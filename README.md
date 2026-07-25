@@ -1,0 +1,1 @@
+SevynOS is an open operating system platform built on Linux with React Native and TypeScript as first-class citizens. Our mission is to give developers the freedom to build once and users the freedom to truly own their devices.
