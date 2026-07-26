@@ -9,6 +9,20 @@ export { ApplicationRegistry } from "./application/application-registry.js";
 export { DuplicateApplicationError } from "./errors/duplicate-application-error.js";
 export { RuntimeError } from "./errors/runtime-error.js";
 
+export { ApplicationSession } from "./application/application-session.js";
+
+export type {
+  ApplicationSessionId,
+  CreateApplicationSessionOptions,
+} from "./application/application-session.js";
+
+export {
+  assertApplicationSessionTransition,
+  canTransitionApplicationSession,
+} from "./application/application-session-state.js";
+
+export type { ApplicationSessionState } from "./application/application-session-state.js";
+
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
 
