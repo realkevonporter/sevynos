@@ -1,5 +1,6 @@
+import type { ApplicationHostId } from "./application-host-id.js";
+
 export type ApplicationId = string;
-export type ApplicationHostId = string;
 
 export interface ApplicationDescriptor {
   /**

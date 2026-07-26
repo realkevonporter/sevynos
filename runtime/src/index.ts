@@ -1,6 +1,5 @@
 export type {
   ApplicationDescriptor,
-  ApplicationHostId,
   ApplicationId,
 } from "./application/application-descriptor.js";
 
@@ -24,6 +23,13 @@ export {
 export type { ApplicationSessionState } from "./application/application-session-state.js";
 
 export { SessionRegistry } from "./application/session-registry.js";
+
+export type { ApplicationHostId } from "./application/application-host-id.js";
+
+export type {
+  ApplicationHost,
+  ApplicationHostStartResult,
+} from "./application/application-host.js";
 
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
