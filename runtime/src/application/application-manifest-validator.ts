@@ -13,26 +13,54 @@ const HOST_ID_PATTERN = /^[a-z0-9]+(?:[.-][a-z0-9]+)+$/;
 const SEMANTIC_VERSION_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
-export function validateApplicationManifest(manifest: ApplicationManifest): void {
-  validateManifestVersion(manifest.manifestVersion);
-  validateApplicationId(manifest);
-  validateApplicationName(manifest);
-  validateApplicationVersion(manifest);
-  validateHostId(manifest);
-  validateEntrypoint(manifest);
+export function validateApplicationManifest(input: unknown): ApplicationManifest {
+  if (!isRecord(input)) {
+    throw new InvalidApplicationManifestError(
+      "manifest",
+      "application manifest must be an object.",
+    );
+  }
+
+  const { manifestVersion, id, name, version, hostId, entrypoint } = input;
+
+  validateManifestVersion(manifestVersion);
+  validateApplicationId(id);
+  validateApplicationName(name);
+  validateApplicationVersion(version);
+  validateHostId(hostId);
+  validateEntrypoint(entrypoint);
+
+  return {
+    manifestVersion,
+    id,
+    name,
+    version,
+    hostId,
+    entrypoint,
+  };
 }
 
-function validateManifestVersion(manifestVersion: number): void {
-  if (manifestVersion !== APPLICATION_MANIFEST_VERSION) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateManifestVersion(
+  value: unknown,
+): asserts value is typeof APPLICATION_MANIFEST_VERSION {
+  if (typeof value !== "number" || value !== APPLICATION_MANIFEST_VERSION) {
     throw new InvalidApplicationManifestError(
       "manifestVersion",
-      `unsupported manifest version ${String(manifestVersion)}.`,
+      `unsupported manifest version ${String(value)}.`,
     );
   }
 }
 
-function validateApplicationId(manifest: ApplicationManifest): void {
-  const id = manifest.id.trim();
+function validateApplicationId(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
+    throw new InvalidApplicationManifestError("id", "application ID must be a string.");
+  }
+
+  const id = value.trim();
 
   if (id.length === 0) {
     throw new InvalidApplicationManifestError("id", "application ID cannot be empty.");
@@ -41,13 +69,20 @@ function validateApplicationId(manifest: ApplicationManifest): void {
   if (!APPLICATION_ID_PATTERN.test(id)) {
     throw new InvalidApplicationManifestError(
       "id",
-      `"${manifest.id}" must use lowercase reverse-domain notation.`,
+      `"${value}" must use lowercase reverse-domain notation.`,
     );
   }
 }
 
-function validateApplicationName(manifest: ApplicationManifest): void {
-  if (manifest.name.trim().length === 0) {
+function validateApplicationName(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
+    throw new InvalidApplicationManifestError(
+      "name",
+      "application name must be a string.",
+    );
+  }
+
+  if (value.trim().length === 0) {
     throw new InvalidApplicationManifestError(
       "name",
       "application name cannot be empty.",
@@ -55,17 +90,31 @@ function validateApplicationName(manifest: ApplicationManifest): void {
   }
 }
 
-function validateApplicationVersion(manifest: ApplicationManifest): void {
-  if (!SEMANTIC_VERSION_PATTERN.test(manifest.version)) {
+function validateApplicationVersion(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
     throw new InvalidApplicationManifestError(
       "version",
-      `"${manifest.version}" must be a valid semantic version.`,
+      "application version must be a string.",
+    );
+  }
+
+  if (!SEMANTIC_VERSION_PATTERN.test(value)) {
+    throw new InvalidApplicationManifestError(
+      "version",
+      `"${value}" must be a valid semantic version.`,
     );
   }
 }
 
-function validateHostId(manifest: ApplicationManifest): void {
-  const hostId = manifest.hostId.trim();
+function validateHostId(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
+    throw new InvalidApplicationManifestError(
+      "hostId",
+      "application host ID must be a string.",
+    );
+  }
+
+  const hostId = value.trim();
 
   if (hostId.length === 0) {
     throw new InvalidApplicationManifestError(
@@ -77,13 +126,20 @@ function validateHostId(manifest: ApplicationManifest): void {
   if (!HOST_ID_PATTERN.test(hostId)) {
     throw new InvalidApplicationManifestError(
       "hostId",
-      `"${manifest.hostId}" must use lowercase dot-separated notation.`,
+      `"${value}" must use lowercase dot-separated notation.`,
     );
   }
 }
 
-function validateEntrypoint(manifest: ApplicationManifest): void {
-  const entrypoint = manifest.entrypoint.trim();
+function validateEntrypoint(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
+    throw new InvalidApplicationManifestError(
+      "entrypoint",
+      "application entrypoint must be a string.",
+    );
+  }
+
+  const entrypoint = value.trim();
 
   if (entrypoint.length === 0) {
     throw new InvalidApplicationManifestError(

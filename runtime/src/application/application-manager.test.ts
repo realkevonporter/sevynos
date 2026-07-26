@@ -110,7 +110,7 @@ describe("ApplicationManager", () => {
     const result = await manager.start(helloApplication.id);
 
     expect(result.session.id).toBe("session-1");
-    expect(result.session.application).toBe(helloApplication);
+    expect(result.session.application).toStrictEqual(helloApplication);
     expect(result.session.state).toBe("running");
     expect(result.session.createdAt).toEqual(new Date("2026-07-26T12:00:00.000Z"));
 

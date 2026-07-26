@@ -5,8 +5,8 @@ import type { ApplicationManifest } from "./application-manifest.js";
 import { validateApplicationManifest } from "./application-manifest-validator.js";
 
 function createManifest(
-  overrides: Partial<ApplicationManifest> = {},
-): ApplicationManifest {
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     manifestVersion: 1,
     id: "dev.sevyn.hello",
@@ -19,22 +19,69 @@ function createManifest(
 }
 
 describe("validateApplicationManifest", () => {
-  it("accepts a valid application manifest", () => {
-    const manifest = createManifest();
+  it("returns a validated application manifest", () => {
+    const input: unknown = createManifest();
 
+    const manifest = validateApplicationManifest(input);
+
+    const expected: ApplicationManifest = {
+      manifestVersion: 1,
+      id: "dev.sevyn.hello",
+      name: "Hello SevynOS",
+      version: "0.1.0",
+      hostId: "sevyn.host.test",
+      entrypoint: "index.js",
+    };
+
+    expect(manifest).toEqual(expected);
+  });
+
+  it("rejects a non-object manifest", () => {
     expect(() => {
-      validateApplicationManifest(manifest);
-    }).not.toThrow();
+      validateApplicationManifest("invalid");
+    }).toThrow('Invalid application manifest field "manifest"');
+  });
+
+  it("rejects null", () => {
+    expect(() => {
+      validateApplicationManifest(null);
+    }).toThrow('Invalid application manifest field "manifest"');
+  });
+
+  it("rejects an array", () => {
+    expect(() => {
+      validateApplicationManifest([]);
+    }).toThrow('Invalid application manifest field "manifest"');
   });
 
   it("rejects an unsupported manifest version", () => {
     const manifest = createManifest({
-      manifestVersion: 2 as 1,
+      manifestVersion: 2,
     });
 
     expect(() => {
       validateApplicationManifest(manifest);
-    }).toThrow(InvalidApplicationManifestError);
+    }).toThrow('Invalid application manifest field "manifestVersion"');
+  });
+
+  it("rejects a missing manifest version", () => {
+    const manifest = createManifest();
+
+    delete manifest["manifestVersion"];
+
+    expect(() => {
+      validateApplicationManifest(manifest);
+    }).toThrow('Invalid application manifest field "manifestVersion"');
+  });
+
+  it("rejects an incorrectly typed manifest version", () => {
+    const manifest = createManifest({
+      manifestVersion: "1",
+    });
+
+    expect(() => {
+      validateApplicationManifest(manifest);
+    }).toThrow('Invalid application manifest field "manifestVersion"');
   });
 
   it("rejects an invalid application ID", () => {
@@ -47,9 +94,29 @@ describe("validateApplicationManifest", () => {
     }).toThrow('Invalid application manifest field "id"');
   });
 
+  it("rejects an incorrectly typed application ID", () => {
+    const manifest = createManifest({
+      id: 123,
+    });
+
+    expect(() => {
+      validateApplicationManifest(manifest);
+    }).toThrow('Invalid application manifest field "id"');
+  });
+
   it("rejects an empty application name", () => {
     const manifest = createManifest({
       name: "   ",
+    });
+
+    expect(() => {
+      validateApplicationManifest(manifest);
+    }).toThrow('Invalid application manifest field "name"');
+  });
+
+  it("rejects an incorrectly typed application name", () => {
+    const manifest = createManifest({
+      name: false,
     });
 
     expect(() => {
@@ -77,9 +144,29 @@ describe("validateApplicationManifest", () => {
     }).not.toThrow();
   });
 
+  it("rejects an incorrectly typed application version", () => {
+    const manifest = createManifest({
+      version: 1,
+    });
+
+    expect(() => {
+      validateApplicationManifest(manifest);
+    }).toThrow('Invalid application manifest field "version"');
+  });
+
   it("rejects an invalid application host ID", () => {
     const manifest = createManifest({
       hostId: "Test Host",
+    });
+
+    expect(() => {
+      validateApplicationManifest(manifest);
+    }).toThrow('Invalid application manifest field "hostId"');
+  });
+
+  it("rejects an incorrectly typed application host ID", () => {
+    const manifest = createManifest({
+      hostId: null,
     });
 
     expect(() => {
@@ -115,6 +202,16 @@ describe("validateApplicationManifest", () => {
     expect(() => {
       validateApplicationManifest(manifest);
     }).toThrow('application entrypoint cannot contain ".." path segments.');
+  });
+
+  it("rejects an incorrectly typed application entrypoint", () => {
+    const manifest = createManifest({
+      entrypoint: {},
+    });
+
+    expect(() => {
+      validateApplicationManifest(manifest);
+    }).toThrow('Invalid application manifest field "entrypoint"');
   });
 
   it("identifies the invalid field on the error", () => {

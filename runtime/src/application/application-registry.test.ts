@@ -74,7 +74,7 @@ describe("ApplicationRegistry", () => {
   it("rejects an invalid application manifest", () => {
     const registry = new ApplicationRegistry();
 
-    const invalidApplication: ApplicationManifest = {
+    const invalidApplication: unknown = {
       manifestVersion: 1,
       id: "Invalid Application",
       name: "Invalid Application",
