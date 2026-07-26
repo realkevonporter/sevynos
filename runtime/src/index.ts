@@ -23,6 +23,8 @@ export {
 
 export type { ApplicationSessionState } from "./application/application-session-state.js";
 
+export { SessionRegistry } from "./application/session-registry.js";
+
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
 
