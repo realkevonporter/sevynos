@@ -33,6 +33,13 @@ export type {
 
 export { ApplicationHostRegistry } from "./application/application-host-registry.js";
 
+export { ApplicationManager } from "./application/application-manager.js";
+
+export type {
+  ApplicationManagerDependencies,
+  StartApplicationResult,
+} from "./application/application-manager.js";
+
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
 
