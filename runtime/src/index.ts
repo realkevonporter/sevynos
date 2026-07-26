@@ -4,6 +4,8 @@ export type {
   ApplicationId,
 } from "./application/application-descriptor.js";
 
+export { ApplicationRegistry } from "./application/application-registry.js";
+
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
 
