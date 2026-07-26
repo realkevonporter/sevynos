@@ -12,13 +12,13 @@ Every application running on SevynOS must describe itself before it can be insta
 
 The operating system must be able to determine:
 
-* what the application is
-* who published it
-* how it should be launched
-* which framework host should execute it
-* what permissions it requests
-* which devices it supports
-* how it integrates with the platform
+- what the application is
+- who published it
+- how it should be launched
+- which framework host should execute it
+- what permissions it requests
+- which devices it supports
+- how it integrates with the platform
 
 This information must exist independently of the application's implementation language or framework.
 
@@ -36,11 +36,11 @@ sevyn.json
 
 The manifest is required for every application type, including:
 
-* React Native
-* Native
-* Web
-* WebAssembly
-* System applications
+- React Native
+- Native
+- Web
+- WebAssembly
+- System applications
 
 Applications without a valid manifest cannot be installed or launched.
 
@@ -48,13 +48,13 @@ Applications without a valid manifest cannot be installed or launched.
 
 The manifest should be:
 
-* human-readable
-* version-controlled
-* deterministic
-* framework-independent
-* extensible
-* easy to validate
-* stable across releases
+- human-readable
+- version-controlled
+- deterministic
+- framework-independent
+- extensible
+- easy to validate
+- stable across releases
 
 The Runtime—not the framework host—owns interpretation of the manifest.
 
@@ -82,11 +82,11 @@ The `id` uniquely identifies an application.
 
 Rules:
 
-* globally unique
-* immutable after release
-* reverse-domain notation
-* lowercase
-* periods as separators
+- globally unique
+- immutable after release
+- reverse-domain notation
+- lowercase
+- periods as separators
 
 Examples:
 
@@ -99,15 +99,15 @@ org.mozilla.firefox
 
 Identity is used for:
 
-* installation
-* permissions
-* storage
-* updates
-* IPC
-* notifications
-* logs
-* crash reports
-* window ownership
+- installation
+- permissions
+- storage
+- updates
+- IPC
+- notifications
+- logs
+- crash reports
+- window ownership
 
 Changing an application's identity creates a different application.
 
@@ -178,12 +178,12 @@ Applications may provide display metadata.
 
 This information is intended for:
 
-* launcher
-* app library
-* installer
-* search
-* settings
-* application switcher
+- launcher
+- app library
+- installer
+- search
+- settings
+- application switcher
 
 ## Permissions
 
@@ -268,13 +268,13 @@ The Runtime makes the final decision.
 
 Before launch the Runtime validates:
 
-* schema
-* required fields
-* identifier
-* version
-* application type
-* entry point
-* manifest version
+- schema
+- required fields
+- identifier
+- version
+- application type
+- entry point
+- manifest version
 
 Invalid manifests are rejected with descriptive errors.
 
@@ -286,11 +286,11 @@ Only the Runtime interprets platform policy.
 
 For example:
 
-* permissions
-* application identity
-* updates
-* installation
-* compatibility
+- permissions
+- application identity
+- updates
+- installation
+- compatibility
 
 remain Runtime responsibilities.
 
@@ -298,18 +298,18 @@ remain Runtime responsibilities.
 
 Later manifest versions may include:
 
-* digital signatures
-* package hashes
-* localization
-* protocol handlers
-* file associations
-* startup tasks
-* services
-* widgets
-* extensions
-* AI models
-* sandbox profiles
-* update channels
+- digital signatures
+- package hashes
+- localization
+- protocol handlers
+- file associations
+- startup tasks
+- services
+- widgets
+- extensions
+- AI models
+- sandbox profiles
+- update channels
 
 Version 1 intentionally excludes these.
 
@@ -331,15 +331,9 @@ Version 1 intentionally excludes these.
     "icon": "./assets/icon.png"
   },
 
-  "permissions": [
-    "notifications.post"
-  ],
+  "permissions": ["notifications.post"],
 
-  "devices": [
-    "desktop",
-    "tablet",
-    "phone"
-  ],
+  "devices": ["desktop", "tablet", "phone"],
 
   "runtime": {
     "minimumVersion": "0.1.0",
@@ -352,18 +346,18 @@ Version 1 intentionally excludes these.
 
 ### Positive
 
-* One manifest format for every application.
-* Framework-independent installation.
-* Consistent identity model.
-* Easier validation.
-* Predictable updates.
-* Better tooling.
+- One manifest format for every application.
+- Framework-independent installation.
+- Consistent identity model.
+- Easier validation.
+- Predictable updates.
+- Better tooling.
 
 ### Negative
 
-* Every application requires metadata.
-* Manifest versions must be maintained.
-* Future changes require migration.
+- Every application requires metadata.
+- Manifest versions must be maintained.
+- Future changes require migration.
 
 ## Alternatives Considered
 
@@ -393,9 +387,9 @@ This decision is validated when:
 
 Revisit if:
 
-* a different serialization format becomes clearly superior
-* application types fundamentally change
-* packaging architecture changes significantly
+- a different serialization format becomes clearly superior
+- application types fundamentally change
+- packaging architecture changes significantly
 
 ## Final Position
 

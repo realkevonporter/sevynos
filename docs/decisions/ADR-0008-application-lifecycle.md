@@ -12,17 +12,17 @@ SevynOS needs a consistent way to describe and control the state of every runnin
 
 An application may:
 
-* be installed but not running
-* begin launching
-* display one or more surfaces
-* move into the background
-* become temporarily suspended
-* resume
-* shut down normally
-* fail during startup
-* crash unexpectedly
-* be forcefully terminated
-* be restored after a restart
+- be installed but not running
+- begin launching
+- display one or more surfaces
+- move into the background
+- become temporarily suspended
+- resume
+- shut down normally
+- fail during startup
+- crash unexpectedly
+- be forcefully terminated
+- be restored after a restart
 
 These behaviors must remain consistent across application frameworks.
 
@@ -30,13 +30,13 @@ A React Native application, native application, web application, or future WebAs
 
 Without a defined lifecycle, different framework hosts may implement incompatible behavior for:
 
-* launching
-* background execution
-* suspending
-* restoring
-* closing
-* crash reporting
-* resource cleanup
+- launching
+- background execution
+- suspending
+- restoring
+- closing
+- crash reporting
+- resource cleanup
 
 The Runtime must therefore be the authoritative source of application lifecycle state.
 
@@ -46,15 +46,15 @@ SevynOS will define a framework-independent application lifecycle managed by the
 
 The Runtime owns:
 
-* the official lifecycle state
-* lifecycle transition validation
-* application sessions
-* launch and stop requests
-* timeout handling
-* crash detection
-* resource cleanup
-* state notifications
-* restoration metadata
+- the official lifecycle state
+- lifecycle transition validation
+- application sessions
+- launch and stop requests
+- timeout handling
+- crash detection
+- resource cleanup
+- state notifications
+- restoration metadata
 
 Framework hosts translate Runtime lifecycle commands into framework-specific behavior.
 
@@ -86,11 +86,11 @@ A process is an operating-system execution unit.
 
 An application session may use:
 
-* one process
-* multiple processes
-* a shared framework-host process
-* helper processes
-* service processes
+- one process
+- multiple processes
+- a shared framework-host process
+- helper processes
+- service processes
 
 The lifecycle model must not assume that one application always equals one process.
 
@@ -100,11 +100,11 @@ A surface is a graphical object presented through the compositor.
 
 An application may have:
 
-* no visible surface
-* one surface
-* multiple windows or surfaces
-* temporary popup surfaces
-* background execution without a surface
+- no visible surface
+- one surface
+- multiple windows or surfaces
+- temporary popup surfaces
+- background execution without a surface
 
 Closing a surface does not always mean stopping the application.
 
@@ -170,11 +170,11 @@ The application is installed and recognized by the Runtime but has no active ses
 
 The Runtime has validated:
 
-* the application manifest
-* application identity
-* application type
-* entry point
-* basic compatibility
+- the application manifest
+- application identity
+- application type
+- entry point
+- basic compatibility
 
 No application code is running.
 
@@ -184,15 +184,15 @@ The Runtime has accepted a launch request and is creating an application session
 
 During this state, the Runtime may:
 
-* validate the manifest
-* select a framework host
-* verify permissions
-* prepare storage
-* prepare the sandbox
-* start or contact the host
-* create processes
-* pass launch information
-* wait for readiness
+- validate the manifest
+- select a framework host
+- verify permissions
+- prepare storage
+- prepare the sandbox
+- start or contact the host
+- create processes
+- pass launch information
+- wait for readiness
 
 The application is not considered usable yet.
 
@@ -204,10 +204,10 @@ A graphical application in this state usually has at least one visible or availa
 
 The application may:
 
-* receive user input
-* access granted platform services
-* create surfaces
-* perform normal foreground work
+- receive user input
+- access granted platform services
+- create surfaces
+- perform normal foreground work
 
 ### `background`
 
@@ -217,20 +217,20 @@ Background does not automatically mean suspended.
 
 An application in this state may continue limited execution according to:
 
-* application manifest declarations
-* granted capabilities
-* platform policy
-* device class
-* power conditions
-* user settings
+- application manifest declarations
+- granted capabilities
+- platform policy
+- device class
+- power conditions
+- user settings
 
 Examples include:
 
-* playing audio
-* completing a short task
-* maintaining an approved communication session
-* responding to a system service
-* preparing application state for suspension
+- playing audio
+- completing a short task
+- maintaining an approved communication session
+- responding to a system service
+- preparing application state for suspension
 
 ### `suspending`
 
@@ -240,12 +240,12 @@ The framework host must notify the application and allow a limited preparation p
 
 During this period, the application may:
 
-* save transient state
-* flush lightweight data
-* release optional resources
-* pause timers
-* pause rendering
-* prepare restoration metadata
+- save transient state
+- flush lightweight data
+- release optional resources
+- pause timers
+- pause rendering
+- prepare restoration metadata
 
 Applications must not perform lengthy work during suspension preparation.
 
@@ -255,19 +255,19 @@ The application session still exists, but normal application execution has been 
 
 A suspended application may retain:
 
-* session identity
-* restoration state
-* surfaces
-* selected memory
-* Runtime metadata
+- session identity
+- restoration state
+- surfaces
+- selected memory
+- Runtime metadata
 
 Whether the process remains resident is an implementation detail.
 
 The Runtime may later:
 
-* resume the same process
-* reconstruct the session
-* terminate it to reclaim resources
+- resume the same process
+- reconstruct the session
+- terminate it to reclaim resources
 
 Applications must not assume that suspended memory will always survive.
 
@@ -277,12 +277,12 @@ The Runtime is restoring a suspended or background application to active executi
 
 During this state, the host may:
 
-* restore execution
-* recreate framework state
-* reconnect services
-* recreate surfaces
-* provide restoration data
-* wait for readiness
+- restore execution
+- recreate framework state
+- reconnect services
+- recreate surfaces
+- provide restoration data
+- wait for readiness
 
 After successful restoration, the application transitions to `running` or `background`.
 
@@ -292,12 +292,12 @@ The Runtime has begun an orderly shutdown.
 
 The application may receive a short opportunity to:
 
-* save durable state
-* close resources
-* finish critical writes
-* disconnect from services
-* destroy surfaces
-* exit cleanly
+- save durable state
+- close resources
+- finish critical writes
+- disconnect from services
+- destroy surfaces
+- exit cleanly
 
 The Runtime may enforce a timeout.
 
@@ -307,11 +307,11 @@ The application session ended normally.
 
 The Runtime has:
 
-* released session resources
-* removed active process ownership
-* closed related host resources
-* recorded the normal exit
-* preserved approved restoration data if required
+- released session resources
+- removed active process ownership
+- closed related host resources
+- recorded the normal exit
+- preserved approved restoration data if required
 
 The installed application remains available for future launches.
 
@@ -323,13 +323,13 @@ This state is primarily used for startup or restoration failures.
 
 Examples:
 
-* invalid entry point
-* host unavailable
-* incompatible Runtime version
-* startup timeout
-* permission preparation failure
-* corrupted application package
-* framework initialization failure
+- invalid entry point
+- host unavailable
+- incompatible Runtime version
+- startup timeout
+- permission preparation failure
+- corrupted application package
+- framework initialization failure
 
 An application may fail without ever reaching `running`.
 
@@ -339,12 +339,12 @@ The application or its framework host exited unexpectedly after execution began.
 
 Possible causes include:
 
-* unhandled exception
-* segmentation fault
-* aborted process
-* host failure
-* invalid memory access
-* unexpected IPC disconnection
+- unhandled exception
+- segmentation fault
+- aborted process
+- host failure
+- invalid memory access
+- unexpected IPC disconnection
 
 The Runtime records available crash metadata before cleanup.
 
@@ -354,14 +354,14 @@ The application was stopped without completing the normal shutdown path.
 
 Possible causes include:
 
-* user force-stop
-* security violation
-* repeated unresponsiveness
-* memory pressure
-* system shutdown deadline
-* host failure
-* administrator action
-* Runtime enforcement
+- user force-stop
+- security violation
+- repeated unresponsiveness
+- memory pressure
+- system shutdown deadline
+- host failure
+- administrator action
+- Runtime enforcement
 
 Termination is intentional from the platform's perspective, even if it is unexpected by the application.
 
@@ -470,15 +470,15 @@ The Runtime is the source of truth.
 
 It:
 
-* stores the lifecycle state
-* creates session identifiers
-* validates transitions
-* sends lifecycle commands
-* receives acknowledgements
-* enforces timeouts
-* records failures
-* coordinates cleanup
-* publishes state changes
+- stores the lifecycle state
+- creates session identifiers
+- validates transitions
+- sends lifecycle commands
+- receives acknowledgements
+- enforces timeouts
+- records failures
+- coordinates cleanup
+- publishes state changes
 
 ### Framework host
 
@@ -486,15 +486,15 @@ The framework host implements lifecycle behavior for its application type.
 
 For React Native, the host may:
 
-* create the Hermes runtime
-* load the JavaScript bundle
-* create Fabric surfaces
-* forward foreground and background events
-* pause rendering
-* stop timers
-* persist restoration state
-* destroy the JavaScript runtime
-* report fatal errors
+- create the Hermes runtime
+- load the JavaScript bundle
+- create Fabric surfaces
+- forward foreground and background events
+- pause rendering
+- stop timers
+- persist restoration state
+- destroy the JavaScript runtime
+- report fatal errors
 
 The host does not decide the official platform state.
 
@@ -502,20 +502,20 @@ The host does not decide the official platform state.
 
 The Shell may request:
 
-* launch
-* activate
-* move to background
-* close
-* force-stop
+- launch
+- activate
+- move to background
+- close
+- force-stop
 
 The Shell displays Runtime state but does not modify it directly.
 
 For example, the application switcher may display:
 
-* running
-* suspended
-* crashed
-* restoring
+- running
+- suspended
+- crashed
+- restoring
 
 using Runtime-provided session information.
 
@@ -525,10 +525,10 @@ The compositor owns graphical surface state.
 
 It may notify the Runtime when:
 
-* the final primary surface closes
-* a surface becomes visible
-* focus changes
-* a graphical client disconnects
+- the final primary surface closes
+- a surface becomes visible
+- focus changes
+- a graphical client disconnects
 
 The compositor does not decide whether the entire application should stop.
 
@@ -536,12 +536,12 @@ The compositor does not decide whether the entire application should stop.
 
 The application may:
 
-* report readiness
-* request background execution
-* request shutdown
-* provide restoration data
-* acknowledge lifecycle commands
-* report recoverable errors
+- report readiness
+- request background execution
+- request shutdown
+- provide restoration data
+- acknowledge lifecycle commands
+- report recoverable errors
 
 The application cannot assign its own authoritative lifecycle state.
 
@@ -697,22 +697,18 @@ SevynOS distinguishes execution state from visual focus.
 
 An application may be:
 
-* running and focused
-* running and visible but unfocused
-* running without a visible surface
-* backgrounded while still executing
-* suspended while retaining session metadata
+- running and focused
+- running and visible but unfocused
+- running without a visible surface
+- backgrounded while still executing
+- suspended while retaining session metadata
 
 The initial state model will not introduce separate official states for every possible visibility combination.
 
 Instead, the Runtime may track additional session attributes:
 
 ```ts
-type ApplicationVisibility =
-  | "foreground"
-  | "visible"
-  | "hidden"
-  | "none";
+type ApplicationVisibility = "foreground" | "visible" | "hidden" | "none";
 ```
 
 The lifecycle state and visibility state are related but distinct.
@@ -748,18 +744,18 @@ Applications that are not singleton may support multiple sessions.
 
 Examples include:
 
-* terminals
-* document editors
-* browser profiles
-* isolated workspaces
+- terminals
+- document editors
+- browser profiles
+- isolated workspaces
 
 Each session receives:
 
-* a unique session ID
-* independent lifecycle state
-* independent launch context
-* separately associated surfaces
-* separately tracked resources
+- a unique session ID
+- independent lifecycle state
+- independent launch context
+- separately associated surfaces
+- separately tracked resources
 
 The application ID identifies the installed application.
 
@@ -771,20 +767,20 @@ Closing an application's final visible window does not always require stopping i
 
 The outcome depends on:
 
-* application manifest behavior
-* application request
-* background capabilities
-* system policy
-* device class
+- application manifest behavior
+- application request
+- background capabilities
+- system policy
+- device class
 
 Possible behaviors include:
 
-* stop immediately
-* continue in background
-* suspend
-* remain active without surfaces
-* ask the user
-* preserve session for restoration
+- stop immediately
+- continue in background
+- suspend
+- remain active without surfaces
+- ask the user
+- preserve session for restoration
 
 Genesis may use the simple default:
 
@@ -798,13 +794,13 @@ Suspension exists to reduce resource use without always discarding application s
 
 The Runtime may suspend an application because of:
 
-* user switching
-* device power policy
-* inactivity
-* memory pressure
-* mobile background policy
-* system sleep
-* application request
+- user switching
+- device power policy
+- inactivity
+- memory pressure
+- mobile background policy
+- system sleep
+- application request
 
 The application must be prepared for the Runtime to terminate a suspended session later.
 
@@ -824,23 +820,23 @@ Applications do not receive unlimited background execution merely because they r
 
 A future permission and capability model may support approved categories such as:
 
-* audio playback
-* navigation
-* active communication
-* downloads
-* file synchronization
-* device communication
-* accessibility service
-* time-limited task completion
+- audio playback
+- navigation
+- active communication
+- downloads
+- file synchronization
+- device communication
+- accessibility service
+- time-limited task completion
 
 The Runtime may impose:
 
-* CPU limits
-* memory limits
-* network limits
-* wake-up limits
-* time limits
-* device-specific restrictions
+- CPU limits
+- memory limits
+- network limits
+- wake-up limits
+- time limits
+- device-specific restrictions
 
 Detailed background-task behavior is outside the Genesis scope.
 
@@ -866,18 +862,18 @@ The user may be warned about unsaved application state where practical, but the 
 
 Before the device enters system sleep, the Runtime may:
 
-* notify eligible applications
-* suspend sessions
-* stop time-sensitive background work
-* flush state
-* coordinate with platform services
+- notify eligible applications
+- suspend sessions
+- stop time-sensitive background work
+- flush state
+- coordinate with platform services
 
 After wake:
 
-* critical system services resume first
-* framework hosts reconnect
-* application sessions are restored according to policy
-* applications receive an appropriate resume event
+- critical system services resume first
+- framework hosts reconnect
+- application sessions are restored according to policy
+- applications receive an appropriate resume event
 
 System suspend is distinct from application suspension, even though one may cause the other.
 
@@ -940,12 +936,12 @@ Lifecycle operations must be bounded.
 
 The Runtime should eventually define default deadlines for:
 
-* startup readiness
-* suspension acknowledgement
-* resume readiness
-* graceful shutdown
-* host communication
-* surface creation
+- startup readiness
+- suspension acknowledgement
+- resume readiness
+- graceful shutdown
+- host communication
+- surface creation
 
 Genesis may use configurable development defaults.
 
@@ -976,9 +972,9 @@ If a shared host fails, the Runtime must identify every affected session.
 
 Each affected session may transition to:
 
-* `crashed`
-* `failed`
-* `terminated`
+- `crashed`
+- `failed`
+- `terminated`
 
 depending on whether it had completed startup and why the host ended.
 
@@ -994,19 +990,19 @@ Ordinary user applications should not automatically restart forever after crashe
 
 Possible future restart policies include:
 
-* never
-* restore once
-* restart on system request
-* restart trusted service
-* restart with exponential backoff
+- never
+- restore once
+- restart on system request
+- restart trusted service
+- restart with exponential backoff
 
 System services may use different policies than user-facing applications.
 
 Genesis should default to:
 
-* no automatic restart for ordinary applications
-* controlled restart for essential trusted services
-* explicit user relaunch after crashes
+- no automatic restart for ordinary applications
+- controlled restart for essential trusted services
+- explicit user relaunch after crashes
 
 ## Restoration
 
@@ -1014,22 +1010,22 @@ Restoration allows SevynOS to recreate useful application state after suspension
 
 Restoration metadata may include:
 
-* application ID
-* previous session ID
-* open document references
-* surface roles and placement
-* selected application state
-* launch context
-* framework-specific restoration data
+- application ID
+- previous session ID
+- open document references
+- surface roles and placement
+- selected application state
+- launch context
+- framework-specific restoration data
 
 Restoration data must be:
 
-* bounded in size
-* versioned
-* treated as untrusted application input
-* invalidatable
-* removable by the user
-* excluded from sensitive storage unless protected appropriately
+- bounded in size
+- versioned
+- treated as untrusted application input
+- invalidatable
+- removable by the user
+- excluded from sensitive storage unless protected appropriately
 
 The Runtime owns restoration records.
 
@@ -1102,12 +1098,12 @@ The host reports completion back to the Runtime.
 
 A native host may:
 
-* start the executable
-* establish lifecycle IPC
-* await a readiness signal
-* send background or suspension commands
-* receive acknowledgements
-* terminate the process when required
+- start the executable
+- establish lifecycle IPC
+- await a readiness signal
+- send background or suspension commands
+- receive acknowledgements
+- terminate the process when required
 
 Native applications must not be treated as permanently running solely because they are compiled binaries.
 
@@ -1115,12 +1111,12 @@ Native applications must not be treated as permanently running solely because th
 
 A future web host may translate lifecycle states into:
 
-* page visibility changes
-* JavaScript lifecycle events
-* timer throttling
-* process freezing
-* document restoration
-* web-worker restrictions
+- page visibility changes
+- JavaScript lifecycle events
+- timer throttling
+- process freezing
+- document restoration
+- web-worker restrictions
 
 The same Runtime state machine still applies.
 
@@ -1130,19 +1126,19 @@ System applications use the same lifecycle model.
 
 Examples include:
 
-* Settings
-* Files
-* Launcher-related applications
-* system utilities
+- Settings
+- Files
+- Launcher-related applications
+- system utilities
 
 Trusted status may grant additional capabilities, but system applications should still:
 
-* have application identities
-* have manifests
-* create sessions
-* report readiness
-* stop cleanly
-* produce crash information
+- have application identities
+- have manifests
+- create sessions
+- report readiness
+- stop cleanly
+- produce crash information
 
 The Shell and Runtime themselves are platform components rather than ordinary applications, even if parts of their UI use React Native.
 
@@ -1171,13 +1167,13 @@ SESSION_NOT_FOUND
 
 Errors should include:
 
-* a stable code
-* a human-readable message
-* the application ID
-* the session ID when available
-* the current state
-* the attempted transition
-* diagnostic details when safe
+- a stable code
+- a human-readable message
+- the application ID
+- the session ID when available
+- the current state
+- the attempted transition
+- diagnostic details when safe
 
 ## Observability
 
@@ -1199,15 +1195,15 @@ Example:
 
 Important measurements include:
 
-* application startup time
-* time to readiness
-* time to first surface
-* suspend duration
-* resume duration
-* graceful-stop duration
-* crash frequency
-* timeout frequency
-* memory-pressure terminations
+- application startup time
+- time to readiness
+- time to first surface
+- suspend duration
+- resume duration
+- graceful-stop duration
+- crash frequency
+- timeout frequency
+- memory-pressure terminations
 
 ## Persistence
 
@@ -1215,11 +1211,11 @@ Active lifecycle state should primarily be held by the Runtime.
 
 The Runtime may persist enough information to support:
 
-* crash recovery
-* restoration
-* diagnostics
-* update coordination
-* shutdown recovery
+- crash recovery
+- restoration
+- diagnostics
+- update coordination
+- shutdown recovery
 
 A session recorded as `running` before a machine crash must not automatically be treated as still running after reboot.
 
@@ -1229,45 +1225,45 @@ During Runtime startup, stale sessions should be reconciled and marked appropria
 
 ### Included
 
-* application session identifiers
-* `installed`
-* `starting`
-* `running`
-* `stopping`
-* `stopped`
-* `failed`
-* `crashed`
-* `terminated`
-* validated transitions
-* launch readiness acknowledgement
-* graceful stop request
-* startup and stop timeouts
-* React Native host translation
-* Runtime lifecycle logs
-* Shell display of basic state
+- application session identifiers
+- `installed`
+- `starting`
+- `running`
+- `stopping`
+- `stopped`
+- `failed`
+- `crashed`
+- `terminated`
+- validated transitions
+- launch readiness acknowledgement
+- graceful stop request
+- startup and stop timeouts
+- React Native host translation
+- Runtime lifecycle logs
+- Shell display of basic state
 
 ### Limited or Experimental
 
-* `background`
-* `suspending`
-* `suspended`
-* `resuming`
-* basic restoration metadata
+- `background`
+- `suspending`
+- `suspended`
+- `resuming`
+- basic restoration metadata
 
 These states should exist in the architecture even if Genesis implements only minimal behavior.
 
 ### Not Required for Genesis
 
-* advanced background task scheduling
-* mobile power policies
-* automatic user-application restart
-* complete memory-pressure priority system
-* multi-user logout restoration
-* shared framework-host processes
-* hibernation
-* full session restoration across upgrades
-* background location
-* sophisticated process freezing
+- advanced background task scheduling
+- mobile power policies
+- automatic user-application restart
+- complete memory-pressure priority system
+- multi-user logout restoration
+- shared framework-host processes
+- hibernation
+- full session restoration across upgrades
+- background location
+- sophisticated process freezing
 
 ## Implementation Direction
 
@@ -1296,55 +1292,19 @@ const validTransitions: Record<
 > = {
   installed: new Set(["starting"]),
 
-  starting: new Set([
-    "running",
-    "background",
-    "failed",
-    "terminated",
-  ]),
+  starting: new Set(["running", "background", "failed", "terminated"]),
 
-  running: new Set([
-    "background",
-    "suspending",
-    "stopping",
-    "crashed",
-    "terminated",
-  ]),
+  running: new Set(["background", "suspending", "stopping", "crashed", "terminated"]),
 
-  background: new Set([
-    "running",
-    "suspending",
-    "stopping",
-    "crashed",
-    "terminated",
-  ]),
+  background: new Set(["running", "suspending", "stopping", "crashed", "terminated"]),
 
-  suspending: new Set([
-    "suspended",
-    "stopping",
-    "crashed",
-    "terminated",
-  ]),
+  suspending: new Set(["suspended", "stopping", "crashed", "terminated"]),
 
-  suspended: new Set([
-    "resuming",
-    "stopping",
-    "terminated",
-  ]),
+  suspended: new Set(["resuming", "stopping", "terminated"]),
 
-  resuming: new Set([
-    "running",
-    "background",
-    "failed",
-    "crashed",
-    "terminated",
-  ]),
+  resuming: new Set(["running", "background", "failed", "crashed", "terminated"]),
 
-  stopping: new Set([
-    "stopped",
-    "crashed",
-    "terminated",
-  ]),
+  stopping: new Set(["stopped", "crashed", "terminated"]),
 
   stopped: new Set(),
   failed: new Set(),
@@ -1361,21 +1321,21 @@ A relaunch creates a new session.
 
 The lifecycle implementation must test:
 
-* valid transitions
-* invalid transitions
-* successful startup
-* startup failure
-* startup timeout
-* normal shutdown
-* shutdown timeout
-* host crash
-* application crash
-* force-stop
-* duplicate singleton launch
-* multiple non-singleton sessions
-* stale session recovery
-* final surface closure
-* Runtime restart reconciliation
+- valid transitions
+- invalid transitions
+- successful startup
+- startup failure
+- startup timeout
+- normal shutdown
+- shutdown timeout
+- host crash
+- application crash
+- force-stop
+- duplicate singleton launch
+- multiple non-singleton sessions
+- stale session recovery
+- final surface closure
+- Runtime restart reconciliation
 
 Tests should use a mock application host before requiring React Native.
 
@@ -1383,26 +1343,26 @@ Tests should use a mock application host before requiring React Native.
 
 ### Positive consequences
 
-* Every framework shares one application model.
-* The Runtime remains the lifecycle authority.
-* Applications have predictable launch and shutdown behavior.
-* Framework-specific behavior stays inside hosts.
-* Crash and termination events are distinguishable.
-* Shell state becomes reliable.
-* Session identity supports multiple application instances.
-* Background and suspension behavior can evolve without changing application identity.
-* The model can support desktop, mobile, television, and embedded devices.
-* Testing can begin with mock framework hosts.
+- Every framework shares one application model.
+- The Runtime remains the lifecycle authority.
+- Applications have predictable launch and shutdown behavior.
+- Framework-specific behavior stays inside hosts.
+- Crash and termination events are distinguishable.
+- Shell state becomes reliable.
+- Session identity supports multiple application instances.
+- Background and suspension behavior can evolve without changing application identity.
+- The model can support desktop, mobile, television, and embedded devices.
+- Testing can begin with mock framework hosts.
 
 ### Negative consequences
 
-* The Runtime must maintain a nontrivial state machine.
-* Framework hosts must acknowledge lifecycle operations.
-* Timeouts and partial failures require careful handling.
-* Visibility and lifecycle remain separate concepts that developers must understand.
-* Suspension behavior may differ between device classes.
-* Restoration introduces versioning and data-validation concerns.
-* Shared framework hosts will complicate crash handling later.
+- The Runtime must maintain a nontrivial state machine.
+- Framework hosts must acknowledge lifecycle operations.
+- Timeouts and partial failures require careful handling.
+- Visibility and lifecycle remain separate concepts that developers must understand.
+- Suspension behavior may differ between device classes.
+- Restoration introduces versioning and data-validation concerns.
+- Shared framework hosts will complicate crash handling later.
 
 ### Risks
 
@@ -1410,20 +1370,20 @@ The primary risk is overengineering lifecycle behavior before Genesis has real a
 
 To reduce this risk:
 
-* Genesis will fully implement only the core launch and stop path
-* background and suspension states will remain minimal
-* public APIs will be introduced only when exercised
-* mock hosts will validate the architecture
-* device-specific policy will remain outside the core state machine
+- Genesis will fully implement only the core launch and stop path
+- background and suspension states will remain minimal
+- public APIs will be introduced only when exercised
+- mock hosts will validate the architecture
+- device-specific policy will remain outside the core state machine
 
 Another risk is allowing framework-specific concepts to leak into Runtime states.
 
 To reduce this risk:
 
-* Runtime state names remain framework-neutral
-* framework lifecycle events are translated by hosts
-* Runtime modules must not import React Native packages
-* public lifecycle records must use SevynOS-owned types
+- Runtime state names remain framework-neutral
+- framework lifecycle events are translated by hosts
+- Runtime modules must not import React Native packages
+- public lifecycle records must use SevynOS-owned types
 
 ## Alternatives Considered
 
@@ -1437,33 +1397,33 @@ The Shell, permissions system, updater, and Runtime would lack a consistent appl
 
 Rejected because:
 
-* one application may use multiple processes
-* one process may host multiple sessions
-* a running process does not mean the application is ready
-* suspended sessions may or may not retain a process
-* process exit does not explain whether the app stopped, crashed, or was terminated
+- one application may use multiple processes
+- one process may host multiple sessions
+- a running process does not mean the application is ready
+- suspended sessions may or may not retain a process
+- process exit does not explain whether the app stopped, crashed, or was terminated
 
 ### Treat windows as applications
 
 Rejected because:
 
-* applications may have multiple windows
-* applications may run without windows
-* closing a surface does not always stop execution
-* non-graphical applications still require lifecycle management
+- applications may have multiple windows
+- applications may run without windows
+- closing a surface does not always stop execution
+- non-graphical applications still require lifecycle management
 
 ### Use only running and stopped
 
 Rejected because this would not represent:
 
-* startup
-* readiness
-* background execution
-* suspension
-* orderly shutdown
-* startup failure
-* crashes
-* force termination
+- startup
+- readiness
+- background execution
+- suspension
+- orderly shutdown
+- startup failure
+- crashes
+- force termination
 
 ### Copy Android or Apple lifecycle states directly
 
@@ -1492,12 +1452,12 @@ This decision will be validated when:
 
 This decision should be reconsidered if:
 
-* real applications reveal missing core states
-* mobile requirements cannot be represented cleanly
-* service processes require a fundamentally different model
-* one process hosting multiple applications makes session ownership impractical
-* suspension cannot be implemented consistently
-* lifecycle complexity creates unacceptable startup or IPC overhead
+- real applications reveal missing core states
+- mobile requirements cannot be represented cleanly
+- service processes require a fundamentally different model
+- one process hosting multiple applications makes session ownership impractical
+- suspension cannot be implemented consistently
+- lifecycle complexity creates unacceptable startup or IPC overhead
 
 Changes should preserve the distinction between application identity, process identity, surface identity, and session identity.
 

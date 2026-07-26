@@ -10,16 +10,16 @@
 
 SevynOS requires a graphical architecture capable of supporting:
 
-* application windows and surfaces
-* multiple displays
-* pointer, keyboard, touch, and stylus input
-* display scaling
-* application isolation
-* compositing
-* animations and visual effects
-* screen capture and sharing
-* accessibility
-* desktop, mobile, television, and embedded interfaces
+- application windows and surfaces
+- multiple displays
+- pointer, keyboard, touch, and stylus input
+- display scaling
+- application isolation
+- compositing
+- animations and visual effects
+- screen capture and sharing
+- accessibility
+- desktop, mobile, television, and embedded interfaces
 
 The graphical system must connect several major SevynOS components:
 
@@ -43,11 +43,11 @@ Project Sevyn must choose an initial display protocol and architecture before im
 
 The primary Linux display-system options are:
 
-* Wayland
-* X11
-* a completely custom display protocol
-* direct rendering without a standardized client protocol
-* a graphics architecture inherited from another platform
+- Wayland
+- X11
+- a completely custom display protocol
+- direct rendering without a standardized client protocol
+- a graphics architecture inherited from another platform
 
 Wayland defines communication between graphical clients and a compositor. In the Wayland architecture, the compositor is the display server, receives input through the underlying system, sends relevant input events to clients, and presents client-rendered surfaces.
 
@@ -61,23 +61,23 @@ Native graphical applications and framework hosts will communicate with the Sevy
 
 The first graphical implementation will use a Wayland compositor architecture for:
 
-* creating and presenting application surfaces
-* routing supported input events
-* managing display outputs
-* coordinating frame presentation
-* handling window and surface roles
-* integrating application windows with the Sevyn Shell
+- creating and presenting application surfaces
+- routing supported input events
+- managing display outputs
+- coordinating frame presentation
+- handling window and surface roles
+- integrating application windows with the Sevyn Shell
 
 SevynOS will define its own compositor policy, shell behavior, application lifecycle integration, security rules, user experience, and platform-specific protocols.
 
 The decision to use Wayland does not yet decide whether Project Sevyn will:
 
-* build a compositor directly using Wayland libraries
-* use wlroots
-* extend Weston
-* use another compositor framework
-* begin with an existing compositor for prototyping
-* create a custom compositor framework later
+- build a compositor directly using Wayland libraries
+- use wlroots
+- extend Weston
+- use another compositor framework
+- begin with an existing compositor for prototyping
+- create a custom compositor framework later
 
 That implementation decision will receive a separate ADR after a technical evaluation.
 
@@ -97,12 +97,12 @@ A Wayland client is a process connected to the compositor.
 
 A client may be:
 
-* an individual native application
-* a React Native framework host
-* a web application host
-* a system interface component
-* an Xwayland compatibility process
-* another graphical subsystem
+- an individual native application
+- a React Native framework host
+- a web application host
+- a system interface component
+- an Xwayland compatibility process
+- another graphical subsystem
 
 A SevynOS application does not necessarily need to communicate with Wayland directly. A framework host may own the Wayland connection and graphical surfaces on behalf of the application.
 
@@ -112,14 +112,14 @@ A Wayland server is called a compositor. It acts as both the display server and 
 
 For SevynOS, the compositor will also participate in:
 
-* Shell integration
-* workspace management
-* window placement
-* focus
-* input routing
-* display configuration
-* visual transitions
-* application-surface policy
+- Shell integration
+- workspace management
+- window placement
+- focus
+- input routing
+- display configuration
+- visual transitions
+- application-surface policy
 
 ### Sevyn Shell
 
@@ -127,16 +127,16 @@ The Sevyn Shell is the user-facing system interface.
 
 It may provide:
 
-* desktop or home screen
-* launcher
-* taskbar or dock
-* application switcher
-* window decorations
-* quick settings
-* notification center
-* lock screen
-* system overlays
-* workspace controls
+- desktop or home screen
+- launcher
+- taskbar or dock
+- application switcher
+- window decorations
+- quick settings
+- notification center
+- lock screen
+- system overlays
+- workspace controls
 
 The Shell and compositor may initially run within the same process, but they must remain conceptually separate.
 
@@ -154,12 +154,12 @@ Clients render their own content and submit surfaces to the compositor. The comp
 
 This aligns with SevynOS requirements for:
 
-* application-owned rendering
-* compositor-controlled presentation
-* strong graphical policy
-* modern GPU acceleration
-* multiple application frameworks
-* centralized input and window management
+- application-owned rendering
+- compositor-controlled presentation
+- strong graphical policy
+- modern GPU acceleration
+- multiple application frameworks
+- centralized input and window management
 
 ### Stronger isolation model than traditional X11
 
@@ -169,12 +169,12 @@ Wayland's client-compositor design gives the compositor authority over which int
 
 Sensitive capabilities such as:
 
-* global keyboard shortcuts
-* screen capture
-* input injection
-* window inspection
-* remote control
-* screen sharing
+- global keyboard shortcuts
+- screen capture
+- input injection
+- window inspection
+- remote control
+- screen sharing
 
 should be exposed through explicit SevynOS permissions and controlled protocols rather than unrestricted global access.
 
@@ -186,16 +186,16 @@ Wayland allows SevynOS to own the compositor instead of building its product exp
 
 This enables Project Sevyn to design:
 
-* window behavior
-* application transitions
-* workspaces
-* tiling or floating policies
-* mobile application surfaces
-* system overlays
-* multitasking
-* display switching
-* touch gestures
-* Shell animations
+- window behavior
+- application transitions
+- workspaces
+- tiling or floating policies
+- mobile application surfaces
+- system overlays
+- multitasking
+- display switching
+- touch gestures
+- Shell animations
 
 as part of one coherent platform.
 
@@ -221,14 +221,14 @@ Wayland compositors can take different roles and forms. The architecture can sup
 
 SevynOS can therefore implement different Shell policies for:
 
-* desktop
-* phone
-* tablet
-* watch
-* television
-* vehicle
-* kiosk
-* embedded display
+- desktop
+- phone
+- tablet
+- watch
+- television
+- vehicle
+- kiosk
+- embedded display
 
 while retaining a shared graphical protocol foundation.
 
@@ -289,14 +289,14 @@ The exact libraries shown in this diagram remain implementation candidates rathe
 
 The Runtime owns:
 
-* application identity
-* application lifecycle
-* permissions
-* application sessions
-* package information
-* application-host selection
-* resource policy
-* process ownership
+- application identity
+- application lifecycle
+- permissions
+- application sessions
+- package information
+- application-host selection
+- resource policy
+- process ownership
 
 The Runtime should not implement drawing, window placement, or input-device processing.
 
@@ -306,42 +306,42 @@ A framework host owns framework-specific rendering integration.
 
 For the React Native host, responsibilities may include:
 
-* creating a Wayland surface
-* connecting Fabric output to that surface
-* forwarding surface dimensions
-* translating input into React Native events
-* responding to scale changes
-* notifying the Runtime of graphical failures
-* destroying surfaces at shutdown
+- creating a Wayland surface
+- connecting Fabric output to that surface
+- forwarding surface dimensions
+- translating input into React Native events
+- responding to scale changes
+- notifying the Runtime of graphical failures
+- destroying surfaces at shutdown
 
 ### Compositor
 
 The compositor owns trusted graphical state, including:
 
-* outputs
-* seats and input devices
-* surfaces
-* focus
-* stacking
-* workspaces
-* surface roles
-* final composition
-* frame scheduling
-* capture authorization
-* Shell-level graphical policy
+- outputs
+- seats and input devices
+- surfaces
+- focus
+- stacking
+- workspaces
+- surface roles
+- final composition
+- frame scheduling
+- capture authorization
+- Shell-level graphical policy
 
 ### Shell
 
 The Shell owns user-facing interaction policy, including:
 
-* how applications are launched
-* how windows appear
-* where windows are positioned
-* how applications are switched
-* how workspaces behave
-* how system surfaces are presented
-* how notifications appear
-* how the lock screen behaves
+- how applications are launched
+- how windows appear
+- where windows are positioned
+- how applications are switched
+- how workspaces behave
+- how system surfaces are presented
+- how notifications appear
+- how the lock screen behaves
 
 The Shell should request privileged compositor operations through a private, authenticated system interface.
 
@@ -351,13 +351,13 @@ Applications own their content.
 
 Applications should not control:
 
-* global focus
-* other applications' positions
-* unrestricted screen capture
-* system overlays
-* arbitrary input injection
-* trusted authentication surfaces
-* lock-screen content without authorization
+- global focus
+- other applications' positions
+- unrestricted screen capture
+- system overlays
+- arbitrary input injection
+- trusted authentication surfaces
+- lock-screen content without authorization
 
 ## Standard and SevynOS-Specific Protocols
 
@@ -365,45 +365,45 @@ SevynOS should prefer standard Wayland protocols whenever they meet platform req
 
 Potential standard protocol areas include:
 
-* application surfaces
-* shared memory buffers
-* output information
-* input seats
-* pointer constraints
-* relative pointer input
-* presentation timing
-* fractional scaling
-* decorations
-* activation
-* text input
-* tablet input
-* data transfer
-* idle behavior
+- application surfaces
+- shared memory buffers
+- output information
+- input seats
+- pointer constraints
+- relative pointer input
+- presentation timing
+- fractional scaling
+- decorations
+- activation
+- text input
+- tablet input
+- data transfer
+- idle behavior
 
 Not every existing extension should automatically be supported.
 
 Each protocol should be evaluated for:
 
-* security
-* stability
-* device applicability
-* maintenance status
-* implementation cost
-* developer value
-* compatibility requirements
+- security
+- stability
+- device applicability
+- maintenance status
+- implementation cost
+- developer value
+- compatibility requirements
 
 SevynOS-specific protocols may be created for capabilities such as:
 
-* Runtime application-session identity
-* trusted Shell surfaces
-* system overlays
-* application lifecycle coordination
-* secure screen capture
-* cross-device window state
-* mobile surface roles
-* application restoration
-* capability-aware surface behavior
-* SevynOS developer tooling
+- Runtime application-session identity
+- trusted Shell surfaces
+- system overlays
+- application lifecycle coordination
+- secure screen capture
+- cross-device window state
+- mobile surface roles
+- application restoration
+- capability-aware surface behavior
+- SevynOS developer tooling
 
 Custom protocols should be narrowly scoped and documented.
 
@@ -417,14 +417,14 @@ A surface is not automatically equivalent to a complete application.
 
 For example, an application may have:
 
-* a primary window
-* a secondary window
-* a context menu
-* a popup
-* a notification-related surface
-* a picture-in-picture surface
-* a drag-and-drop icon
-* an embedded surface
+- a primary window
+- a secondary window
+- a context menu
+- a popup
+- a notification-related surface
+- a picture-in-picture surface
+- a drag-and-drop icon
+- an embedded surface
 
 The Runtime owns the application session.
 
@@ -439,13 +439,7 @@ type SurfaceAssociation = {
   applicationId: string;
   sessionId: string;
   surfaceId: string;
-  role:
-    | "primary"
-    | "secondary"
-    | "dialog"
-    | "popup"
-    | "overlay"
-    | "picture-in-picture";
+  role: "primary" | "secondary" | "dialog" | "popup" | "overlay" | "picture-in-picture";
 };
 ```
 
@@ -457,20 +451,20 @@ Wayland does not define the complete SevynOS window-management experience.
 
 Project Sevyn must define policies for:
 
-* floating windows
-* tiling
-* maximization
-* full-screen behavior
-* minimizing
-* workspaces
-* multiple displays
-* modal dialogs
-* always-on-top surfaces
-* picture-in-picture
-* mobile full-screen applications
-* split-screen applications
-* system overlays
-* application restoration
+- floating windows
+- tiling
+- maximization
+- full-screen behavior
+- minimizing
+- workspaces
+- multiple displays
+- modal dialogs
+- always-on-top surfaces
+- picture-in-picture
+- mobile full-screen applications
+- split-screen applications
+- system overlays
+- application restoration
 
 These policies belong to SevynOS, not to React Native or individual applications.
 
@@ -484,15 +478,15 @@ The compositor should receive input from the underlying input stack and route ev
 
 Potential input types include:
 
-* keyboard
-* mouse
-* touch
-* trackpad
-* stylus
-* game controller
-* remote control
-* rotary input
-* accessibility devices
+- keyboard
+- mouse
+- touch
+- trackpad
+- stylus
+- game controller
+- remote control
+- rotary input
+- accessibility devices
 
 Input focus must be owned by the compositor.
 
@@ -573,11 +567,11 @@ The React Native host may manage one or more Wayland surfaces for each applicati
 
 The host must coordinate with the Runtime so that every surface can be associated with:
 
-* an authenticated application
-* a valid session
-* granted capabilities
-* lifecycle state
-* device policy
+- an authenticated application
+- a valid session
+- granted capabilities
+- lifecycle state
+- device policy
 
 A Wayland connection by itself must not establish a trusted SevynOS application identity.
 
@@ -593,19 +587,19 @@ A modular compositor library that provides implementations of many common Waylan
 
 Potential advantages:
 
-* modular architecture
-* existing compositor ecosystem
-* support for common backends and protocols
-* faster path to a working custom compositor
-* strong fit for experimentation
+- modular architecture
+- existing compositor ecosystem
+- support for common backends and protocols
+- faster path to a working custom compositor
+- strong fit for experimentation
 
 Potential concerns:
 
-* API stability and upgrade maintenance
-* ownership of security policy
-* fit with future phone and embedded targets
-* dependency on project-specific extensions
-* need for C expertise
+- API stability and upgrade maintenance
+- ownership of security policy
+- fit with future phone and embedded targets
+- dependency on project-specific extensions
+- need for C expertise
 
 ### Weston
 
@@ -613,17 +607,17 @@ Weston is a reference Wayland compositor implementation and may provide a useful
 
 Potential advantages:
 
-* close relationship with Wayland development
-* reference implementation value
-* useful embedded use cases
-* established architecture
+- close relationship with Wayland development
+- reference implementation value
+- useful embedded use cases
+- established architecture
 
 Potential concerns:
 
-* adapting it into a unique SevynOS product architecture
-* Shell customization model
-* React Native integration strategy
-* long-term maintainability of extensive modifications
+- adapting it into a unique SevynOS product architecture
+- Shell customization model
+- React Native integration strategy
+- long-term maintainability of extensive modifications
 
 ### Direct implementation
 
@@ -631,16 +625,16 @@ Project Sevyn could build directly with core Wayland libraries and selected grap
 
 Potential advantages:
 
-* complete architectural control
-* minimal unnecessary policy
-* precise SevynOS integration
+- complete architectural control
+- minimal unnecessary policy
+- precise SevynOS integration
 
 Potential concerns:
 
-* substantially larger implementation scope
-* increased graphics and input complexity
-* slower prototype progress
-* greater security and correctness burden
+- substantially larger implementation scope
+- increased graphics and input complexity
+- slower prototype progress
+- greater security and correctness burden
 
 ### Existing compositor during prototyping
 
@@ -648,12 +642,12 @@ The first React Native rendering spike may run as a normal Wayland client under 
 
 This can validate:
 
-* surface creation
-* rendering
-* input
-* scaling
-* lifecycle coordination
-* framework-host integration
+- surface creation
+- rendering
+- input
+- scaling
+- lifecycle coordination
+- framework-host integration
 
 before Project Sevyn builds its own compositor.
 
@@ -667,20 +661,20 @@ Future versions may support X11 applications through Xwayland.
 
 Potential benefits include:
 
-* compatibility with existing Linux applications
-* access to developer tools
-* easier transition during early desktop development
-* broader software availability
+- compatibility with existing Linux applications
+- access to developer tools
+- easier transition during early desktop development
+- broader software availability
 
 Potential costs include:
 
-* additional attack surface
-* legacy behavior
-* inconsistent window semantics
-* integration complexity
-* visual inconsistency
-* increased maintenance
-* possible user confusion between native and compatibility applications
+- additional attack surface
+- legacy behavior
+- inconsistent window semantics
+- integration complexity
+- visual inconsistency
+- increased maintenance
+- possible user confusion between native and compatibility applications
 
 Xwayland support should be optional and separately governed.
 
@@ -708,28 +702,28 @@ Examples:
 
 ### Desktop
 
-* floating and tiled windows
-* keyboard and pointer input
-* multiple displays
-* workspaces
-* drag and drop
+- floating and tiled windows
+- keyboard and pointer input
+- multiple displays
+- workspaces
+- drag and drop
 
 ### Phone
 
-* primarily full-screen surfaces
-* touch gestures
-* split-screen multitasking
-* rotation
-* virtual keyboard
-* application cards
+- primarily full-screen surfaces
+- touch gestures
+- split-screen multitasking
+- rotation
+- virtual keyboard
+- application cards
 
 ### Television
 
-* full-screen applications
-* remote-control navigation
-* focus-based input
-* overscan handling
-* media overlays
+- full-screen applications
+- remote-control navigation
+- focus-based input
+- overscan handling
+- media overlays
 
 ### Watch
 
@@ -743,42 +737,42 @@ The Genesis milestone should remain narrow.
 
 ### Included
 
-* execution as a Wayland client under an existing compositor
-* one graphical React Native application
-* creation of one application surface
-* basic pointer or keyboard input
-* resize handling
-* display scale awareness
-* frame presentation
-* clean surface destruction
-* documented client-compositor boundary
-* initial compositor-framework research
+- execution as a Wayland client under an existing compositor
+- one graphical React Native application
+- creation of one application surface
+- basic pointer or keyboard input
+- resize handling
+- display scale awareness
+- frame presentation
+- clean surface destruction
+- documented client-compositor boundary
+- initial compositor-framework research
 
 ### Optional
 
-* a minimal experimental SevynOS compositor
-* one Shell-owned system surface
-* basic application-window movement
-* basic focus management
-* one display output
+- a minimal experimental SevynOS compositor
+- one Shell-owned system surface
+- basic application-window movement
+- basic focus management
+- one display output
 
 ### Not included
 
-* production compositor
-* mobile compositor
-* advanced window animations
-* multiple graphics backends
-* complete accessibility stack
-* secure screen-sharing portal
-* full clipboard management
-* virtual keyboard
-* Xwayland
-* remote desktop
-* color management
-* HDR
-* variable refresh rate
-* production multi-GPU support
-* complete multi-display management
+- production compositor
+- mobile compositor
+- advanced window animations
+- multiple graphics backends
+- complete accessibility stack
+- secure screen-sharing portal
+- full clipboard management
+- virtual keyboard
+- Xwayland
+- remote desktop
+- color management
+- HDR
+- variable refresh rate
+- production multi-GPU support
+- complete multi-display management
 
 ## Initial Technical Demonstration
 
@@ -799,19 +793,19 @@ The first graphical demonstration should prove:
 
 The graphics architecture must eventually measure:
 
-* time to first surface
-* time to first rendered frame
-* frame latency
-* missed frames
-* input-to-display latency
-* compositor CPU usage
-* compositor GPU usage
-* application GPU usage
-* buffer allocation
-* resize performance
-* multi-window performance
-* idle resource usage
-* display memory consumption
+- time to first surface
+- time to first rendered frame
+- frame latency
+- missed frames
+- input-to-display latency
+- compositor CPU usage
+- compositor GPU usage
+- application GPU usage
+- buffer allocation
+- resize performance
+- multi-window performance
+- idle resource usage
+- display memory consumption
 
 The Genesis milestone does not need final production performance.
 
@@ -821,29 +815,29 @@ It must establish enough instrumentation to detect major architectural problems.
 
 ### Positive consequences
 
-* SevynOS gains a modern Linux graphical foundation.
-* The platform can own its compositor and Shell behavior.
-* React Native and other frameworks can share one surface protocol.
-* Input and final presentation remain under trusted compositor control.
-* The architecture supports desktop, mobile, embedded, and specialized devices.
-* Existing Wayland libraries and tools can accelerate development.
-* Standard protocols may reduce unnecessary custom work.
-* X11 compatibility remains possible through Xwayland.
-* SevynOS can define its own security and window-management policies.
-* The graphics architecture remains independent from the Runtime and application framework.
+- SevynOS gains a modern Linux graphical foundation.
+- The platform can own its compositor and Shell behavior.
+- React Native and other frameworks can share one surface protocol.
+- Input and final presentation remain under trusted compositor control.
+- The architecture supports desktop, mobile, embedded, and specialized devices.
+- Existing Wayland libraries and tools can accelerate development.
+- Standard protocols may reduce unnecessary custom work.
+- X11 compatibility remains possible through Xwayland.
+- SevynOS can define its own security and window-management policies.
+- The graphics architecture remains independent from the Runtime and application framework.
 
 ### Negative consequences
 
-* Project Sevyn must implement or adapt a compositor.
-* Wayland intentionally leaves many desktop policies outside the core protocol.
-* Some required capabilities depend on extension protocols.
-* Protocol compatibility requires ongoing maintenance.
-* Screen sharing, global shortcuts, automation, and input methods require additional trusted services.
-* Existing X11 applications may require Xwayland.
-* Graphics failures may span the application, framework host, compositor, GPU drivers, and kernel.
-* Mobile and desktop policies may require substantially different Shell behavior.
-* Compositor development requires specialized systems and graphics knowledge.
-* Supporting proprietary GPU drivers may introduce additional complexity.
+- Project Sevyn must implement or adapt a compositor.
+- Wayland intentionally leaves many desktop policies outside the core protocol.
+- Some required capabilities depend on extension protocols.
+- Protocol compatibility requires ongoing maintenance.
+- Screen sharing, global shortcuts, automation, and input methods require additional trusted services.
+- Existing X11 applications may require Xwayland.
+- Graphics failures may span the application, framework host, compositor, GPU drivers, and kernel.
+- Mobile and desktop policies may require substantially different Shell behavior.
+- Compositor development requires specialized systems and graphics knowledge.
+- Supporting proprietary GPU drivers may introduce additional complexity.
 
 ### Risks
 
@@ -851,16 +845,16 @@ The largest risk is mistaking the selection of Wayland for the completion of the
 
 Wayland does not define:
 
-* the SevynOS user experience
-* the complete security policy
-* application identity
-* the Runtime lifecycle
-* window-management behavior
-* permission dialogs
-* screen-sharing authorization
-* application restoration
-* React Native rendering
-* system accessibility
+- the SevynOS user experience
+- the complete security policy
+- application identity
+- the Runtime lifecycle
+- window-management behavior
+- permission dialogs
+- screen-sharing authorization
+- application restoration
+- React Native rendering
+- system accessibility
 
 Project Sevyn must design those layers deliberately.
 
@@ -868,13 +862,13 @@ Another risk is exposing too many unstable or compositor-specific protocols to a
 
 To reduce that risk:
 
-* public applications should primarily use the SevynOS SDK
-* framework hosts should isolate low-level protocol details
-* custom protocols should remain narrow
-* standard protocols should be preferred when appropriate
-* unstable interfaces must not become permanent public contracts accidentally
-* protocol versions must be tracked explicitly
-* compatibility tests should be automated
+- public applications should primarily use the SevynOS SDK
+- framework hosts should isolate low-level protocol details
+- custom protocols should remain narrow
+- standard protocols should be preferred when appropriate
+- unstable interfaces must not become permanent public contracts accidentally
+- protocol versions must be tracked explicitly
+- compatibility tests should be automated
 
 ## Alternatives Considered
 
@@ -884,11 +878,11 @@ X11 provides broad compatibility and a mature Linux software ecosystem.
 
 It was rejected as the native SevynOS graphical architecture because:
 
-* its trust model does not align well with application isolation goals
-* the server and window-manager architecture carries significant legacy behavior
-* modern Linux graphics development has shifted toward Wayland
-* SevynOS wants compositor-owned presentation and policy
-* designing a new platform around X11 would create unnecessary long-term constraints
+- its trust model does not align well with application isolation goals
+- the server and window-manager architecture carries significant legacy behavior
+- modern Linux graphics development has shifted toward Wayland
+- SevynOS wants compositor-owned presentation and policy
+- designing a new platform around X11 would create unnecessary long-term constraints
 
 X11 applications may still be supported through Xwayland.
 
@@ -898,16 +892,16 @@ A completely custom protocol would give Project Sevyn full control.
 
 It was rejected for the initial platform because it would require SevynOS to independently design and maintain:
 
-* client-server transport
-* surface lifecycles
-* buffer sharing
-* input routing
-* output discovery
-* synchronization
-* protocol generation
-* debugging tools
-* toolkit integrations
-* compatibility layers
+- client-server transport
+- surface lifecycles
+- buffer sharing
+- input routing
+- output discovery
+- synchronization
+- protocol generation
+- debugging tools
+- toolkit integrations
+- compatibility layers
 
 SevynOS should create custom extensions only where its requirements are not met by existing protocols.
 
@@ -917,14 +911,14 @@ Applications could render directly to display hardware.
 
 This was rejected for general application use because it would prevent coherent:
 
-* multitasking
-* input routing
-* application isolation
-* window management
-* overlays
-* composition
-* capture controls
-* multi-application presentation
+- multitasking
+- input routing
+- application isolation
+- window management
+- overlays
+- composition
+- capture controls
+- multi-application presentation
 
 Direct display access may still be appropriate for boot graphics, recovery environments, or specialized trusted components.
 
@@ -934,12 +928,12 @@ SevynOS could run its applications inside an existing environment such as GNOME 
 
 This may be useful during early development, but it was rejected as the final architecture because Project Sevyn must define its own:
 
-* Shell
-* compositor policy
-* application lifecycle integration
-* permission experience
-* cross-device behavior
-* product identity
+- Shell
+- compositor policy
+- application lifecycle integration
+- permission experience
+- cross-device behavior
+- product identity
 
 ### Use Android's graphical stack
 
@@ -968,14 +962,14 @@ This decision will be validated when:
 
 This decision should be reconsidered if:
 
-* Wayland prevents a critical SevynOS requirement
-* the protocol ecosystem becomes incompatible with Project Sevyn's goals
-* required hardware cannot be supported
-* compositor complexity becomes unsustainable
-* React Native integration cannot meet performance requirements
-* another display architecture provides substantially stronger cross-device support
-* security requirements cannot be implemented reasonably
-* Linux graphical architecture changes materially
+- Wayland prevents a critical SevynOS requirement
+- the protocol ecosystem becomes incompatible with Project Sevyn's goals
+- required hardware cannot be supported
+- compositor complexity becomes unsustainable
+- React Native integration cannot meet performance requirements
+- another display architecture provides substantially stronger cross-device support
+- security requirements cannot be implemented reasonably
+- Linux graphical architecture changes materially
 
 Reconsidering this decision would require a migration strategy for native applications and framework hosts.
 
@@ -1004,14 +998,14 @@ It does not define the SevynOS experience.
 
 Project Sevyn will own:
 
-* the compositor policy
-* the Shell
-* application identity
-* permissions
-* lifecycle integration
-* window behavior
-* trusted graphical interfaces
-* cross-device user experience
+- the compositor policy
+- the Shell
+- application identity
+- permissions
+- lifecycle integration
+- window behavior
+- trusted graphical interfaces
+- cross-device user experience
 
 Wayland will carry the surfaces.
 

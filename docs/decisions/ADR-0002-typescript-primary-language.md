@@ -12,17 +12,17 @@ SevynOS is intended to provide a modern, accessible, cross-device application pl
 
 The platform will include:
 
-* a graphical shell
-* system applications
-* developer tooling
-* command-line tools
-* an application SDK
-* application manifests
-* lifecycle APIs
-* system-service clients
-* development utilities
-* package-management tools
-* cross-device application interfaces
+- a graphical shell
+- system applications
+- developer tooling
+- command-line tools
+- an application SDK
+- application manifests
+- lifecycle APIs
+- system-service clients
+- development utilities
+- package-management tools
+- cross-device application interfaces
 
 Project Sevyn needs a primary language that supports rapid development, strong tooling, broad developer familiarity, and close alignment with the React Native ecosystem.
 
@@ -40,35 +40,35 @@ TypeScript will be the primary platform language for SevynOS.
 
 TypeScript should be used by default for:
 
-* the Sevyn Shell
-* system applications
-* the public SDK
-* developer tooling
-* command-line tools
-* application templates
-* package metadata tooling
-* application lifecycle APIs
-* service client libraries
-* test utilities
-* build orchestration where practical
-* documentation examples
-* third-party application development
+- the Sevyn Shell
+- system applications
+- the public SDK
+- developer tooling
+- command-line tools
+- application templates
+- package metadata tooling
+- application lifecycle APIs
+- service client libraries
+- test utilities
+- build orchestration where practical
+- documentation examples
+- third-party application development
 
 TypeScript will not be required for components where it is technically unsuitable.
 
 Native languages may be used for:
 
-* Linux integration
-* graphics and compositor integration
-* device access
-* process management
-* inter-process communication infrastructure
-* performance-critical code
-* cryptographic operations
-* sandboxing and security enforcement
-* React Native platform bindings
-* hardware-specific services
-* boot and early system initialization
+- Linux integration
+- graphics and compositor integration
+- device access
+- process management
+- inter-process communication infrastructure
+- performance-critical code
+- cryptographic operations
+- sandboxing and security enforcement
+- React Native platform bindings
+- hardware-specific services
+- boot and early system initialization
 
 The architectural goal is:
 
@@ -82,13 +82,13 @@ React Native applications are commonly written using JavaScript or TypeScript.
 
 Making TypeScript the primary language creates a consistent development experience across:
 
-* applications
-* system applications
-* SDK packages
-* shell components
-* developer tools
-* examples
-* documentation
+- applications
+- system applications
+- SDK packages
+- shell components
+- developer tools
+- examples
+- documentation
 
 A developer familiar with React Native should be able to understand a meaningful portion of the SevynOS codebase without first learning a low-level systems language.
 
@@ -98,14 +98,14 @@ TypeScript provides static type checking while retaining compatibility with the 
 
 This can help detect:
 
-* incorrect API usage
-* invalid application manifests
-* mismatched event payloads
-* unsupported device capabilities
-* incompatible lifecycle states
-* malformed permission requests
-* incorrect service responses
-* breaking SDK changes
+- incorrect API usage
+- invalid application manifests
+- mismatched event payloads
+- unsupported device capabilities
+- incompatible lifecycle states
+- malformed permission requests
+- incorrect service responses
+- breaking SDK changes
 
 TypeScript does not eliminate runtime errors, but it provides a stronger foundation than untyped JavaScript for a large platform codebase.
 
@@ -115,12 +115,12 @@ A major goal of SevynOS is to lower the barrier to platform development.
 
 TypeScript is widely used by:
 
-* web developers
-* React developers
-* React Native developers
-* Node.js developers
-* full-stack developers
-* tooling engineers
+- web developers
+- React developers
+- React Native developers
+- Node.js developers
+- full-stack developers
+- tooling engineers
 
 Using TypeScript allows more developers to contribute to the shell, SDK, system applications, tools, and documentation without requiring expertise in kernel development or native systems programming.
 
@@ -128,16 +128,16 @@ Using TypeScript allows more developers to contribute to the shell, SDK, system 
 
 TypeScript supports rapid iteration and has mature tooling for:
 
-* editor integration
-* automatic completion
-* refactoring
-* testing
-* formatting
-* linting
-* package management
-* documentation generation
-* build systems
-* debugging
+- editor integration
+- automatic completion
+- refactoring
+- testing
+- formatting
+- linting
+- package management
+- documentation generation
+- build systems
+- debugging
 
 This is especially valuable during the early SevynOS prototype phase, when the architecture will change frequently.
 
@@ -145,14 +145,14 @@ This is especially valuable during the early SevynOS prototype phase, when the a
 
 TypeScript is well suited to sharing code across:
 
-* desktop
-* phone
-* tablet
-* watch
-* television
-* embedded interfaces
-* development tools
-* cloud services
+- desktop
+- phone
+- tablet
+- watch
+- television
+- embedded interfaces
+- development tools
+- cloud services
 
 Shared platform logic can remain portable while native components implement device-specific behavior behind stable APIs.
 
@@ -205,12 +205,12 @@ TypeScript code should not depend on undocumented native behavior.
 
 Native components should expose:
 
-* typed interfaces
-* stable error codes
-* validated inputs
-* versioned protocols
-* predictable lifecycle behavior
-* documented security constraints
+- typed interfaces
+- stable error codes
+- validated inputs
+- versioned protocols
+- predictable lifecycle behavior
+- documented security constraints
 
 ## Proposed Language Responsibilities
 
@@ -218,40 +218,40 @@ Native components should expose:
 
 TypeScript is expected to be used for:
 
-* launcher interface
-* desktop workspace
-* notification center
-* quick settings
-* application switcher
-* lock-screen interface
-* Settings application
-* Files application
-* Terminal interface
-* package-manager interface
-* app manifests and validation
-* developer CLI
-* project scaffolding
-* test harnesses
-* SDK modules
-* application state models
-* device-capability APIs
-* service clients
-* system-event definitions
-* extension APIs
-* developer documentation examples
+- launcher interface
+- desktop workspace
+- notification center
+- quick settings
+- application switcher
+- lock-screen interface
+- Settings application
+- Files application
+- Terminal interface
+- package-manager interface
+- app manifests and validation
+- developer CLI
+- project scaffolding
+- test harnesses
+- SDK modules
+- application state models
+- device-capability APIs
+- service clients
+- system-event definitions
+- extension APIs
+- developer documentation examples
 
 ### C++
 
 C++ may be used for:
 
-* React Native platform integration
-* Fabric renderer integration
-* TurboModules
-* native component hosting
-* Hermes embedding
-* graphics bindings
-* existing native libraries
-* performance-sensitive runtime components
+- React Native platform integration
+- Fabric renderer integration
+- TurboModules
+- native component hosting
+- Hermes embedding
+- graphics bindings
+- existing native libraries
+- performance-sensitive runtime components
 
 C++ is likely to be necessary because React Native itself includes significant C++ infrastructure.
 
@@ -259,15 +259,15 @@ C++ is likely to be necessary because React Native itself includes significant C
 
 Rust may be considered for:
 
-* security-sensitive services
-* IPC infrastructure
-* process supervisors
-* package validation
-* permissions enforcement
-* system daemons
-* parsers
-* networking services
-* components where memory safety is especially important
+- security-sensitive services
+- IPC infrastructure
+- process supervisors
+- package validation
+- permissions enforcement
+- system daemons
+- parsers
+- networking services
+- components where memory safety is especially important
 
 Rust is not required for the initial prototype.
 
@@ -277,12 +277,12 @@ The project should not introduce Rust merely because it is considered a modern s
 
 C may be used for:
 
-* Linux system interfaces
-* compatibility with existing libraries
-* small low-level components
-* hardware and driver integration
-* boot-related code
-* APIs where C is the established interface
+- Linux system interfaces
+- compatibility with existing libraries
+- small low-level components
+- hardware and driver integration
+- boot-related code
+- APIs where C is the established interface
 
 ### Shell scripting
 
@@ -298,12 +298,12 @@ SevynOS applications and system interfaces will rely on a JavaScript engine and 
 
 Hermes is the initial preferred JavaScript engine because it is designed for React Native and provides:
 
-* bytecode compilation
-* optimized startup behavior
-* garbage collection
-* debugging support
-* close integration with React Native
-* support across multiple processor architectures
+- bytecode compilation
+- optimized startup behavior
+- garbage collection
+- debugging support
+- close integration with React Native
+- support across multiple processor architectures
 
 Hermes must receive its own Architecture Decision Record before becoming a permanent platform dependency.
 
@@ -334,26 +334,22 @@ Sevyn Runtime
 
 All public SevynOS TypeScript APIs should provide:
 
-* strict types
-* documented errors
-* promise-based asynchronous interfaces where appropriate
-* cancellable operations where appropriate
-* stable event payloads
-* capability detection
-* permission-aware behavior
-* versioned compatibility
-* runtime validation at trust boundaries
+- strict types
+- documented errors
+- promise-based asynchronous interfaces where appropriate
+- cancellable operations where appropriate
+- stable event payloads
+- capability detection
+- permission-aware behavior
+- versioned compatibility
+- runtime validation at trust boundaries
 
 Example:
 
 ```ts
-import {
-  Permissions,
-  PermissionStatus,
-} from "@sevynos/permissions";
+import { Permissions, PermissionStatus } from "@sevynos/permissions";
 
-const status: PermissionStatus =
-  await Permissions.request("device.camera");
+const status: PermissionStatus = await Permissions.request("device.camera");
 
 if (status === "granted") {
   // The application may access the camera API.
@@ -368,15 +364,15 @@ Inputs crossing application, process, package, or native boundaries must also be
 
 SevynOS TypeScript code should initially use:
 
-* TypeScript strict mode
-* explicit public API types
-* consistent formatting
-* automated linting
-* unit tests for platform logic
-* runtime schema validation at external boundaries
-* minimal use of `any`
-* documented exceptions when unsafe types are unavoidable
-* semantic versioning for public packages
+- TypeScript strict mode
+- explicit public API types
+- consistent formatting
+- automated linting
+- unit tests for platform logic
+- runtime schema validation at external boundaries
+- minimal use of `any`
+- documented exceptions when unsafe types are unavoidable
+- semantic versioning for public packages
 
 The project should prefer readable code over clever abstractions.
 
@@ -407,28 +403,28 @@ The exact configuration will be selected after the initial monorepo and tooling 
 
 ### Positive consequences
 
-* React Native developers receive a familiar platform language.
-* The shell and system applications can be developed rapidly.
-* Application and platform types can be shared.
-* SDK documentation can use one primary language.
-* Tooling and editor support are mature.
-* More developers can contribute to the project.
-* Cross-device code reuse becomes easier.
-* The public platform can hide low-level implementation complexity.
-* System applications can exercise the same SDK offered to third parties.
-* Typed interfaces can improve API stability.
+- React Native developers receive a familiar platform language.
+- The shell and system applications can be developed rapidly.
+- Application and platform types can be shared.
+- SDK documentation can use one primary language.
+- Tooling and editor support are mature.
+- More developers can contribute to the project.
+- Cross-device code reuse becomes easier.
+- The public platform can hide low-level implementation complexity.
+- System applications can exercise the same SDK offered to third parties.
+- Typed interfaces can improve API stability.
 
 ### Negative consequences
 
-* TypeScript cannot safely or efficiently implement every system component.
-* The platform will require a native interoperability layer.
-* JavaScript garbage collection may be unsuitable for hard real-time behavior.
-* Startup time and memory usage must be measured carefully.
-* Runtime errors remain possible despite static types.
-* Native and TypeScript types may drift without code generation or validation.
-* Excessive dependency on the JavaScript package ecosystem could introduce supply-chain risk.
-* Developers may incorrectly assume TypeScript code is automatically secure because it is typed.
-* Multiple languages will still exist within the project.
+- TypeScript cannot safely or efficiently implement every system component.
+- The platform will require a native interoperability layer.
+- JavaScript garbage collection may be unsuitable for hard real-time behavior.
+- Startup time and memory usage must be measured carefully.
+- Runtime errors remain possible despite static types.
+- Native and TypeScript types may drift without code generation or validation.
+- Excessive dependency on the JavaScript package ecosystem could introduce supply-chain risk.
+- Developers may incorrectly assume TypeScript code is automatically secure because it is typed.
+- Multiple languages will still exist within the project.
 
 ### Risks
 
@@ -436,23 +432,23 @@ The primary risk is attempting to use TypeScript in layers where it is not appro
 
 This could produce:
 
-* weak security boundaries
-* excessive memory usage
-* poor startup performance
-* unreliable process management
-* complex native workarounds
-* hidden latency
-* fragile system services
+- weak security boundaries
+- excessive memory usage
+- poor startup performance
+- unreliable process management
+- complex native workarounds
+- hidden latency
+- fragile system services
 
 To reduce this risk:
 
-* all performance claims must be measured
-* security enforcement must occur below untrusted applications
-* native services must own privileged operations
-* TypeScript should orchestrate rather than directly control unsafe low-level resources
-* architectural boundaries must remain explicit
-* native code should expose narrow, typed APIs
-* system-critical components must not depend on an application-level event loop unless deliberately designed to do so
+- all performance claims must be measured
+- security enforcement must occur below untrusted applications
+- native services must own privileged operations
+- TypeScript should orchestrate rather than directly control unsafe low-level resources
+- architectural boundaries must remain explicit
+- native code should expose narrow, typed APIs
+- system-critical components must not depend on an application-level event loop unless deliberately designed to do so
 
 ## Alternatives Considered
 
@@ -506,24 +502,24 @@ However, Project Sevyn must carefully review dependencies used throughout the Ty
 
 Platform packages should avoid unnecessary dependencies, especially for:
 
-* permissions
-* package validation
-* cryptography
-* update systems
-* application installation
-* manifest parsing
-* security-sensitive tooling
+- permissions
+- package validation
+- cryptography
+- update systems
+- application installation
+- manifest parsing
+- security-sensitive tooling
 
 Dependency selection should consider:
 
-* maintenance activity
-* license compatibility
-* package ownership
-* release history
-* known vulnerabilities
-* transitive dependency size
-* reproducible builds
-* ability to vendor or replace the dependency
+- maintenance activity
+- license compatibility
+- package ownership
+- release history
+- known vulnerabilities
+- transitive dependency size
+- reproducible builds
+- ability to vendor or replace the dependency
 
 The public SDK should remain as lightweight as reasonably possible.
 
@@ -544,13 +540,13 @@ This decision will be validated when:
 
 This decision should be reconsidered if:
 
-* TypeScript prevents acceptable shell performance
-* React Native changes its primary language or architecture significantly
-* the runtime introduces unacceptable memory or startup costs
-* critical platform components become overly dependent on unsafe native bridges
-* another language provides a significantly better developer experience while maintaining ecosystem compatibility
-* TypeScript tooling or governance changes in a way that threatens the project
-* cross-device requirements cannot be met reliably
+- TypeScript prevents acceptable shell performance
+- React Native changes its primary language or architecture significantly
+- the runtime introduces unacceptable memory or startup costs
+- critical platform components become overly dependent on unsafe native bridges
+- another language provides a significantly better developer experience while maintaining ecosystem compatibility
+- TypeScript tooling or governance changes in a way that threatens the project
+- cross-device requirements cannot be met reliably
 
 Reconsidering this decision does not require removing TypeScript support from applications. It may instead change which internal platform layers use it.
 
@@ -573,20 +569,17 @@ During the Genesis prototype, Project Sevyn should:
 
 The first demonstration should include a TypeScript React Native application that:
 
-* launches through the Sevyn Runtime
-* renders inside the Sevyn Shell
-* receives a typed lifecycle event
-* reads typed platform information
-* calls one native-backed SevynOS API
-* closes cleanly through the Runtime
+- launches through the Sevyn Runtime
+- renders inside the Sevyn Shell
+- receives a typed lifecycle event
+- reads typed platform information
+- calls one native-backed SevynOS API
+- closes cleanly through the Runtime
 
 Example:
 
 ```ts
-import {
-  AppLifecycle,
-  System,
-} from "@sevynos/sdk";
+import { AppLifecycle, System } from "@sevynos/sdk";
 
 AppLifecycle.on("foreground", () => {
   console.log("Running on", System.platformName);

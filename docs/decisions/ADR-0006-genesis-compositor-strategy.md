@@ -12,16 +12,16 @@ ADR-0005 selected Wayland as the initial graphical client protocol for SevynOS.
 
 The next decision is how Project Sevyn should create the compositor responsible for:
 
-* display outputs
-* graphical surfaces
-* input routing
-* focus
-* window placement
-* workspaces
-* frame presentation
-* trusted system surfaces
-* Shell integration
-* graphical security policy
+- display outputs
+- graphical surfaces
+- input routing
+- focus
+- window placement
+- workspaces
+- frame presentation
+- trusted system surfaces
+- Shell integration
+- graphical security policy
 
 Several implementation paths are available:
 
@@ -45,8 +45,8 @@ A direct implementation would offer maximum control but would require Project Se
 
 Genesis must balance two needs:
 
-* prove the SevynOS application architecture quickly
-* establish a credible path toward a SevynOS-owned graphical environment
+- prove the SevynOS application architecture quickly
+- establish a credible path toward a SevynOS-owned graphical environment
 
 ## Decision
 
@@ -58,14 +58,14 @@ The first SevynOS React Native application and framework host will run as normal
 
 This stage will validate:
 
-* Wayland connection and registry discovery
-* application-surface creation
-* React Native rendering
-* input delivery
-* resizing
-* display scaling
-* Runtime lifecycle integration
-* clean startup and shutdown
+- Wayland connection and registry discovery
+- application-surface creation
+- React Native rendering
+- input delivery
+- resizing
+- display scaling
+- Runtime lifecycle integration
+- clean startup and shutdown
 
 The existing compositor is development infrastructure only.
 
@@ -79,15 +79,15 @@ The first compositor will initially run nested inside another Wayland session ra
 
 Its purpose will be to validate:
 
-* the SevynOS compositor process
-* surface management
-* application-session association
-* basic focus
-* basic pointer and keyboard input
-* one output
-* Shell-owned surfaces
-* launch and close behavior
-* trusted compositor-to-Shell communication
+- the SevynOS compositor process
+- surface management
+- application-session association
+- basic focus
+- basic pointer and keyboard input
+- one output
+- Shell-owned surfaces
+- launch and close behavior
+- trusted compositor-to-Shell communication
 
 ### Stage 3: Standalone Genesis compositor
 
@@ -95,12 +95,12 @@ After the nested compositor works reliably, Project Sevyn will add a standalone 
 
 This stage may introduce:
 
-* DRM/KMS output
-* libinput-based device input
-* session management
-* hardware-backed rendering
-* display mode management
-* basic multi-output preparation
+- DRM/KMS output
+- libinput-based device input
+- session management
+- hardware-backed rendering
+- display mode management
+- basic multi-output preparation
 
 The exact hardware and deployment environment will be defined in a separate ADR.
 
@@ -110,10 +110,10 @@ wlroots will be the initial compositor framework for the custom Genesis composit
 
 Project Sevyn will not initially:
 
-* fork Weston
-* build directly on libweston
-* implement the compositor entirely from scratch
-* treat an existing desktop compositor as the final SevynOS graphical environment
+- fork Weston
+- build directly on libweston
+- implement the compositor entirely from scratch
+- treat an existing desktop compositor as the final SevynOS graphical environment
 
 The architectural rule is:
 
@@ -159,13 +159,13 @@ This reduces the number of new systems being debugged simultaneously.
 
 Without this separation, a rendering failure could originate from:
 
-* the React Native renderer
-* the framework host
-* the Wayland client
-* the custom compositor
-* the graphics backend
-* the GPU driver
-* the Runtime integration
+- the React Native renderer
+- the framework host
+- the Wayland client
+- the custom compositor
+- the graphics backend
+- the GPU driver
+- the Runtime integration
 
 Using an established compositor during Stage 1 creates a known graphical server environment and narrows the problem.
 
@@ -175,16 +175,16 @@ Project Sevyn should not remain permanently dependent on the policies or archite
 
 SevynOS needs control over:
 
-* Shell surfaces
-* application identity
-* window-management behavior
-* trusted prompts
-* screen capture
-* input authorization
-* workspace behavior
-* mobile surface policies
-* system overlays
-* cross-device interaction
+- Shell surfaces
+- application identity
+- window-management behavior
+- trusted prompts
+- screen capture
+- input authorization
+- workspace behavior
+- mobile surface policies
+- system overlays
+- cross-device interaction
 
 A custom compositor is therefore required for the long-term platform.
 
@@ -202,11 +202,11 @@ A nested compositor can operate as a Wayland client of an existing compositor wh
 
 This creates a practical development environment where the SevynOS compositor can be:
 
-* launched from a normal developer session
-* restarted without logging out
-* debugged using standard tools
-* displayed inside a window
-* tested without direct control of the machine's display hardware
+- launched from a normal developer session
+- restarted without logging out
+- debugged using standard tools
+- displayed inside a window
+- tested without direct control of the machine's display hardware
 
 Weston's documented backend model demonstrates that nested and standalone compositor operation are established Wayland development patterns.
 
@@ -214,18 +214,18 @@ Weston's documented backend model demonstrates that nested and standalone compos
 
 A completely direct implementation would require early decisions about:
 
-* DRM/KMS
-* input-device handling
-* backend abstraction
-* buffer allocation
-* renderer integration
-* protocol implementations
-* output hotplug
-* session switching
-* GPU handling
-* cursor rendering
-* damage tracking
-* frame scheduling
+- DRM/KMS
+- input-device handling
+- backend abstraction
+- buffer allocation
+- renderer integration
+- protocol implementations
+- output hotplug
+- session switching
+- GPU handling
+- cursor rendering
+- damage tracking
+- frame scheduling
 
 These are important but do not initially distinguish SevynOS.
 
@@ -237,11 +237,11 @@ The compositor framework is an implementation dependency.
 
 It must not become part of:
 
-* the public SevynOS SDK
-* the application manifest
-* the Runtime application contract
-* framework-host public APIs
-* application lifecycle definitions
+- the public SevynOS SDK
+- the application manifest
+- the Runtime application contract
+- framework-host public APIs
+- application lifecycle definitions
 
 Applications should interact with SevynOS concepts rather than wlroots-specific APIs.
 
@@ -265,14 +265,14 @@ A lower-policy compositor framework is preferable to inheriting an existing desk
 
 The wlroots ecosystem provides multiple real compositor implementations that can be studied for:
 
-* backend initialization
-* output management
-* input handling
-* scene composition
-* XDG shell support
-* nested operation
-* protocol registration
-* application focus
+- backend initialization
+- output management
+- input handling
+- scene composition
+- XDG shell support
+- nested operation
+- protocol registration
+- application focus
 
 These projects should be treated as engineering references, not copied without understanding or license review.
 
@@ -288,13 +288,13 @@ Project Sevyn does not need to use every wlroots component.
 
 The compositor can begin with:
 
-* one backend
-* one renderer
-* one allocator
-* one seat
-* one output
-* one application-surface protocol
-* one scene representation
+- one backend
+- one renderer
+- one allocator
+- one seat
+- one output
+- one application-surface protocol
+- one scene representation
 
 Additional features can be introduced only when required.
 
@@ -316,13 +316,13 @@ That may be valuable for embedded or reference-compositor use cases, but Genesis
 
 Project Sevyn needs a Shell and compositor structure that may eventually span:
 
-* desktop
-* mobile
-* television
-* embedded interfaces
-* custom trusted surfaces
-* application-session identity
-* React Native system UI
+- desktop
+- mobile
+- television
+- embedded interfaces
+- custom trusted surfaces
+- application-session identity
+- React Native system UI
 
 The project should begin with a compositor framework that encourages defining this policy directly rather than adapting an existing reference compositor's Shell model.
 
@@ -330,12 +330,12 @@ The project should begin with a compositor framework that encourages defining th
 
 Weston remains important to SevynOS as:
 
-* a Wayland reference implementation
-* a test environment
-* a source of standards-oriented design examples
-* a nested compositor
-* a comparison implementation
-* a protocol behavior reference
+- a Wayland reference implementation
+- a test environment
+- a source of standards-oriented design examples
+- a nested compositor
+- a comparison implementation
+- a protocol behavior reference
 
 Not selecting libweston does not mean rejecting Weston as an engineering resource.
 
@@ -345,12 +345,12 @@ Forking Weston might produce a graphical environment quickly, but it would creat
 
 That could lead to:
 
-* difficult upstream synchronization
-* SevynOS behavior becoming entangled with Weston assumptions
-* extensive patches that are hard to review
-* delayed adoption of upstream fixes
-* a product architecture defined by modification rather than deliberate design
-* uncertainty over which changes should be upstreamed
+- difficult upstream synchronization
+- SevynOS behavior becoming entangled with Weston assumptions
+- extensive patches that are hard to review
+- delayed adoption of upstream fixes
+- a product architecture defined by modification rather than deliberate design
+- uncertainty over which changes should be upstreamed
 
 Weston provides libweston specifically so third parties can build environments on its compositor core without necessarily turning Weston itself into their product.
 
@@ -362,41 +362,41 @@ A direct compositor implementation would maximize control.
 
 It would also require Project Sevyn to independently integrate or implement:
 
-* Wayland server objects
-* protocol dispatch
-* rendering
-* buffer management
-* DRM/KMS
-* input devices
-* output modes
-* cursor handling
-* frame timing
-* surface trees
-* damage tracking
-* session management
-* backend abstraction
-* nested operation
-* hardware acceleration
+- Wayland server objects
+- protocol dispatch
+- rendering
+- buffer management
+- DRM/KMS
+- input devices
+- output modes
+- cursor handling
+- frame timing
+- surface trees
+- damage tracking
+- session management
+- backend abstraction
+- nested operation
+- hardware acceleration
 
 Wayland places significant authority in the compositor. It receives input, determines the target surface, and controls final presentation.
 
 Implementing this incorrectly could create:
 
-* crashes
-* rendering corruption
-* input leaks
-* privilege mistakes
-* unusable hardware configurations
-* serious security flaws
+- crashes
+- rendering corruption
+- input leaks
+- privilege mistakes
+- unusable hardware configurations
+- serious security flaws
 
 A from-scratch implementation may become appropriate after Project Sevyn has:
 
-* a stable Runtime
-* a working React Native platform
-* compositor expertise
-* automated protocol tests
-* performance measurements
-* concrete requirements unmet by existing frameworks
+- a stable Runtime
+- a working React Native platform
+- compositor expertise
+- automated protocol tests
+- performance measurements
+- concrete requirements unmet by existing frameworks
 
 It is not justified for Genesis.
 
@@ -429,12 +429,12 @@ The Runtime should not depend directly on wlroots types.
 
 The compositor should not become the source of truth for:
 
-* installed applications
-* permission grants
-* package identity
-* application lifecycle
-* user accounts
-* application process ownership
+- installed applications
+- permission grants
+- package identity
+- application lifecycle
+- user accounts
+- application process ownership
 
 The two systems should communicate through a narrow, versioned interface.
 
@@ -460,11 +460,11 @@ The final process model may change.
 
 The initial separation is intended to ensure that:
 
-* a Shell crash does not automatically destroy Runtime state
-* Runtime code does not directly depend on compositor libraries
-* compositor failures are observable
-* framework hosts remain distinct
-* system boundaries remain understandable
+- a Shell crash does not automatically destroy Runtime state
+- Runtime code does not directly depend on compositor libraries
+- compositor failures are observable
+- framework hosts remain distinct
+- system boundaries remain understandable
 
 For the earliest nested spike, the Shell may temporarily be implemented inside the compositor process if that significantly reduces complexity.
 
@@ -502,14 +502,14 @@ The first nested compositor should expose only the protocols required for the de
 
 The minimum set is expected to include:
 
-* core Wayland compositor
-* shared-memory support
-* output information
-* seat
-* pointer
-* keyboard
-* XDG shell
-* basic data-device support only if needed
+- core Wayland compositor
+- shared-memory support
+- output information
+- seat
+- pointer
+- keyboard
+- XDG shell
+- basic data-device support only if needed
 
 The compositor should not advertise unsupported interfaces.
 
@@ -519,19 +519,19 @@ Protocol support must be added intentionally.
 
 The first compositor does not need:
 
-* Xwayland
-* screen capture
-* global shortcuts
-* virtual keyboard
-* tablet protocols
-* remote desktop
-* session locking
-* advanced decorations
-* idle inhibition
-* color management
-* fractional scaling
-* output management UI
-* drag and drop
+- Xwayland
+- screen capture
+- global shortcuts
+- virtual keyboard
+- tablet protocols
+- remote desktop
+- session locking
+- advanced decorations
+- idle inhibition
+- color management
+- fractional scaling
+- output management UI
+- drag and drop
 
 Some of these may become necessary before Genesis is considered complete, but they should not block the first application surface.
 
@@ -541,24 +541,24 @@ The initial Shell should be intentionally small.
 
 It should include:
 
-* a background surface
-* one launcher control
-* one application representation
-* one basic window frame or surface container
-* a close action
-* a visible focus state
-* a development status overlay
+- a background surface
+- one launcher control
+- one application representation
+- one basic window frame or surface container
+- a close action
+- a visible focus state
+- a development status overlay
 
 The Genesis Shell is not intended to resemble the final desktop.
 
 Its purpose is to validate:
 
-* Shell-to-Runtime launch requests
-* Runtime-to-compositor session association
-* compositor-to-Shell surface events
-* trusted Shell surfaces
-* input focus
-* application close behavior
+- Shell-to-Runtime launch requests
+- Runtime-to-compositor session association
+- compositor-to-Shell surface events
+- trusted Shell surfaces
+- input focus
+- application close behavior
 
 Visual polish should begin only after the boundaries work reliably.
 
@@ -599,10 +599,10 @@ The standalone Genesis compositor is complete when:
 
 Create small standalone experiments for:
 
-* a native Wayland client
-* Runtime session identity
-* React Native surface rendering
-* basic wlroots initialization
+- a native Wayland client
+- Runtime session identity
+- React Native surface rendering
+- basic wlroots initialization
 
 These experiments may live outside production packages temporarily.
 
@@ -620,11 +620,11 @@ experiments/
 
 Prove:
 
-* surface creation
-* rendering
-* resize
-* input
-* shutdown
+- surface creation
+- rendering
+- resize
+- input
+- shutdown
 
 ### Phase 2: Minimal nested compositor
 
@@ -658,34 +658,34 @@ logging
 
 Add:
 
-* trusted Shell connection
-* application-surface events
-* focus controls
-* launch controls
-* close controls
-* minimal visual workspace
+- trusted Shell connection
+- application-surface events
+- focus controls
+- launch controls
+- close controls
+- minimal visual workspace
 
 ### Phase 4: Standalone backend
 
 Add:
 
-* direct display backend
-* device input
-* documented test hardware
-* safe startup and shutdown
-* recovery instructions
+- direct display backend
+- device input
+- documented test hardware
+- safe startup and shutdown
+- recovery instructions
 
 ### Phase 5: Architecture review
 
 Evaluate:
 
-* dependency boundaries
-* performance
-* memory use
-* crash behavior
-* security assumptions
-* upstream maintenance cost
-* suitability for future touch devices
+- dependency boundaries
+- performance
+- memory use
+- crash behavior
+- security assumptions
+- upstream maintenance cost
+- suitability for future touch devices
 
 The findings should determine whether Genesis continues with wlroots or requires a superseding decision.
 
@@ -726,23 +726,23 @@ wlroots must remain a replaceable implementation dependency.
 
 Project Sevyn should:
 
-* pin known compatible versions
-* record build options
-* track upstream release changes
-* avoid depending on undocumented internal symbols
-* isolate wlroots usage inside the compositor package
-* wrap important compositor operations in SevynOS-owned types
-* maintain integration tests
-* document required protocols
-* evaluate security advisories
-* contribute general fixes upstream where appropriate
+- pin known compatible versions
+- record build options
+- track upstream release changes
+- avoid depending on undocumented internal symbols
+- isolate wlroots usage inside the compositor package
+- wrap important compositor operations in SevynOS-owned types
+- maintain integration tests
+- document required protocols
+- evaluate security advisories
+- contribute general fixes upstream where appropriate
 
 Project Sevyn should not expose public APIs named after:
 
-* `wlr_*` structures
-* wlroots backend objects
-* wlroots scene nodes
-* wlroots-specific event types
+- `wlr_*` structures
+- wlroots backend objects
+- wlroots scene nodes
+- wlroots-specific event types
 
 Public platform APIs should use SevynOS-owned terminology.
 
@@ -768,25 +768,25 @@ The compositor is a trusted system component.
 
 A compromised compositor could potentially:
 
-* observe displayed content
-* observe or redirect input
-* impersonate system surfaces
-* interfere with application windows
-* misuse capture functionality
-* undermine visual security indicators
+- observe displayed content
+- observe or redirect input
+- impersonate system surfaces
+- interfere with application windows
+- misuse capture functionality
+- undermine visual security indicators
 
 The compositor must therefore:
 
-* minimize dependencies
-* validate client requests
-* expose only required protocols
-* distinguish Shell clients from ordinary clients
-* authenticate Runtime communication
-* avoid trusting client-provided application identity
-* handle malformed surfaces safely
-* release resources when clients disconnect
-* avoid unrestricted debug interfaces in production
-* maintain structured security logs
+- minimize dependencies
+- validate client requests
+- expose only required protocols
+- distinguish Shell clients from ordinary clients
+- authenticate Runtime communication
+- avoid trusting client-provided application identity
+- handle malformed surfaces safely
+- release resources when clients disconnect
+- avoid unrestricted debug interfaces in production
+- maintain structured security logs
 
 Wayland surfaces do not themselves provide authenticated SevynOS application identity.
 
@@ -800,45 +800,45 @@ The compositor should have several layers of testing.
 
 Test SevynOS-owned logic such as:
 
-* surface-to-session association
-* focus policy
-* state transitions
-* permission decisions
-* Runtime message validation
-* Shell command validation
+- surface-to-session association
+- focus policy
+- state transitions
+- permission decisions
+- Runtime message validation
+- Shell command validation
 
 ### Protocol tests
 
 Create test clients that:
 
-* connect and disconnect
-* create valid surfaces
-* send malformed requests
-* create multiple surfaces
-* destroy surfaces unexpectedly
-* exit during configuration
-* attempt unsupported protocols
+- connect and disconnect
+- create valid surfaces
+- send malformed requests
+- create multiple surfaces
+- destroy surfaces unexpectedly
+- exit during configuration
+- attempt unsupported protocols
 
 ### Nested integration tests
 
 Launch the compositor nested and verify:
 
-* output creation
-* client launch
-* frame presentation
-* input routing
-* application close
-* compositor shutdown
+- output creation
+- client launch
+- frame presentation
+- input routing
+- application close
+- compositor shutdown
 
 ### Crash tests
 
 Force failure of:
 
-* the Shell
-* an application
-* the React Native host
-* the Runtime bridge
-* the compositor backend
+- the Shell
+- an application
+- the React Native host
+- the Runtime bridge
+- the compositor backend
 
 Verify that failures are reported clearly and do not leave uncontrolled processes.
 
@@ -846,27 +846,27 @@ Verify that failures are reported clearly and do not leave uncontrolled processe
 
 Standalone hardware tests should verify:
 
-* output initialization
-* hotplug behavior
-* input-device discovery
-* suspend and resume
-* GPU reset behavior
-* shutdown recovery
+- output initialization
+- hotplug behavior
+- input-device discovery
+- suspend and resume
+- GPU reset behavior
+- shutdown recovery
 
 ## Performance Measurements
 
 Genesis should record:
 
-* compositor startup time
-* time to nested output
-* time to first Shell frame
-* application surface creation time
-* input-to-frame latency
-* idle CPU use
-* idle memory use
-* frame misses
-* application resize latency
-* shutdown time
+- compositor startup time
+- time to nested output
+- time to first Shell frame
+- application surface creation time
+- input-to-frame latency
+- idle CPU use
+- idle memory use
+- frame misses
+- application resize latency
+- shutdown time
 
 The goal is not immediate optimization.
 
@@ -876,28 +876,28 @@ The goal is to ensure the staged architecture does not introduce avoidable delay
 
 ### Positive consequences
 
-* React Native rendering can be validated before the compositor exists.
-* Project Sevyn gains ownership of compositor policy during Genesis.
-* wlroots reduces the amount of low-level infrastructure that must be created immediately.
-* Nested development avoids disrupting the developer's primary desktop session.
-* The Runtime remains independent from the graphics framework.
-* The Shell remains conceptually separate from the compositor.
-* The implementation can progress incrementally.
-* Weston remains available as a reference and test environment.
-* A future standalone compositor can evolve from the nested implementation.
-* The project avoids an early long-lived Weston fork.
-* The project avoids prematurely implementing every low-level graphical subsystem.
+- React Native rendering can be validated before the compositor exists.
+- Project Sevyn gains ownership of compositor policy during Genesis.
+- wlroots reduces the amount of low-level infrastructure that must be created immediately.
+- Nested development avoids disrupting the developer's primary desktop session.
+- The Runtime remains independent from the graphics framework.
+- The Shell remains conceptually separate from the compositor.
+- The implementation can progress incrementally.
+- Weston remains available as a reference and test environment.
+- A future standalone compositor can evolve from the nested implementation.
+- The project avoids an early long-lived Weston fork.
+- The project avoids prematurely implementing every low-level graphical subsystem.
 
 ### Negative consequences
 
-* Genesis still requires native C and Wayland expertise.
-* wlroots upgrades may require compositor changes.
-* The staged approach temporarily supports two environments: an external compositor and the SevynOS compositor.
-* Nested behavior may differ from direct hardware behavior.
-* Some compositor policy must be designed earlier than application developers may expect.
-* Debugging may cross Runtime, Shell, compositor, host, and application processes.
-* The project will eventually need direct hardware and session-management expertise.
-* wlroots-specific assumptions may accidentally leak into SevynOS code without strict review.
+- Genesis still requires native C and Wayland expertise.
+- wlroots upgrades may require compositor changes.
+- The staged approach temporarily supports two environments: an external compositor and the SevynOS compositor.
+- Nested behavior may differ from direct hardware behavior.
+- Some compositor policy must be designed earlier than application developers may expect.
+- Debugging may cross Runtime, Shell, compositor, host, and application processes.
+- The project will eventually need direct hardware and session-management expertise.
+- wlroots-specific assumptions may accidentally leak into SevynOS code without strict review.
 
 ### Risks
 
@@ -905,21 +905,21 @@ The primary risk is that the temporary Stage 1 environment becomes permanent and
 
 To reduce this risk:
 
-* Stage 1 must have explicit completion criteria
-* compositor work must begin immediately after client validation
-* the nested compositor must be part of Genesis
-* architecture documents must not describe an external compositor as SevynOS
-* Shell-specific features must not be implemented against another desktop's private APIs
+- Stage 1 must have explicit completion criteria
+- compositor work must begin immediately after client validation
+- the nested compositor must be part of Genesis
+- architecture documents must not describe an external compositor as SevynOS
+- Shell-specific features must not be implemented against another desktop's private APIs
 
 A second risk is treating wlroots as the architecture instead of as an implementation tool.
 
 To reduce this risk:
 
-* public types must remain SevynOS-owned
-* Runtime interfaces must not expose wlroots
-* Shell APIs must remain independent
-* architecture tests should enforce package boundaries
-* the compositor dependency should be reevaluated at the end of Genesis
+- public types must remain SevynOS-owned
+- Runtime interfaces must not expose wlroots
+- Shell APIs must remain independent
+- architecture tests should enforce package boundaries
+- the compositor dependency should be reevaluated at the end of Genesis
 
 ## Alternatives Considered
 
@@ -929,12 +929,12 @@ This would provide the fastest path to displaying applications.
 
 It was rejected as the complete Genesis strategy because SevynOS would not control:
 
-* trusted Shell surfaces
-* window behavior
-* input policy
-* application-session association
-* security-sensitive graphical capabilities
-* future mobile interaction
+- trusted Shell surfaces
+- window behavior
+- input policy
+- application-session association
+- security-sensitive graphical capabilities
+- future mobile interaction
 
 An existing compositor will be used only for the first development stage.
 
@@ -944,12 +944,12 @@ This would establish compositor ownership earlier.
 
 It was rejected as the first step because it would combine:
 
-* client development
-* compositor development
-* DRM/KMS
-* device input
-* session management
-* GPU integration
+- client development
+- compositor development
+- DRM/KMS
+- device input
+- session management
+- GPU integration
 
 into one debugging problem.
 
@@ -1000,15 +1000,15 @@ This decision will be validated when:
 
 This decision should be reconsidered if:
 
-* wlroots cannot support a critical SevynOS requirement
-* wlroots maintenance or API changes become unsustainable
-* mobile or embedded requirements cannot be implemented reasonably
-* security policy requires a different compositor architecture
-* hardware compatibility is inadequate
-* React Native rendering performance is unacceptable
-* nested and standalone behavior diverge significantly
-* libweston or another framework demonstrates a clearly superior path
-* Project Sevyn develops sufficient expertise and requirements to justify direct implementation
+- wlroots cannot support a critical SevynOS requirement
+- wlroots maintenance or API changes become unsustainable
+- mobile or embedded requirements cannot be implemented reasonably
+- security policy requires a different compositor architecture
+- hardware compatibility is inadequate
+- React Native rendering performance is unacceptable
+- nested and standalone behavior diverge significantly
+- libweston or another framework demonstrates a clearly superior path
+- Project Sevyn develops sufficient expertise and requirements to justify direct implementation
 
 A replacement must preserve the SevynOS-owned Runtime, Shell, application, and SDK interfaces wherever possible.
 

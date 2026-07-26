@@ -12,14 +12,14 @@ SevynOS was inspired in part by the difficulty developers face when building and
 
 Today, a developer may need to account for:
 
-* different application frameworks
-* different platform APIs
-* different build systems
-* different deployment processes
-* different permission models
-* different lifecycle rules
-* different user-interface conventions
-* different native-language requirements
+- different application frameworks
+- different platform APIs
+- different build systems
+- different deployment processes
+- different permission models
+- different lifecycle rules
+- different user-interface conventions
+- different native-language requirements
 
 React Native already provides a familiar development model for building applications with React, JavaScript, and TypeScript across multiple platforms.
 
@@ -27,14 +27,14 @@ However, React Native applications still depend on platform-specific implementat
 
 Android, iOS, Windows, and macOS each provide their own:
 
-* rendering integration
-* native components
-* application host
-* lifecycle behavior
-* system modules
-* event handling
-* development tooling
-* build pipeline
+- rendering integration
+- native components
+- application host
+- lifecycle behavior
+- system modules
+- event handling
+- development tooling
+- build pipeline
 
 For React Native applications to run properly on SevynOS, Project Sevyn must implement a dedicated platform layer.
 
@@ -44,13 +44,13 @@ React Native is central to the original SevynOS vision, but the operating system
 
 SevynOS may support other application technologies in the future, including:
 
-* native C++ or Rust applications
-* Qt applications
-* Flutter applications
-* WebAssembly applications
-* games and custom rendering engines
-* web applications
-* command-line applications
+- native C++ or Rust applications
+- Qt applications
+- Flutter applications
+- WebAssembly applications
+- games and custom rendering engines
+- web applications
+- command-line applications
 
 React Native will therefore become the flagship and best-supported framework for SevynOS, not the sole framework permitted by the platform.
 
@@ -68,24 +68,24 @@ React Native applications running on SevynOS should use a dedicated SevynOS plat
 
 Project Sevyn will create and maintain the components required for React Native applications to:
 
-* start through the Sevyn Runtime
-* render inside the SevynOS graphical environment
-* receive application lifecycle events
-* access SevynOS system APIs
-* respond to input
-* interact with windows and surfaces
-* use accessibility services
-* participate in the permission model
-* support development and debugging
-* identify SevynOS as the active platform
+- start through the Sevyn Runtime
+- render inside the SevynOS graphical environment
+- receive application lifecycle events
+- access SevynOS system APIs
+- respond to input
+- interact with windows and surfaces
+- use accessibility services
+- participate in the permission model
+- support development and debugging
+- identify SevynOS as the active platform
 
 React Native will be the preferred framework for:
 
-* the Sevyn Shell
-* first-party system applications
-* sample applications
-* developer templates
-* most high-level user-interface development
+- the Sevyn Shell
+- first-party system applications
+- sample applications
+- developer templates
+- most high-level user-interface development
 
 However, the core Sevyn Runtime and public platform architecture must not require every application to use React Native.
 
@@ -113,13 +113,13 @@ React Native aligns naturally with the decision to make TypeScript the primary h
 
 The same language can be used across:
 
-* third-party applications
-* system applications
-* the Sevyn Shell
-* public SDK packages
-* developer tooling
-* examples
-* documentation
+- third-party applications
+- system applications
+- the Sevyn Shell
+- public SDK packages
+- developer tooling
+- examples
+- documentation
 
 ### Cross-device potential
 
@@ -127,13 +127,13 @@ React Native is already designed around shared application logic and reusable us
 
 SevynOS can extend this model across:
 
-* desktop
-* phone
-* tablet
-* watch
-* television
-* vehicle displays
-* embedded screens
+- desktop
+- phone
+- tablet
+- watch
+- television
+- vehicle displays
+- embedded screens
 
 Individual devices may require specialized layouts and capabilities, but the application model and SDK can remain consistent.
 
@@ -143,15 +143,15 @@ Writing the Sevyn Shell and system applications with React Native forces Project
 
 This provides continuous validation of:
 
-* performance
-* stability
-* APIs
-* tooling
-* accessibility
-* lifecycle behavior
-* rendering
-* packaging
-* developer experience
+- performance
+- stability
+- APIs
+- tooling
+- accessibility
+- lifecycle behavior
+- rendering
+- packaging
+- developer experience
 
 If Project Sevyn cannot build its own system applications effectively with React Native, the platform implementation is not yet good enough.
 
@@ -218,14 +218,14 @@ The React Native implementation for SevynOS is expected to include the following
 
 The host is responsible for:
 
-* initializing the JavaScript engine
-* loading application bundles or bytecode
-* creating the React Native runtime
-* registering native components
-* registering native modules
-* connecting the app to its Sevyn Runtime session
-* handling startup and shutdown
-* forwarding errors and logs
+- initializing the JavaScript engine
+- loading application bundles or bytecode
+- creating the React Native runtime
+- registering native components
+- registering native modules
+- connecting the app to its Sevyn Runtime session
+- handling startup and shutdown
+- forwarding errors and logs
 
 ### Renderer integration
 
@@ -233,13 +233,13 @@ SevynOS must provide a rendering path that allows React Native components to app
 
 The implementation must determine:
 
-* how Fabric surfaces map to SevynOS windows
-* how layout is presented to the graphics stack
-* how drawing is submitted
-* how frames are synchronized
-* how scaling and display density are handled
-* how clipping, effects, and animations work
-* how multiple application surfaces are managed
+- how Fabric surfaces map to SevynOS windows
+- how layout is presented to the graphics stack
+- how drawing is submitted
+- how frames are synchronized
+- how scaling and display density are handled
+- how clipping, effects, and animations work
+- how multiple application surfaces are managed
 
 The exact rendering and compositor architecture will be decided separately.
 
@@ -249,13 +249,13 @@ SevynOS must implement a minimum supported set of React Native components.
 
 The first prototype may include:
 
-* `View`
-* `Text`
-* `Image`
-* `ScrollView`
-* `TextInput`
-* `Pressable`
-* basic accessibility properties
+- `View`
+- `Text`
+- `Image`
+- `ScrollView`
+- `TextInput`
+- `Pressable`
+- basic accessibility properties
 
 Additional components should be added based on real application requirements.
 
@@ -265,16 +265,16 @@ The platform layer should expose system capabilities through TurboModules or the
 
 Early modules may include:
 
-* platform information
-* application lifecycle
-* windows
-* storage
-* files
-* notifications
-* permissions
-* clipboard
-* appearance
-* device capabilities
+- platform information
+- application lifecycle
+- windows
+- storage
+- files
+- notifications
+- permissions
+- clipboard
+- appearance
+- device capabilities
 
 These modules should preferably delegate to public SevynOS services rather than directly implementing privileged operating-system behavior.
 
@@ -284,14 +284,14 @@ The platform must translate SevynOS input events into React Native events.
 
 Potential input sources include:
 
-* mouse
-* keyboard
-* touchscreen
-* stylus
-* trackpad
-* rotary input
-* remote control
-* game controller
+- mouse
+- keyboard
+- touchscreen
+- stylus
+- trackpad
+- rotary input
+- remote control
+- game controller
 
 Applications should be able to respond to available input methods without assuming a specific device category.
 
@@ -301,16 +301,16 @@ Accessibility is part of the platform architecture and must not be postponed unt
 
 The React Native implementation should eventually connect to SevynOS accessibility services for:
 
-* semantic roles
-* labels
-* hints
-* focus navigation
-* screen readers
-* reduced motion
-* text scaling
-* high contrast
-* keyboard navigation
-* alternative input
+- semantic roles
+- labels
+- hints
+- focus navigation
+- screen readers
+- reduced motion
+- text scaling
+- high contrast
+- keyboard navigation
+- alternative input
 
 The first prototype may provide only a subset, but accessibility must remain an explicit architectural requirement.
 
@@ -320,18 +320,18 @@ React Native applications must receive lifecycle state from the Sevyn Runtime.
 
 Potential events include:
 
-* starting
-* foreground
-* background
-* suspended
-* resumed
-* stopping
-* stopped
-* memory pressure
-* session locking
-* session unlocking
-* display change
-* capability change
+- starting
+- foreground
+- background
+- suspended
+- resumed
+- stopping
+- stopped
+- memory pressure
+- session locking
+- session unlocking
+- display change
+- capability change
 
 The lifecycle API should remain consistent across device categories where possible.
 
@@ -339,16 +339,16 @@ The lifecycle API should remain consistent across device categories where possib
 
 The SevynOS React Native platform should eventually support:
 
-* fast refresh
-* debugging
-* development builds
-* source maps
-* structured logging
-* error overlays
-* performance profiling
-* component inspection
-* emulator or simulator workflows
-* remote development
+- fast refresh
+- debugging
+- development builds
+- source maps
+- structured logging
+- error overlays
+- performance profiling
+- component inspection
+- emulator or simulator workflows
+- remote development
 
 The Genesis prototype only needs the minimum tooling necessary to launch and debug a simple application.
 
@@ -359,9 +359,7 @@ React Native applications must be able to identify SevynOS explicitly.
 Example:
 
 ```ts
-import {
-  Platform,
-} from "react-native";
+import { Platform } from "react-native";
 
 if (Platform.OS === "sevynos") {
   console.log("Running on SevynOS");
@@ -371,9 +369,7 @@ if (Platform.OS === "sevynos") {
 SevynOS may also provide richer platform information through its SDK.
 
 ```ts
-import {
-  System,
-} from "@sevynos/system";
+import { System } from "@sevynos/system";
 
 console.log(System.platform);
 console.log(System.deviceClass);
@@ -396,9 +392,7 @@ Applications should prefer capability detection over excessive platform checks.
 Example:
 
 ```ts
-import {
-  Device,
-} from "@sevynos/system";
+import { Device } from "@sevynos/system";
 
 if (Device.hasCapability("pointer")) {
   // Enable pointer-specific interaction.
@@ -417,25 +411,25 @@ The long-term compatibility goal is:
 
 Minimal changes may still be required when an application:
 
-* uses platform-specific native modules
-* depends on Android or Apple services
-* assumes a mobile-only layout
-* uses unsupported native libraries
-* depends on platform-specific permissions
-* uses proprietary APIs
-* relies on unsupported React Native components
+- uses platform-specific native modules
+- depends on Android or Apple services
+- assumes a mobile-only layout
+- uses unsupported native libraries
+- depends on platform-specific permissions
+- uses proprietary APIs
+- relies on unsupported React Native components
 
 SevynOS should not promise perfect compatibility with every React Native application.
 
 Instead, it should provide:
 
-* clear compatibility documentation
-* migration tooling
-* capability detection
-* replacement SDK modules
-* actionable build errors
-* platform support guidelines
-* a compatibility test suite
+- clear compatibility documentation
+- migration tooling
+- capability detection
+- replacement SDK modules
+- actionable build errors
+- platform support guidelines
+- a compatibility test suite
 
 ## Framework Independence
 
@@ -461,13 +455,13 @@ React Native-specific behavior belongs in the React Native host and platform int
 
 The Runtime should manage:
 
-* identity
-* permissions
-* process or session ownership
-* lifecycle
-* resources
-* communication
-* termination
+- identity
+- permissions
+- process or session ownership
+- lifecycle
+- resources
+- communication
+- termination
 
 without depending on how the application's interface is built.
 
@@ -522,34 +516,34 @@ The Genesis prototype should support only the minimum required path.
 
 ### Included
 
-* one desktop Linux environment
-* one React Native application
-* Hermes or another supported JavaScript runtime
-* a minimal React Native host
-* basic rendering
-* basic pointer or keyboard input
-* a small supported component set
-* one typed native module
-* application lifecycle integration
-* explicit `sevynos` platform identity
-* development logging
-* clean application startup and shutdown
+- one desktop Linux environment
+- one React Native application
+- Hermes or another supported JavaScript runtime
+- a minimal React Native host
+- basic rendering
+- basic pointer or keyboard input
+- a small supported component set
+- one typed native module
+- application lifecycle integration
+- explicit `sevynos` platform identity
+- development logging
+- clean application startup and shutdown
 
 ### Not included
 
-* complete React Native API compatibility
-* Android application compatibility
-* iOS application compatibility
-* every community native module
-* mobile hardware support
-* full accessibility implementation
-* production sandboxing
-* production package installation
-* public app-store distribution
-* advanced animation support
-* complete debugging tools
-* multiple rendering backends
-* stable third-party SDK guarantees
+- complete React Native API compatibility
+- Android application compatibility
+- iOS application compatibility
+- every community native module
+- mobile hardware support
+- full accessibility implementation
+- production sandboxing
+- production package installation
+- public app-store distribution
+- advanced animation support
+- complete debugging tools
+- multiple rendering backends
+- stable third-party SDK guarantees
 
 The initial goal is architectural validation, not production readiness.
 
@@ -568,22 +562,11 @@ The first demonstration application should:
 Example application:
 
 ```tsx
-import {
-  useEffect,
-  useState,
-} from "react";
+import { useEffect, useState } from "react";
 
-import {
-  Platform,
-  Pressable,
-  Text,
-  View,
-} from "react-native";
+import { Platform, Pressable, Text, View } from "react-native";
 
-import {
-  AppLifecycle,
-  System,
-} from "@sevynos/sdk";
+import { AppLifecycle, System } from "@sevynos/sdk";
 
 export default function App() {
   const [state, setState] = useState("starting");
@@ -625,14 +608,14 @@ React Native applications on SevynOS must eventually meet defined performance ta
 
 These should include:
 
-* application startup time
-* first rendered frame
-* input latency
-* animation smoothness
-* memory usage
-* idle CPU usage
-* background resource usage
-* application shutdown time
+- application startup time
+- first rendered frame
+- input latency
+- animation smoothness
+- memory usage
+- idle CPU usage
+- background resource usage
+- application shutdown time
 
 The project must measure performance rather than assume React Native is either fast enough or too slow.
 
@@ -644,23 +627,23 @@ React Native applications are untrusted unless explicitly designated as trusted 
 
 The JavaScript environment must not receive unrestricted access to:
 
-* the filesystem
-* devices
-* other applications
-* system services
-* process control
-* user data
-* authentication material
-* network credentials
-* privileged settings
+- the filesystem
+- devices
+- other applications
+- system services
+- process control
+- user data
+- authentication material
+- network credentials
+- privileged settings
 
 All privileged access must pass through:
 
-* the SevynOS SDK
-* Runtime permission checks
-* validated IPC
-* system services
-* capability restrictions
+- the SevynOS SDK
+- Runtime permission checks
+- validated IPC
+- system services
+- capability restrictions
 
 Type definitions and JavaScript-level checks are not security controls.
 
@@ -670,28 +653,28 @@ Security enforcement must occur in trusted native or service layers.
 
 ### Positive consequences
 
-* React Native developers gain a familiar path to SevynOS.
-* Existing application code may be reused.
-* TypeScript becomes consistent across applications, the Shell, and SDK.
-* SevynOS can attract contributors from the React ecosystem.
-* System applications can validate the public platform.
-* Cross-device development becomes a central platform capability.
-* Project Sevyn gains a clear technical identity.
-* React Native improvements may benefit the wider ecosystem.
-* Application developers can avoid direct Linux-specific programming.
-* The platform can provide modern tooling from its earliest stages.
+- React Native developers gain a familiar path to SevynOS.
+- Existing application code may be reused.
+- TypeScript becomes consistent across applications, the Shell, and SDK.
+- SevynOS can attract contributors from the React ecosystem.
+- System applications can validate the public platform.
+- Cross-device development becomes a central platform capability.
+- Project Sevyn gains a clear technical identity.
+- React Native improvements may benefit the wider ecosystem.
+- Application developers can avoid direct Linux-specific programming.
+- The platform can provide modern tooling from its earliest stages.
 
 ### Negative consequences
 
-* Implementing a new React Native platform is a major engineering effort.
-* Compatibility with upstream React Native releases will require continuous maintenance.
-* Many existing native modules will not work automatically.
-* Graphics integration may become complex.
-* The project will depend on parts of React Native's architecture and release direction.
-* Debugging problems may span TypeScript, C++, graphics, IPC, and Linux layers.
-* Performance must be carefully measured and optimized.
-* Some applications will still require SevynOS-specific adaptations.
-* Supporting React Native well may initially slow support for other frameworks.
+- Implementing a new React Native platform is a major engineering effort.
+- Compatibility with upstream React Native releases will require continuous maintenance.
+- Many existing native modules will not work automatically.
+- Graphics integration may become complex.
+- The project will depend on parts of React Native's architecture and release direction.
+- Debugging problems may span TypeScript, C++, graphics, IPC, and Linux layers.
+- Performance must be carefully measured and optimized.
+- Some applications will still require SevynOS-specific adaptations.
+- Supporting React Native well may initially slow support for other frameworks.
 
 ### Risks
 
@@ -699,29 +682,29 @@ The largest risk is underestimating the work required to implement and maintain 
 
 Specific risks include:
 
-* renderer complexity
-* incomplete component behavior
-* upstream architectural changes
-* weak native-module compatibility
-* inaccessible user interfaces
-* poor startup performance
-* memory overhead on modest devices
-* dependency on undocumented framework behavior
-* a long-lived fork that becomes difficult to update
-* confusion between React Native APIs and SevynOS APIs
+- renderer complexity
+- incomplete component behavior
+- upstream architectural changes
+- weak native-module compatibility
+- inaccessible user interfaces
+- poor startup performance
+- memory overhead on modest devices
+- dependency on undocumented framework behavior
+- a long-lived fork that becomes difficult to update
+- confusion between React Native APIs and SevynOS APIs
 
 To reduce these risks:
 
-* begin with a narrow prototype
-* follow the current React Native architecture
-* avoid claiming complete compatibility
-* separate SevynOS services from React Native bindings
-* create automated compatibility tests
-* contribute upstream where possible
-* document unsupported APIs
-* measure performance continuously
-* keep the Runtime framework-neutral
-* add features based on real applications rather than theoretical completeness
+- begin with a narrow prototype
+- follow the current React Native architecture
+- avoid claiming complete compatibility
+- separate SevynOS services from React Native bindings
+- create automated compatibility tests
+- contribute upstream where possible
+- document unsupported APIs
+- measure performance continuously
+- keep the Runtime framework-neutral
+- add features based on real applications rather than theoretical completeness
 
 ## Alternatives Considered
 
@@ -784,14 +767,14 @@ This decision will be validated when:
 
 This decision should be reconsidered if:
 
-* React Native becomes technically incompatible with core SevynOS goals
-* maintaining the platform implementation becomes unsustainable
-* performance cannot meet target device requirements
-* upstream changes make long-term support impractical
-* the framework cannot provide required accessibility
-* developers show little interest despite a functional implementation
-* another framework offers substantially better compatibility with the SevynOS mission
-* React Native's licensing or governance becomes incompatible with Project Sevyn
+- React Native becomes technically incompatible with core SevynOS goals
+- maintaining the platform implementation becomes unsustainable
+- performance cannot meet target device requirements
+- upstream changes make long-term support impractical
+- the framework cannot provide required accessibility
+- developers show little interest despite a functional implementation
+- another framework offers substantially better compatibility with the SevynOS mission
+- React Native's licensing or governance becomes incompatible with Project Sevyn
 
 Reconsidering this decision may change React Native's status as the flagship framework, but it should not unnecessarily break existing applications.
 

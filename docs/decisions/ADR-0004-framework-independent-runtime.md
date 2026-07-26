@@ -16,28 +16,28 @@ However, React Native is not the operating system.
 
 SevynOS must also be capable of supporting applications that use other technologies, including:
 
-* native C, C++, or Rust applications
-* command-line applications
-* games and custom rendering engines
-* WebAssembly applications
-* web applications
-* Qt applications
-* Flutter applications
-* background services
-* system daemons
-* future application frameworks
+- native C, C++, or Rust applications
+- command-line applications
+- games and custom rendering engines
+- WebAssembly applications
+- web applications
+- Qt applications
+- Flutter applications
+- background services
+- system daemons
+- future application frameworks
 
 If the Sevyn Runtime is designed around React Native-specific concepts, every future application type would either need to imitate React Native or bypass the Runtime entirely.
 
 That would create several architectural problems:
 
-* platform services would become tied to one framework
-* permissions could be enforced inconsistently
-* application lifecycle rules would fragment
-* non-React-Native applications could become second-class
-* framework upgrades could destabilize the core platform
-* replacing or supplementing React Native would become unnecessarily difficult
-* system security boundaries could leak into application-framework code
+- platform services would become tied to one framework
+- permissions could be enforced inconsistently
+- application lifecycle rules would fragment
+- non-React-Native applications could become second-class
+- framework upgrades could destabilize the core platform
+- replacing or supplementing React Native would become unnecessarily difficult
+- system security boundaries could leak into application-framework code
 
 The Runtime must therefore define what a SevynOS application is without assuming how that application renders its interface or which programming language it uses.
 
@@ -49,19 +49,19 @@ The Runtime will manage all applications through a common application contract.
 
 That contract will describe platform-level concerns such as:
 
-* application identity
-* package metadata
-* executable entry point
-* application type
-* requested permissions
-* granted capabilities
-* lifecycle state
-* process ownership
-* resource limits
-* communication endpoints
-* supported device classes
-* launch behavior
-* shutdown behavior
+- application identity
+- package metadata
+- executable entry point
+- application type
+- requested permissions
+- granted capabilities
+- lifecycle state
+- process ownership
+- resource limits
+- communication endpoints
+- supported device classes
+- launch behavior
+- shutdown behavior
 
 Framework-specific behavior will be implemented by separate application hosts or adapters.
 
@@ -121,14 +121,14 @@ Permissions and privileged access must be enforced by SevynOS, not by a user-int
 
 A framework-independent Runtime allows all application types to use the same:
 
-* identity model
-* permission system
-* capability grants
-* IPC rules
-* process policies
-* resource controls
-* package validation
-* lifecycle authority
+- identity model
+- permission system
+- capability grants
+- IPC rules
+- process policies
+- resource controls
+- package validation
+- lifecycle authority
 
 This avoids creating separate security models for each application framework.
 
@@ -148,15 +148,15 @@ React Native is well suited to many interfaces, but not every application should
 
 Examples include:
 
-* high-performance games
-* graphics tools
-* compilers
-* device-management services
-* media-processing software
-* background daemons
-* terminal utilities
-* low-latency applications
-* hardware-control software
+- high-performance games
+- graphics tools
+- compilers
+- device-management services
+- media-processing software
+- background daemons
+- terminal utilities
+- low-latency applications
+- hardware-control software
 
 These applications should still participate fully in the SevynOS application model.
 
@@ -164,12 +164,12 @@ These applications should still participate fully in the SevynOS application mod
 
 Making the Runtime independent from React Native protects SevynOS if:
 
-* React Native changes direction
-* a different framework becomes important
-* Project Sevyn supports additional programming models
-* some devices require lighter application environments
-* particular workloads require native execution
-* React Native becomes unsuitable for selected system components
+- React Native changes direction
+- a different framework becomes important
+- Project Sevyn supports additional programming models
+- some devices require lighter application environments
+- particular workloads require native execution
+- React Native becomes unsuitable for selected system components
 
 React Native can remain the flagship framework without becoming a mandatory dependency for the entire platform.
 
@@ -224,15 +224,15 @@ com.projectsevyn.settings
 
 Identity should be used for:
 
-* permissions
-* storage scopes
-* IPC addressing
-* package updates
-* application ownership
-* logs
-* crash reports
-* notification routing
-* process tracking
+- permissions
+- storage scopes
+- IPC addressing
+- package updates
+- application ownership
+- logs
+- crash reports
+- notification routing
+- process tracking
 
 ### Application registry
 
@@ -240,30 +240,30 @@ The Runtime should maintain a registry of installed applications.
 
 The registry may include:
 
-* application ID
-* display name
-* version
-* package location
-* framework type
-* entry point
-* permissions
-* supported device classes
-* developer identity
-* installation state
-* enabled or disabled status
+- application ID
+- display name
+- version
+- package location
+- framework type
+- entry point
+- permissions
+- supported device classes
+- developer identity
+- installation state
+- enabled or disabled status
 
 ### Package validation
 
 Before launching an application, the Runtime should validate:
 
-* manifest structure
-* package identity
-* entry-point existence
-* framework support
-* permission declarations
-* package integrity
-* platform compatibility
-* signature information when supported
+- manifest structure
+- package identity
+- entry-point existence
+- framework support
+- permission declarations
+- package integrity
+- platform compatibility
+- signature information when supported
 
 ### Application launch
 
@@ -311,16 +311,16 @@ A framework host must not grant permissions independently.
 
 The Runtime may eventually manage:
 
-* memory limits
-* CPU policies
-* background execution
-* storage quotas
-* network policies
-* open windows
-* graphics surfaces
-* device access
-* process priorities
-* energy usage
+- memory limits
+- CPU policies
+- background execution
+- storage quotas
+- network policies
+- open windows
+- graphics surfaces
+- device access
+- process priorities
+- energy usage
 
 The first prototype may implement only a small subset.
 
@@ -328,11 +328,11 @@ The first prototype may implement only a small subset.
 
 The Runtime should help establish authenticated communication between:
 
-* applications
-* framework hosts
-* system services
-* shell components
-* developer tools
+- applications
+- framework hosts
+- system services
+- shell components
+- developer tools
 
 The exact IPC technology will be decided separately.
 
@@ -340,13 +340,13 @@ The exact IPC technology will be decided separately.
 
 The Runtime should:
 
-* request graceful shutdown
-* enforce termination when required
-* release application resources
-* record crash information
-* clean up stale sessions
-* notify the Shell of state changes
-* support application restart policies
+- request graceful shutdown
+- enforce termination when required
+- release application resources
+- record crash information
+- clean up stale sessions
+- notify the Shell of state changes
+- support application restart policies
 
 ## Framework Host Responsibilities
 
@@ -354,25 +354,25 @@ A framework host adapts a specific application technology to the Runtime.
 
 A host is responsible for framework-specific work such as:
 
-* loading framework code
-* initializing language runtimes
-* loading bundles or executables
-* creating render surfaces
-* forwarding input
-* translating lifecycle events
-* exposing SDK bindings
-* returning logs and errors
-* cleaning up framework resources
+- loading framework code
+- initializing language runtimes
+- loading bundles or executables
+- creating render surfaces
+- forwarding input
+- translating lifecycle events
+- exposing SDK bindings
+- returning logs and errors
+- cleaning up framework resources
 
 A host must not independently control:
 
-* system-wide permissions
-* application identity
-* package installation
-* trusted capability issuance
-* global lifecycle policy
-* unrelated application processes
-* security decisions owned by the Runtime
+- system-wide permissions
+- application identity
+- package installation
+- trusted capability issuance
+- global lifecycle policy
+- unrelated application processes
+- security decisions owned by the Runtime
 
 ## Proposed Application Contract
 
@@ -385,15 +385,8 @@ A conceptual application manifest may include:
   "version": "1.0.0",
   "applicationType": "react-native",
   "entryPoint": "./dist/index.bundle",
-  "permissions": [
-    "files.user-documents",
-    "notifications.post"
-  ],
-  "devices": [
-    "desktop",
-    "tablet",
-    "phone"
-  ]
+  "permissions": ["files.user-documents", "notifications.post"],
+  "devices": ["desktop", "tablet", "phone"]
 }
 ```
 
@@ -404,13 +397,7 @@ A conceptual internal launch request may resemble:
 ```ts
 type ApplicationLaunchRequest = {
   applicationId: string;
-  reason:
-    | "user"
-    | "system"
-    | "notification"
-    | "file"
-    | "protocol"
-    | "background";
+  reason: "user" | "system" | "notification" | "file" | "protocol" | "background";
   arguments?: string[];
   environment?: Record<string, string>;
 };
@@ -476,29 +463,29 @@ The React Native host will be the first framework host implemented.
 
 It may be responsible for:
 
-* starting Hermes
-* loading JavaScript or Hermes bytecode
-* initializing React Native
-* registering SevynOS native components
-* registering SDK modules
-* creating Fabric surfaces
-* connecting lifecycle events
-* forwarding logs
-* handling Fast Refresh in development
-* shutting down the JavaScript runtime
+- starting Hermes
+- loading JavaScript or Hermes bytecode
+- initializing React Native
+- registering SevynOS native components
+- registering SDK modules
+- creating Fabric surfaces
+- connecting lifecycle events
+- forwarding logs
+- handling Fast Refresh in development
+- shutting down the JavaScript runtime
 
 The Runtime should only need to know that the application uses the `react-native` application type and that a compatible host is installed.
 
 The Runtime should not need to know:
 
-* component names
-* React trees
-* JavaScript module formats
-* Metro configuration
-* Fabric internals
-* TurboModule definitions
-* React hooks
-* application UI state
+- component names
+- React trees
+- JavaScript module formats
+- Metro configuration
+- Fabric internals
+- TurboModule definitions
+- React hooks
+- application UI state
 
 ## Shell Integration
 
@@ -507,9 +494,7 @@ The Sevyn Shell should request application operations through the Runtime.
 Example:
 
 ```ts
-await Runtime.launchApplication(
-  "com.projectsevyn.settings",
-);
+await Runtime.launchApplication("com.projectsevyn.settings");
 ```
 
 The Shell should not launch framework executables directly.
@@ -531,12 +516,12 @@ System applications should use the same Runtime contract as third-party applicat
 
 A Settings application built with React Native should still:
 
-* have an application identity
-* have a manifest
-* launch through the Runtime
-* receive permissions
-* follow lifecycle rules
-* use documented APIs
+- have an application identity
+- have a manifest
+- launch through the Runtime
+- receive permissions
+- follow lifecycle rules
+- use documented APIs
 
 Some trusted components may receive elevated capabilities.
 
@@ -548,11 +533,11 @@ The Runtime application contract should be versioned independently from individu
 
 Possible version domains include:
 
-* package manifest version
-* Runtime protocol version
-* framework-host protocol version
-* SDK API version
-* service protocol version
+- package manifest version
+- Runtime protocol version
+- framework-host protocol version
+- SDK API version
+- service protocol version
 
 A framework host should declare which Runtime protocol versions it supports.
 
@@ -563,9 +548,7 @@ Example:
   "host": "org.sevynos.host.react-native",
   "hostVersion": "0.1.0",
   "runtimeProtocol": "^1.0.0",
-  "applicationTypes": [
-    "react-native"
-  ]
+  "applicationTypes": ["react-native"]
 }
 ```
 
@@ -608,22 +591,22 @@ type RuntimeError = {
 
 The framework host should be treated as a privileged platform component because it may:
 
-* create application processes
-* load untrusted code
-* access graphics surfaces
-* forward permissions
-* connect to system services
-* handle application data
+- create application processes
+- load untrusted code
+- access graphics surfaces
+- forward permissions
+- connect to system services
+- handle application data
 
 Each host must:
 
-* validate Runtime requests
-* isolate application sessions
-* avoid sharing capabilities between applications
-* validate messages from untrusted code
-* release capabilities at shutdown
-* report crashes accurately
-* avoid exposing unrestricted operating-system access
+- validate Runtime requests
+- isolate application sessions
+- avoid sharing capabilities between applications
+- validate messages from untrusted code
+- release capabilities at shutdown
+- report crashes accurately
+- avoid exposing unrestricted operating-system access
 
 The Runtime must authenticate framework hosts.
 
@@ -641,27 +624,27 @@ The prototype should still preserve the framework-independent boundary.
 
 ### Included
 
-* an application-type field in the manifest
-* a framework-neutral application registry
-* a host interface
-* one registered React Native host
-* framework-neutral lifecycle states
-* framework-neutral launch and stop operations
-* host-selection logic
-* clear unsupported-type errors
-* host crash reporting
+- an application-type field in the manifest
+- a framework-neutral application registry
+- a host interface
+- one registered React Native host
+- framework-neutral lifecycle states
+- framework-neutral launch and stop operations
+- host-selection logic
+- clear unsupported-type errors
+- host crash reporting
 
 ### Not included
 
-* multiple production-ready hosts
-* hot-swappable hosts
-* third-party host installation
-* complete host sandboxing
-* public host-development SDK
-* production protocol compatibility
-* framework marketplace
-* automatic host downloads
-* fallback compatibility environments
+- multiple production-ready hosts
+- hot-swappable hosts
+- third-party host installation
+- complete host sandboxing
+- public host-development SDK
+- production protocol compatibility
+- framework marketplace
+- automatic host downloads
+- fallback compatibility environments
 
 The goal is to prove the boundary before the codebase becomes dependent on React Native assumptions.
 
@@ -696,44 +679,29 @@ export type LaunchContext = {
 export interface ApplicationHost {
   readonly id: string;
 
-  supports(
-    applicationType: string,
-  ): boolean;
+  supports(applicationType: string): boolean;
 
-  launch(
-    context: LaunchContext,
-  ): Promise<void>;
+  launch(context: LaunchContext): Promise<void>;
 
-  stop(
-    sessionId: string,
-  ): Promise<void>;
+  stop(sessionId: string): Promise<void>;
 }
 ```
 
 A React Native host could implement it:
 
 ```ts
-export class ReactNativeHost
-  implements ApplicationHost
-{
-  readonly id =
-    "org.sevynos.host.react-native";
+export class ReactNativeHost implements ApplicationHost {
+  readonly id = "org.sevynos.host.react-native";
 
-  supports(
-    applicationType: string,
-  ): boolean {
+  supports(applicationType: string): boolean {
     return applicationType === "react-native";
   }
 
-  async launch(
-    context: LaunchContext,
-  ): Promise<void> {
+  async launch(context: LaunchContext): Promise<void> {
     // Start the React Native application.
   }
 
-  async stop(
-    sessionId: string,
-  ): Promise<void> {
+  async stop(sessionId: string): Promise<void> {
     // Shut down the React Native application.
   }
 }
@@ -745,27 +713,27 @@ The exact implementation may use native code rather than TypeScript. The importa
 
 ### Positive consequences
 
-* The Runtime remains stable as frameworks evolve.
-* SevynOS can support new application types later.
-* Security and permissions remain consistent.
-* React Native stays first-class without becoming mandatory.
-* Framework-specific code remains isolated.
-* Application lifecycle rules can be shared.
-* The Shell does not need framework knowledge.
-* Specialized native and high-performance applications remain possible.
-* Framework-host compatibility can be tested independently.
-* Future devices can choose appropriate hosts without redefining the Runtime.
+- The Runtime remains stable as frameworks evolve.
+- SevynOS can support new application types later.
+- Security and permissions remain consistent.
+- React Native stays first-class without becoming mandatory.
+- Framework-specific code remains isolated.
+- Application lifecycle rules can be shared.
+- The Shell does not need framework knowledge.
+- Specialized native and high-performance applications remain possible.
+- Framework-host compatibility can be tested independently.
+- Future devices can choose appropriate hosts without redefining the Runtime.
 
 ### Negative consequences
 
-* The architecture requires an additional abstraction layer.
-* Host protocols must be designed and maintained.
-* Framework-neutral concepts may initially feel more complex.
-* Some framework features may not map cleanly to shared lifecycle rules.
-* Debugging may cross application, host, Runtime, and service boundaries.
-* Host registration and compatibility add startup and packaging complexity.
-* The first prototype may take slightly longer than directly embedding React Native into the Runtime.
-* Poorly designed abstractions could become overly generic or difficult to use.
+- The architecture requires an additional abstraction layer.
+- Host protocols must be designed and maintained.
+- Framework-neutral concepts may initially feel more complex.
+- Some framework features may not map cleanly to shared lifecycle rules.
+- Debugging may cross application, host, Runtime, and service boundaries.
+- Host registration and compatibility add startup and packaging complexity.
+- The first prototype may take slightly longer than directly embedding React Native into the Runtime.
+- Poorly designed abstractions could become overly generic or difficult to use.
 
 ### Risks
 
@@ -773,25 +741,25 @@ The largest risk is creating an abstraction so generic that it becomes vague, in
 
 To reduce this risk:
 
-* design around the React Native host first
-* generalize only proven platform responsibilities
-* avoid speculative support for unknown frameworks
-* keep the initial host interface small
-* separate required capabilities from optional extensions
-* allow host-specific metadata without placing it in the core contract
-* test the design with at least one non-React-Native mock host
-* revise the contract before declaring it stable
+- design around the React Native host first
+- generalize only proven platform responsibilities
+- avoid speculative support for unknown frameworks
+- keep the initial host interface small
+- separate required capabilities from optional extensions
+- allow host-specific metadata without placing it in the core contract
+- test the design with at least one non-React-Native mock host
+- revise the contract before declaring it stable
 
 Another risk is allowing framework-specific concepts to leak gradually into the Runtime.
 
 To reduce that risk:
 
-* review Runtime dependencies
-* prohibit imports from React Native packages in Runtime code
-* keep framework code in separate packages
-* use protocol-level messages between Runtime and hosts
-* create architecture tests where practical
-* document every exception
+- review Runtime dependencies
+- prohibit imports from React Native packages in Runtime code
+- keep framework code in separate packages
+- use protocol-level messages between Runtime and hosts
+- create architecture tests where practical
+- document every exception
 
 ## Alternatives Considered
 
@@ -817,14 +785,14 @@ Each framework could launch and manage applications independently.
 
 This was rejected because it would fragment:
 
-* permissions
-* lifecycle
-* package management
-* identity
-* resource control
-* crash reporting
-* security
-* user experience
+- permissions
+- lifecycle
+- package management
+- identity
+- resource control
+- crash reporting
+- security
+- user experience
 
 All applications must remain visible to and governed by the Runtime.
 
@@ -863,13 +831,13 @@ This decision will be validated when:
 
 This decision should be reconsidered if:
 
-* the host abstraction prevents required platform features
-* framework-independent lifecycle states become impractical
-* performance overhead becomes measurable and unacceptable
-* security requires a substantially different host model
-* supporting multiple frameworks creates unsustainable complexity
-* all practical applications converge permanently on one execution model
-* a better application-isolation architecture replaces the host model
+- the host abstraction prevents required platform features
+- framework-independent lifecycle states become impractical
+- performance overhead becomes measurable and unacceptable
+- security requires a substantially different host model
+- supporting multiple frameworks creates unsustainable complexity
+- all practical applications converge permanently on one execution model
+- a better application-isolation architecture replaces the host model
 
 Reconsidering the host interface does not change the broader requirement that the Runtime remain independent from a single application framework.
 

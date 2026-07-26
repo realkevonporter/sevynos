@@ -10,26 +10,26 @@
 
 SevynOS requires a stable low-level foundation capable of managing:
 
-* processes
-* memory
-* filesystems
-* networking
-* hardware drivers
-* power management
-* device input and output
-* security primitives
-* multiple processor architectures
+- processes
+- memory
+- filesystems
+- networking
+- hardware drivers
+- power management
+- device input and output
+- security primitives
+- multiple processor architectures
 
 Writing a new kernel would require substantial engineering effort before SevynOS could begin developing the areas that distinguish the platform.
 
 The primary innovation of SevynOS is not intended to be its kernel. The project is focused on creating:
 
-* a React Native-first application platform
-* a TypeScript-first developer experience
-* an open and user-controlled computing environment
-* a consistent runtime across device categories
-* a polished cross-device shell
-* a stable SevynOS SDK
+- a React Native-first application platform
+- a TypeScript-first developer experience
+- an open and user-controlled computing environment
+- a consistent runtime across device categories
+- a polished cross-device shell
+- a stable SevynOS SDK
 
 The project therefore needs a proven kernel that allows development to begin at the runtime, services, shell, and application layers.
 
@@ -51,15 +51,15 @@ Linux will provide the underlying operating-system primitives, while the Sevyn R
 
 Linux is a mature, widely deployed kernel used across:
 
-* servers
-* desktops
-* mobile devices
-* televisions
-* vehicles
-* embedded systems
-* networking equipment
-* development boards
-* supercomputers
+- servers
+- desktops
+- mobile devices
+- televisions
+- vehicles
+- embedded systems
+- networking equipment
+- development boards
+- supercomputers
 
 Using Linux allows SevynOS to build on decades of engineering, testing, security work, and production deployment.
 
@@ -69,14 +69,14 @@ Linux supports a broad range of processor architectures and hardware categories.
 
 Potential SevynOS targets include:
 
-* x86-64 desktop and laptop computers
-* ARM64 development boards
-* tablets
-* mobile devices
-* embedded devices
-* televisions
-* automotive systems
-* wearable devices
+- x86-64 desktop and laptop computers
+- ARM64 development boards
+- tablets
+- mobile devices
+- embedded devices
+- televisions
+- automotive systems
+- wearable devices
 
 Not every device will work automatically. Hardware vendors may still require proprietary firmware, drivers, or board-support packages. However, Linux gives SevynOS a significantly stronger starting point than a new kernel would provide.
 
@@ -84,17 +84,17 @@ Not every device will work automatically. Hardware vendors may still require pro
 
 Linux provides access to established components for:
 
-* graphics
-* audio
-* networking
-* Bluetooth
-* USB
-* filesystems
-* encryption
-* containers
-* process isolation
-* device management
-* power management
+- graphics
+- audio
+- networking
+- Bluetooth
+- USB
+- filesystems
+- encryption
+- containers
+- process isolation
+- device management
+- power management
 
 SevynOS can evaluate and reuse these components rather than recreating them without a clear platform benefit.
 
@@ -110,15 +110,15 @@ Using Linux allows Project Sevyn to direct its limited early resources toward th
 
 These include:
 
-* Sevyn Runtime
-* Sevyn Shell
-* Sevyn SDK
-* React Native platform support
-* developer tooling
-* application packaging
-* permissions
-* system services
-* cross-device continuity
+- Sevyn Runtime
+- Sevyn Shell
+- Sevyn SDK
+- React Native platform support
+- developer tooling
+- application packaging
+- permissions
+- system services
+- cross-device continuity
 
 ## Architectural Boundaries
 
@@ -148,12 +148,12 @@ Third-party applications should not require direct access to kernel interfaces f
 
 Direct low-level access may be permitted for:
 
-* trusted system services
-* device drivers
-* approved native extensions
-* developer tools
-* explicitly authorized advanced applications
-* user-enabled unrestricted development environments
+- trusted system services
+- device drivers
+- approved native extensions
+- developer tools
+- explicitly authorized advanced applications
+- user-enabled unrestricted development environments
 
 These capabilities must remain under the device owner's control.
 
@@ -161,24 +161,24 @@ These capabilities must remain under the device owner's control.
 
 ### Positive consequences
 
-* SevynOS can begin development without creating a kernel.
-* The project gains access to extensive hardware and driver support.
-* The platform can initially target common desktop and ARM hardware.
-* Existing Linux debugging and development tools can be used.
-* The project can reuse mature system components.
-* Contributors can work from established documentation and tooling.
-* The architecture can support multiple device categories over time.
-* More engineering effort can be invested in the SevynOS-specific platform layers.
+- SevynOS can begin development without creating a kernel.
+- The project gains access to extensive hardware and driver support.
+- The platform can initially target common desktop and ARM hardware.
+- Existing Linux debugging and development tools can be used.
+- The project can reuse mature system components.
+- Contributors can work from established documentation and tooling.
+- The architecture can support multiple device categories over time.
+- More engineering effort can be invested in the SevynOS-specific platform layers.
 
 ### Negative consequences
 
-* SevynOS will inherit some Linux architectural constraints.
-* Hardware support may still depend on proprietary vendor components.
-* Kernel and userspace licensing obligations must be understood and respected.
-* Some Linux components may not fit the long-term SevynOS architecture.
-* Supporting many hardware configurations may create significant testing complexity.
-* The project may need to maintain selected kernel configurations or patches later.
-* Linux terminology and implementation details could leak into the developer experience unless platform boundaries are carefully maintained.
+- SevynOS will inherit some Linux architectural constraints.
+- Hardware support may still depend on proprietary vendor components.
+- Kernel and userspace licensing obligations must be understood and respected.
+- Some Linux components may not fit the long-term SevynOS architecture.
+- Supporting many hardware configurations may create significant testing complexity.
+- The project may need to maintain selected kernel configurations or patches later.
+- Linux terminology and implementation details could leak into the developer experience unless platform boundaries are carefully maintained.
 
 ### Risks
 
@@ -186,12 +186,12 @@ The largest architectural risk is that SevynOS becomes a customized Linux deskto
 
 To reduce this risk:
 
-* applications must target SevynOS APIs
-* the Runtime must own the application lifecycle
-* system capabilities must be exposed through SevynOS services
-* the Shell must remain separate from the Runtime
-* public documentation must describe SevynOS concepts rather than requiring Linux knowledge
-* Linux-specific dependencies must not become part of the public SDK without deliberate review
+- applications must target SevynOS APIs
+- the Runtime must own the application lifecycle
+- system capabilities must be exposed through SevynOS services
+- the Shell must remain separate from the Runtime
+- public documentation must describe SevynOS concepts rather than requiring Linux knowledge
+- Linux-specific dependencies must not become part of the public SDK without deliberate review
 
 ## Alternatives Considered
 
@@ -201,15 +201,15 @@ A custom kernel would provide complete architectural control.
 
 It was rejected for the initial project because it would require major work in:
 
-* scheduling
-* memory management
-* device drivers
-* networking
-* filesystems
-* security
-* power management
-* hardware initialization
-* debugging infrastructure
+- scheduling
+- memory management
+- device drivers
+- networking
+- filesystems
+- security
+- power management
+- hardware initialization
+- debugging infrastructure
 
 This work would delay the React Native platform, shell, runtime, SDK, and developer experience.
 
@@ -251,10 +251,10 @@ The Linux kernel is licensed under the GNU General Public License version 2.
 
 Project Sevyn must comply with all applicable licensing obligations when distributing:
 
-* kernel binaries
-* modified kernel source code
-* kernel modules
-* derivative kernel components
+- kernel binaries
+- modified kernel source code
+- kernel modules
+- derivative kernel components
 
 The Linux kernel license does not require every SevynOS component to use the same license.
 
@@ -279,11 +279,11 @@ During the Genesis prototype, SevynOS should:
 
 The initial development target should be:
 
-* desktop-class hardware
-* x86-64 or ARM64
-* a Linux development environment
-* a Wayland-capable graphics stack
-* one known and documented machine configuration
+- desktop-class hardware
+- x86-64 or ARM64
+- a Linux development environment
+- a Wayland-capable graphics stack
+- one known and documented machine configuration
 
 The exact distribution and hardware target will be decided in a separate ADR.
 
@@ -302,12 +302,12 @@ This decision will be validated when:
 
 This decision should be reconsidered if:
 
-* Linux prevents a critical SevynOS platform requirement
-* licensing obligations become incompatible with the project
-* required hardware cannot be supported
-* the platform requires security properties Linux cannot reasonably provide
-* another kernel provides a clearly superior path
-* Project Sevyn eventually has the resources and technical reason to build a new kernel
+- Linux prevents a critical SevynOS platform requirement
+- licensing obligations become incompatible with the project
+- required hardware cannot be supported
+- the platform requires security properties Linux cannot reasonably provide
+- another kernel provides a clearly superior path
+- Project Sevyn eventually has the resources and technical reason to build a new kernel
 
 Reconsidering this decision does not imply that a custom kernel is necessary. Any replacement must demonstrate meaningful benefits that justify the migration cost.
 

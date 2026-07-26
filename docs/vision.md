@@ -1,6 +1,6 @@
 # Project Sevyn Vision
 
-> *Build an operating system that belongs to its users.*
+> _Build an operating system that belongs to its users._
 
 ---
 
@@ -12,11 +12,11 @@ Modern operating systems are often designed around the priorities of platforms, 
 
 Users are expected to:
 
-* surrender ownership of their devices
-* accept opaque software
-* rely on closed services
-* adapt to platform restrictions
-* trust systems they cannot inspect
+- surrender ownership of their devices
+- accept opaque software
+- rely on closed services
+- adapt to platform restrictions
+- trust systems they cannot inspect
 
 Project Sevyn exists because we believe there is another path.
 
@@ -82,11 +82,11 @@ Whenever two designs solve the same problem, prefer the simpler one.
 
 Simple code is:
 
-* easier to understand
-* easier to secure
-* easier to optimize
-* easier to maintain
-* easier to teach
+- easier to understand
+- easier to secure
+- easier to optimize
+- easier to maintain
+- easier to teach
 
 Complexity must always justify its existence.
 
@@ -220,12 +220,12 @@ Every major subsystem should be replaceable without redesigning the platform.
 
 This includes:
 
-* framework hosts
-* graphics backends
-* networking
-* storage
-* package systems
-* rendering engines
+- framework hosts
+- graphics backends
+- networking
+- storage
+- package systems
+- rendering engines
 
 Good boundaries create long-lived software.
 
@@ -235,10 +235,10 @@ Good boundaries create long-lived software.
 
 Project Sevyn is **not** trying to become:
 
-* another Windows clone
-* another macOS clone
-* another Android clone
-* another Linux desktop clone
+- another Windows clone
+- another macOS clone
+- another Android clone
+- another Linux desktop clone
 
 Compatibility may be valuable.
 
@@ -276,14 +276,14 @@ If one option consistently answers "yes," choose it.
 
 Project Sevyn values:
 
-* curiosity
-* craftsmanship
-* humility
-* clear communication
-* constructive disagreement
-* measurable improvements
-* thoughtful documentation
-* long-term thinking
+- curiosity
+- craftsmanship
+- humility
+- clear communication
+- constructive disagreement
+- measurable improvements
+- thoughtful documentation
+- long-term thinking
 
 Ideas should compete on merit.
 

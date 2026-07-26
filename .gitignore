@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+generated/
+artifacts/
+coverage/
+
+# Tool caches
+.turbo/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Runtime files
+*.sock
+*.pid
+*.log
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Native build systems
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+compile_commands.json
