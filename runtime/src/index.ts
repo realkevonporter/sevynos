@@ -31,6 +31,8 @@ export type {
   ApplicationHostStartResult,
 } from "./application/application-host.js";
 
+export { ApplicationHostRegistry } from "./application/application-host-registry.js";
+
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
 
