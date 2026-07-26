@@ -19,6 +19,11 @@ import { assertRuntimeTransition } from "./runtime-state.js";
 import type { RuntimeState } from "./runtime-state.js";
 import { InvalidRuntimeStateError } from "./errors/invalid-runtime-state-error.js";
 
+import {
+  RuntimeShutdownError,
+  type RuntimeShutdownFailure,
+} from "./errors/runtime-shutdown-error.js";
+
 export interface RuntimeOptions {
   readonly logger: RuntimeLogger;
   readonly createSessionId?: () => ApplicationSessionId;
@@ -226,6 +231,7 @@ export class SevynRuntime {
   async #dispose(): Promise<void> {
     this.#logger.log("info", "runtime.disposing");
 
+    const failures: RuntimeShutdownFailure[] = [];
     const sessions = this.#sessions.list();
 
     for (const session of sessions) {
@@ -233,7 +239,24 @@ export class SevynRuntime {
         continue;
       }
 
-      await this.stopApplication(session.id);
+      try {
+        await this.stopApplication(session.id);
+      } catch (error: unknown) {
+        failures.push({
+          sessionId: session.id,
+          error,
+        });
+
+        this.#logger.log("error", "application.stop.failed.during-runtime-shutdown", {
+          sessionId: session.id,
+          applicationId: session.application.id,
+          error: this.#serializeError(error),
+        });
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new RuntimeShutdownError(failures);
     }
   }
 

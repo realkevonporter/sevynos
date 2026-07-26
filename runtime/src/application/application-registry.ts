@@ -1,10 +1,12 @@
 import { DuplicateApplicationError } from "../errors/duplicate-application-error.js";
 import type { ApplicationDescriptor, ApplicationId } from "./application-descriptor.js";
+import { validateApplicationManifest } from "./application-manifest-validator.js";
 
 export class ApplicationRegistry {
   readonly #applications = new Map<ApplicationId, ApplicationDescriptor>();
 
   public register(application: ApplicationDescriptor): void {
+    validateApplicationManifest(application);
     if (this.#applications.has(application.id)) {
       throw new DuplicateApplicationError(application.id);
     }

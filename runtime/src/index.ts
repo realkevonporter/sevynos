@@ -1,7 +1,4 @@
-export type {
-  ApplicationDescriptor,
-  ApplicationId,
-} from "./application/application-descriptor.js";
+export type { ApplicationDescriptor } from "./application/application-descriptor.js";
 
 export { ApplicationRegistry } from "./application/application-registry.js";
 
@@ -39,6 +36,19 @@ export type {
   ApplicationManagerDependencies,
   StartApplicationResult,
 } from "./application/application-manager.js";
+
+export {
+  APPLICATION_MANIFEST_VERSION,
+  type ApplicationId,
+  type ApplicationManifest,
+} from "./application/application-manifest.js";
+
+export { validateApplicationManifest } from "./application/application-manifest-validator.js";
+
+export {
+  InvalidApplicationManifestError,
+  type ApplicationManifestField,
+} from "./errors/invalid-application-manifest-error.js";
 
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";

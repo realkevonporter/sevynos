@@ -5,6 +5,7 @@ import type { ApplicationDescriptor } from "./application-descriptor.js";
 describe("ApplicationDescriptor", () => {
   it("describes an application without framework-specific Runtime fields", () => {
     const application: ApplicationDescriptor = {
+      manifestVersion: 1,
       id: "dev.sevyn.hello",
       name: "Hello SevynOS",
       version: "0.1.0",
@@ -13,6 +14,7 @@ describe("ApplicationDescriptor", () => {
     };
 
     expect(application).toEqual({
+      manifestVersion: 1,
       id: "dev.sevyn.hello",
       name: "Hello SevynOS",
       version: "0.1.0",

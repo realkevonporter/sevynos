@@ -5,6 +5,7 @@ import { ApplicationSession } from "./application-session.js";
 import { SessionRegistry } from "./session-registry.js";
 
 const helloApplication: ApplicationDescriptor = {
+  manifestVersion: 1,
   id: "dev.sevyn.hello",
   name: "Hello SevynOS",
   version: "0.1.0",

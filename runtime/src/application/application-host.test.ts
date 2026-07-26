@@ -5,6 +5,7 @@ import type { ApplicationHost, ApplicationHostStartResult } from "./application-
 import { ApplicationSession } from "./application-session.js";
 
 const helloApplication: ApplicationDescriptor = {
+  manifestVersion: 1,
   id: "dev.sevyn.hello",
   name: "Hello SevynOS",
   version: "0.1.0",
