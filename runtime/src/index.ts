@@ -1,5 +1,3 @@
-export type { ApplicationDescriptor } from "./application/application-descriptor.js";
-
 export { ApplicationRegistry } from "./application/application-registry.js";
 
 export { DuplicateApplicationError } from "./errors/duplicate-application-error.js";

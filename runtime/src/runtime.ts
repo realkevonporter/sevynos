@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { ApplicationDescriptor } from "./application/application-descriptor.js";
+import type { ApplicationManifest } from "./application/application-manifest.js";
 import type { ApplicationHost } from "./application/application-host.js";
 import { ApplicationHostRegistry } from "./application/application-host-registry.js";
 import {
@@ -62,18 +62,11 @@ export class SevynRuntime {
     return this.#state;
   }
 
-  public registerApplication(application: ApplicationDescriptor): void {
-    this.#applications.register(application);
-
-    this.#logger.log("info", "application.registered", {
-      applicationId: application.id,
-      applicationName: application.name,
-      applicationVersion: application.version,
-      hostId: application.hostId,
-    });
+  public registerApplication(manifest: ApplicationManifest): void {
+    this.#applications.register(manifest);
   }
 
-  public unregisterApplication(applicationId: ApplicationDescriptor["id"]): boolean {
+  public unregisterApplication(applicationId: ApplicationManifest["id"]): boolean {
     const removed = this.#applications.unregister(applicationId);
 
     if (removed) {
@@ -106,7 +99,7 @@ export class SevynRuntime {
   }
 
   public async startApplication(
-    applicationId: ApplicationDescriptor["id"],
+    applicationId: ApplicationManifest["id"],
   ): Promise<StartApplicationResult> {
     this.#assertStateForOperation("start application", ["running"]);
 

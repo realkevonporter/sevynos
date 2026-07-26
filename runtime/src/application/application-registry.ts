@@ -1,28 +1,36 @@
 import { DuplicateApplicationError } from "../errors/duplicate-application-error.js";
-import type { ApplicationDescriptor, ApplicationId } from "./application-descriptor.js";
+import type { ApplicationId, ApplicationManifest } from "./application-manifest.js";
 import { validateApplicationManifest } from "./application-manifest-validator.js";
+import { ApplicationNotFoundError } from "../errors/application-not-found-error.js";
 
 export class ApplicationRegistry {
-  readonly #applications = new Map<ApplicationId, ApplicationDescriptor>();
+  readonly #applications = new Map<ApplicationId, ApplicationManifest>();
 
-  public register(application: ApplicationDescriptor): void {
-    validateApplicationManifest(application);
-    if (this.#applications.has(application.id)) {
-      throw new DuplicateApplicationError(application.id);
+  public register(manifest: ApplicationManifest): void {
+    validateApplicationManifest(manifest);
+
+    if (this.#applications.has(manifest.id)) {
+      throw new DuplicateApplicationError(manifest.id);
     }
 
-    this.#applications.set(application.id, application);
+    this.#applications.set(manifest.id, manifest);
   }
 
   public unregister(id: ApplicationId): boolean {
     return this.#applications.delete(id);
   }
 
-  public get(id: ApplicationId): ApplicationDescriptor | undefined {
-    return this.#applications.get(id);
+  public get(applicationId: ApplicationId): ApplicationManifest {
+    const manifest = this.#applications.get(applicationId);
+
+    if (!manifest) {
+      throw new ApplicationNotFoundError(applicationId);
+    }
+
+    return manifest;
   }
 
-  public list(): readonly ApplicationDescriptor[] {
+  public list(): readonly ApplicationManifest[] {
     return [...this.#applications.values()];
   }
 

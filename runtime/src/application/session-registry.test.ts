@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { ApplicationDescriptor } from "./application-descriptor.js";
+import type { ApplicationManifest } from "./application-manifest.js";
 import { ApplicationSession } from "./application-session.js";
 import { SessionRegistry } from "./session-registry.js";
 
-const helloApplication: ApplicationDescriptor = {
+const helloApplication: ApplicationManifest = {
   manifestVersion: 1,
   id: "dev.sevyn.hello",
   name: "Hello SevynOS",

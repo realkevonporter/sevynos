@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { ApplicationDescriptor } from "./application-descriptor.js";
+import type { ApplicationManifest } from "./application-manifest.js";
 import {
   assertApplicationSessionTransition,
   type ApplicationSessionState,
@@ -10,14 +10,14 @@ export type ApplicationSessionId = string;
 
 export interface CreateApplicationSessionOptions {
   readonly id?: ApplicationSessionId;
-  readonly application: ApplicationDescriptor;
+  readonly application: ApplicationManifest;
   readonly state?: ApplicationSessionState;
   readonly createdAt?: Date;
 }
 
 export class ApplicationSession {
   public readonly id: ApplicationSessionId;
-  public readonly application: ApplicationDescriptor;
+  public readonly application: ApplicationManifest;
   public readonly state: ApplicationSessionState;
   public readonly createdAt: Date;
 

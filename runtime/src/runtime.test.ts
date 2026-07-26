@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import type { ApplicationDescriptor } from "./application/application-descriptor.js";
 import type {
   ApplicationHost,
   ApplicationHostStartResult,
@@ -13,6 +12,7 @@ import { InvalidRuntimeStateError } from "./errors/invalid-runtime-state-error.j
 import { RuntimeShutdownError } from "./errors/runtime-shutdown-error.js";
 import type { RuntimeLogger } from "./logger.js";
 import { SevynRuntime } from "./runtime.js";
+import type { ApplicationManifest } from "./application/application-manifest.js";
 
 const logger: RuntimeLogger = {
   log(level, event, context): void {
@@ -22,7 +22,7 @@ const logger: RuntimeLogger = {
   },
 };
 
-const application: ApplicationDescriptor = {
+const application: ApplicationManifest = {
   manifestVersion: 1,
   id: "dev.sevyn.hello",
   name: "Hello SevynOS",
@@ -31,7 +31,7 @@ const application: ApplicationDescriptor = {
   entrypoint: "index.js",
 };
 
-const secondApplication: ApplicationDescriptor = {
+const secondApplication: ApplicationManifest = {
   manifestVersion: 1,
   id: "dev.sevyn.second",
   name: "Second SevynOS Application",

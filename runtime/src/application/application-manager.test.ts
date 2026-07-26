@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
-
-import type { ApplicationDescriptor } from "./application-descriptor.js";
 import type { ApplicationHost, ApplicationHostStartResult } from "./application-host.js";
 import { ApplicationHostRegistry } from "./application-host-registry.js";
 import { ApplicationManager } from "./application-manager.js";
 import { ApplicationRegistry } from "./application-registry.js";
 import { ApplicationSession, type ApplicationSessionId } from "./application-session.js";
 import { SessionRegistry } from "./session-registry.js";
+import type { ApplicationManifest } from "./application-manifest.js";
 
-const helloApplication: ApplicationDescriptor = {
+const helloApplication: ApplicationManifest = {
   manifestVersion: 1,
   id: "dev.sevyn.hello",
   name: "Hello SevynOS",

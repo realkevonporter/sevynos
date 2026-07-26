@@ -1,9 +1,8 @@
 import { ApplicationHostNotFoundError } from "../errors/application-host-not-found-error.js";
-import { ApplicationNotFoundError } from "../errors/application-not-found-error.js";
 import { ApplicationSessionNotFoundError } from "../errors/application-session-not-found-error.js";
 import { InvalidApplicationSessionStateError } from "../errors/invalid-application-session-state-error.js";
 
-import type { ApplicationId } from "./application-descriptor.js";
+import type { ApplicationId } from "./application-manifest.js";
 import type { ApplicationHostStartResult } from "./application-host.js";
 import type { ApplicationHostRegistry } from "./application-host-registry.js";
 import type { ApplicationRegistry } from "./application-registry.js";
@@ -40,10 +39,6 @@ export class ApplicationManager {
 
   public async start(applicationId: ApplicationId): Promise<StartApplicationResult> {
     const application = this.#applications.get(applicationId);
-
-    if (!application) {
-      throw new ApplicationNotFoundError(applicationId);
-    }
 
     const host = this.#hosts.get(application.hostId);
 
