@@ -1,3 +1,4 @@
+import { DuplicateApplicationError } from "../errors/duplicate-application-error.js";
 import type { ApplicationDescriptor, ApplicationId } from "./application-descriptor.js";
 
 export class ApplicationRegistry {
@@ -5,7 +6,7 @@ export class ApplicationRegistry {
 
   public register(application: ApplicationDescriptor): void {
     if (this.#applications.has(application.id)) {
-      throw new Error(`Application "${application.id}" is already registered.`);
+      throw new DuplicateApplicationError(application.id);
     }
 
     this.#applications.set(application.id, application);

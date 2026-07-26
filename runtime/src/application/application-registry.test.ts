@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ApplicationDescriptor } from "./application-descriptor.js";
 import { ApplicationRegistry } from "./application-registry.js";
+import { DuplicateApplicationError } from "../errors/duplicate-application-error.js";
 
 const hello: ApplicationDescriptor = {
   id: "dev.sevyn.hello",
@@ -52,5 +53,13 @@ describe("ApplicationRegistry", () => {
     registry.register(hello);
 
     expect(() => registry.register(hello)).toThrow();
+  });
+
+  it("prevents duplicate registrations", () => {
+    const registry = new ApplicationRegistry();
+
+    registry.register(hello);
+
+    expect(() => registry.register(hello)).toThrow(DuplicateApplicationError);
   });
 });
