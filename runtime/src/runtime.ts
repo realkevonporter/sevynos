@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import type { ApplicationManifest } from "./application/application-manifest.js";
+import { isApplicationPackage } from "./application/application-package.js";
+
+import { InvalidApplicationPackageError } from "./errors/invalid-application-package-error.js";
 import type { ApplicationHost } from "./application/application-host.js";
 import { ApplicationHostRegistry } from "./application/application-host-registry.js";
 import {
@@ -62,8 +65,14 @@ export class SevynRuntime {
     return this.#state;
   }
 
-  public registerApplication(manifest: ApplicationManifest): void {
-    this.#applications.register(manifest);
+  public registerApplication(input: unknown): void {
+    if (!isApplicationPackage(input)) {
+      throw new InvalidApplicationPackageError(
+        "expected an object containing a manifest.",
+      );
+    }
+
+    this.#applications.register(input.manifest);
   }
 
   public unregisterApplication(applicationId: ApplicationManifest["id"]): boolean {

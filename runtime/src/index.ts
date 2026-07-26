@@ -35,11 +35,9 @@ export type {
   StartApplicationResult,
 } from "./application/application-manager.js";
 
-export {
-  APPLICATION_MANIFEST_VERSION,
-  type ApplicationId,
-  type ApplicationManifest,
-} from "./application/application-manifest.js";
+export { APPLICATION_MANIFEST_VERSION } from "./application/application-manifest.js";
+
+export type { ApplicationPackage } from "./application/application-package.js";
 
 export { validateApplicationManifest } from "./application/application-manifest-validator.js";
 
@@ -47,8 +45,6 @@ export {
   InvalidApplicationManifestError,
   type ApplicationManifestField,
 } from "./errors/invalid-application-manifest-error.js";
-
-export type { ApplicationPackage } from "./application/application-package.js";
 
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";

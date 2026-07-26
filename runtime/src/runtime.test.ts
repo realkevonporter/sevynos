@@ -13,6 +13,8 @@ import { RuntimeShutdownError } from "./errors/runtime-shutdown-error.js";
 import type { RuntimeLogger } from "./logger.js";
 import { SevynRuntime } from "./runtime.js";
 import type { ApplicationManifest } from "./application/application-manifest.js";
+import { InvalidApplicationPackageError } from "./errors/invalid-application-package-error.js";
+import { InvalidApplicationManifestError } from "./errors/invalid-application-manifest-error.js";
 
 const logger: RuntimeLogger = {
   log(level, event, context): void {
@@ -93,7 +95,7 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
+    runtime.registerApplication({ manifest: application });
     runtime.registerApplicationHost(host);
 
     await expect(runtime.startApplication(application.id)).rejects.toBeInstanceOf(
@@ -108,7 +110,7 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
+    runtime.registerApplication({ manifest: application });
     runtime.registerApplicationHost(host);
 
     await runtime.start();
@@ -127,7 +129,7 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
+    runtime.registerApplication({ manifest: application });
     runtime.registerApplicationHost(host);
 
     await runtime.start();
@@ -145,7 +147,7 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
+    runtime.registerApplication({ manifest: application });
     runtime.registerApplicationHost(host);
 
     await runtime.start();
@@ -159,7 +161,7 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
+    runtime.registerApplication({ manifest: application });
     runtime.registerApplicationHost(host);
 
     await runtime.start();
@@ -177,7 +179,7 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
+    runtime.registerApplication({ manifest: application });
     runtime.registerApplicationHost(host);
 
     await runtime.start();
@@ -201,8 +203,8 @@ describe("SevynRuntime application composition", () => {
 
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
-    runtime.registerApplication(secondApplication);
+    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication({ manifest: secondApplication });
 
     runtime.registerApplicationHost(failingHost);
     runtime.registerApplicationHost(successfulHost);
@@ -237,7 +239,7 @@ describe("SevynRuntime application composition", () => {
 
     const runtime = createRuntime();
 
-    runtime.registerApplication(application);
+    runtime.registerApplication({ manifest: application });
     runtime.registerApplicationHost(failingHost);
 
     await runtime.start();
@@ -261,5 +263,55 @@ describe("SevynRuntime application composition", () => {
 
       expect(error.failures[0]?.sessionId).toBe(started.session.id);
     }
+  });
+
+  it("rejects an invalid application package", () => {
+    const runtime = createRuntime();
+
+    expect(() => {
+      runtime.registerApplication(null);
+    }).toThrow(InvalidApplicationPackageError);
+  });
+
+  it("rejects an application package without a manifest", () => {
+    const runtime = createRuntime();
+
+    expect(() => {
+      runtime.registerApplication({});
+    }).toThrow(InvalidApplicationPackageError);
+  });
+
+  it("rejects a package with an invalid manifest", () => {
+    const runtime = createRuntime();
+
+    expect(() => {
+      runtime.registerApplication({
+        manifest: {
+          manifestVersion: 1,
+          id: "Invalid Application",
+          name: "Invalid",
+          version: "1.0.0",
+          hostId: "sevyn.host.test",
+          entrypoint: "index.js",
+        },
+      });
+    }).toThrow(InvalidApplicationManifestError);
+  });
+
+  it("delegates manifest validation to the application registry", () => {
+    const runtime = createRuntime();
+
+    expect(() => {
+      runtime.registerApplication({
+        manifest: {
+          manifestVersion: 1,
+          id: "Invalid Application",
+          name: "Invalid",
+          version: "1.0.0",
+          hostId: "sevyn.host.test",
+          entrypoint: "index.js",
+        },
+      });
+    }).toThrow(InvalidApplicationManifestError);
   });
 });
