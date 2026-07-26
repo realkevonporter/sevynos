@@ -48,6 +48,8 @@ export {
   type ApplicationManifestField,
 } from "./errors/invalid-application-manifest-error.js";
 
+export type { ApplicationPackage } from "./application/application-package.js";
+
 export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
 
