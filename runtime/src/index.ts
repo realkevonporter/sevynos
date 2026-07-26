@@ -44,7 +44,7 @@ export { SevynRuntime } from "./runtime.js";
 export type { RuntimeState } from "./runtime-state.js";
 
 export {
-  JsonRuntimeLogger,
+  SevynRuntimeLogger,
   type LogContext,
   type LogLevel,
   type RuntimeLogger,

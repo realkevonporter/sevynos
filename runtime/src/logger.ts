@@ -6,7 +6,7 @@ export interface RuntimeLogger {
   log(level: LogLevel, event: string, context?: LogContext): void;
 }
 
-export class JsonRuntimeLogger implements RuntimeLogger {
+export class SevynRuntimeLogger implements RuntimeLogger {
   public log(level: LogLevel, event: string, context: LogContext = {}): void {
     const entry = {
       timestamp: new Date().toISOString(),
@@ -29,5 +29,21 @@ export class JsonRuntimeLogger implements RuntimeLogger {
     }
 
     console.log(serialized);
+  }
+
+  public debug(event: string, context?: LogContext): void {
+    this.log("debug", event, context);
+  }
+
+  public info(event: string, context?: LogContext): void {
+    this.log("info", event, context);
+  }
+
+  public warn(event: string, context?: LogContext): void {
+    this.log("warn", event, context);
+  }
+
+  public error(event: string, context?: LogContext): void {
+    this.log("error", event, context);
   }
 }

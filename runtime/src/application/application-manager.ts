@@ -1,9 +1,13 @@
+import { ApplicationHostNotFoundError } from "../errors/application-host-not-found-error.js";
+import { ApplicationNotFoundError } from "../errors/application-not-found-error.js";
+import { ApplicationSessionNotFoundError } from "../errors/application-session-not-found-error.js";
+import { InvalidApplicationSessionStateError } from "../errors/invalid-application-session-state-error.js";
+
 import type { ApplicationId } from "./application-descriptor.js";
 import type { ApplicationHostStartResult } from "./application-host.js";
 import type { ApplicationHostRegistry } from "./application-host-registry.js";
-import type { ApplicationSession, ApplicationSessionId } from "./application-session.js";
-import { ApplicationSession as Session } from "./application-session.js";
 import type { ApplicationRegistry } from "./application-registry.js";
+import { ApplicationSession, type ApplicationSessionId } from "./application-session.js";
 import type { SessionRegistry } from "./session-registry.js";
 
 export interface ApplicationManagerDependencies {
@@ -38,16 +42,16 @@ export class ApplicationManager {
     const application = this.#applications.get(applicationId);
 
     if (!application) {
-      throw new Error(`Application "${applicationId}" is not registered.`);
+      throw new ApplicationNotFoundError(applicationId);
     }
 
     const host = this.#hosts.get(application.hostId);
 
     if (!host) {
-      throw new Error(`Application host "${application.hostId}" is not registered.`);
+      throw new ApplicationHostNotFoundError(application.hostId);
     }
 
-    const createdSession = new Session({
+    const createdSession = new ApplicationSession({
       id: this.#createSessionId(),
       application,
       createdAt: this.#now(),
@@ -83,21 +87,17 @@ export class ApplicationManager {
     const session = this.#sessions.get(sessionId);
 
     if (!session) {
-      throw new Error(`Application session "${sessionId}" is not registered.`);
+      throw new ApplicationSessionNotFoundError(sessionId);
     }
 
     if (session.state !== "running") {
-      throw new Error(
-        `Application session "${sessionId}" cannot be stopped from state "${session.state}".`,
-      );
+      throw new InvalidApplicationSessionStateError(sessionId, session.state);
     }
 
     const host = this.#hosts.get(session.application.hostId);
 
     if (!host) {
-      throw new Error(
-        `Application host "${session.application.hostId}" is not registered.`,
-      );
+      throw new ApplicationHostNotFoundError(session.application.hostId);
     }
 
     const stoppingSession = session.transitionTo("stopping");
