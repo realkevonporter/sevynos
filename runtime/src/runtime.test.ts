@@ -4,17 +4,20 @@ import type {
   ApplicationHost,
   ApplicationHostStartResult,
 } from "./application/application-host.js";
+import type { ApplicationPackage } from "./application/application-package.js";
 import type {
   ApplicationSession,
   ApplicationSessionId,
 } from "./application/application-session.js";
+import { InvalidApplicationManifestError } from "./errors/invalid-application-manifest-error.js";
+import { InvalidApplicationPackageError } from "./errors/invalid-application-package-error.js";
 import { InvalidRuntimeStateError } from "./errors/invalid-runtime-state-error.js";
 import { RuntimeShutdownError } from "./errors/runtime-shutdown-error.js";
 import type { RuntimeLogger } from "./logger.js";
 import { SevynRuntime } from "./runtime.js";
-import type { ApplicationManifest } from "./application/application-manifest.js";
-import { InvalidApplicationPackageError } from "./errors/invalid-application-package-error.js";
-import { InvalidApplicationManifestError } from "./errors/invalid-application-manifest-error.js";
+
+const JAVASCRIPT_HOST_ID = "sevyn.host.javascript";
+const REACT_NATIVE_HOST_ID = "sevyn.host.react-native";
 
 const logger: RuntimeLogger = {
   log(level, event, context): void {
@@ -24,22 +27,46 @@ const logger: RuntimeLogger = {
   },
 };
 
-const application: ApplicationManifest = {
-  manifestVersion: 1,
-  id: "dev.sevyn.hello",
-  name: "Hello SevynOS",
-  version: "0.1.0",
-  hostId: "sevyn.host.test",
-  entrypoint: "index.js",
+const application: ApplicationPackage = {
+  manifest: {
+    manifestVersion: 1,
+    id: "dev.sevyn.hello",
+    name: "Hello SevynOS",
+    version: "0.1.0",
+    hostId: JAVASCRIPT_HOST_ID,
+    entrypoint: "index.js",
+  },
+
+  files: {
+    "index.js": `
+      export async function start() {
+        return {};
+      }
+
+      export async function stop() {}
+    `,
+  },
 };
 
-const secondApplication: ApplicationManifest = {
-  manifestVersion: 1,
-  id: "dev.sevyn.second",
-  name: "Second SevynOS Application",
-  version: "0.1.0",
-  hostId: "sevyn.host.second",
-  entrypoint: "index.js",
+const secondApplication: ApplicationPackage = {
+  manifest: {
+    manifestVersion: 1,
+    id: "dev.sevyn.second",
+    name: "Second SevynOS Application",
+    version: "0.1.0",
+    hostId: REACT_NATIVE_HOST_ID,
+    entrypoint: "index.js",
+  },
+
+  files: {
+    "index.js": `
+      export async function start() {
+        return {};
+      }
+
+      export async function stop() {}
+    `,
+  },
 };
 
 class TestApplicationHost implements ApplicationHost {
@@ -49,7 +76,7 @@ class TestApplicationHost implements ApplicationHost {
   readonly #failStop: boolean;
 
   public constructor(
-    public readonly id = "sevyn.host.test",
+    public readonly id = JAVASCRIPT_HOST_ID,
     failStop = false,
   ) {
     this.#failStop = failStop;
@@ -81,11 +108,13 @@ function createRuntime(): SevynRuntime {
 
   return new SevynRuntime({
     logger,
+
     createSessionId: (): ApplicationSessionId => {
       sessionNumber += 1;
 
       return `session-${String(sessionNumber)}`;
     },
+
     now: (): Date => new Date("2026-07-26T12:00:00.000Z"),
   });
 }
@@ -95,12 +124,12 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication(application);
     runtime.registerApplicationHost(host);
 
-    await expect(runtime.startApplication(application.id)).rejects.toBeInstanceOf(
-      InvalidRuntimeStateError,
-    );
+    await expect(
+      runtime.startApplication(application.manifest.id),
+    ).rejects.toBeInstanceOf(InvalidRuntimeStateError);
 
     expect(host.startedSessions).toEqual([]);
     expect(runtime.listApplicationSessions()).toEqual([]);
@@ -110,12 +139,12 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication(application);
     runtime.registerApplicationHost(host);
 
     await runtime.start();
 
-    const result = await runtime.startApplication(application.id);
+    const result = await runtime.startApplication(application.manifest.id);
 
     expect(runtime.state).toBe("running");
     expect(result.session.state).toBe("running");
@@ -129,12 +158,12 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication(application);
     runtime.registerApplicationHost(host);
 
     await runtime.start();
 
-    const started = await runtime.startApplication(application.id);
+    const started = await runtime.startApplication(application.manifest.id);
 
     const stopped = await runtime.stopApplication(started.session.id);
 
@@ -147,12 +176,12 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication(application);
     runtime.registerApplicationHost(host);
 
     await runtime.start();
 
-    const started = await runtime.startApplication(application.id);
+    const started = await runtime.startApplication(application.manifest.id);
 
     expect(runtime.listApplicationSessions()).toEqual([started.session]);
   });
@@ -161,12 +190,12 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication(application);
     runtime.registerApplicationHost(host);
 
     await runtime.start();
 
-    const started = await runtime.startApplication(application.id);
+    const started = await runtime.startApplication(application.manifest.id);
 
     await runtime.stop("test shutdown");
 
@@ -179,12 +208,12 @@ describe("SevynRuntime application composition", () => {
     const host = new TestApplicationHost();
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication(application);
     runtime.registerApplicationHost(host);
 
     await runtime.start();
 
-    const started = await runtime.startApplication(application.id);
+    const started = await runtime.startApplication(application.manifest.id);
 
     await runtime.stopApplication(started.session.id);
 
@@ -197,34 +226,32 @@ describe("SevynRuntime application composition", () => {
   });
 
   it("attempts to stop every running session when one stop fails", async () => {
-    const failingHost = new TestApplicationHost("sevyn.host.test", true);
+    const failingHost = new TestApplicationHost(JAVASCRIPT_HOST_ID, true);
 
-    const successfulHost = new TestApplicationHost("sevyn.host.second");
+    const successfulHost = new TestApplicationHost(REACT_NATIVE_HOST_ID);
 
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
-    runtime.registerApplication({ manifest: secondApplication });
+    runtime.registerApplication(application);
+    runtime.registerApplication(secondApplication);
 
     runtime.registerApplicationHost(failingHost);
     runtime.registerApplicationHost(successfulHost);
 
     await runtime.start();
 
-    const first = await runtime.startApplication(application.id);
+    const first = await runtime.startApplication(application.manifest.id);
 
-    const second = await runtime.startApplication(secondApplication.id);
+    const second = await runtime.startApplication(secondApplication.manifest.id);
 
     await expect(runtime.stop("test shutdown")).rejects.toBeInstanceOf(
       RuntimeShutdownError,
     );
 
     expect(failingHost.stoppedSessions).toHaveLength(1);
-
     expect(successfulHost.stoppedSessions).toHaveLength(1);
 
     expect(failingHost.stoppedSessions[0]?.id).toBe(first.session.id);
-
     expect(successfulHost.stoppedSessions[0]?.id).toBe(second.session.id);
 
     expect(runtime.getApplicationSession(first.session.id)?.state).toBe("failed");
@@ -235,16 +262,16 @@ describe("SevynRuntime application composition", () => {
   });
 
   it("reports session failures after shutdown attempts complete", async () => {
-    const failingHost = new TestApplicationHost("sevyn.host.test", true);
+    const failingHost = new TestApplicationHost(JAVASCRIPT_HOST_ID, true);
 
     const runtime = createRuntime();
 
-    runtime.registerApplication({ manifest: application });
+    runtime.registerApplication(application);
     runtime.registerApplicationHost(failingHost);
 
     await runtime.start();
 
-    const started = await runtime.startApplication(application.id);
+    const started = await runtime.startApplication(application.manifest.id);
 
     try {
       await runtime.stop("test shutdown");
@@ -258,9 +285,7 @@ describe("SevynRuntime application composition", () => {
       }
 
       expect(error.code).toBe("RUNTIME_SHUTDOWN_FAILED");
-
       expect(error.failures).toHaveLength(1);
-
       expect(error.failures[0]?.sessionId).toBe(started.session.id);
     }
   });
@@ -291,8 +316,12 @@ describe("SevynRuntime application composition", () => {
           id: "Invalid Application",
           name: "Invalid",
           version: "1.0.0",
-          hostId: "sevyn.host.test",
+          hostId: JAVASCRIPT_HOST_ID,
           entrypoint: "index.js",
+        },
+
+        files: {
+          "index.js": "export async function start() { return {}; }",
         },
       });
     }).toThrow(InvalidApplicationManifestError);
@@ -308,8 +337,12 @@ describe("SevynRuntime application composition", () => {
           id: "Invalid Application",
           name: "Invalid",
           version: "1.0.0",
-          hostId: "sevyn.host.test",
+          hostId: JAVASCRIPT_HOST_ID,
           entrypoint: "index.js",
+        },
+
+        files: {
+          "index.js": "export async function start() { return {}; }",
         },
       });
     }).toThrow(InvalidApplicationManifestError);

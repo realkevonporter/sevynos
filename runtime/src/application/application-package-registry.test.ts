@@ -6,14 +6,30 @@ import { InvalidApplicationManifestError } from "../errors/invalid-application-m
 import type { ApplicationPackage } from "./application-package.js";
 import { ApplicationPackageRegistry } from "./application-package-registry.js";
 
-const helloPackage: ApplicationPackage = {
+const helloApplicationPackage: ApplicationPackage = {
   manifest: {
     manifestVersion: 1,
     id: "dev.sevyn.hello",
-    name: "Hello",
-    version: "1.0.0",
-    hostId: "sevyn.host.react-native",
+    name: "Hello SevynOS",
+    version: "0.1.0",
+    hostId: "sevyn.host.javascript",
     entrypoint: "index.js",
+  },
+
+  files: {
+    "index.js": `
+      export async function start(context) {
+        context.log("Hello from SevynOS!");
+
+        return {
+          title: "Hello SevynOS"
+        };
+      }
+
+      export async function stop(context) {
+        context.log("Goodbye from SevynOS!");
+      }
+    `,
   },
 };
 
@@ -21,25 +37,27 @@ describe("ApplicationPackageRegistry", () => {
   it("registers an application package", () => {
     const registry = new ApplicationPackageRegistry();
 
-    registry.register(helloPackage);
+    registry.register(helloApplicationPackage);
 
-    expect(registry.get(helloPackage.manifest.id)).toStrictEqual(helloPackage);
+    expect(registry.get(helloApplicationPackage.manifest.id)).toStrictEqual(
+      helloApplicationPackage,
+    );
   });
 
   it("lists registered application packages", () => {
     const registry = new ApplicationPackageRegistry();
 
-    registry.register(helloPackage);
+    registry.register(helloApplicationPackage);
 
-    expect(registry.list()).toStrictEqual([helloPackage]);
+    expect(registry.list()).toStrictEqual([helloApplicationPackage]);
   });
 
   it("reports whether an application package exists", () => {
     const registry = new ApplicationPackageRegistry();
 
-    registry.register(helloPackage);
+    registry.register(helloApplicationPackage);
 
-    expect(registry.has(helloPackage.manifest.id)).toBe(true);
+    expect(registry.has(helloApplicationPackage.manifest.id)).toBe(true);
 
     expect(registry.has("missing")).toBe(false);
   });
@@ -47,32 +65,32 @@ describe("ApplicationPackageRegistry", () => {
   it("removes an application package", () => {
     const registry = new ApplicationPackageRegistry();
 
-    registry.register(helloPackage);
+    registry.register(helloApplicationPackage);
 
-    expect(registry.unregister(helloPackage.manifest.id)).toBe(true);
+    expect(registry.unregister(helloApplicationPackage.manifest.id)).toBe(true);
 
-    expect(registry.has(helloPackage.manifest.id)).toBe(false);
+    expect(registry.has(helloApplicationPackage.manifest.id)).toBe(false);
 
     expect(registry.list()).toStrictEqual([]);
 
     expect(() => {
-      registry.get(helloPackage.manifest.id);
+      registry.get(helloApplicationPackage.manifest.id);
     }).toThrow(ApplicationNotFoundError);
   });
 
   it("returns false when removing an unregistered application package", () => {
     const registry = new ApplicationPackageRegistry();
 
-    expect(registry.unregister(helloPackage.manifest.id)).toBe(false);
+    expect(registry.unregister(helloApplicationPackage.manifest.id)).toBe(false);
   });
 
   it("prevents duplicate application package registrations", () => {
     const registry = new ApplicationPackageRegistry();
 
-    registry.register(helloPackage);
+    registry.register(helloApplicationPackage);
 
     expect(() => {
-      registry.register(helloPackage);
+      registry.register(helloApplicationPackage);
     }).toThrow(DuplicateApplicationError);
   });
 
@@ -85,8 +103,23 @@ describe("ApplicationPackageRegistry", () => {
         id: "Invalid Application",
         name: "Invalid Application",
         version: "0.1.0",
-        hostId: "sevyn.host.test",
+        hostId: "sevyn.host.javascript",
         entrypoint: "index.js",
+      },
+      files: {
+        "index.js": `
+      export async function start(context) {
+        context.log("Hello from SevynOS!");
+
+        return {
+          title: "Hello SevynOS"
+        };
+      }
+
+      export async function stop(context) {
+        context.log("Goodbye from SevynOS!");
+      }
+    `,
       },
     } satisfies ApplicationPackage;
 
@@ -102,7 +135,10 @@ describe("ApplicationPackageRegistry", () => {
 
     const inputPackage: ApplicationPackage = {
       manifest: {
-        ...helloPackage.manifest,
+        ...helloApplicationPackage.manifest,
+      },
+      files: {
+        ...helloApplicationPackage.files,
       },
     };
 
@@ -118,11 +154,11 @@ describe("ApplicationPackageRegistry", () => {
   it("clears all registered application packages", () => {
     const registry = new ApplicationPackageRegistry();
 
-    registry.register(helloPackage);
+    registry.register(helloApplicationPackage);
     registry.clear();
 
     expect(registry.list()).toStrictEqual([]);
 
-    expect(registry.has(helloPackage.manifest.id)).toBe(false);
+    expect(registry.has(helloApplicationPackage.manifest.id)).toBe(false);
   });
 });

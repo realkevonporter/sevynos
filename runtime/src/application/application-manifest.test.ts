@@ -16,7 +16,7 @@ describe("ApplicationManifest", () => {
       name: "Hello SevynOS",
       version: "0.1.0",
 
-      hostId: "sevyn.host.test",
+      hostId: "sevyn.host.javascript",
       entrypoint: "index.js",
     };
 
@@ -27,7 +27,7 @@ describe("ApplicationManifest", () => {
       name: "Hello SevynOS",
       version: "0.1.0",
 
-      hostId: "sevyn.host.test",
+      hostId: "sevyn.host.javascript",
       entrypoint: "index.js",
     });
   });
@@ -40,7 +40,7 @@ describe("ApplicationManifest", () => {
       name: "Hello SevynOS",
       version: "4.7.2",
 
-      hostId: "sevyn.host.test",
+      hostId: "sevyn.host.javascript",
       entrypoint: "index.js",
     };
 

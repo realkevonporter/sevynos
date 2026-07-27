@@ -13,8 +13,8 @@
   },
   "scripts": {
     "build": "tsc --build",
-    "dev": "tsx watch src/main.ts",
-    "start": "node dist/main.js",
+    "demo": "tsx watch src/demo.ts",
+    "start": "node dist/demo.js",
     "lint": "eslint src --max-warnings=0",
     "typecheck": "tsc --project tsconfig.test.json --noEmit",
     "test": "vitest run",

@@ -8,21 +8,42 @@ import { ApplicationPackageRegistry } from "./application-package-registry.js";
 import { ApplicationSession, type ApplicationSessionId } from "./application-session.js";
 import { SessionRegistry } from "./session-registry.js";
 
+const JAVASCRIPT_HOST_ID = "sevyn.host.javascript";
+
+const UNKNOWN_HOST_ID = "sevyn.host.unknown";
+
 const helloApplicationPackage: ApplicationPackage = {
   manifest: {
     manifestVersion: 1,
     id: "dev.sevyn.hello",
-    name: "Hello",
-    version: "1.0.0",
-    hostId: "sevyn.host.test",
+    name: "Hello SevynOS",
+    version: "0.1.0",
+    hostId: JAVASCRIPT_HOST_ID,
     entrypoint: "index.js",
+  },
+
+  files: {
+    "index.js": `
+        export async function start(context) {
+          context.log("Hello from SevynOS!");
+
+          return {
+            title: "Hello SevynOS"
+          };
+        }
+
+        export async function stop(context) {
+          context.log("Goodbye from SevynOS!");
+        }
+      `,
   },
 };
 
 class TestApplicationHost implements ApplicationHost {
-  public readonly id = "sevyn.host.test";
+  public readonly id = JAVASCRIPT_HOST_ID;
 
   public startedSession?: ApplicationSession;
+
   public stoppedSession?: ApplicationSession;
 
   public async start(session: ApplicationSession): Promise<ApplicationHostStartResult> {
@@ -43,7 +64,7 @@ class TestApplicationHost implements ApplicationHost {
 }
 
 class FailingApplicationHost implements ApplicationHost {
-  public readonly id = "sevyn.host.test";
+  public readonly id = JAVASCRIPT_HOST_ID;
 
   public async start(session: ApplicationSession): Promise<ApplicationHostStartResult> {
     void session;
@@ -61,7 +82,7 @@ class FailingApplicationHost implements ApplicationHost {
 }
 
 class FailingStopApplicationHost implements ApplicationHost {
-  public readonly id = "sevyn.host.test";
+  public readonly id = JAVASCRIPT_HOST_ID;
 
   public async start(session: ApplicationSession): Promise<ApplicationHostStartResult> {
     await Promise.resolve();
@@ -81,11 +102,13 @@ class FailingStopApplicationHost implements ApplicationHost {
 }
 
 function createManager(host: ApplicationHost): {
-  manager: ApplicationManager;
-  sessions: SessionRegistry;
+  readonly manager: ApplicationManager;
+  readonly sessions: SessionRegistry;
 } {
   const applications = new ApplicationPackageRegistry();
+
   const hosts = new ApplicationHostRegistry();
+
   const sessions = new SessionRegistry();
 
   applications.register(helloApplicationPackage);
@@ -96,7 +119,9 @@ function createManager(host: ApplicationHost): {
     applications,
     hosts,
     sessions,
+
     createSessionId: (): ApplicationSessionId => "session-1",
+
     now: (): Date => new Date("2026-07-26T12:00:00.000Z"),
   });
 
@@ -145,21 +170,35 @@ describe("ApplicationManager", () => {
 
   it("rejects an application with an unknown host", async () => {
     const applications = new ApplicationPackageRegistry();
+
     const hosts = new ApplicationHostRegistry();
+
     const sessions = new SessionRegistry();
 
-    applications.register(helloApplicationPackage);
+    const unknownHostPackage: ApplicationPackage = {
+      ...helloApplicationPackage,
+
+      manifest: {
+        ...helloApplicationPackage.manifest,
+
+        hostId: UNKNOWN_HOST_ID,
+      },
+    };
+
+    applications.register(unknownHostPackage);
 
     const manager = new ApplicationManager({
       applications,
       hosts,
       sessions,
+
       createSessionId: (): ApplicationSessionId => "session-1",
+
       now: (): Date => new Date("2026-07-26T12:00:00.000Z"),
     });
 
-    await expect(manager.start(helloApplicationPackage.manifest.id)).rejects.toThrow(
-      'Application host "sevyn.host.test" is not registered.',
+    await expect(manager.start(unknownHostPackage.manifest.id)).rejects.toThrow(
+      `Application host "${UNKNOWN_HOST_ID}" is not registered.`,
     );
 
     expect(sessions.list()).toEqual([]);
@@ -214,7 +253,9 @@ describe("ApplicationManager", () => {
 
     const createdSession = new ApplicationSession({
       id: "session-1",
+
       application: helloApplicationPackage,
+
       createdAt: new Date("2026-07-26T12:00:00.000Z"),
     });
 

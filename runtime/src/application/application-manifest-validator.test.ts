@@ -12,7 +12,7 @@ function createManifest(
     id: "dev.sevyn.hello",
     name: "Hello SevynOS",
     version: "0.1.0",
-    hostId: "sevyn.host.test",
+    hostId: "sevyn.host.javascript",
     entrypoint: "index.js",
     ...overrides,
   };
@@ -29,7 +29,7 @@ describe("validateApplicationManifest", () => {
       id: "dev.sevyn.hello",
       name: "Hello SevynOS",
       version: "0.1.0",
-      hostId: "sevyn.host.test",
+      hostId: "sevyn.host.javascript",
       entrypoint: "index.js",
     };
 
