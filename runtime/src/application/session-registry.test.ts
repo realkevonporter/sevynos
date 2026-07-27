@@ -1,22 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import type { ApplicationManifest } from "./application-manifest.js";
+import type { ApplicationPackage } from "./application-package.js";
 import { ApplicationSession } from "./application-session.js";
 import { SessionRegistry } from "./session-registry.js";
 
-const helloApplication: ApplicationManifest = {
-  manifestVersion: 1,
-  id: "dev.sevyn.hello",
-  name: "Hello SevynOS",
-  version: "0.1.0",
-  hostId: "sevyn.host.react-native",
-  entrypoint: "index.js",
+const helloApplicationPackage: ApplicationPackage = {
+  manifest: {
+    manifestVersion: 1,
+    id: "dev.sevyn.hello",
+    name: "Hello SevynOS",
+    version: "0.1.0",
+    hostId: "sevyn.host.react-native",
+    entrypoint: "index.js",
+  },
 };
 
 function createSession(id = "session-1"): ApplicationSession {
   return new ApplicationSession({
     id,
-    application: helloApplication,
+    application: helloApplicationPackage,
     createdAt: new Date("2026-07-26T12:00:00.000Z"),
   });
 }
@@ -24,6 +26,7 @@ function createSession(id = "session-1"): ApplicationSession {
 describe("SessionRegistry", () => {
   it("adds and retrieves a session", () => {
     const registry = new SessionRegistry();
+
     const session = createSession();
 
     registry.add(session);
@@ -33,17 +36,19 @@ describe("SessionRegistry", () => {
 
   it("rejects duplicate sessions", () => {
     const registry = new SessionRegistry();
+
     const session = createSession();
 
     registry.add(session);
 
-    expect(() => registry.add(session)).toThrow(
-      'Application session "session-1" is already registered.',
-    );
+    expect(() => {
+      registry.add(session);
+    }).toThrow('Application session "session-1" is already registered.');
   });
 
   it("updates an existing session", () => {
     const registry = new SessionRegistry();
+
     const createdSession = createSession();
 
     registry.add(createdSession);
@@ -59,16 +64,19 @@ describe("SessionRegistry", () => {
 
   it("rejects updates for unknown sessions", () => {
     const registry = new SessionRegistry();
+
     const session = createSession();
 
-    expect(() => registry.update(session)).toThrow(
-      'Application session "session-1" is not registered.',
-    );
+    expect(() => {
+      registry.update(session);
+    }).toThrow('Application session "session-1" is not registered.');
   });
 
   it("lists sessions", () => {
     const registry = new SessionRegistry();
+
     const firstSession = createSession("session-1");
+
     const secondSession = createSession("session-2");
 
     registry.add(firstSession);
@@ -79,21 +87,25 @@ describe("SessionRegistry", () => {
 
   it("removes a session", () => {
     const registry = new SessionRegistry();
+
     const session = createSession();
 
     registry.add(session);
 
     expect(registry.remove(session.id)).toBe(true);
+
     expect(registry.get(session.id)).toBeUndefined();
   });
 
   it("reports whether a session exists", () => {
     const registry = new SessionRegistry();
+
     const session = createSession();
 
     registry.add(session);
 
     expect(registry.has(session.id)).toBe(true);
+
     expect(registry.has("missing-session")).toBe(false);
   });
 
@@ -101,6 +113,7 @@ describe("SessionRegistry", () => {
     const registry = new SessionRegistry();
 
     registry.add(createSession("session-1"));
+
     registry.add(createSession("session-2"));
 
     registry.clear();

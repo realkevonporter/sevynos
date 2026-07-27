@@ -1,6 +1,4 @@
-import { randomUUID } from "node:crypto";
-
-import type { ApplicationManifest } from "./application-manifest.js";
+import type { ApplicationPackage } from "./application-package.js";
 import {
   assertApplicationSessionTransition,
   type ApplicationSessionState,
@@ -9,33 +7,33 @@ import {
 export type ApplicationSessionId = string;
 
 export interface CreateApplicationSessionOptions {
-  readonly id?: ApplicationSessionId;
-  readonly application: ApplicationManifest;
+  readonly id: ApplicationSessionId;
+  readonly application: ApplicationPackage;
+  readonly createdAt: Date;
   readonly state?: ApplicationSessionState;
-  readonly createdAt?: Date;
 }
 
 export class ApplicationSession {
   public readonly id: ApplicationSessionId;
-  public readonly application: ApplicationManifest;
-  public readonly state: ApplicationSessionState;
+  public readonly application: ApplicationPackage;
   public readonly createdAt: Date;
+  public readonly state: ApplicationSessionState;
 
   public constructor(options: CreateApplicationSessionOptions) {
-    this.id = options.id ?? randomUUID();
+    this.id = options.id;
     this.application = options.application;
+    this.createdAt = options.createdAt;
     this.state = options.state ?? "created";
-    this.createdAt = options.createdAt ?? new Date();
   }
 
-  public transitionTo(requestedState: ApplicationSessionState): ApplicationSession {
-    assertApplicationSessionTransition(this.state, requestedState);
+  public transitionTo(state: ApplicationSessionState): ApplicationSession {
+    assertApplicationSessionTransition(this.state, state);
 
     return new ApplicationSession({
       id: this.id,
       application: this.application,
-      state: requestedState,
       createdAt: this.createdAt,
+      state,
     });
   }
 }

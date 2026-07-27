@@ -1,31 +1,28 @@
 import { randomUUID } from "node:crypto";
 
-import type { ApplicationManifest } from "./application/application-manifest.js";
-import { isApplicationPackage } from "./application/application-package.js";
-
-import { InvalidApplicationPackageError } from "./errors/invalid-application-package-error.js";
 import type { ApplicationHost } from "./application/application-host.js";
 import { ApplicationHostRegistry } from "./application/application-host-registry.js";
 import {
   ApplicationManager,
   type StartApplicationResult,
 } from "./application/application-manager.js";
-import { ApplicationRegistry } from "./application/application-registry.js";
+import type { ApplicationId } from "./application/application-manifest.js";
+import { isApplicationPackage } from "./application/application-package.js";
+import { ApplicationPackageRegistry } from "./application/application-package-registry.js";
 import type {
   ApplicationSession,
   ApplicationSessionId,
 } from "./application/application-session.js";
 import { SessionRegistry } from "./application/session-registry.js";
-import type { RuntimeLogger } from "./logger.js";
-import { RUNTIME_IDENTITY } from "./runtime-identity.js";
-import { assertRuntimeTransition } from "./runtime-state.js";
-import type { RuntimeState } from "./runtime-state.js";
+import { InvalidApplicationPackageError } from "./errors/invalid-application-package-error.js";
 import { InvalidRuntimeStateError } from "./errors/invalid-runtime-state-error.js";
-
 import {
   RuntimeShutdownError,
   type RuntimeShutdownFailure,
 } from "./errors/runtime-shutdown-error.js";
+import type { RuntimeLogger } from "./logger.js";
+import { RUNTIME_IDENTITY } from "./runtime-identity.js";
+import { assertRuntimeTransition, type RuntimeState } from "./runtime-state.js";
 
 export interface RuntimeOptions {
   readonly logger: RuntimeLogger;
@@ -36,7 +33,7 @@ export interface RuntimeOptions {
 export class SevynRuntime {
   readonly #logger: RuntimeLogger;
 
-  readonly #applications: ApplicationRegistry;
+  readonly #applications: ApplicationPackageRegistry;
   readonly #hosts: ApplicationHostRegistry;
   readonly #sessions: SessionRegistry;
   readonly #applicationManager: ApplicationManager;
@@ -47,8 +44,10 @@ export class SevynRuntime {
   public constructor(options: RuntimeOptions) {
     this.#logger = options.logger;
 
-    this.#applications = new ApplicationRegistry();
+    this.#applications = new ApplicationPackageRegistry();
+
     this.#hosts = new ApplicationHostRegistry();
+
     this.#sessions = new SessionRegistry();
 
     this.#applicationManager = new ApplicationManager({
@@ -72,10 +71,16 @@ export class SevynRuntime {
       );
     }
 
-    this.#applications.register(input.manifest);
+    this.#applications.register(input);
+
+    this.#logger.log("info", "application.registered", {
+      applicationId: input.manifest.id,
+      version: input.manifest.version,
+      hostId: input.manifest.hostId,
+    });
   }
 
-  public unregisterApplication(applicationId: ApplicationManifest["id"]): boolean {
+  public unregisterApplication(applicationId: ApplicationId): boolean {
     const removed = this.#applications.unregister(applicationId);
 
     if (removed) {
@@ -108,7 +113,7 @@ export class SevynRuntime {
   }
 
   public async startApplication(
-    applicationId: ApplicationManifest["id"],
+    applicationId: ApplicationId,
   ): Promise<StartApplicationResult> {
     this.#assertStateForOperation("start application", ["running"]);
 
@@ -117,7 +122,7 @@ export class SevynRuntime {
     this.#logger.log("info", "application.started", {
       applicationId,
       sessionId: result.session.id,
-      hostId: result.session.application.hostId,
+      hostId: result.session.application.manifest.hostId,
       hostInstanceId: result.host.instanceId,
     });
 
@@ -132,9 +137,9 @@ export class SevynRuntime {
     const session = await this.#applicationManager.stop(sessionId);
 
     this.#logger.log("info", "application.stopped", {
-      applicationId: session.application.id,
+      applicationId: session.application.manifest.id,
       sessionId: session.id,
-      hostId: session.application.hostId,
+      hostId: session.application.manifest.hostId,
     });
 
     return session;
@@ -234,6 +239,7 @@ export class SevynRuntime {
     this.#logger.log("info", "runtime.disposing");
 
     const failures: RuntimeShutdownFailure[] = [];
+
     const sessions = this.#sessions.list();
 
     for (const session of sessions) {
@@ -251,7 +257,7 @@ export class SevynRuntime {
 
         this.#logger.log("error", "application.stop.failed.during-runtime-shutdown", {
           sessionId: session.id,
-          applicationId: session.application.id,
+          applicationId: session.application.manifest.id,
           error: this.#serializeError(error),
         });
       }

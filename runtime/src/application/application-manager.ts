@@ -2,15 +2,15 @@ import { ApplicationHostNotFoundError } from "../errors/application-host-not-fou
 import { ApplicationSessionNotFoundError } from "../errors/application-session-not-found-error.js";
 import { InvalidApplicationSessionStateError } from "../errors/invalid-application-session-state-error.js";
 
-import type { ApplicationId } from "./application-manifest.js";
 import type { ApplicationHostStartResult } from "./application-host.js";
 import type { ApplicationHostRegistry } from "./application-host-registry.js";
-import type { ApplicationRegistry } from "./application-registry.js";
+import type { ApplicationId } from "./application-manifest.js";
+import type { ApplicationPackageRegistry } from "./application-package-registry.js";
 import { ApplicationSession, type ApplicationSessionId } from "./application-session.js";
 import type { SessionRegistry } from "./session-registry.js";
 
 export interface ApplicationManagerDependencies {
-  readonly applications: ApplicationRegistry;
+  readonly applications: ApplicationPackageRegistry;
   readonly hosts: ApplicationHostRegistry;
   readonly sessions: SessionRegistry;
   readonly createSessionId: () => ApplicationSessionId;
@@ -23,7 +23,7 @@ export interface StartApplicationResult {
 }
 
 export class ApplicationManager {
-  readonly #applications: ApplicationRegistry;
+  readonly #applications: ApplicationPackageRegistry;
   readonly #hosts: ApplicationHostRegistry;
   readonly #sessions: SessionRegistry;
   readonly #createSessionId: () => ApplicationSessionId;
@@ -38,17 +38,19 @@ export class ApplicationManager {
   }
 
   public async start(applicationId: ApplicationId): Promise<StartApplicationResult> {
-    const application = this.#applications.get(applicationId);
+    const applicationPackage = this.#applications.get(applicationId);
 
-    const host = this.#hosts.get(application.hostId);
+    const hostId = applicationPackage.manifest.hostId;
+
+    const host = this.#hosts.get(hostId);
 
     if (!host) {
-      throw new ApplicationHostNotFoundError(application.hostId);
+      throw new ApplicationHostNotFoundError(hostId);
     }
 
     const createdSession = new ApplicationSession({
       id: this.#createSessionId(),
-      application,
+      application: applicationPackage,
       createdAt: this.#now(),
     });
 
@@ -89,10 +91,12 @@ export class ApplicationManager {
       throw new InvalidApplicationSessionStateError(sessionId, session.state);
     }
 
-    const host = this.#hosts.get(session.application.hostId);
+    const hostId = session.application.manifest.hostId;
+
+    const host = this.#hosts.get(hostId);
 
     if (!host) {
-      throw new ApplicationHostNotFoundError(session.application.hostId);
+      throw new ApplicationHostNotFoundError(hostId);
     }
 
     const stoppingSession = session.transitionTo("stopping");

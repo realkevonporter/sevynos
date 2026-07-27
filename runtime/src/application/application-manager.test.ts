@@ -1,19 +1,22 @@
 import { describe, expect, it } from "vitest";
+
 import type { ApplicationHost, ApplicationHostStartResult } from "./application-host.js";
 import { ApplicationHostRegistry } from "./application-host-registry.js";
 import { ApplicationManager } from "./application-manager.js";
-import { ApplicationRegistry } from "./application-registry.js";
+import type { ApplicationPackage } from "./application-package.js";
+import { ApplicationPackageRegistry } from "./application-package-registry.js";
 import { ApplicationSession, type ApplicationSessionId } from "./application-session.js";
 import { SessionRegistry } from "./session-registry.js";
-import type { ApplicationManifest } from "./application-manifest.js";
 
-const helloApplication: ApplicationManifest = {
-  manifestVersion: 1,
-  id: "dev.sevyn.hello",
-  name: "Hello SevynOS",
-  version: "0.1.0",
-  hostId: "sevyn.host.test",
-  entrypoint: "index.js",
+const helloApplicationPackage: ApplicationPackage = {
+  manifest: {
+    manifestVersion: 1,
+    id: "dev.sevyn.hello",
+    name: "Hello",
+    version: "1.0.0",
+    hostId: "sevyn.host.test",
+    entrypoint: "index.js",
+  },
 };
 
 class TestApplicationHost implements ApplicationHost {
@@ -81,11 +84,12 @@ function createManager(host: ApplicationHost): {
   manager: ApplicationManager;
   sessions: SessionRegistry;
 } {
-  const applications = new ApplicationRegistry();
+  const applications = new ApplicationPackageRegistry();
   const hosts = new ApplicationHostRegistry();
   const sessions = new SessionRegistry();
 
-  applications.register(helloApplication);
+  applications.register(helloApplicationPackage);
+
   hosts.register(host);
 
   const manager = new ApplicationManager({
@@ -105,13 +109,17 @@ function createManager(host: ApplicationHost): {
 describe("ApplicationManager", () => {
   it("starts an application through its configured host", async () => {
     const host = new TestApplicationHost();
+
     const { manager, sessions } = createManager(host);
 
-    const result = await manager.start(helloApplication.id);
+    const result = await manager.start(helloApplicationPackage.manifest.id);
 
     expect(result.session.id).toBe("session-1");
-    expect(result.session.application).toStrictEqual(helloApplication);
+
+    expect(result.session.application).toStrictEqual(helloApplicationPackage);
+
     expect(result.session.state).toBe("running");
+
     expect(result.session.createdAt).toEqual(new Date("2026-07-26T12:00:00.000Z"));
 
     expect(result.host).toEqual({
@@ -119,11 +127,13 @@ describe("ApplicationManager", () => {
     });
 
     expect(host.startedSession?.state).toBe("starting");
+
     expect(sessions.get("session-1")).toBe(result.session);
   });
 
   it("rejects an unknown application", async () => {
     const host = new TestApplicationHost();
+
     const { manager, sessions } = createManager(host);
 
     await expect(manager.start("dev.sevyn.missing")).rejects.toThrow(
@@ -134,11 +144,11 @@ describe("ApplicationManager", () => {
   });
 
   it("rejects an application with an unknown host", async () => {
-    const applications = new ApplicationRegistry();
+    const applications = new ApplicationPackageRegistry();
     const hosts = new ApplicationHostRegistry();
     const sessions = new SessionRegistry();
 
-    applications.register(helloApplication);
+    applications.register(helloApplicationPackage);
 
     const manager = new ApplicationManager({
       applications,
@@ -148,7 +158,7 @@ describe("ApplicationManager", () => {
       now: (): Date => new Date("2026-07-26T12:00:00.000Z"),
     });
 
-    await expect(manager.start(helloApplication.id)).rejects.toThrow(
+    await expect(manager.start(helloApplicationPackage.manifest.id)).rejects.toThrow(
       'Application host "sevyn.host.test" is not registered.',
     );
 
@@ -157,9 +167,10 @@ describe("ApplicationManager", () => {
 
   it("marks the session as failed when the host fails", async () => {
     const host = new FailingApplicationHost();
+
     const { manager, sessions } = createManager(host);
 
-    await expect(manager.start(helloApplication.id)).rejects.toThrow(
+    await expect(manager.start(helloApplicationPackage.manifest.id)).rejects.toThrow(
       "Host failed to start.",
     );
 
@@ -168,20 +179,25 @@ describe("ApplicationManager", () => {
 
   it("stops a running application through its host", async () => {
     const host = new TestApplicationHost();
+
     const { manager, sessions } = createManager(host);
 
-    const started = await manager.start(helloApplication.id);
+    const started = await manager.start(helloApplicationPackage.manifest.id);
 
     const stopped = await manager.stop(started.session.id);
 
     expect(host.stoppedSession?.state).toBe("stopping");
+
     expect(stopped.state).toBe("stopped");
+
     expect(stopped.id).toBe(started.session.id);
+
     expect(sessions.get(stopped.id)).toBe(stopped);
   });
 
   it("rejects an unknown session", async () => {
     const host = new TestApplicationHost();
+
     const { manager, sessions } = createManager(host);
 
     await expect(manager.stop("missing-session")).rejects.toThrow(
@@ -193,11 +209,12 @@ describe("ApplicationManager", () => {
 
   it("rejects stopping a session that is not running", async () => {
     const host = new TestApplicationHost();
+
     const { manager, sessions } = createManager(host);
 
     const createdSession = new ApplicationSession({
       id: "session-1",
-      application: helloApplication,
+      application: helloApplicationPackage,
       createdAt: new Date("2026-07-26T12:00:00.000Z"),
     });
 
@@ -212,9 +229,10 @@ describe("ApplicationManager", () => {
 
   it("marks the session as failed when the host cannot stop it", async () => {
     const host = new FailingStopApplicationHost();
+
     const { manager, sessions } = createManager(host);
 
-    const started = await manager.start(helloApplication.id);
+    const started = await manager.start(helloApplicationPackage.manifest.id);
 
     await expect(manager.stop(started.session.id)).rejects.toThrow(
       "Host failed to stop.",

@@ -1,5 +1,3 @@
-export { ApplicationRegistry } from "./application/application-registry.js";
-
 export { DuplicateApplicationError } from "./errors/duplicate-application-error.js";
 export { RuntimeError } from "./errors/runtime-error.js";
 
@@ -38,8 +36,6 @@ export type {
 export { APPLICATION_MANIFEST_VERSION } from "./application/application-manifest.js";
 
 export type { ApplicationPackage } from "./application/application-package.js";
-
-export { validateApplicationManifest } from "./application/application-manifest-validator.js";
 
 export {
   InvalidApplicationManifestError,

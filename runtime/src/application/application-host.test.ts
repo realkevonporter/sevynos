@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { ApplicationManifest } from "./application-manifest.js";
 import type { ApplicationHost, ApplicationHostStartResult } from "./application-host.js";
+import type { ApplicationPackage } from "./application-package.js";
 import { ApplicationSession } from "./application-session.js";
 
-const helloApplication: ApplicationManifest = {
-  manifestVersion: 1,
-  id: "dev.sevyn.hello",
-  name: "Hello SevynOS",
-  version: "0.1.0",
-  hostId: "sevyn.host.test",
-  entrypoint: "index.js",
+const helloApplicationPackage: ApplicationPackage = {
+  manifest: {
+    manifestVersion: 1,
+    id: "dev.sevyn.hello",
+    name: "Hello SevynOS",
+    version: "0.1.0",
+    hostId: "sevyn.host.test",
+    entrypoint: "index.js",
+  },
 };
 
 class TestApplicationHost implements ApplicationHost {
@@ -37,13 +39,14 @@ describe("ApplicationHost", () => {
 
     const session = new ApplicationSession({
       id: "session-1",
-      application: helloApplication,
+      application: helloApplicationPackage,
       createdAt: new Date("2026-07-26T12:00:00.000Z"),
     });
 
     const result = await host.start(session);
 
     expect(host.id).toBe("sevyn.host.test");
+
     expect(result).toEqual({
       instanceId: "test:session-1",
     });
