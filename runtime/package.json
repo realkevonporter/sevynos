@@ -22,8 +22,13 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "@types/react": "^19.2.17",
+    "react": "^19.2.8",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
+  },
+  "peerDependencies": {
+    "react": "^19.2.8"
   }
 }

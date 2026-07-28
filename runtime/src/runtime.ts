@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { ApplicationHost } from "./application/application-host.js";
 import { ApplicationHostRegistry } from "./application/application-host-registry.js";
 import {
@@ -23,6 +21,44 @@ import {
 import type { RuntimeLogger } from "./logger.js";
 import { RUNTIME_IDENTITY } from "./runtime-identity.js";
 import { assertRuntimeTransition, type RuntimeState } from "./runtime-state.js";
+
+type RuntimeCrypto = {
+  readonly randomUUID?: () => string;
+};
+
+function createDefaultSessionId(): ApplicationSessionId {
+  const runtimeGlobal = globalThis as typeof globalThis & {
+    readonly crypto?: RuntimeCrypto;
+  };
+
+  const randomUUID = runtimeGlobal.crypto?.randomUUID;
+
+  if (typeof randomUUID === "function") {
+    return randomUUID.call(runtimeGlobal.crypto);
+  }
+
+  return createFallbackSessionId();
+}
+
+function createFallbackSessionId(): ApplicationSessionId {
+  const timestamp = Date.now().toString(36);
+  const randomPartOne = Math.random().toString(36).slice(2);
+  const randomPartTwo = Math.random().toString(36).slice(2);
+
+  return `${timestamp}-${randomPartOne}-${randomPartTwo}`;
+}
+
+function getProcessId(): number | undefined {
+  const processValue = (
+    globalThis as {
+      process?: {
+        pid?: number;
+      };
+    }
+  ).process;
+
+  return processValue?.pid;
+}
 
 export interface RuntimeOptions {
   readonly logger: RuntimeLogger;
@@ -54,8 +90,7 @@ export class SevynRuntime {
       applications: this.#applications,
       hosts: this.#hosts,
       sessions: this.#sessions,
-      createSessionId:
-        options.createSessionId ?? ((): ApplicationSessionId => randomUUID()),
+      createSessionId: options.createSessionId ?? createDefaultSessionId,
       now: options.now ?? ((): Date => new Date()),
     });
   }
@@ -166,7 +201,7 @@ export class SevynRuntime {
       this.#logger.log("info", "runtime.ready", {
         runtimeId: RUNTIME_IDENTITY.id,
         architectureVersion: RUNTIME_IDENTITY.architectureVersion,
-        processId: process.pid,
+        processId: getProcessId(),
       });
     } catch (error: unknown) {
       this.#transitionTo("failed", "runtime.start.failed");
@@ -229,7 +264,7 @@ export class SevynRuntime {
 
   async #initialize(): Promise<void> {
     this.#logger.log("info", "runtime.initializing", {
-      processId: process.pid,
+      processId: getProcessId(),
     });
 
     await Promise.resolve();

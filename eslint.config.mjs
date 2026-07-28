@@ -11,6 +11,7 @@ export default tseslint.config(
       "**/coverage/**",
       "**/node_modules/**",
       "**/.turbo/**",
+      "**/.expo/**",
       "third_party/**",
     ],
   },
@@ -21,7 +22,7 @@ export default tseslint.config(
   ...tseslint.configs.stylisticTypeChecked,
 
   {
-    files: ["**/*.ts", "**/*.tsx"],
+    files: ["runtime/**/*.ts", "runtime/**/*.tsx"],
 
     languageOptions: {
       parserOptions: {
@@ -31,6 +32,39 @@ export default tseslint.config(
 
       globals: {
         ...globals.node,
+      },
+    },
+
+    rules: {
+      "@typescript-eslint/consistent-type-imports": [
+        "error",
+        {
+          prefer: "type-imports",
+          fixStyle: "inline-type-imports",
+        },
+      ],
+
+      "@typescript-eslint/no-import-type-side-effects": "error",
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/switch-exhaustiveness-check": "error",
+      "@typescript-eslint/explicit-function-return-type": "error",
+      "@typescript-eslint/no-confusing-void-expression": "off",
+    },
+  },
+
+  {
+    files: ["shell/**/*.ts", "shell/**/*.tsx"],
+
+    languageOptions: {
+      parserOptions: {
+        project: ["./shell/tsconfig.json"],
+        tsconfigRootDir: import.meta.dirname,
+      },
+
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
       },
     },
 

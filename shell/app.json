@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "SevynOS",
+    "slug": "sevynos",
+    "scheme": "sevynos",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "org.sevynos.shell"
+    },
+    "android": {
+      "package": "org.sevynos.shell"
+    }
+  }
+}
