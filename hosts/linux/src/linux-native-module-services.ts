@@ -455,9 +455,7 @@ export class LinuxNativeModuleServices {
   async #cameraDevice(): Promise<string | undefined> {
     const candidates = (await readdir("/dev").catch(() => []))
       .filter((entry) => /^video\d+$/.test(entry))
-      .sort((first, second) =>
-        first.localeCompare(second, undefined, { numeric: true }),
-      );
+      .sort((first, second) => first.localeCompare(second, undefined, { numeric: true }));
     for (const candidate of candidates) {
       const device = join("/dev", candidate);
       const usable = await access(device).then(
@@ -2025,8 +2023,8 @@ function launchFfplay(
     let settled = false;
     let stopped = false;
     let ended: Error | null | undefined;
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => {
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
     const handle: LinuxMediaPlaybackHandle = {
@@ -2042,7 +2040,10 @@ function launchFfplay(
       },
       onEnded: (listener) => {
         endedListeners.add(listener);
-        if (ended !== undefined) queueMicrotask(() => listener(ended ?? undefined));
+        if (ended !== undefined)
+          queueMicrotask(() => {
+            listener(ended ?? undefined);
+          });
       },
     };
     const finish = (error?: Error): void => {

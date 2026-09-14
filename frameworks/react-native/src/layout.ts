@@ -219,9 +219,9 @@ function layoutChild(
     ? bounds.width
     : constrained(
         dimension(style.width, bounds.width) ??
-      (child.type === "text"
-        ? bounds.width
-        : Math.max(0, bounds.width - margin.left - margin.right)),
+          (child.type === "text"
+            ? bounds.width
+            : Math.max(0, bounds.width - margin.left - margin.right)),
         style.minWidth,
         style.maxWidth,
       );
@@ -230,9 +230,9 @@ function layoutChild(
     ? bounds.height
     : constrained(
         dimension(style.height, bounds.height) ??
-      (child.type === "text"
-        ? bounds.height
-        : Math.max(minHeight, bounds.height - margin.top - margin.bottom)),
+          (child.type === "text"
+            ? bounds.height
+            : Math.max(minHeight, bounds.height - margin.top - margin.bottom)),
         style.minHeight,
         style.maxHeight,
       );
@@ -261,10 +261,8 @@ function layoutChild(
       transformScaleX *= operation["scale"];
       transformScaleY *= operation["scale"];
     }
-    if (typeof operation["scaleX"] === "number")
-      transformScaleX *= operation["scaleX"];
-    if (typeof operation["scaleY"] === "number")
-      transformScaleY *= operation["scaleY"];
+    if (typeof operation["scaleX"] === "number") transformScaleX *= operation["scaleX"];
+    if (typeof operation["scaleY"] === "number") transformScaleY *= operation["scaleY"];
   }
   const own = Object.freeze({
     x: x + transformTranslateX,
@@ -488,10 +486,7 @@ function layoutChildren(
   });
 }
 
-const DROPPED_STYLE_PROPS = [
-  "zIndex",
-  "textDecorationLine",
-] as const;
+const DROPPED_STYLE_PROPS = ["zIndex", "textDecorationLine"] as const;
 
 const warnedDroppedProps = new Set<string>();
 

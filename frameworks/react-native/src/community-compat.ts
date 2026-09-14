@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/require-await, @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-unsafe-call */
 /**
  * SevynOS React Native Community & Ecosystem Compatibility Layer
  *

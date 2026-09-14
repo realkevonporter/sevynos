@@ -25,14 +25,13 @@ Genesis milestone includes:
 - a TypeScript runtime for applications, lifecycle, permissions, and services;
 - a native SevynOS React Native renderer with Yoga layout and Hermes execution;
 - React Native shell surfaces and system applications;
-- keyboard, pointer, clipboard, storage, audio, camera, Wi-Fi, and other Linux
-  capabilities behind typed service boundaries;
 - an installer exercised against blank BIOS and UEFI virtual disks;
 - Electron and deterministic headless hosts for fast development and testing.
 
-Hardware support varies by computer. Camera, Wi-Fi, graphics, audio routing,
-sleep, and power behavior still need broader real-device testing. See the
-[Genesis roadmap](docs/roadmap/phase-1.md) for the honest project status.
+Clipboard, keyboard input, camera capture, audible audio output, and Wi-Fi do
+not currently work on target hardware. Graphics, sleep, power, and other device
+behavior also need broader real-device testing. See the [Genesis
+roadmap](docs/roadmap/phase-1.md) for the honest project status.
 
 ## The platform, not a collection of ports
 

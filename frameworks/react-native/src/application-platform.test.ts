@@ -91,9 +91,8 @@ describe("Sevyn third-party application platform", () => {
       "cellular",
     ];
     expect(
-      validateSevynApplicationManifest(
-        manifest({ permissions: platformPermissions }),
-      ).permissions,
+      validateSevynApplicationManifest(manifest({ permissions: platformPermissions }))
+        .permissions,
     ).toEqual(platformPermissions);
     expect(() =>
       validateSevynApplicationManifest({ ...manifest(), entrypoint: "../host.js" }),

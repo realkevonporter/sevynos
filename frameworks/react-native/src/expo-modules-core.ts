@@ -117,7 +117,6 @@ export function useReleasingSharedObject<T>(
         ((object as Record<string, unknown>)["release"] as () => void)();
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, dependencies);
   return object;
 }
@@ -149,7 +148,6 @@ export class UnavailabilityError extends Error {
 }
 
 // The generic return type preserves Expo's typed native-module API.
-// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
 export function requireNativeModule<T = Record<string, unknown>>(name: string): T {
   const registered = TurboModuleRegistry.get(name);
   if (registered !== null && registered !== undefined) return registered as T;
@@ -157,7 +155,6 @@ export function requireNativeModule<T = Record<string, unknown>>(name: string): 
 }
 
 // The generic return type preserves Expo's typed optional-module API.
-// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
 export function requireOptionalNativeModule<T = Record<string, unknown>>(
   name: string,
 ): T | null {

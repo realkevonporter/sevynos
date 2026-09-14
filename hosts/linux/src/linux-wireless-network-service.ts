@@ -142,13 +142,7 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
 
       await this.#execute({
         executable: "/sbin/wpa_cli",
-        arguments: [
-          "-p",
-          "/run/wpa_supplicant",
-          "-i",
-          interfaceName,
-          "disconnect",
-        ],
+        arguments: ["-p", "/run/wpa_supplicant", "-i", interfaceName, "disconnect"],
         timeoutMilliseconds: 2_500,
       }).catch(() => undefined);
       await this.#execute({

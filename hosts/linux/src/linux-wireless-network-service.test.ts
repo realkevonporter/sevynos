@@ -128,8 +128,14 @@ describe("LinuxWirelessNetworkService", () => {
     await expect(service.setEnabled(true)).resolves.toMatchObject({ enabled: true });
     expect(requests).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ executable: "/usr/sbin/rfkill", arguments: ["block", "wifi"] }),
-        expect.objectContaining({ executable: "/sbin/ip", arguments: ["link", "set", "wlan0", "up"] }),
+        expect.objectContaining({
+          executable: "/usr/sbin/rfkill",
+          arguments: ["block", "wifi"],
+        }),
+        expect.objectContaining({
+          executable: "/sbin/ip",
+          arguments: ["link", "set", "wlan0", "up"],
+        }),
       ]),
     );
   });

@@ -12,16 +12,18 @@ capabilities without coupling application code to one host.
   Wayland hosts;
 - React Native shell and system applications using a custom reconciler and Yoga;
 - isolated Hermes application execution and bounded native IPC;
-- keyboard, pointer, clipboard, storage, network, audio, camera, power, and
-  system-service paths;
 - hybrid BIOS/UEFI live media and tested installation to blank virtual disks;
 - QEMU boot, input, focus-latency, live-media, and installer regression gates;
 - reusable compatibility tests that contributors can extend with their own
   React Native applications.
 
+Clipboard, keyboard input, camera capture, audible audio output, and Wi-Fi are
+known target-hardware gaps. Existing service code and automated tests for those
+areas are foundations, not evidence that the device paths work end to end.
+
 ## Active priorities
 
-1. Broaden physical hardware validation and driver/firmware coverage.
+1. Restore and physically verify clipboard, keyboard, camera, audio, and Wi-Fi.
 2. Finish text input, selection, IME, shaping, and AT-SPI accessibility.
 3. Improve GPU acceleration, damage tracking, animation, and power efficiency.
 4. Strengthen kernel-enforced application isolation and document grants.

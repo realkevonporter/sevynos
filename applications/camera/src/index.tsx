@@ -831,9 +831,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
       setCaptures((prev) => [newItem, ...prev]);
       props.onCapture?.(newItem);
     } catch (error: unknown) {
-      setOperationError(
-        error instanceof Error ? error.message : "Photo capture failed.",
-      );
+      setOperationError(error instanceof Error ? error.message : "Photo capture failed.");
     }
   };
 

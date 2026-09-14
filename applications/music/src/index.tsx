@@ -851,7 +851,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Resume failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.resume?.();
+        await NativeModules.HardwareModules.media.resume();
       }
     } else {
       setIsPaused(true);
@@ -862,7 +862,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Pause failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.pause?.();
+        await NativeModules.HardwareModules.media.pause();
       }
     }
   }, [
@@ -900,7 +900,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Seek failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.seek?.(0);
+        await NativeModules.HardwareModules.media.seek(0);
       }
       return;
     }
@@ -922,7 +922,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Seek failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.seek?.(clamped);
+        await NativeModules.HardwareModules.media.seek(clamped);
       }
     },
     [currentTrack, props.media],
@@ -939,7 +939,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Volume failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.setVolume?.(clamped);
+        await NativeModules.HardwareModules.media.setVolume(clamped);
       }
     },
     [props.media],
@@ -950,7 +950,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
     setIsMuted(nextMuted);
     try {
       if (props.media?.setVolume) await props.media.setVolume(nextMuted ? 0 : volume);
-      else await NativeModules.HardwareModules.media.setVolume?.(nextMuted ? 0 : volume);
+      else await NativeModules.HardwareModules.media.setVolume(nextMuted ? 0 : volume);
     } catch (error: unknown) {
       setPlaybackError(error instanceof Error ? error.message : "Mute failed.");
     }
@@ -997,30 +997,24 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
     setScanStatus("Scanning your Music folder...");
     const scan =
       props.media?.scan?.bind(props.media) ?? NativeModules.HardwareModules.media.scan;
-    if (scan) {
-      try {
-        const found = (await scan(
-          "/var/lib/sevynos/user/Music",
-        )) as readonly MediaTrack[];
-        if (found.length > 0) {
-          setTracks((prev) => {
-            const existingIds = new Set(prev.map((t) => t.path));
-            const fresh = found.filter((t) => !existingIds.has(t.path));
-            return [...prev, ...fresh];
-          });
-          setScanStatus(`Discovered ${String(found.length)} new track(s).`);
-        } else {
-          setScanStatus("Scan complete. No new audio files found.");
-        }
-      } catch (error: unknown) {
-        setScanStatus(
-          error instanceof Error
-            ? `Library scan unavailable: ${error.message}`
-            : "Library scan unavailable.",
-        );
+    try {
+      const found = (await scan("/var/lib/sevynos/user/Music")) as readonly MediaTrack[];
+      if (found.length > 0) {
+        setTracks((prev) => {
+          const existingIds = new Set(prev.map((t) => t.path));
+          const fresh = found.filter((t) => !existingIds.has(t.path));
+          return [...prev, ...fresh];
+        });
+        setScanStatus(`Discovered ${String(found.length)} new track(s).`);
+      } else {
+        setScanStatus("Scan complete. No new audio files found.");
       }
-    } else {
-      setScanStatus("Scanned library. 5 built-in high-fidelity tracks available.");
+    } catch (error: unknown) {
+      setScanStatus(
+        error instanceof Error
+          ? `Library scan unavailable: ${error.message}`
+          : "Library scan unavailable.",
+      );
     }
   }, [props.media]);
 

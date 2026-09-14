@@ -311,7 +311,10 @@ export function useAnimatedValue(initialValue: number): AnimatedValue {
   value.current ??= new AnimatedValue(initialValue);
   return value.current;
 }
-export const useAnimatedValueXY = (initial: { x: number; y: number }): AnimatedValueXY => {
+export const useAnimatedValueXY = (initial: {
+  x: number;
+  y: number;
+}): AnimatedValueXY => {
   const value = useRef<AnimatedValueXY | undefined>(undefined);
   value.current ??= new AnimatedValueXY(initial);
   return value.current;

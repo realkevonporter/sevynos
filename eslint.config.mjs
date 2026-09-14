@@ -73,6 +73,35 @@ export default tseslint.config(
     extends: [tseslint.configs.disableTypeChecked],
   },
   {
+    // These files are explicit compatibility boundaries. They mirror dynamic
+    // React Native and Expo APIs, including intentional no-op methods, so the
+    // application-facing surface can remain source-compatible while native
+    // implementations are added behind it. Keep the exemption narrowly scoped.
+    files: [
+      "frameworks/react-native/src/animated.ts",
+      "frameworks/react-native/src/community-compat.ts",
+      "frameworks/react-native/src/expo-modules-core.ts",
+      "frameworks/react-native/src/fabric.ts",
+      "frameworks/react-native/src/native-modules.ts",
+      "frameworks/react-native/src/react-jsx-shim.ts",
+      "frameworks/react-native/src/react-native-app-compat.test.ts",
+      "frameworks/react-native/src/react-shim.ts",
+      "frameworks/react-native/src/utilities.ts",
+    ],
+    rules: {
+      "@typescript-eslint/no-confusing-void-expression": "off",
+      "@typescript-eslint/no-empty-function": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unnecessary-condition": "off",
+      "@typescript-eslint/no-unnecessary-type-parameters": "off",
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off",
+      "@typescript-eslint/no-unused-vars": "off",
+      "@typescript-eslint/prefer-nullish-coalescing": "off",
+      "@typescript-eslint/unbound-method": "off",
+    },
+  },
+  {
     files: ["applications/**/*.{ts,tsx}", "examples/**/*.{ts,tsx}"],
     rules: {
       "no-restricted-imports": [

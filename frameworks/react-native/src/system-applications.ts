@@ -3945,7 +3945,10 @@ export function ReactNativeIdeApplication(props: {
                 key: "project",
                 id: "ide.project",
                 text: `${appName} · ${status}`,
-                style: { color: status.includes("failed") ? "#FF7B72" : "#8B949E", fontSize: 11 },
+                style: {
+                  color: status.includes("failed") ? "#FF7B72" : "#8B949E",
+                  fontSize: 11,
+                },
               }),
               View({ key: "spacer", id: "ide.topbar.spacer", style: { flexGrow: 1 } }),
               button("ide.run", "▶ Run", handleRun),

@@ -38,7 +38,12 @@ export class SevynErrorBoundary extends Component<
   }
 
   public override componentDidCatch(error: Error, info: ErrorInfo): void {
-    console.error("SevynErrorBoundary caught an error:", error.message, error.stack, info.componentStack);
+    console.error(
+      "SevynErrorBoundary caught an error:",
+      error.message,
+      error.stack,
+      info.componentStack,
+    );
     this.props.onError?.(error, info);
   }
 

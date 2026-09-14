@@ -176,12 +176,7 @@ function traceSample(log, traceId) {
     totalDurationMs: metric(log, traceId, "FOCUS_TRACE_PRESENTED", "totalDurationMs"),
     rasterDurationMs: metric(log, traceId, "TS_FRAME_RASTERIZED", "durationMs"),
     copyDurationMs: metric(log, traceId, "RUST_BUFFER_COPIED", "durationMs"),
-    renderRequests: metric(
-      log,
-      traceId,
-      "TS_FOCUS_FRAME_ACKNOWLEDGED",
-      "renderRequests",
-    ),
+    renderRequests: metric(log, traceId, "TS_FOCUS_FRAME_ACKNOWLEDGED", "renderRequests"),
     frames: metric(log, traceId, "TS_FOCUS_FRAME_ACKNOWLEDGED", "frames"),
   };
 }

@@ -227,10 +227,7 @@ export async function startWaylandHost(
       capture: (options) =>
         nativeModules.request("camera.capture", (options ?? null) as StructuredValue),
       recordStart: (options) =>
-        nativeModules.request(
-          "camera.recordStart",
-          (options ?? null) as StructuredValue,
-        ),
+        nativeModules.request("camera.recordStart", (options ?? null) as StructuredValue),
       recordStop: () => nativeModules.request("camera.recordStop", null),
       preview: async () => {
         const result = await nativeModules.request("camera.preview", null);
@@ -404,9 +401,7 @@ export async function startWaylandHost(
             ? {}
             : { storage: await FileLinuxApplicationStorage.create(persistenceAdapter) }),
           onProcessLaunched: (applicationId) => {
-            marker(
-              `SEVYN_GENESIS_ISOLATED_PROCESS_LAUNCHED id=${applicationId}`,
-            );
+            marker(`SEVYN_GENESIS_ISOLATED_PROCESS_LAUNCHED id=${applicationId}`);
             if (applicationId === "org.sevynos.notes")
               marker("SEVYN_GENESIS_NOTES_ISOLATED_PROCESS_LAUNCHED");
           },
@@ -466,9 +461,7 @@ export async function startWaylandHost(
           subsystem: "application-package",
           event: "preinstall.failed",
           message:
-            error instanceof Error
-              ? error.message
-              : `Unable to load ${packagePath}.`,
+            error instanceof Error ? error.message : `Unable to load ${packagePath}.`,
         });
       }
     }

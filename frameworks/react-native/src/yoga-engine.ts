@@ -136,11 +136,14 @@ function resolveEdges(
   kind: "margin" | "padding",
 ): { top: number; right: number; bottom: number; left: number } {
   const source = style[kind];
-  const all = typeof source === "number" ? source : source?.all ?? 0;
-  const vertical = typeof source === "number" ? source : source?.vertical ?? all;
-  const horizontal = typeof source === "number" ? source : source?.horizontal ?? all;
+  const all = typeof source === "number" ? source : (source?.all ?? 0);
+  const vertical = typeof source === "number" ? source : (source?.vertical ?? all);
+  const horizontal = typeof source === "number" ? source : (source?.horizontal ?? all);
   return {
-    top: style[`${kind}Top`] ?? (typeof source === "number" ? source : source?.top) ?? vertical,
+    top:
+      style[`${kind}Top`] ??
+      (typeof source === "number" ? source : source?.top) ??
+      vertical,
     right:
       style[`${kind}Right`] ??
       (typeof source === "number" ? source : source?.right) ??

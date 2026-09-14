@@ -145,7 +145,10 @@ export class AnimatedValueXY {
   public readonly x: AnimatedValue;
   public readonly y: AnimatedValue;
 
-  public constructor(valueIn?: { x?: number | AnimatedValue; y?: number | AnimatedValue }) {
+  public constructor(valueIn?: {
+    x?: number | AnimatedValue;
+    y?: number | AnimatedValue;
+  }) {
     this.x =
       valueIn?.x instanceof AnimatedValue
         ? valueIn.x
@@ -198,13 +201,9 @@ export class AnimatedValueXY {
     { readonly translateX: AnimatedValue },
     { readonly translateY: AnimatedValue },
   ] {
-    return [
-      Object.freeze({ translateX: this.x }),
-      Object.freeze({ translateY: this.y }),
-    ];
+    return [Object.freeze({ translateX: this.x }), Object.freeze({ translateY: this.y })];
   }
 }
-
 
 export interface TimingAnimationConfig {
   readonly toValue: number;
@@ -592,10 +591,7 @@ export function event(
         typeof eventObj === "object" &&
         eventObj !== null
       ) {
-        const traverse = (
-          map: Record<string, unknown>,
-          src: Record<string, unknown>,
-        ) => {
+        const traverse = (map: Record<string, unknown>, src: Record<string, unknown>) => {
           for (const [k, v] of Object.entries(map)) {
             if (v instanceof AnimatedValue && typeof src[k] === "number") {
               v.setValue(src[k]);
@@ -605,17 +601,11 @@ export function event(
               typeof src[k] === "object" &&
               src[k] !== null
             ) {
-              traverse(
-                v as Record<string, unknown>,
-                src[k] as Record<string, unknown>,
-              );
+              traverse(v as Record<string, unknown>, src[k] as Record<string, unknown>);
             }
           }
         };
-        traverse(
-          mapping as Record<string, unknown>,
-          eventObj as Record<string, unknown>,
-        );
+        traverse(mapping as Record<string, unknown>, eventObj as Record<string, unknown>);
       }
     }
     config?.listener?.(...args);
@@ -634,10 +624,7 @@ export function diffClamp(
   });
 }
 
-export function add(
-  a: AnimatedValue,
-  b: AnimatedValue | number,
-): AnimatedInterpolation {
+export function add(a: AnimatedValue, b: AnimatedValue | number): AnimatedInterpolation {
   const bVal = b instanceof AnimatedValue ? b.getValue() : b;
   return a.interpolate({
     inputRange: [0, 100],
@@ -679,20 +666,14 @@ export function divide(
   });
 }
 
-export function modulo(
-  a: AnimatedValue,
-  modulus: number,
-): AnimatedInterpolation {
+export function modulo(a: AnimatedValue, modulus: number): AnimatedInterpolation {
   return a.interpolate({
     inputRange: [0, modulus],
     outputRange: [0, modulus],
   });
 }
 
-export function decay(
-  _value: AnimatedValue,
-  _config: unknown,
-): CompositeAnimation {
+export function decay(_value: AnimatedValue, _config: unknown): CompositeAnimation {
   return {
     start(callback?: EndCallback): void {
       callback?.({ finished: true });

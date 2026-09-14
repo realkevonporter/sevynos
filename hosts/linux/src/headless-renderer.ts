@@ -16,10 +16,7 @@ export interface HeadlessFrameSnapshot {
 
 export class HeadlessGenesisRenderer implements GenesisRenderer<DesktopScene> {
   public state: RendererState = "created";
-  readonly #displays = new Map<
-    string,
-    HeadlessFrameSnapshot["displays"][number]
-  >();
+  readonly #displays = new Map<string, HeadlessFrameSnapshot["displays"][number]>();
   #frameNumber = 0;
   public initialize(): void {
     this.state = "initialized";

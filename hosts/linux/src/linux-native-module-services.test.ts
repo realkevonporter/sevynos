@@ -165,9 +165,7 @@ describe("Linux native module services", () => {
       paused: false,
       durationSec: 240,
     });
-    expect(launches).toEqual([
-      { source: "/dev/null", volume: 100, offsetSeconds: 0 },
-    ]);
+    expect(launches).toEqual([{ source: "/dev/null", volume: 100, offsetSeconds: 0 }]);
 
     const paused = await services.request("media.pause", null);
     expect(paused).toMatchObject({

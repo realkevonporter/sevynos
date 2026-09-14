@@ -178,7 +178,9 @@ const renderPlanner = new DisplayRenderPlanner({
 const frameExecutor = new GenesisFrameExecutor<DesktopScene>({
   createRenderPlans: () => {
     latestScene = sceneComposer.compose(viewport);
-    console.log(`[Renderer] Composed scene with ${latestScene.nodes.length} nodes (frame ${frameExecutionCount})`);
+    console.log(
+      `[Renderer] Composed scene with ${String(latestScene.nodes.length)} nodes (frame ${String(frameExecutionCount)})`,
+    );
     return renderPlanner.createRenderPlans(latestScene);
   },
   renderer: canvasRenderer,
@@ -305,7 +307,9 @@ const initialDevelopmentPackage =
   await window.genesisHost.loadDevelopmentApplicationPackage();
 if (initialDevelopmentPackage !== undefined) {
   try {
-    const parsedPackage = JSON.parse(initialDevelopmentPackage) as SevynApplicationPackage;
+    const parsedPackage = JSON.parse(
+      initialDevelopmentPackage,
+    ) as SevynApplicationPackage;
     await isolatedApplications.installDevelopmentPackage(parsedPackage);
     await window.genesisHost.saveInstalledApplicationPackage(initialDevelopmentPackage);
     await launchDesktopApplication(parsedPackage.manifest.id);

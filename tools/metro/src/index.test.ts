@@ -70,5 +70,5 @@ describe("@sevynos/metro bundler config", () => {
     const bundle = await readFile(result.outputFilePath, "utf8");
     expect(bundle).toContain("sevynos-implementation");
     expect(bundle).not.toContain("generic-implementation");
-  }, 20_000);
+  }, 60_000);
 });

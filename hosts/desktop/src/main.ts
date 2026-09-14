@@ -173,11 +173,18 @@ function createDesktopWindow(): BrowserWindow {
     },
   });
   window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    console.log(`[Renderer log level ${level}] ${message} (${sourceId}:${line})`);
+    console.log(
+      `[Renderer log level ${String(level)}] ${message} (${sourceId}:${String(line)})`,
+    );
   });
-  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    console.error(`[Renderer load failed] ${errorCode}: ${errorDescription} (${validatedURL})`);
-  });
+  window.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL) => {
+      console.error(
+        `[Renderer load failed] ${String(errorCode)}: ${errorDescription} (${validatedURL})`,
+      );
+    },
+  );
   window.webContents.on("render-process-gone", (_event, details) => {
     console.error("[Renderer process gone]", details);
   });

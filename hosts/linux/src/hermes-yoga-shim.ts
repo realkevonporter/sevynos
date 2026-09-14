@@ -234,13 +234,21 @@ class YogaNode {
     });
     const lines: (typeof measured)[] = [[]];
     for (const item of measured) {
-      const current = lines[lines.length - 1]!;
+      let current = lines.at(-1);
+      if (!current) {
+        current = [];
+        lines.push(current);
+      }
       const occupied = current.reduce(
         (sum, entry) => sum + entry.main + entry.mainStart + entry.mainEnd,
         Math.max(0, current.length - 1) * gap,
       );
       const outer = item.main + item.mainStart + item.mainEnd;
-      if (this.#wrap !== Wrap.NoWrap && current.length > 0 && occupied + gap + outer > mainSize)
+      if (
+        this.#wrap !== Wrap.NoWrap &&
+        current.length > 0 &&
+        occupied + gap + outer > mainSize
+      )
         lines.push([item]);
       else current.push(item);
     }
@@ -258,7 +266,8 @@ class YogaNode {
           Math.max(0, lines.length - 1) * crossGap
         : 0;
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-      const line = lines[lineIndex]!;
+      const line = lines.at(lineIndex);
+      if (!line) continue;
       const totalGap = Math.max(0, line.length - 1) * gap;
       const fixed = line.reduce(
         (sum, item) => sum + item.main + item.mainStart + item.mainEnd,

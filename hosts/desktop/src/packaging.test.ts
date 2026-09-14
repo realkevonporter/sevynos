@@ -40,7 +40,7 @@ describe("Genesis desktop packaging", () => {
     const html = await readFile(join(packageDirectory, "src", "index.html"), "utf8");
     const main = await readFile(join(packageDirectory, "src", "main.ts"), "utf8");
     expect(html).toContain("Content-Security-Policy");
-    expect(html).toContain("connect-src http: https:");
+    expect(html).toContain("connect-src 'self' http: https: data:");
     expect(main).not.toContain("/Users/");
     expect(main).toContain('setWindowOpenHandler(() => ({ action: "deny" }))');
   });
