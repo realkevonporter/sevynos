@@ -13,22 +13,17 @@
   },
   "scripts": {
     "build": "tsc --build",
-    "demo": "tsx watch src/demo.ts",
-    "start": "node dist/demo.js",
     "lint": "eslint src --max-warnings=0",
     "typecheck": "tsc --project tsconfig.test.json --noEmit",
     "test": "vitest run",
     "clean": "rm -rf dist coverage *.tsbuildinfo"
   },
   "devDependencies": {
+    "@sevynos/graphics": "workspace:*",
+    "@sevynos/input": "workspace:*",
     "@types/node": "catalog:",
-    "@types/react": "^19.2.17",
-    "react": "^19.2.8",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  },
-  "peerDependencies": {
-    "react": "^19.2.8"
   }
 }

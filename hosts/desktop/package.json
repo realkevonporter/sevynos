@@ -1,0 +1,106 @@
+{
+  "name": "@sevynos/desktop-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The compositor-rendered SevynOS Genesis desktop host.",
+  "productName": "SevynOS Genesis",
+  "desktopName": "sevynos-genesis.desktop",
+  "author": "SevynOS Contributors",
+  "copyright": "Copyright © 2026 SevynOS Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sevynos/sevynos"
+  },
+  "bugs": {
+    "url": "https://github.com/sevynos/sevynos/issues"
+  },
+  "homepage": "https://github.com/sevynos/sevynos",
+  "type": "module",
+  "main": "dist/main.js",
+  "exports": {
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm build:dev",
+    "build:dependencies": "turbo run build --filter=@sevynos/desktop-host^...",
+    "build:dev": "tsc -p tsconfig.json && node scripts/build-renderer.mjs && esbuild src/preload.ts --bundle --platform=node --format=cjs --external:electron --sourcemap --outfile=dist/preload.cjs && node scripts/build-system-applications.mjs && node scripts/copy-assets.mjs",
+    "build:prod": "tsc -p tsconfig.json && node scripts/build-renderer.mjs --production && esbuild src/preload.ts --bundle --platform=node --format=cjs --external:electron --minify --outfile=dist/preload.cjs && node scripts/build-system-applications.mjs --production && node scripts/copy-assets.mjs",
+    "build:workspace": "turbo run build --filter=@sevynos/desktop-host...",
+    "build:workspace:prod": "pnpm build:dependencies && pnpm build:prod",
+    "start": "pnpm build:workspace && pnpm start:built",
+    "dev": "pnpm build:workspace && node scripts/dev.mjs",
+    "start:built": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "package": "pnpm build:workspace:prod && electron-builder --publish never",
+    "package:mac": "pnpm build:workspace:prod && electron-builder --mac --publish never",
+    "package:linux": "pnpm build:workspace:prod && electron-builder --linux --publish never",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "test": "vitest run"
+  },
+  "build": {
+    "appId": "org.sevynos.genesis",
+    "productName": "SevynOS Genesis",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "dist/main.js",
+      "dist/preload.cjs",
+      "dist/renderer.js",
+      "dist/application-worker.js",
+      "dist/system-applications/*.js",
+      "dist/index.html",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build-resources/icon.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "identity": null
+    },
+    "linux": {
+      "executableName": "sevynos-genesis",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "syncDesktopName": true,
+      "icon": "build-resources/icon.png",
+      "artifactName": "SevynOS-Genesis-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "sign": false
+    },
+    "artifactName": "SevynOS-Genesis-${version}-${arch}.${ext}"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "workspace:*",
+    "@sevynos/desktop-shell": "workspace:*",
+    "@sevynos/example-notes": "workspace:*",
+    "@sevynos/graphics": "workspace:*",
+    "@sevynos/input": "workspace:*",
+    "@sevynos/react-native": "workspace:*",
+    "@sevynos/runtime": "workspace:*",
+    "@sevynos/shell-core": "workspace:*",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "^38.0.0",
+    "electron-builder": "^26.15.3",
+    "@types/react": "^19.2.17",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0",
+    "vitest": "catalog:"
+  }
+}

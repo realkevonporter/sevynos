@@ -1,0 +1,10 @@
+.git
+.expo
+**/.git
+**/.expo
+**/node_modules
+applications/tokrah/android
+applications/tokrah/ios
+applications/tokrah/dist
+tools/qemu/build
+**/*.log

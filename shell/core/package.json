@@ -1,0 +1,25 @@
+{
+  "name": "@sevynos/shell-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host-independent device profiles and system-application lifecycle for SevynOS shells.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "test": "vitest run",
+    "clean": "rm -rf dist coverage *.tsbuildinfo"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,15 +1,26 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 
 # Build output
 dist/
 build/
+release/
+target/
 generated/
 artifacts/
 coverage/
 
 # Tool caches
 .turbo/
+.cache/
+.next/
+.parcel-cache/
+.pytest_cache/
+.ruff_cache/
+.vite/
+.expo/
+__pycache__/
 *.tsbuildinfo
 
 # Environment
@@ -21,11 +32,15 @@ coverage/
 *.sock
 *.pid
 *.log
+*.out
+*.tmp
+*.temp
 
 # Editors
 .idea/
 .vscode/
 *.swp
+*~
 
 # Operating systems
 .DS_Store
@@ -36,3 +51,13 @@ CMakeFiles/
 CMakeCache.txt
 cmake-build-*/
 compile_commands.json
+DerivedData/
+Pods/
+out/
+
+# Packaged releases and disk images
+*.AppImage
+*.appimage
+*.blockmap
+*.dmg
+*.iso

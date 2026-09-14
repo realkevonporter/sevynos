@@ -12,23 +12,29 @@ describe("ApplicationManifest", () => {
     const manifest: ApplicationManifest = {
       manifestVersion: APPLICATION_MANIFEST_VERSION,
 
-      id: "dev.sevyn.hello",
+      id: "org.sevynos.hello",
       name: "Hello SevynOS",
       version: "0.1.0",
 
       hostId: "sevyn.host.javascript",
       entrypoint: "index.js",
+      permissions: ["filesystem.read", "notifications"],
+      signature: "sig-valid-test",
+      system: false,
     };
 
     expect(manifest).toEqual({
-      manifestVersion: 1,
+      manifestVersion: 2,
 
-      id: "dev.sevyn.hello",
+      id: "org.sevynos.hello",
       name: "Hello SevynOS",
       version: "0.1.0",
 
       hostId: "sevyn.host.javascript",
       entrypoint: "index.js",
+      permissions: ["filesystem.read", "notifications"],
+      signature: "sig-valid-test",
+      system: false,
     });
   });
 
@@ -36,7 +42,7 @@ describe("ApplicationManifest", () => {
     const manifest: ApplicationManifest = {
       manifestVersion: APPLICATION_MANIFEST_VERSION,
 
-      id: "dev.sevyn.hello",
+      id: "org.sevynos.hello",
       name: "Hello SevynOS",
       version: "4.7.2",
 
@@ -44,7 +50,7 @@ describe("ApplicationManifest", () => {
       entrypoint: "index.js",
     };
 
-    expect(manifest.manifestVersion).toBe(1);
+    expect(manifest.manifestVersion).toBe(2);
     expect(manifest.version).toBe("4.7.2");
   });
 });

@@ -1,0 +1,203 @@
+import { describe, expect, it } from "vitest";
+import { DesktopSceneComposer } from "@sevynos/desktop-shell";
+import { SimulatedWaylandBridgeTransport } from "./simulated-wayland-bridge.js";
+import { startWaylandHost } from "./wayland.js";
+
+const pause = (milliseconds = 0): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+describe("interactive Wayland host", () => {
+  it("discovers a display, presents frames, translates input, resizes, and shuts down", async () => {
+    const bridge = new SimulatedWaylandBridgeTransport();
+    const markers: string[] = [];
+    const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
+    bridge.ready(1280, 720, 1);
+    const host = await starting;
+    await pause();
+    const firstFrame = bridge.frames[0];
+    expect(firstFrame).toBeDefined();
+    if (firstFrame === undefined) throw new Error("Expected a presented frame.");
+    expect(firstFrame.width).toBe(1280);
+    expect(firstFrame.height).toBe(720);
+    expect(firstFrame.pixels).toHaveLength(firstFrame.stride * firstFrame.height);
+    expect(firstFrame.pixels.some((byte) => byte !== 0)).toBe(true);
+    expect(markers).toContain("SEVYN_GENESIS_VISIBLE_SURFACE_CONFIGURED");
+    expect(markers).toContain("SEVYN_GENESIS_INPUT_DEVICES_INITIALIZED");
+    expect(markers).toContain("GENESIS_FRAME_RENDER_REQUESTED");
+    expect(markers).toContain("SEVYN_GENESIS_FIRST_COMPOSITOR_FRAME_PRESENTED");
+    expect(markers.some((value) => value.startsWith("GENESIS_FRAME_RENDERED "))).toBe(
+      true,
+    );
+    expect(markers).toContain("GENESIS_PRESENT_MESSAGE_SENT frameId=1");
+    expect(markers).toContain(
+      "TYPESCRIPT DISPLAY SIZE width=1280 height=720 scale=1 reason=initial",
+    );
+    expect(markers).toContain(
+      "FRAMEBUFFER SIZE width=1280 height=720 stride=5120 bytes=3686400",
+    );
+    expect(markers).toContain(
+      "GENESIS_DISPLAY_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=720 scale=1",
+    );
+    expect(markers).toContain(
+      "GENESIS_WORKSPACE_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=648",
+    );
+    expect(
+      markers.some((value) =>
+        value.startsWith(
+          "GENESIS_WINDOW_CONTENT_BOUNDS reason=initial windowId=window-1 coordinateSpace=desktop-logical ",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      markers.some((value) =>
+        /^GENESIS_NATIVE_COMMAND_BOUNDS reason=(initial|surface-sync) windowId=window-1 coordinateSpace=window-content-local index=/.test(
+          value,
+        ),
+      ),
+    ).toBe(true);
+    bridge.pointer("move", 140, 120);
+    bridge.keyboard("down", "a", "KeyA");
+    const framesBeforeResize = bridge.frames.length;
+    bridge.resize(1024, 640, 1);
+    bridge.pointer("move", 900, 500);
+    await pause(25);
+    expect(host.runtime.cursor.state.position).toEqual({ x: 900, y: 500 });
+    expect(host.runtime.environment.listDisplays()[0]).toMatchObject({
+      id: "display-wayland-output-1",
+      bounds: { width: 1024, height: 640 },
+      scaleFactor: 1,
+    });
+    const resizedFrames = bridge.frames.slice(framesBeforeResize);
+    expect(resizedFrames.length).toBeGreaterThan(0);
+    expect(
+      resizedFrames.every(
+        (message) =>
+          message.width === 1024 && message.height === 640 && message.stride === 4096,
+      ),
+    ).toBe(true);
+    expect(markers).toContain(
+      "TYPESCRIPT DISPLAY SIZE width=1024 height=640 scale=1 reason=resize",
+    );
+    expect(markers).toContain(
+      "FRAMEBUFFER SIZE width=1024 height=640 stride=4096 bytes=2621440",
+    );
+    expect(markers).toContain(
+      "GENESIS_DISPLAY_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=640 scale=1",
+    );
+    expect(markers).toContain(
+      "GENESIS_WORKSPACE_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=568",
+    );
+    await host.shutdown();
+    expect(bridge.sent.at(-1)?.type).toBe("shutdown-complete");
+  });
+  it("round-trips clipboard text through the native boundary", async () => {
+    const bridge = new SimulatedWaylandBridgeTransport();
+    const starting = startWaylandHost(bridge);
+    bridge.ready();
+    const host = await starting;
+    await host.clipboard.writeText("Sevyn clipboard");
+    await expect(host.clipboard.readText()).resolves.toBe("Sevyn clipboard");
+    await host.shutdown();
+  });
+
+  it("changes the desktop theme through the Settings surface", async () => {
+    const bridge = new SimulatedWaylandBridgeTransport();
+    const starting = startWaylandHost(bridge);
+    bridge.ready(1280, 720, 1);
+    const host = await starting;
+    await host.runtime.applications.launch("org.sevynos.settings");
+    const composer = new DesktopSceneComposer(host.runtime);
+    let themeControl = composer
+      .compose({ width: 1280, height: 720, scaleFactor: 1 })
+      .nodes.find(
+        (node) => node.kind === "desktop-settings-control" && node.action === "theme",
+      );
+    for (let attempt = 0; themeControl === undefined && attempt < 100; attempt += 1) {
+      await pause(5);
+      themeControl = composer
+        .compose({ width: 1280, height: 720, scaleFactor: 1 })
+        .nodes.find(
+          (node) => node.kind === "desktop-settings-control" && node.action === "theme",
+        );
+    }
+    if (themeControl?.kind !== "desktop-settings-control")
+      throw new Error("Settings did not expose its theme control.");
+    await pause(20);
+    bridge.pointer(
+      "down",
+      themeControl.bounds.x + themeControl.bounds.width / 2,
+      themeControl.bounds.y + themeControl.bounds.height / 2,
+    );
+    expect(host.runtime.settings.snapshot.theme).toBe("light");
+    await host.shutdown();
+  });
+
+  it("focuses on pointer-down and keeps presentation backlog to one latest frame", async () => {
+    const bridge = new SimulatedWaylandBridgeTransport();
+    const markers: string[] = [];
+    const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
+    bridge.ready(1280, 720, 1);
+    const host = await starting;
+    await pause(30);
+    bridge.autoPresentFrames = false;
+    const baseline = bridge.frames.length;
+
+    bridge.pointer("down", 340, 200, "focus-welcome");
+    expect(
+      host.runtime.windows.listWindows().find((window) => window.state === "focused")?.id,
+    ).toBe("window-1");
+    await pause();
+    expect(bridge.frames).toHaveLength(baseline + 1);
+    const welcomeFrame = bridge.frames.at(-1);
+    expect(welcomeFrame?.traceId).toBe("focus-welcome");
+
+    bridge.pointer("down", 668, 550, "focus-console");
+    bridge.keyboard("down", "z", "KeyZ");
+    expect(
+      host.runtime.windows.listWindows().find((window) => window.state === "focused")?.id,
+    ).toBe("window-2");
+    expect(host.runtime.surfaces.get("window-2")).toMatchObject({
+      kind: "console",
+      input: "z",
+    });
+    await pause();
+    expect(bridge.frames).toHaveLength(baseline + 1);
+
+    if (welcomeFrame === undefined)
+      throw new Error("The welcome focus frame was not sent.");
+    bridge.presentFrame(welcomeFrame.frameId);
+    await pause();
+    expect(bridge.frames).toHaveLength(baseline + 2);
+    expect(bridge.frames.at(-1)?.traceId).toBe("focus-console");
+    expect(
+      markers.filter((value) =>
+        value.startsWith("TS_FRAME_STARTED traceId=focus-console "),
+      ),
+    ).toHaveLength(1);
+
+    await host.shutdown();
+  });
+
+  it("bounds sustained pointer rendering while control messages remain responsive", async () => {
+    const bridge = new SimulatedWaylandBridgeTransport();
+    const starting = startWaylandHost(bridge);
+    bridge.ready(1280, 720, 1);
+    const host = await starting;
+    await pause(30);
+    bridge.autoPresentFrames = false;
+    const baseline = bridge.frames.length;
+
+    for (let index = 0; index < 1_000; index += 1)
+      bridge.pointer("move", 400 + (index % 200), 300);
+    await pause(25);
+    expect(bridge.frames).toHaveLength(baseline + 1);
+    for (let index = 0; index < 1_000; index += 1)
+      bridge.pointer("move", 600 + (index % 200), 320);
+    await pause(25);
+    expect(bridge.frames).toHaveLength(baseline + 1);
+
+    await host.clipboard.writeText("control-path-remains-live");
+    await expect(host.clipboard.readText()).resolves.toBe("control-path-remains-live");
+    expect(host.runtime.cursor.state.position.x).toBe(799);
+    await host.shutdown();
+  }, 15_000);
+});

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install SevynOS
+Comment=Install SevynOS to your computer
+Exec=/usr/local/bin/sevyn-installer
+Terminal=true
+Categories=System;Installer;
+Icon=drive-harddisk

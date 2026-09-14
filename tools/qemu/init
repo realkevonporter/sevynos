@@ -1,0 +1,238 @@
+#!/bin/busybox sh
+set -eu
+export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+/bin/busybox --install -s
+mountpoint -q /proc || mount -t proc proc /proc
+mountpoint -q /sys || mount -t sysfs sysfs /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
+mountpoint -q /run || mount -t tmpfs tmpfs /run
+
+# Inhibit magic SysRq for security in appliance mode
+sysctl -w kernel.sysrq=0 2>/dev/null || echo 0 > /proc/sys/kernel/sysrq 2>/dev/null || true
+
+log_marker() {
+  echo "$1"
+  if [ -c /dev/ttyS0 ]; then
+    echo "$1" > /dev/ttyS0 2>/dev/null || true
+  fi
+}
+
+log_marker "SEVYN_KERNEL_BOOTED"
+log_marker "SEVYN_QEMU_KERNEL_BOOTED"
+case " $(cat /proc/cmdline) " in
+  *" sevyn.live=1 "*) log_marker "SEVYN_LIVE_USB_ROOT_READY" ;;
+esac
+mkdir -p /var/lib/sevynos
+modprobe virtio_pci 2>/dev/null || true
+modprobe virtio_blk 2>/dev/null || true
+modprobe virtio_gpu 2>/dev/null || true
+modprobe virtio_net 2>/dev/null || true
+modprobe xhci_pci 2>/dev/null || true
+modprobe usbhid 2>/dev/null || true
+modprobe hid_generic 2>/dev/null || true
+modprobe drm 2>/dev/null || true
+modprobe drm_kms_helper 2>/dev/null || true
+modprobe i915 2>/dev/null || true
+modprobe xe 2>/dev/null || true
+modprobe amdgpu 2>/dev/null || true
+modprobe radeon 2>/dev/null || true
+modprobe bochs 2>/dev/null || true
+modprobe qxl 2>/dev/null || true
+modprobe simpledrm 2>/dev/null || true
+case " $(cat /proc/cmdline) " in
+  *"modprobe.blacklist=nouveau"*) ;;
+  *) modprobe nouveau 2>/dev/null || true ;;
+esac
+modprobe nvme 2>/dev/null || true
+modprobe ahci 2>/dev/null || true
+modprobe sd_mod 2>/dev/null || true
+modprobe usb_storage 2>/dev/null || true
+modprobe uas 2>/dev/null || true
+modprobe mmc_block 2>/dev/null || true
+modprobe videodev 2>/dev/null || true
+modprobe uvcvideo 2>/dev/null || true
+modprobe v4l2_common 2>/dev/null || true
+modprobe soundcore 2>/dev/null || true
+modprobe snd 2>/dev/null || true
+modprobe snd_pcm 2>/dev/null || true
+modprobe snd_hda_intel 2>/dev/null || true
+modprobe snd_hda_codec_realtek 2>/dev/null || true
+modprobe snd_hda_codec_generic 2>/dev/null || true
+modprobe snd_hda_codec_hdmi 2>/dev/null || true
+modprobe snd_soc_skl 2>/dev/null || true
+modprobe snd_soc_avs 2>/dev/null || true
+modprobe snd_sof_pci_intel_cnl 2>/dev/null || true
+modprobe snd_sof_intel_hda_common 2>/dev/null || true
+rfkill unblock all 2>/dev/null || true
+modprobe cfg80211 2>/dev/null || true
+modprobe mac80211 2>/dev/null || true
+modprobe iwlwifi 2>/dev/null || true
+modprobe iwlmvm 2>/dev/null || true
+modprobe iwldvm 2>/dev/null || true
+modprobe ath10k_pci 2>/dev/null || true
+modprobe ath11k_pci 2>/dev/null || true
+modprobe ath9k 2>/dev/null || true
+modprobe ath9k_htc 2>/dev/null || true
+modprobe rtl8xxxu 2>/dev/null || true
+modprobe rtl8187 2>/dev/null || true
+modprobe rtl8192cu 2>/dev/null || true
+modprobe rtw88_usb 2>/dev/null || true
+modprobe rtw88_8822bu 2>/dev/null || true
+modprobe rtw88_8822cu 2>/dev/null || true
+modprobe rtw88_8822ce 2>/dev/null || true
+modprobe rtw88_8821ce 2>/dev/null || true
+modprobe rtw89_pci 2>/dev/null || true
+modprobe rtw89_8852ae 2>/dev/null || true
+modprobe rtw89_8852be 2>/dev/null || true
+modprobe mt7921e 2>/dev/null || true
+modprobe mt7922e 2>/dev/null || true
+modprobe mt76_usb 2>/dev/null || true
+modprobe mt76x0u 2>/dev/null || true
+modprobe mt76x2u 2>/dev/null || true
+modprobe rt2800usb 2>/dev/null || true
+modprobe zd1211rw 2>/dev/null || true
+modprobe mwifiex_usb 2>/dev/null || true
+modprobe brcmfmac 2>/dev/null || true
+modprobe cdc_ether 2>/dev/null || true
+modprobe rndis_host 2>/dev/null || true
+modprobe r8169 2>/dev/null || true
+modprobe e1000e 2>/dev/null || true
+modprobe igc 2>/dev/null || true
+mkdir -p /run/udev
+mkdir -p /media
+/lib/systemd/systemd-udevd --daemon
+udevadm trigger --action=add
+udevadm trigger --action=add --subsystem-match=pci 2>/dev/null || true
+udevadm trigger --action=add --subsystem-match=drm 2>/dev/null || true
+udevadm trigger --action=add --subsystem-match=sound 2>/dev/null || true
+udevadm trigger --action=add --subsystem-match=net 2>/dev/null || true
+if ! udevadm settle --timeout=30; then
+  echo "SEVYN_QEMU_UDEV_SETTLE_TIMEOUT"
+fi
+chmod -R 0666 /dev/dri /dev/fb* /dev/snd /dev/video* 2>/dev/null || true
+chmod 0666 /dev/tty0 /dev/tty1 2>/dev/null || true
+if [ -d /dev/dri ]; then
+  echo "SEVYN_DRM_DEVICES_INITIALIZED: $(ls -m /dev/dri 2>/dev/null || true)"
+fi
+amixer set Master 80% unmute 2>/dev/null || true
+amixer set PCM 80% unmute 2>/dev/null || true
+amixer set Speaker 80% unmute 2>/dev/null || true
+amixer set Headphone 80% unmute 2>/dev/null || true
+if [ -e /proc/asound/cards ]; then
+  echo "SEVYN_AUDIO_INITIALIZED: $(head -n 2 /proc/asound/cards 2>/dev/null | tr '\n' ' ' || true)"
+fi
+if ls /dev/video* >/dev/null 2>&1; then
+  echo "SEVYN_CAMERA_INITIALIZED: $(ls -m /dev/video* 2>/dev/null || true)"
+fi
+data_device=""
+data_label=/dev/disk/by-label/SEVYN_DATA
+if [ -e "$data_label" ]; then
+  candidate=$(readlink -f "$data_label" 2>/dev/null || true)
+  case "$candidate" in
+    /dev/*)
+      if [ -b "$candidate" ]; then data_device="$candidate"; fi
+      ;;
+  esac
+fi
+fsck_status=0
+if [ -n "$data_device" ]; then
+  e2fsck -p "$data_device" >/tmp/sevyn-fsck.log 2>&1 || fsck_status=$?
+  if [ "$fsck_status" -le 1 ] && mount -t ext4 "$data_device" /var/lib/sevynos; then
+    log_marker "SEVYN_PERSISTENT_STORAGE_MOUNTED device=$data_device"
+    log_marker "SEVYN_QEMU_PERSISTENT_STORAGE_MOUNTED"
+  fi
+fi
+if ! mountpoint -q /var/lib/sevynos; then
+  mount -t tmpfs tmpfs /var/lib/sevynos
+  log_marker "SEVYN_VOLATILE_STORAGE_ACTIVE"
+  log_marker "SEVYN_QEMU_PERSISTENCE_RECOVERY_MODE"
+fi
+log_marker "SEVYN_QEMU_INPUT_DEVICES_INITIALIZED"
+mkdir -p /run/wpa_supplicant /etc/udhcpc
+chmod 0755 /run/wpa_supplicant
+if [ ! -f /etc/resolv.conf ] || [ ! -s /etc/resolv.conf ]; then
+  printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf 2>/dev/null || true
+fi
+rfkill unblock all 2>/dev/null || true
+
+for _wait in $(seq 1 12); do
+  found_wifi=0
+  for p in /sys/class/net/*; do
+    if [ -d "$p/wireless" ] || [ -d "$p/phy80211" ]; then found_wifi=1; break; fi
+  done
+  if [ "$found_wifi" -eq 1 ]; then break; fi
+  sleep 0.5
+done
+
+for wifi_path in /sys/class/net/*; do
+  if [ -d "$wifi_path/wireless" ] || [ -d "$wifi_path/phy80211" ]; then
+    wifi_name=${wifi_path##*/}
+    echo "SEVYN_WIFI_DEVICE_INITIALIZED interface=$wifi_name"
+    wifi_config=/var/lib/sevynos/wpa_supplicant.conf
+    if [ ! -f "$wifi_config" ]; then
+      cp /etc/sevynos/wpa_supplicant.conf "$wifi_config"
+      chmod 0600 "$wifi_config"
+    fi
+    rfkill unblock wifi 2>/dev/null || true
+    ip link set "$wifi_name" up 2>/dev/null || true
+    if wpa_supplicant -B -i "$wifi_name" -c "$wifi_config" -D nl80211,wext >/tmp/sevyn-wpa.log 2>&1; then
+      echo "SEVYN_WIFI_SERVICE_READY interface=$wifi_name"
+      (
+        for _attempt in $(seq 1 20); do
+          if wpa_cli -p /run/wpa_supplicant -i "$wifi_name" status 2>/dev/null | grep -q '^wpa_state=COMPLETED$'; then
+            if udhcpc -q -n -t 3 -T 3 -s /usr/share/udhcpc/default.script -i "$wifi_name" >/tmp/sevyn-wifi-dhcp.log 2>&1; then
+              echo "SEVYN_NETWORK_READY interface=$wifi_name"
+            fi
+            break
+          fi
+          sleep 1
+        done
+      ) &
+    else
+      echo "SEVYN_WIFI_SERVICE_FAILED interface=$wifi_name"
+    fi
+  fi
+done
+for interface_path in /sys/class/net/*; do
+  interface_name=${interface_path##*/}
+  if [ "$interface_name" = "lo" ]; then continue; fi
+  if [ -d "$interface_path/wireless" ] || [ -d "$interface_path/phy80211" ]; then continue; fi
+  ip link set "$interface_name" up 2>/dev/null || continue
+  if udhcpc -q -n -t 2 -T 3 -s /usr/share/udhcpc/default.script -i "$interface_name" >/tmp/sevyn-dhcp.log 2>&1; then
+    echo "SEVYN_NETWORK_READY interface=$interface_name"
+    break
+  fi
+done
+/usr/sbin/acpid
+echo $$ > /run/sevynos-init.pid
+case " $(cat /proc/cmdline) " in
+  *" sevyn.installer=1 "*)
+    log_marker "SEVYN_INSTALLER_STARTING"
+    exec /usr/local/bin/sevyn-installer
+    ;;
+esac
+if /usr/local/bin/start-genesis; then
+  log_marker "SEVYN_QEMU_FULL_DESKTOP_BOOTED"
+  sync
+  poweroff -f
+else
+  log_marker "SEVYN_QEMU_BOOT_FAILED"
+  if grep -q 'sevyn.live=1' /proc/cmdline && ! grep -q 'sevyn.full-desktop-smoke=1' /proc/cmdline; then
+    echo "=== SevynOS Startup Failed ==="
+    echo "Weston log:"
+    tail -n 40 /var/log/weston.log 2>/dev/null || true
+    echo "Genesis log:"
+    tail -n 40 /var/log/genesis.log 2>/dev/null || true
+    if grep -q 'sevyn.debug=1' /proc/cmdline; then
+      echo "=== SevynOS Debug Mode Active: Dropping to diagnostic shell ==="
+      /bin/sh
+    else
+      echo "SevynOS security boundary: Emergency root shell is disabled in appliance mode."
+      echo "System will power down in 5 seconds. To debug, boot with 'sevyn.debug=1'."
+      sleep 5
+    fi
+  fi
+  sync
+  poweroff -f
+fi

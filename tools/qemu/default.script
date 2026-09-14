@@ -1,0 +1,76 @@
+#!/bin/sh
+# BusyBox udhcpc script for SevynOS
+
+[ -z "$1" ] && echo "Error: should be called from udhcpc" && exit 1
+
+RESOLV_CONF="/etc/resolv.conf"
+[ -n "$broadcast" ] && BROADCAST="broadcast $broadcast"
+[ -n "$mask" ] && NETMASK="netmask $mask"
+
+case "$1" in
+  deconfig)
+    if command -v ip >/dev/null 2>&1; then
+      ip -4 addr flush dev "$interface" 2>/dev/null || true
+    else
+      ifconfig "$interface" 0.0.0.0 2>/dev/null || true
+    fi
+    ;;
+
+  renew|bound)
+    if command -v ip >/dev/null 2>&1; then
+      prefix=24
+      if [ -n "$mask" ]; then
+        p=0
+        old_ifs=$IFS
+        IFS=.
+        for octet in $mask; do
+          case "$octet" in
+            255) p=$((p + 8)) ;;
+            254) p=$((p + 7)) ;;
+            252) p=$((p + 6)) ;;
+            248) p=$((p + 5)) ;;
+            240) p=$((p + 4)) ;;
+            224) p=$((p + 3)) ;;
+            192) p=$((p + 2)) ;;
+            128) p=$((p + 1)) ;;
+            *) ;;
+          esac
+        done
+        IFS=$old_ifs
+        if [ "$p" -gt 0 ]; then prefix=$p; fi
+      fi
+      ip -4 addr replace "$ip/$prefix" $BROADCAST dev "$interface" 2>/dev/null || \
+      ip -4 addr add "$ip/$prefix" $BROADCAST dev "$interface" 2>/dev/null || \
+      ifconfig "$interface" "$ip" $NETMASK $BROADCAST 2>/dev/null || true
+    else
+      ifconfig "$interface" "$ip" $NETMASK $BROADCAST 2>/dev/null || true
+    fi
+
+    if [ -n "$router" ]; then
+      for r in $router; do
+        if command -v ip >/dev/null 2>&1; then
+          ip -4 route replace default via "$r" dev "$interface" 2>/dev/null || \
+          ip -4 route add default via "$r" dev "$interface" 2>/dev/null || true
+        else
+          route add default gw "$r" dev "$interface" 2>/dev/null || true
+        fi
+        break
+      done
+    fi
+
+    tmp_resolv="/tmp/resolv.conf.$$"
+    rm -f "$tmp_resolv"
+    [ -n "$domain" ] && echo "search $domain" >> "$tmp_resolv"
+    if [ -n "$dns" ]; then
+      for i in $dns; do
+        echo "nameserver $i" >> "$tmp_resolv"
+      done
+    fi
+    echo "nameserver 1.1.1.1" >> "$tmp_resolv"
+    echo "nameserver 8.8.8.8" >> "$tmp_resolv"
+    mv -f "$tmp_resolv" "$RESOLV_CONF"
+    chmod 644 "$RESOLV_CONF"
+    ;;
+esac
+
+exit 0

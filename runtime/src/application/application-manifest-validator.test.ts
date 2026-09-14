@@ -9,7 +9,7 @@ function createManifest(
 ): Record<string, unknown> {
   return {
     manifestVersion: 1,
-    id: "dev.sevyn.hello",
+    id: "org.sevynos.hello",
     name: "Hello SevynOS",
     version: "0.1.0",
     hostId: "sevyn.host.javascript",
@@ -26,7 +26,7 @@ describe("validateApplicationManifest", () => {
 
     const expected: ApplicationManifest = {
       manifestVersion: 1,
-      id: "dev.sevyn.hello",
+      id: "org.sevynos.hello",
       name: "Hello SevynOS",
       version: "0.1.0",
       hostId: "sevyn.host.javascript",
@@ -56,12 +56,47 @@ describe("validateApplicationManifest", () => {
 
   it("rejects an unsupported manifest version", () => {
     const manifest = createManifest({
-      manifestVersion: 2,
+      manifestVersion: 3,
     });
 
     expect(() => {
       validateApplicationManifest(manifest);
     }).toThrow('Invalid application manifest field "manifestVersion"');
+  });
+
+  it("accepts a manifest version 2 with permissions, signature, and system", () => {
+    const manifest = createManifest({
+      manifestVersion: 2,
+      permissions: ["filesystem.read", "notifications"],
+      signature: "sevyn-release-sig-123",
+      system: true,
+    });
+
+    const validated = validateApplicationManifest(manifest);
+    expect(validated.manifestVersion).toBe(2);
+    expect(validated.permissions).toEqual(["filesystem.read", "notifications"]);
+    expect(validated.signature).toBe("sevyn-release-sig-123");
+    expect(validated.system).toBe(true);
+  });
+
+  it("rejects invalid permissions (non-array or invalid entries)", () => {
+    expect(() => {
+      validateApplicationManifest(createManifest({ permissions: "not-an-array" }));
+    }).toThrow('Invalid application manifest field "permissions"');
+
+    expect(() => {
+      validateApplicationManifest(createManifest({ permissions: [""] }));
+    }).toThrow('Invalid application manifest field "permissions"');
+  });
+
+  it("rejects invalid signature or system types", () => {
+    expect(() => {
+      validateApplicationManifest(createManifest({ signature: 123 }));
+    }).toThrow('Invalid application manifest field "signature"');
+
+    expect(() => {
+      validateApplicationManifest(createManifest({ system: "true" }));
+    }).toThrow('Invalid application manifest field "system"');
   });
 
   it("rejects a missing manifest version", () => {

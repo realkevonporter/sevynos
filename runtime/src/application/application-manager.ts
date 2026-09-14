@@ -7,7 +7,13 @@ import type { ApplicationHostRegistry } from "./application-host-registry.js";
 import type { ApplicationId } from "./application-manifest.js";
 import type { ApplicationPackageRegistry } from "./application-package-registry.js";
 import { ApplicationSession, type ApplicationSessionId } from "./application-session.js";
+import type { ApplicationSessionState } from "./application-session-state.js";
 import type { SessionRegistry } from "./session-registry.js";
+
+import {
+  ApplicationInstaller,
+  type InstalledApplicationRecord,
+} from "./application-installer.js";
 
 export interface ApplicationManagerDependencies {
   readonly applications: ApplicationPackageRegistry;
@@ -15,6 +21,9 @@ export interface ApplicationManagerDependencies {
   readonly sessions: SessionRegistry;
   readonly createSessionId: () => ApplicationSessionId;
   readonly now: () => Date;
+  readonly installer?: ApplicationInstaller | undefined;
+  readonly appsDirectory?: string | undefined;
+  readonly pristineDirectory?: string | undefined;
 }
 
 export interface StartApplicationResult {
@@ -22,12 +31,16 @@ export interface StartApplicationResult {
   readonly host: ApplicationHostStartResult;
 }
 
+const STOPPABLE_SESSION_STATES: ReadonlySet<ApplicationSessionState> =
+  new Set<ApplicationSessionState>(["foreground", "background", "suspended"]);
+
 export class ApplicationManager {
   readonly #applications: ApplicationPackageRegistry;
   readonly #hosts: ApplicationHostRegistry;
   readonly #sessions: SessionRegistry;
   readonly #createSessionId: () => ApplicationSessionId;
   readonly #now: () => Date;
+  readonly #installer: ApplicationInstaller;
 
   public constructor(dependencies: ApplicationManagerDependencies) {
     this.#applications = dependencies.applications;
@@ -35,6 +48,65 @@ export class ApplicationManager {
     this.#sessions = dependencies.sessions;
     this.#createSessionId = dependencies.createSessionId;
     this.#now = dependencies.now;
+    this.#installer =
+      dependencies.installer ??
+      new ApplicationInstaller({
+        packages: this.#applications,
+        appsDirectory: dependencies.appsDirectory,
+        pristineDirectory: dependencies.pristineDirectory,
+        onBeforeUninstall: async (appId) => {
+          await this.stopAllForApplication(appId);
+        },
+      });
+  }
+
+  public get installer(): ApplicationInstaller {
+    return this.#installer;
+  }
+
+  public async install(
+    bundleData: Uint8Array | string,
+    options?: { source?: "pristine" | "bundle" | "sideload" },
+  ): Promise<InstalledApplicationRecord> {
+    return this.#installer.install(bundleData, options);
+  }
+
+  public async uninstall(applicationId: ApplicationId): Promise<void> {
+    await this.#installer.uninstall(applicationId);
+  }
+
+  public async listInstalled(): Promise<readonly InstalledApplicationRecord[]> {
+    return this.#installer.listInstalled();
+  }
+
+  public async getInstalled(
+    id: ApplicationId,
+  ): Promise<InstalledApplicationRecord | undefined> {
+    return this.#installer.getInstalled(id);
+  }
+
+  public async installFromPristine(
+    applicationId: ApplicationId,
+  ): Promise<InstalledApplicationRecord> {
+    return this.#installer.installFromPristine(applicationId);
+  }
+
+  public async stopAllForApplication(applicationId: ApplicationId): Promise<void> {
+    const activeSessions = this.#sessions
+      .list()
+      .filter(
+        (s) =>
+          s.application.manifest.id === applicationId &&
+          STOPPABLE_SESSION_STATES.has(s.state),
+      );
+
+    for (const session of activeSessions) {
+      await this.stop(session.id);
+    }
+  }
+
+  public getSession(sessionId: ApplicationSessionId): ApplicationSession | undefined {
+    return this.#sessions.get(sessionId);
   }
 
   public async start(applicationId: ApplicationId): Promise<StartApplicationResult> {
@@ -56,25 +128,22 @@ export class ApplicationManager {
 
     this.#sessions.add(createdSession);
 
-    const startingSession = createdSession.transitionTo("starting");
-
-    this.#sessions.update(startingSession);
+    const startingSession = this.#sessions.transition(createdSession.id, "starting");
 
     try {
       const hostResult = await host.start(startingSession);
 
-      const runningSession = startingSession.transitionTo("running");
-
-      this.#sessions.update(runningSession);
+      const foregroundSession = this.#sessions.transition(
+        startingSession.id,
+        "foreground",
+      );
 
       return {
-        session: runningSession,
+        session: foregroundSession,
         host: hostResult,
       };
     } catch (error: unknown) {
-      const failedSession = startingSession.transitionTo("failed");
-
-      this.#sessions.update(failedSession);
+      this.#sessions.transition(startingSession.id, "failed");
 
       throw error;
     }
@@ -87,8 +156,12 @@ export class ApplicationManager {
       throw new ApplicationSessionNotFoundError(sessionId);
     }
 
-    if (session.state !== "running") {
-      throw new InvalidApplicationSessionStateError(sessionId, session.state);
+    if (!STOPPABLE_SESSION_STATES.has(session.state)) {
+      throw new InvalidApplicationSessionStateError(
+        sessionId,
+        session.state,
+        "be stopped",
+      );
     }
 
     const hostId = session.application.manifest.hostId;
@@ -99,24 +172,62 @@ export class ApplicationManager {
       throw new ApplicationHostNotFoundError(hostId);
     }
 
-    const stoppingSession = session.transitionTo("stopping");
-
-    this.#sessions.update(stoppingSession);
+    const stoppingSession = this.#sessions.transition(session.id, "stopping");
 
     try {
       await host.stop(stoppingSession);
 
-      const stoppedSession = stoppingSession.transitionTo("stopped");
-
-      this.#sessions.update(stoppedSession);
-
-      return stoppedSession;
+      return this.#sessions.transition(stoppingSession.id, "stopped");
     } catch (error: unknown) {
-      const failedSession = stoppingSession.transitionTo("failed");
-
-      this.#sessions.update(failedSession);
+      this.#sessions.transition(stoppingSession.id, "failed");
 
       throw error;
     }
+  }
+
+  public foreground(sessionId: ApplicationSessionId): ApplicationSession {
+    return this.#transitionSession(
+      sessionId,
+      "foreground",
+      ["background", "suspended"],
+      "enter the foreground",
+    );
+  }
+
+  public background(sessionId: ApplicationSessionId): ApplicationSession {
+    return this.#transitionSession(
+      sessionId,
+      "background",
+      ["foreground", "suspended"],
+      "enter the background",
+    );
+  }
+
+  public suspend(sessionId: ApplicationSessionId): ApplicationSession {
+    return this.#transitionSession(
+      sessionId,
+      "suspended",
+      ["background"],
+      "be suspended",
+    );
+  }
+
+  #transitionSession(
+    sessionId: ApplicationSessionId,
+    targetState: ApplicationSessionState,
+    allowedStates: readonly ApplicationSessionState[],
+    operation: string,
+  ): ApplicationSession {
+    const session = this.#sessions.get(sessionId);
+
+    if (!session) {
+      throw new ApplicationSessionNotFoundError(sessionId);
+    }
+
+    if (!allowedStates.includes(session.state)) {
+      throw new InvalidApplicationSessionStateError(sessionId, session.state, operation);
+    }
+
+    return this.#sessions.transition(sessionId, targetState);
   }
 }

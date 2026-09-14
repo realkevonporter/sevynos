@@ -9,7 +9,7 @@ import { ApplicationPackageRegistry } from "./application-package-registry.js";
 const helloApplicationPackage: ApplicationPackage = {
   manifest: {
     manifestVersion: 1,
-    id: "dev.sevyn.hello",
+    id: "org.sevynos.hello",
     name: "Hello SevynOS",
     version: "0.1.0",
     hostId: "sevyn.host.javascript",

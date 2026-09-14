@@ -1,0 +1,19 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "paths": {
+      "@sevynos/runtime": ["../../runtime/src/index.ts"],
+      "@sevynos/genesis": ["../../graphics/genesis/src/index.ts"],
+      "@sevynos/react-native-host": ["../../hosts/react-native/src/index.ts"],
+      "@sevynos/shell-core": ["../core/src/index.ts"],
+      "@sevynos/system-applications": ["../../applications/shell/index.ts"],
+      "@sevynos/system-applications/mobile": ["../../applications/shell/mobile.ts"]
+    },
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true
+    // "baseUrl": "."
+  },
+  "include": ["**/*.ts", "**/*.tsx"]
+}

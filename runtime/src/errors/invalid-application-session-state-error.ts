@@ -1,10 +1,18 @@
+import type { ApplicationSessionId } from "../application/application-session.js";
 import type { ApplicationSessionState } from "../application/application-session-state.js";
-import { RuntimeError } from "./runtime-error.js";
 
-export class InvalidApplicationSessionStateError extends RuntimeError {
-  public readonly code = "INVALID_APPLICATION_SESSION_STATE" as const;
+export class InvalidApplicationSessionStateError extends Error {
+  public readonly code = "INVALID_APPLICATION_SESSION_STATE";
 
-  public constructor(sessionId: string, state: ApplicationSessionState) {
-    super(`Application session "${sessionId}" cannot be stopped from state "${state}".`);
+  public constructor(
+    sessionId: ApplicationSessionId,
+    state: ApplicationSessionState,
+    operation: string,
+  ) {
+    super(
+      `Application session "${sessionId}" cannot ${operation} from state "${state}".`,
+    );
+
+    this.name = "InvalidApplicationSessionStateError";
   }
 }

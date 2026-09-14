@@ -40,9 +40,9 @@ describe("ApplicationHostRegistry", () => {
 
     registry.register(firstHost);
 
-    expect(() => registry.register(secondHost)).toThrow(
-      'Application host "sevyn.host.test" is already registered.',
-    );
+    expect(() => {
+      registry.register(secondHost);
+    }).toThrow('Application host "sevyn.host.test" is already registered.');
   });
 
   it("lists registered hosts", () => {

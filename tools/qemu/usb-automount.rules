@@ -1,0 +1,3 @@
+# SevynOS USB storage auto-mount
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_BUS}=="usb", RUN+="/usr/local/bin/sevyn-usb-mount %k"
+ACTION=="remove", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", RUN+="/usr/local/bin/sevyn-usb-unmount %k"

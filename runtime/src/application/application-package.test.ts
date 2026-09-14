@@ -7,7 +7,7 @@ describe("ApplicationPackage", () => {
     const applicationPackage: ApplicationPackage = {
       manifest: {
         manifestVersion: 1,
-        id: "dev.sevyn.hello",
+        id: "org.sevynos.hello",
         name: "Hello SevynOS",
         version: "0.1.0",
         hostId: "sevyn.host.javascript",
@@ -30,6 +30,6 @@ describe("ApplicationPackage", () => {
       },
     };
 
-    expect(applicationPackage.manifest.id).toBe("dev.sevyn.hello");
+    expect(applicationPackage.manifest.id).toBe("org.sevynos.hello");
   });
 });

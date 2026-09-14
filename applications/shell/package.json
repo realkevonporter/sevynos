@@ -1,0 +1,43 @@
+{
+  "name": "@sevynos/system-applications",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Independent system applications and built-in device profiles for SevynOS shells.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./desktop": {
+      "types": "./dist/desktop.d.ts",
+      "import": "./dist/desktop.js"
+    },
+    "./mobile": {
+      "types": "./dist/mobile.d.ts",
+      "import": "./dist/mobile.js"
+    },
+    "./components": {
+      "types": "./dist/components.d.ts",
+      "import": "./dist/components.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "clean": "rm -rf dist coverage *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@sevynos/shell-core": "workspace:*",
+    "react": "^19.2.8",
+    "react-native": "0.85.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

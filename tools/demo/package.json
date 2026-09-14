@@ -1,0 +1,23 @@
+{
+  "name": "@sevynos/demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A minimal runtime and JavaScript-host integration demo.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --build",
+    "build:workspace": "turbo run build --filter=@sevynos/demo...",
+    "start": "pnpm build:workspace && node dist/demo.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "clean": "rm -rf dist coverage *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@sevynos/javascript-host": "workspace:*",
+    "@sevynos/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

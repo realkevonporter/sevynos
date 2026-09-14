@@ -1,0 +1,16 @@
+name: Linux native host
+on:
+  push:
+    paths: ["hosts/linux/**", ".github/workflows/linux-native.yml"]
+  pull_request:
+    paths: ["hosts/linux/**", ".github/workflows/linux-native.yml"]
+jobs:
+  wayland:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and test native Wayland client
+        run: docker build --tag sevynos-wayland-smoke hosts/linux/native
+      - name: Present a real frame under headless Weston
+        run: docker run --rm sevynos-wayland-smoke

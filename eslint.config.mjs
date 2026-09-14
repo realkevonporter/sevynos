@@ -1,18 +1,28 @@
 import eslint from "@eslint/js";
-import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
     ignores: [
-      "**/dist/**",
-      "**/build/**",
-      "**/generated/**",
-      "**/coverage/**",
-      "**/node_modules/**",
-      "**/.turbo/**",
+      "**/.cache/**",
       "**/.expo/**",
-      "third_party/**",
+      "**/.next/**",
+      "**/.parcel-cache/**",
+      "**/.pnpm-store/**",
+      "**/.pytest_cache/**",
+      "**/.ruff_cache/**",
+      "**/.turbo/**",
+      "**/__pycache__/**",
+      "**/build/**",
+      "**/coverage/**",
+      "**/DerivedData/**",
+      "**/dist/**",
+      "**/generated/**",
+      "**/node_modules/**",
+      "**/out/**",
+      "**/Pods/**",
+      "**/release/**",
+      "**/target/**",
     ],
   },
 
@@ -22,78 +32,75 @@ export default tseslint.config(
   ...tseslint.configs.stylisticTypeChecked,
 
   {
-    files: ["runtime/**/*.ts", "runtime/**/*.tsx"],
+    files: [
+      "runtime/src/**/*.ts",
+      "graphics/*/src/**/*.ts",
+      "input/src/**/*.ts",
+      "hosts/*/src/**/*.ts",
+      "frameworks/*/src/**/*.ts",
+      "shell/core/src/**/*.ts",
+      "shell/desktop/src/**/*.ts",
+      "applications/shell/**/*.ts",
+      "applications/shell/**/*.tsx",
+      "applications/*/src/**/*.ts",
+      "applications/*/src/**/*.tsx",
+      "sdk/*/src/**/*.ts",
+      "sdk/*/src/**/*.tsx",
+      "tools/*/src/**/*.ts",
+    ],
 
     languageOptions: {
       parserOptions: {
-        project: ["./runtime/tsconfig.json", "./runtime/tsconfig.test.json"],
+        projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
-
-      globals: {
-        ...globals.node,
-      },
-    },
-
-    rules: {
-      "@typescript-eslint/consistent-type-imports": [
-        "error",
-        {
-          prefer: "type-imports",
-          fixStyle: "inline-type-imports",
-        },
-      ],
-
-      "@typescript-eslint/no-import-type-side-effects": "error",
-      "@typescript-eslint/no-floating-promises": "error",
-      "@typescript-eslint/no-misused-promises": "error",
-      "@typescript-eslint/switch-exhaustiveness-check": "error",
-      "@typescript-eslint/explicit-function-return-type": "error",
-      "@typescript-eslint/no-confusing-void-expression": "off",
     },
   },
 
   {
-    files: ["shell/**/*.ts", "shell/**/*.tsx"],
+    files: ["shell/mobile/src/**/*.ts", "shell/mobile/src/**/*.tsx"],
 
     languageOptions: {
       parserOptions: {
-        project: ["./shell/tsconfig.json"],
+        projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
-
-      globals: {
-        ...globals.browser,
-        ...globals.es2021,
-      },
-    },
-
-    rules: {
-      "@typescript-eslint/consistent-type-imports": [
-        "error",
-        {
-          prefer: "type-imports",
-          fixStyle: "inline-type-imports",
-        },
-      ],
-
-      "@typescript-eslint/no-import-type-side-effects": "error",
-      "@typescript-eslint/no-floating-promises": "error",
-      "@typescript-eslint/no-misused-promises": "error",
-      "@typescript-eslint/switch-exhaustiveness-check": "error",
-      "@typescript-eslint/explicit-function-return-type": "error",
-      "@typescript-eslint/no-confusing-void-expression": "off",
     },
   },
 
   {
-    files: ["**/*.js", "**/*.mjs", "**/*.cjs"],
+    files: ["**/*.js", "**/*.mjs"],
     extends: [tseslint.configs.disableTypeChecked],
-
-    languageOptions: {
-      globals: {
-        ...globals.node,
-      },
+  },
+  {
+    files: ["applications/**/*.{ts,tsx}", "examples/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: [
+                "@sevynos/react-native/internal",
+                "@sevynos/react-native/internal/*",
+              ],
+              message: "Applications may use only the public @sevynos/react-native API.",
+            },
+            {
+              group: [
+                "@sevynos/runtime",
+                "@sevynos/runtime/*",
+                "@sevynos/desktop-host",
+                "@sevynos/desktop-host/*",
+                "electron",
+                "node:*",
+              ],
+              message:
+                "Sevyn applications cannot import host or unrestricted runtime APIs.",
+            },
+          ],
+        },
+      ],
     },
   },
 );

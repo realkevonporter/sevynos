@@ -2,7 +2,16 @@ import { RuntimeError } from "./runtime-error.js";
 import type { RuntimeErrorCode } from "./runtime-error-code.js";
 
 export type ApplicationManifestField =
-  "manifestVersion" | "id" | "name" | "version" | "hostId" | "entrypoint" | "manifest";
+  | "manifestVersion"
+  | "id"
+  | "name"
+  | "version"
+  | "hostId"
+  | "entrypoint"
+  | "permissions"
+  | "signature"
+  | "system"
+  | "manifest";
 
 export class InvalidApplicationManifestError extends RuntimeError {
   public readonly code: RuntimeErrorCode = "INVALID_APPLICATION_MANIFEST";

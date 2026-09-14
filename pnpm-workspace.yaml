@@ -1,19 +1,22 @@
 packages:
   - "runtime"
-  - "shell"
+  - "graphics/*"
+  - "input"
+  - "shell/*"
   - "hosts/*"
+  - "frameworks/*"
   - "sdk/*"
   - "services/*"
-  - "packages/*"
   - "tools/*"
   - "applications/*"
-  - "examples/*"
 
 allowBuilds:
+  electron: true
+  electron-winstaller: false
   esbuild: true
 
 catalog:
-  "@types/node": "^24.0.0"
+  "@types/node": "^24.13.3"
   "tsx": "^4.0.0"
-  "typescript": "^5.0.0"
+  "typescript": "^5.9.3"
   "vitest": "^3.0.0"

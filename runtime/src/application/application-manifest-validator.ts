@@ -21,7 +21,17 @@ export function validateApplicationManifest(input: unknown): ApplicationManifest
     );
   }
 
-  const { manifestVersion, id, name, version, hostId, entrypoint } = input;
+  const {
+    manifestVersion,
+    id,
+    name,
+    version,
+    hostId,
+    entrypoint,
+    permissions,
+    signature,
+    system,
+  } = input;
 
   validateManifestVersion(manifestVersion);
   validateApplicationId(id);
@@ -29,6 +39,9 @@ export function validateApplicationManifest(input: unknown): ApplicationManifest
   validateApplicationVersion(version);
   validateHostId(hostId);
   validateEntrypoint(entrypoint);
+  validatePermissions(permissions);
+  validateSignature(signature);
+  validateSystem(system);
 
   return {
     manifestVersion,
@@ -37,6 +50,11 @@ export function validateApplicationManifest(input: unknown): ApplicationManifest
     version,
     hostId,
     entrypoint,
+    ...(permissions !== undefined
+      ? { permissions: Object.freeze([...permissions]) }
+      : {}),
+    ...(signature !== undefined ? { signature } : {}),
+    ...(system !== undefined ? { system } : {}),
   };
 }
 
@@ -46,11 +64,51 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validateManifestVersion(
   value: unknown,
-): asserts value is typeof APPLICATION_MANIFEST_VERSION {
-  if (typeof value !== "number" || value !== APPLICATION_MANIFEST_VERSION) {
+): asserts value is typeof APPLICATION_MANIFEST_VERSION | 1 {
+  if (value !== 1 && value !== APPLICATION_MANIFEST_VERSION) {
     throw new InvalidApplicationManifestError(
       "manifestVersion",
       `unsupported manifest version ${String(value)}.`,
+    );
+  }
+}
+
+function validatePermissions(
+  value: unknown,
+): asserts value is readonly string[] | undefined {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    throw new InvalidApplicationManifestError(
+      "permissions",
+      "application permissions must be an array.",
+    );
+  }
+  for (const item of value) {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      throw new InvalidApplicationManifestError(
+        "permissions",
+        "permission entries must be non-empty strings.",
+      );
+    }
+  }
+}
+
+function validateSignature(value: unknown): asserts value is string | undefined {
+  if (value === undefined) return;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new InvalidApplicationManifestError(
+      "signature",
+      "application signature must be a non-empty string.",
+    );
+  }
+}
+
+function validateSystem(value: unknown): asserts value is boolean | undefined {
+  if (value === undefined) return;
+  if (typeof value !== "boolean") {
+    throw new InvalidApplicationManifestError(
+      "system",
+      "application system flag must be a boolean.",
     );
   }
 }

@@ -6,7 +6,7 @@ import { ApplicationSession, type ApplicationSessionId } from "./application-ses
 const helloApplicationPackage: ApplicationPackage = {
   manifest: {
     manifestVersion: 1,
-    id: "dev.sevyn.hello",
+    id: "org.sevynos.hello",
     name: "Hello SevynOS",
     version: "0.1.0",
     hostId: "sevyn.host.javascript",
@@ -50,11 +50,8 @@ describe("ApplicationSession", () => {
     const session = createSession();
 
     expect(session.id).toBe("session-1");
-
     expect(session.application).toBe(helloApplicationPackage);
-
     expect(session.state).toBe("created");
-
     expect(session.createdAt).toBe(defaultCreatedAt);
   });
 
@@ -94,25 +91,43 @@ describe("ApplicationSession", () => {
     expect(startingSession.createdAt).toBe(createdSession.createdAt);
   });
 
-  it("supports the normal session lifecycle", () => {
+  it("supports the normal foreground lifecycle", () => {
     const created = createSession();
 
     const starting = created.transitionTo("starting");
 
-    const running = starting.transitionTo("running");
+    const foreground = starting.transitionTo("foreground");
 
-    const stopping = running.transitionTo("stopping");
+    const background = foreground.transitionTo("background");
+
+    const restored = background.transitionTo("foreground");
+
+    const stopping = restored.transitionTo("stopping");
 
     const stopped = stopping.transitionTo("stopped");
 
     expect(stopped.state).toBe("stopped");
   });
 
+  it("supports suspending a background session", () => {
+    const created = createSession();
+
+    const starting = created.transitionTo("starting");
+
+    const foreground = starting.transitionTo("foreground");
+
+    const background = foreground.transitionTo("background");
+
+    const suspended = background.transitionTo("suspended");
+
+    expect(suspended.state).toBe("suspended");
+  });
+
   it("rejects invalid transitions", () => {
     const session = createSession();
 
     expect(() => {
-      session.transitionTo("running");
-    }).toThrow('Invalid application session transition: "created" → "running".');
+      session.transitionTo("foreground");
+    }).toThrow('Invalid application session transition: "created" → "foreground".');
   });
 });

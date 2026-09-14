@@ -1,0 +1,51 @@
+{
+  "name": "@expo/vector-icons",
+  "version": "14.0.0",
+  "private": true,
+  "description": "Expo vector icons compatibility shim for SevynOS React Native",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./MaterialCommunityIcons": {
+      "types": "./dist/MaterialCommunityIcons.d.ts",
+      "import": "./dist/MaterialCommunityIcons.js"
+    },
+    "./Ionicons": {
+      "types": "./dist/Ionicons.d.ts",
+      "import": "./dist/Ionicons.js"
+    },
+    "./Feather": {
+      "types": "./dist/Feather.d.ts",
+      "import": "./dist/Feather.js"
+    },
+    "./FontAwesome": {
+      "types": "./dist/FontAwesome.d.ts",
+      "import": "./dist/FontAwesome.js"
+    },
+    "./AntDesign": {
+      "types": "./dist/AntDesign.d.ts",
+      "import": "./dist/AntDesign.js"
+    },
+    "./MaterialIcons": {
+      "types": "./dist/MaterialIcons.d.ts",
+      "import": "./dist/MaterialIcons.js"
+    },
+    "./Entypo": {
+      "types": "./dist/Entypo.d.ts",
+      "import": "./dist/Entypo.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@sevynos/react-native": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

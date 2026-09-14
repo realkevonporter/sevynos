@@ -1,0 +1,40 @@
+{
+  "name": "@sevynos/metro",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Metro bundler integration and configuration for SevynOS React Native",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    }
+  },
+  "bin": {
+    "sevyn-metro": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.29.7",
+    "@expo/vector-icons": "workspace:*",
+    "@react-native/babel-preset": "0.85.3",
+    "@sevynos/react-native": "workspace:*",
+    "metro": "^0.87.0",
+    "metro-config": "^0.87.0",
+    "metro-core": "^0.87.0",
+    "metro-runtime": "^0.87.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -6,6 +6,10 @@
 **Applies to:** Project Sevyn / SevynOS
 **Architecture version:** v0.1 Genesis
 
+> The monorepository decision remains active. The original directory layout is
+> superseded by ADR-0012 where implementation experience established clearer
+> responsibility boundaries.
+
 ---
 
 # Context

@@ -1,0 +1,80 @@
+# Desktop audit — 2026-09-06
+
+This is a source audit, not a claim of hardware validation. The user's successful
+bare-metal boot is the protected baseline. The worktree already contains extensive
+uncommitted changes. No reset, rebase, boot rewrite, or host migration is planned.
+
+## Existing architecture and implementation status
+
+| Area                                       | Evidence and current boundary                                                                                                                          | Status / gaps                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Boot / kernel / init                       | `tools/qemu/{grub.cfg,init,start-genesis.sh,build-image.sh}`, `kernel/README.md`                                                                       | Linux + initramfs; BusyBox init mounts virtual filesystems, starts udev/networking/Weston/Genesis. Optional labeled `SEVYN_DATA`; otherwise volatile. Preserve this sequence.                                                                                                                                                                                   |
+| Graphics / display server                  | Rust `hosts/linux/native/src/main.rs`, `hosts/linux/src/wayland.ts`, `graphics/core`                                                                   | Weston DRM kiosk hosts Genesis's fullscreen Wayland surface. RGBA software rendering, shared-memory buffers, binary frame pipe, frame acknowledgements and bounded backlog exist. Genesis is not yet a standalone DRM compositor; do not replace working Weston for cosmetic reasons.                                                                           |
+| React Native bootstrap / native bridge     | `frameworks/react-native/src/{reconciler,application-runtime,primitives,layout}.ts`, `hosts/react-native`, `shell/desktop/src/application-surfaces.ts` | Custom React renderer/native command surfaces and Yoga plus a separate mobile shell. Live UI is not simply the TSX shell preview. Stable typed services exist in `frameworks/react-native/src/services.ts`.                                                                                                                                                     |
+| Runtime / applications / IPC               | `runtime/src/application`, `shell/desktop/src/*coordinator*`, `frameworks/react-native/src/worker-*`, Linux process executor                           | Manifest/package/session registries, lifecycle, isolated third-party child processes, bounded JSON control IPC, shutdown and recovery exist. First-party app exceptions and shell watchdog still need fault-injection verification.                                                                                                                             |
+| Windows / multitasking                     | `graphics/core/src/window`, `shell/desktop/src/desktop-window-layout.ts`, `input/src/input/window-*`                                                   | Focus, z-order, move, resize, minimize, maximize, restore, workspaces, display geometry and persistence are implemented with tests. Full task switcher, edge preview and animation behavior require end-to-end inspection/validation.                                                                                                                           |
+| Pointer / keyboard / touch                 | `input/src/input`, Rust Wayland seat/input handlers                                                                                                    | Pointer capture, focus routing, drag/resize, cursor model, XKB keyboard and wheel foundations exist. Native bridge uses a fixed arrow surface; contextual cursor models are not proof of native shape switching. Touch event types do not establish working touchscreen/gesture hardware. Central configurable shortcuts and complete text selection remain P0. |
+| Filesystem / MIME / Trash                  | `hosts/linux/src/linux-file-system.ts`, `FilesApplication` in `system-applications.ts`                                                                 | Real Node filesystem operations under a user root, standard folders, MIME table and Trash exist. Unsafe prefix confinement, symlink traversal, name collisions, metadata trust and swallowed failures are P0. No filesystem watcher contract. Files UI exposes Trash internals rather than a complete restore flow.                                             |
+| Clipboard / drag/drop / menus              | Wayland clipboard adapter + Rust data device, SDK text clipboard                                                                                       | Real text clipboard for brokered applications. No complete shared file/image clipboard, cut transaction, typed drag payload service or general accessible context-menu framework established. Window dragging is separate from file drag/drop.                                                                                                                  |
+| Shell / desktop / dock / launcher          | `desktop-scene-composer.ts`, desktop settings/persistence, `applications/shell`                                                                        | Scene composition, pinned IDs and launcher/application registration exist. Desktop filesystem editing, pin gestures, menu semantics and keyboard traversal need completion. TSX status-bar preview contains literal “Connected” and “100%”; do not confuse it with native hardware-backed scene state.                                                          |
+| Clock / status                             | scene composer and TSX status bar                                                                                                                      | Clock timer exists; date/time preference/calendar work remains. Native scene subscribes to battery, audio and network. Subscription existence alone is not hardware event integration.                                                                                                                                                                          |
+| Wi-Fi / Ethernet / DNS                     | `linux-wireless-network-service.ts`, init `wpa_supplicant` and `udhcpc`                                                                                | Real command-backed Wi-Fi scan/connect/disconnect, security classification, DHCP and firmware setup exist. Baseline Linux test suite: 47 passed, 1 Wi-Fi test failed (empty scan result). Forget-network, roaming, credentials and event lifecycle need further verification.                                                                                   |
+| Audio / microphone                         | `linux-audio-service.ts`, init ALSA setup                                                                                                              | Real amixer calls but service reports availability even when probing fails; optimistic state updates and mixer-enable mistaken for headphone presence. No complete routing/mixing/input/hotplug/media pipeline.                                                                                                                                                 |
+| Battery / power / suspend                  | `linux-battery-service.ts`, shutdown adapter, init ACPI scripts                                                                                        | Sysfs battery reads and shutdown exist. 0% incorrectly becomes 100%; missing capacity also defaults to full. Polling is 15 seconds. Battery health, multi-battery aggregation, sleep/resume/authenticated lock/log-out not established.                                                                                                                         |
+| Camera / Bluetooth / hardware hotplug      | init udev + video/audio modules                                                                                                                        | Loading a driver is not a camera service. No complete camera/microphone capture or Bluetooth pairing service found. No shared typed hotplug service connecting every UI.                                                                                                                                                                                        |
+| Browser                                    | `chromium-browser-engine.ts`, `EngineBrowserApplication`                                                                                               | Mature Chromium engine behind an interface, but headless screenshot capture after actions, delayed input, temporary profile, disabled GPU and muted audio are not daily-driver browsing. Tabs/download/upload/permissions/media and persistent profile need real integration. No TLS-bypass flag observed.                                                      |
+| Core apps                                  | `frameworks/react-native/src/system-applications.ts`, `applications/notes`                                                                             | Files, Browser, Text Editor, Notes, Settings, System Monitor, Console/IDE/gallery exist. Console is not proof of PTY terminal. Full word processor, Photos, video, camera, calculator, calendar and clock apps remain missing or unverified.                                                                                                                    |
+| Media / screenshots / recording / printing | no complete service contract in `services.ts`                                                                                                          | Native capture/codec/permission/storage lifecycle needed before UI. Chromium PNG decoder is not a multimedia framework.                                                                                                                                                                                                                                         |
+| Settings / themes / motion / materials     | desktop settings and persistence; framework tokens/motion/animated; shell theme                                                                        | Shared tokens, reduced-motion setting, animation primitives and persisted geometry exist. No proof of real backdrop blur in the software renderer; visual alpha/shadows are not blur.                                                                                                                                                                           |
+| Fonts / accessibility / text / scrolling   | font-atlas builder, software renderer, native roles/text/scroll primitives                                                                             | Raster glyph rendering, labels/roles and scroll primitives exist. Full shaping/IME/accessibility bridge/keyboard editing/RTL behavior needs implementation and validation.                                                                                                                                                                                      |
+| Notifications / permissions / accounts     | framework notification service, `runtime/src/security`                                                                                                 | Bounded notification history and capability policy exist. Persistent permission review, user authentication, secure sessions and revocation across every native path need audit. `services/{files,notifications,permissions}` are placeholders, not active daemons.                                                                                             |
+| Health / logs / recovery                   | Linux proc service, runtime diagnostics, desktop recovery, boot markers                                                                                | Real proc reads have fabricated fallback metrics. Isolated application recovery exists; whole-shell watchdog/recovery not proven. No complete update/package-signing/rollback/installer/account/encryption infrastructure established.                                                                                                                          |
+
+## Highest-risk findings
+
+1. Filesystem data loss and root escape through path/symlink/Trash operations.
+2. Hardware UI can claim success using fabricated defaults; service commands can
+   fail after local state already changed.
+3. Init grants broad raw-device permissions and runs privileged orchestration.
+   Before shipping third-party device APIs, introduce narrow brokers and actual
+   OS-level identity isolation. Do not change boot ownership blindly.
+4. Browser screenshot transport and disabled audio cannot meet modern media UX.
+5. Existing live persistence is optional: reboot persistence cannot be promised on
+   volatile live media. Preserve the explicit labeled-volume policy.
+6. Large existing uncommitted diff and stale roadmap docs obscure ownership and
+   regressions. Record test baselines and verify changes independently.
+
+## Roadmap and acceptance gates
+
+- **P0:** prevent filesystem escape/data loss; honest capability/error reporting;
+  safe Files Trash/restore flow; central text/file clipboard and shortcuts;
+  complete input/cursor/focus/menu/window lifecycle; app crash isolation; working
+  persisted settings and storage status. Then real browser surface/input/download
+  integration, audio routing, authentication/lock and secure service boundaries.
+  Gates: temporary-directory filesystem tests, input/window integration tests,
+  native compositor smoke, exact-image BIOS/UEFI boot and physical-device checks.
+- **P1:** filesystem events, search/Open With/thumbnails, desktop file semantics,
+  persistent dock gestures, native context menus, hardware-event subscriptions,
+  device selectors, camera/capture/media stack, real PTY, core editing/viewing apps,
+  accessibility bridge and keyboard-only flows. Gate each with actual service
+  action plus UI integration; no placeholder controls.
+- **P2:** animation/material tuning after services work, multi-display hardware
+  arrangements, advanced editor formats, printing, network settings, package
+  updates with rollback, localization and power profiles.
+- **P3:** independent DRM/KMS compositor if evidence warrants it, advanced GPU
+  effects, hibernation, encryption/installer architecture, extensible indexing,
+  advanced media and platform integrations.
+
+## First implementation scope
+
+Repair native filesystem confinement and Trash data safety, battery readings and
+honest ALSA state without changing boot, native bridge, dependencies or public
+service signatures. Existing React application consumers continue through the
+same injected service interfaces. These changes are an initial P0 increment,
+not completion of the desktop milestone.
+
+Filesystem path checks in TypeScript are defense in depth, not a race-proof
+sandbox against a hostile process changing directories between syscalls. A
+future native broker needs descriptor-relative operations with kernel-enforced
+resolution and no-replace moves. Do not claim that path validation substitutes
+for that lower-level boundary.

@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "composite": true,
+    "tsBuildInfoFile": "dist/desktop-shell.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../runtime" },
+    { "path": "../../graphics/core" },
+    { "path": "../../input" },
+    { "path": "../../frameworks/react-native" },
+    { "path": "../../applications/notes" },
+    { "path": "../../applications/browser" },
+    { "path": "../../applications/camera" },
+    { "path": "../../applications/music" },
+    { "path": "../../applications/settings" },
+    { "path": "../../applications/files" },
+    { "path": "../../applications/terminal" },
+    { "path": "../../applications/system-monitor" },
+    { "path": "../../applications/welcome" },
+    { "path": "../core" },
+    { "path": "../../applications/shell" }
+  ],
+  "exclude": ["dist", "node_modules"]
+}

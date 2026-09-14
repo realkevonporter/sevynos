@@ -1,0 +1,36 @@
+name: Proposal
+description: Propose a feature or architectural change
+title: "[Proposal]: "
+labels: [proposal, needs-discussion]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or developer problem should SevynOS solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Affected platform boundaries
+      description: Runtime, React Native, shell, graphics, input, Linux services, security, or other areas.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Compatibility
+      options:
+        - label: I considered existing applications, public APIs, and boot paths.
+          required: true

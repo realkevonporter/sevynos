@@ -1,0 +1,26 @@
+{
+  "name": "@sevynos/sdk",
+  "version": "0.1.0",
+  "description": "Public application SDK for the SevynOS platform.",
+  "license": "Apache-2.0",
+  "homepage": "https://sevynos.org",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "lint": "eslint src --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist coverage *.tsbuildinfo"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -7,7 +7,7 @@ import { SessionRegistry } from "./session-registry.js";
 const helloApplicationPackage: ApplicationPackage = {
   manifest: {
     manifestVersion: 1,
-    id: "dev.sevyn.hello",
+    id: "org.sevynos.hello",
     name: "Hello SevynOS",
     version: "0.1.0",
     hostId: "sevyn.host.javascript",
@@ -135,5 +135,35 @@ describe("SessionRegistry", () => {
     registry.clear();
 
     expect(registry.list()).toEqual([]);
+  });
+
+  it("transitions and replaces an immutable session", () => {
+    const registry = new SessionRegistry();
+
+    const createdSession = new ApplicationSession({
+      id: "session-1",
+      application: helloApplicationPackage,
+      createdAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+
+    registry.add(createdSession);
+
+    const startingSession = registry.transition(createdSession.id, "starting");
+
+    expect(startingSession).not.toBe(createdSession);
+
+    expect(createdSession.state).toBe("created");
+
+    expect(startingSession.state).toBe("starting");
+
+    expect(registry.get(createdSession.id)).toBe(startingSession);
+  });
+
+  it("rejects transitioning an unknown session", () => {
+    const registry = new SessionRegistry();
+
+    expect(() => {
+      registry.transition("missing-session", "starting");
+    }).toThrow('Application session "missing-session" is not registered.');
   });
 });

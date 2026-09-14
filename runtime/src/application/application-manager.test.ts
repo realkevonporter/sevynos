@@ -15,7 +15,7 @@ const UNKNOWN_HOST_ID = "sevyn.host.unknown";
 const helloApplicationPackage: ApplicationPackage = {
   manifest: {
     manifestVersion: 1,
-    id: "dev.sevyn.hello",
+    id: "org.sevynos.hello",
     name: "Hello SevynOS",
     version: "0.1.0",
     hostId: JAVASCRIPT_HOST_ID,
@@ -24,18 +24,18 @@ const helloApplicationPackage: ApplicationPackage = {
 
   files: {
     "index.js": `
-        export async function start(context) {
-          context.log("Hello from SevynOS!");
+      export async function start(context) {
+        context.log("Hello from SevynOS!");
 
-          return {
-            title: "Hello SevynOS"
-          };
-        }
+        return {
+          title: "Hello SevynOS"
+        };
+      }
 
-        export async function stop(context) {
-          context.log("Goodbye from SevynOS!");
-        }
-      `,
+      export async function stop(context) {
+        context.log("Goodbye from SevynOS!");
+      }
+    `,
   },
 };
 
@@ -131,6 +131,36 @@ function createManager(host: ApplicationHost): {
   };
 }
 
+function createSessionInState(
+  state: "created" | "foreground" | "background" | "suspended",
+): ApplicationSession {
+  const created = new ApplicationSession({
+    id: "session-1",
+    application: helloApplicationPackage,
+    createdAt: new Date("2026-07-26T12:00:00.000Z"),
+  });
+
+  if (state === "created") {
+    return created;
+  }
+
+  const starting = created.transitionTo("starting");
+
+  const foreground = starting.transitionTo("foreground");
+
+  if (state === "foreground") {
+    return foreground;
+  }
+
+  const background = foreground.transitionTo("background");
+
+  if (state === "background") {
+    return background;
+  }
+
+  return background.transitionTo("suspended");
+}
+
 describe("ApplicationManager", () => {
   it("starts an application through its configured host", async () => {
     const host = new TestApplicationHost();
@@ -143,7 +173,7 @@ describe("ApplicationManager", () => {
 
     expect(result.session.application).toStrictEqual(helloApplicationPackage);
 
-    expect(result.session.state).toBe("running");
+    expect(result.session.state).toBe("foreground");
 
     expect(result.session.createdAt).toEqual(new Date("2026-07-26T12:00:00.000Z"));
 
@@ -161,8 +191,8 @@ describe("ApplicationManager", () => {
 
     const { manager, sessions } = createManager(host);
 
-    await expect(manager.start("dev.sevyn.missing")).rejects.toThrow(
-      'Application "dev.sevyn.missing" is not registered.',
+    await expect(manager.start("org.sevynos.missing")).rejects.toThrow(
+      'Application "org.sevynos.missing" is not registered.',
     );
 
     expect(sessions.list()).toEqual([]);
@@ -180,7 +210,6 @@ describe("ApplicationManager", () => {
 
       manifest: {
         ...helloApplicationPackage.manifest,
-
         hostId: UNKNOWN_HOST_ID,
       },
     };
@@ -216,7 +245,7 @@ describe("ApplicationManager", () => {
     expect(sessions.get("session-1")?.state).toBe("failed");
   });
 
-  it("stops a running application through its host", async () => {
+  it("stops a foreground application through its host", async () => {
     const host = new TestApplicationHost();
 
     const { manager, sessions } = createManager(host);
@@ -234,6 +263,27 @@ describe("ApplicationManager", () => {
     expect(sessions.get(stopped.id)).toBe(stopped);
   });
 
+  it.each(["foreground", "background", "suspended"] as const)(
+    "stops an application from the %s state",
+    async (state) => {
+      const host = new TestApplicationHost();
+
+      const { manager, sessions } = createManager(host);
+
+      const session = createSessionInState(state);
+
+      sessions.add(session);
+
+      const stopped = await manager.stop(session.id);
+
+      expect(host.stoppedSession?.state).toBe("stopping");
+
+      expect(stopped.state).toBe("stopped");
+
+      expect(sessions.get(session.id)).toBe(stopped);
+    },
+  );
+
   it("rejects an unknown session", async () => {
     const host = new TestApplicationHost();
 
@@ -246,18 +296,12 @@ describe("ApplicationManager", () => {
     expect(sessions.list()).toEqual([]);
   });
 
-  it("rejects stopping a session that is not running", async () => {
+  it("rejects stopping a session that is not active", async () => {
     const host = new TestApplicationHost();
 
     const { manager, sessions } = createManager(host);
 
-    const createdSession = new ApplicationSession({
-      id: "session-1",
-
-      application: helloApplicationPackage,
-
-      createdAt: new Date("2026-07-26T12:00:00.000Z"),
-    });
+    const createdSession = createSessionInState("created");
 
     sessions.add(createdSession);
 
@@ -280,5 +324,63 @@ describe("ApplicationManager", () => {
     );
 
     expect(sessions.get(started.session.id)?.state).toBe("failed");
+  });
+
+  it("moves a foreground application to the background", async () => {
+    const host = new TestApplicationHost();
+
+    const { manager, sessions } = createManager(host);
+
+    const started = await manager.start(helloApplicationPackage.manifest.id);
+
+    const background = manager.background(started.session.id);
+
+    expect(background.state).toBe("background");
+
+    expect(sessions.get(background.id)).toBe(background);
+
+    expect(started.session.state).toBe("foreground");
+  });
+
+  it("returns a background application to the foreground", async () => {
+    const host = new TestApplicationHost();
+
+    const { manager } = createManager(host);
+
+    const started = await manager.start(helloApplicationPackage.manifest.id);
+
+    const background = manager.background(started.session.id);
+
+    const foreground = manager.foreground(background.id);
+
+    expect(foreground.state).toBe("foreground");
+  });
+
+  it("suspends a background application", async () => {
+    const host = new TestApplicationHost();
+
+    const { manager } = createManager(host);
+
+    const started = await manager.start(helloApplicationPackage.manifest.id);
+
+    const background = manager.background(started.session.id);
+
+    const suspended = manager.suspend(background.id);
+
+    expect(suspended.state).toBe("suspended");
+  });
+
+  it("rejects suspending a foreground application", async () => {
+    const host = new TestApplicationHost();
+
+    const { manager } = createManager(host);
+
+    const started = await manager.start(helloApplicationPackage.manifest.id);
+
+    expect(() => {
+      manager.suspend(started.session.id);
+    }).toThrow(
+      'Application session "session-1" cannot be suspended from state "foreground".',
+    );
   });
 });

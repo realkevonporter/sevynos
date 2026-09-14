@@ -11,6 +11,8 @@ import type {
   ApplicationSession,
   ApplicationSessionId,
 } from "./application/application-session.js";
+import type { ApplicationSessionState } from "./application/application-session-state.js";
+import type { InstalledApplicationRecord } from "./application/application-installer.js";
 import { SessionRegistry } from "./application/session-registry.js";
 import { InvalidApplicationPackageError } from "./errors/invalid-application-package-error.js";
 import { InvalidRuntimeStateError } from "./errors/invalid-runtime-state-error.js";
@@ -22,30 +24,31 @@ import type { RuntimeLogger } from "./logger.js";
 import { RUNTIME_IDENTITY } from "./runtime-identity.js";
 import { assertRuntimeTransition, type RuntimeState } from "./runtime-state.js";
 
-type RuntimeCrypto = {
-  readonly randomUUID?: () => string;
-};
+const STOPPABLE_APPLICATION_SESSION_STATES: ReadonlySet<ApplicationSessionState> =
+  new Set<ApplicationSessionState>(["foreground", "background", "suspended"]);
 
 function createDefaultSessionId(): ApplicationSessionId {
-  const runtimeGlobal = globalThis as typeof globalThis & {
-    readonly crypto?: RuntimeCrypto;
-  };
+  const cryptoObject = (
+    globalThis as {
+      crypto?: {
+        randomUUID?: () => string;
+      };
+    }
+  ).crypto;
 
-  const randomUUID = runtimeGlobal.crypto?.randomUUID;
-
-  if (typeof randomUUID === "function") {
-    return randomUUID.call(runtimeGlobal.crypto);
+  if (typeof cryptoObject?.randomUUID === "function") {
+    return cryptoObject.randomUUID();
   }
 
   return createFallbackSessionId();
 }
 
 function createFallbackSessionId(): ApplicationSessionId {
-  const timestamp = Date.now().toString(36);
-  const randomPartOne = Math.random().toString(36).slice(2);
-  const randomPartTwo = Math.random().toString(36).slice(2);
-
-  return `${timestamp}-${randomPartOne}-${randomPartTwo}`;
+  return [
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2),
+    Math.random().toString(36).slice(2),
+  ].join("-");
 }
 
 function getProcessId(): number | undefined {
@@ -64,6 +67,8 @@ export interface RuntimeOptions {
   readonly logger: RuntimeLogger;
   readonly createSessionId?: () => ApplicationSessionId;
   readonly now?: () => Date;
+  readonly appsDirectory?: string | undefined;
+  readonly pristineDirectory?: string | undefined;
 }
 
 export class SevynRuntime {
@@ -73,9 +78,11 @@ export class SevynRuntime {
   readonly #hosts: ApplicationHostRegistry;
   readonly #sessions: SessionRegistry;
   readonly #applicationManager: ApplicationManager;
+  readonly #listeners = new Set<() => void>();
 
   #state: RuntimeState = "created";
   #shutdownPromise: Promise<void> | undefined;
+  #version = 0;
 
   public constructor(options: RuntimeOptions) {
     this.#logger = options.logger;
@@ -92,11 +99,25 @@ export class SevynRuntime {
       sessions: this.#sessions,
       createSessionId: options.createSessionId ?? createDefaultSessionId,
       now: options.now ?? ((): Date => new Date()),
+      appsDirectory: options.appsDirectory,
+      pristineDirectory: options.pristineDirectory,
     });
   }
 
   public get state(): RuntimeState {
     return this.#state;
+  }
+
+  public subscribe(listener: () => void): () => void {
+    this.#listeners.add(listener);
+
+    return (): void => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  public getSnapshot(): number {
+    return this.#version;
   }
 
   public registerApplication(input: unknown): void {
@@ -113,6 +134,8 @@ export class SevynRuntime {
       version: input.manifest.version,
       hostId: input.manifest.hostId,
     });
+
+    this.#notify();
   }
 
   public unregisterApplication(applicationId: ApplicationId): boolean {
@@ -122,6 +145,8 @@ export class SevynRuntime {
       this.#logger.log("info", "application.unregistered", {
         applicationId,
       });
+
+      this.#notify();
     }
 
     return removed;
@@ -133,6 +158,8 @@ export class SevynRuntime {
     this.#logger.log("info", "application.host.registered", {
       hostId: host.id,
     });
+
+    this.#notify();
   }
 
   public unregisterApplicationHost(hostId: ApplicationHost["id"]): boolean {
@@ -142,6 +169,8 @@ export class SevynRuntime {
       this.#logger.log("info", "application.host.unregistered", {
         hostId,
       });
+
+      this.#notify();
     }
 
     return removed;
@@ -159,7 +188,10 @@ export class SevynRuntime {
       sessionId: result.session.id,
       hostId: result.session.application.manifest.hostId,
       hostInstanceId: result.host.instanceId,
+      sessionState: result.session.state,
     });
+
+    this.#notify();
 
     return result;
   }
@@ -175,7 +207,10 @@ export class SevynRuntime {
       applicationId: session.application.manifest.id,
       sessionId: session.id,
       hostId: session.application.manifest.hostId,
+      sessionState: session.state,
     });
+
+    this.#notify();
 
     return session;
   }
@@ -188,6 +223,53 @@ export class SevynRuntime {
 
   public listApplicationSessions(): readonly ApplicationSession[] {
     return this.#sessions.list();
+  }
+
+  public async installApplication(
+    bundleData: Uint8Array | string,
+    options?: { source?: "pristine" | "bundle" | "sideload" },
+  ): Promise<InstalledApplicationRecord> {
+    const record = await this.#applicationManager.install(bundleData, options);
+    this.#logger.log("info", "application.installed", {
+      applicationId: record.id,
+      version: record.version,
+      system: record.system,
+      installSource: record.installSource,
+    });
+    this.#notify();
+    return record;
+  }
+
+  public async uninstallApplication(applicationId: ApplicationId): Promise<void> {
+    await this.#applicationManager.uninstall(applicationId);
+    this.#logger.log("info", "application.uninstalled", {
+      applicationId,
+    });
+    this.#notify();
+  }
+
+  public async listInstalledApplications(): Promise<
+    readonly InstalledApplicationRecord[]
+  > {
+    return this.#applicationManager.listInstalled();
+  }
+
+  public async getInstalledApplication(
+    id: ApplicationId,
+  ): Promise<InstalledApplicationRecord | undefined> {
+    return this.#applicationManager.getInstalled(id);
+  }
+
+  public async installApplicationFromPristine(
+    applicationId: ApplicationId,
+  ): Promise<InstalledApplicationRecord> {
+    const record = await this.#applicationManager.installFromPristine(applicationId);
+    this.#logger.log("info", "application.installed.pristine", {
+      applicationId: record.id,
+      version: record.version,
+    });
+    this.#notify();
+    return record;
   }
 
   public async start(): Promise<void> {
@@ -212,6 +294,54 @@ export class SevynRuntime {
 
       throw error;
     }
+  }
+
+  public foregroundApplication(sessionId: ApplicationSessionId): ApplicationSession {
+    this.#assertStateForOperation("foreground application", ["running"]);
+
+    const session = this.#applicationManager.foreground(sessionId);
+
+    this.#logger.log("info", "application.foregrounded", {
+      applicationId: session.application.manifest.id,
+      sessionId: session.id,
+      state: session.state,
+    });
+
+    this.#notify();
+
+    return session;
+  }
+
+  public backgroundApplication(sessionId: ApplicationSessionId): ApplicationSession {
+    this.#assertStateForOperation("background application", ["running"]);
+
+    const session = this.#applicationManager.background(sessionId);
+
+    this.#logger.log("info", "application.backgrounded", {
+      applicationId: session.application.manifest.id,
+      sessionId: session.id,
+      state: session.state,
+    });
+
+    this.#notify();
+
+    return session;
+  }
+
+  public suspendApplication(sessionId: ApplicationSessionId): ApplicationSession {
+    this.#assertStateForOperation("suspend application", ["running"]);
+
+    const session = this.#applicationManager.suspend(sessionId);
+
+    this.#logger.log("info", "application.suspended", {
+      applicationId: session.application.manifest.id,
+      sessionId: session.id,
+      state: session.state,
+    });
+
+    this.#notify();
+
+    return session;
   }
 
   public stop(reason: string): Promise<void> {
@@ -278,7 +408,7 @@ export class SevynRuntime {
     const sessions = this.#sessions.list();
 
     for (const session of sessions) {
-      if (session.state !== "running") {
+      if (!STOPPABLE_APPLICATION_SESSION_STATES.has(session.state)) {
         continue;
       }
 
@@ -293,6 +423,7 @@ export class SevynRuntime {
         this.#logger.log("error", "application.stop.failed.during-runtime-shutdown", {
           sessionId: session.id,
           applicationId: session.application.manifest.id,
+          sessionState: session.state,
           error: this.#serializeError(error),
         });
       }
@@ -319,6 +450,8 @@ export class SevynRuntime {
       currentState: requestedState,
       ...context,
     });
+
+    this.#notify();
   }
 
   #assertStateForOperation(
@@ -330,6 +463,14 @@ export class SevynRuntime {
     }
 
     throw new InvalidRuntimeStateError(operation, this.#state, allowedStates);
+  }
+
+  #notify(): void {
+    this.#version += 1;
+
+    for (const listener of this.#listeners) {
+      listener();
+    }
   }
 
   #serializeError(error: unknown): Readonly<Record<string, unknown>> {

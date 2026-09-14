@@ -1,0 +1,33 @@
+{
+  "name": "@sevynos/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sevyn": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sevynos/metro": "workspace:*",
+    "@sevynos/react-native": "workspace:*",
+    "@sevynos/runtime": "workspace:*",
+    "@sevynos/sdk": "workspace:*",
+    "esbuild": "^0.25.0",
+    "hermes-compiler": "250829098.0.10"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
