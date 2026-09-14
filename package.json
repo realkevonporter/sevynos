@@ -27,7 +27,7 @@
     "typecheck": "turbo run typecheck",
     "test": "pnpm test:repository && turbo run test",
     "test:repository": "node --test tools/repository/*.test.mjs tools/qemu/*.test.mjs",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "sevyn": "node tools/cli/dist/cli.js",
     "desktop": "pnpm --filter @sevynos/desktop-host start",
     "desktop:dev": "pnpm --filter @sevynos/desktop-host dev",
