@@ -3,7 +3,7 @@
 > Open. Simple. Your code.
 
 [![Repository quality](https://github.com/realkevonporter/sevynos/actions/workflows/quality.yml/badge.svg)](https://github.com/realkevonporter/sevynos/actions/workflows/quality.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Project status](https://img.shields.io/badge/status-early%20development-f4b942.svg)](docs/roadmap/phase-1.md)
 
 SevynOS is an open computing platform built on Linux, TypeScript, and React
