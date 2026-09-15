@@ -117,6 +117,7 @@ Architecture changes should start with
 - Working boot paths and public contracts are changed deliberately.
 - A green typecheck is not device proof; claims should match the evidence.
 
-SevynOS is available under the [Apache License 2.0](LICENSE). Security issues
+SevynOS is available under the [GNU General Public License v3.0 or later](LICENSE).
+Third-party components retain their respective licenses. Security issues
 should be reported through the process in [SECURITY.md](SECURITY.md), not a
 public issue.

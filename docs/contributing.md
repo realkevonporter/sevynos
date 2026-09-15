@@ -7,6 +7,14 @@ design, accessibility review, hardware reports, and issue triage are all useful.
 By participating, you agree to follow the project
 [Code of Conduct](../CODE_OF_CONDUCT.md).
 
+## License
+
+SevynOS is licensed under the [GNU General Public License v3.0 or later](../LICENSE)
+(`GPL-3.0-or-later`). Contributions must be offered under those terms unless
+explicitly identified as third-party material with its own compatible license.
+Preserve third-party copyright notices and license texts; the project license
+does not replace dependency licenses.
+
 ## Before you start
 
 1. Search existing issues and discussions before opening a duplicate.

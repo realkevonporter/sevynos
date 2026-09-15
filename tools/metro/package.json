@@ -1,6 +1,7 @@
 {
   "name": "@sevynos/metro",
   "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
   "private": true,
   "description": "Metro bundler integration and configuration for SevynOS React Native",
   "type": "module",

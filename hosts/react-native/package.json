@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "The SevynOS host adapter for mounted React Native applications.",
-  "license": "Apache-2.0",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "exports": {
     ".": {

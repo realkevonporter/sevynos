@@ -1,6 +1,7 @@
 {
   "name": "@expo/vector-icons",
   "version": "14.0.0",
+  "license": "GPL-3.0-or-later",
   "private": true,
   "description": "Expo vector icons compatibility shim for SevynOS React Native",
   "type": "module",

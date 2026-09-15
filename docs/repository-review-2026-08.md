@@ -99,7 +99,9 @@ checkout repeatable without relying on a broad destructive command.
 - Removed redundant `.gitkeep` files where implemented packages now exist.
 - Corrected the malformed ADR-0010 filename and populated the permissions and
   capability-security decision.
-- Replaced the empty root license with the complete Apache License 2.0 text.
+- Replaced the empty root license with the complete Apache License 2.0 text at
+  the time of this review. The current project license is GPLv3 or later; see
+  the root [LICENSE](../LICENSE).
 - Retained deliberate roadmap boundaries under `services/`, `sdk/`, `tests/`,
   and `applications/settings/`; these are named responsibilities rather than
   miscellaneous buckets.

@@ -1,6 +1,7 @@
 {
   "name": "@sevynos/react-native",
   "version": "1.0.0",
+  "license": "GPL-3.0-or-later",
   "private": true,
   "description": "Host-independent React Native system framework and Sevyn Design Language.",
   "type": "module",
