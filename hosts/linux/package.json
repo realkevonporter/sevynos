@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@expo/vector-icons": "workspace:*",
+    "@sevynos/core-applications": "workspace:*",
     "@sevynos/desktop-shell": "workspace:*",
     "@sevynos/example-notes": "workspace:*",
     "@sevynos/graphics": "workspace:*",

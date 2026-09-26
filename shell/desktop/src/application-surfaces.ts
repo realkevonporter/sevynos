@@ -19,7 +19,6 @@ import {
   UnavailableBatteryService,
   UnavailableAudioService,
   UnavailableSystemService,
-  createCoreSystemApplication,
   type NativeBounds,
   type AccessibilityNode,
   type NativeRuntimeSnapshot,
@@ -33,8 +32,11 @@ import {
   type SevynSystemService,
   type SevynFileSystem,
   type SevynStudioService,
-  type AppManagerEntry,
 } from "@sevynos/react-native/internal";
+import {
+  createCoreSystemApplication,
+  type AppManagerEntry,
+} from "@sevynos/core-applications";
 import type { DesktopSettings } from "./desktop-settings.js";
 
 export interface WelcomeApplicationSurface {

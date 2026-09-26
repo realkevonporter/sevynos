@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  createCoreSystemApplication,
   SevynApplicationRuntime,
   SystemNotificationService,
   type AccessibilityNode,
 } from "@sevynos/react-native/internal";
+import { createCoreSystemApplication } from "@sevynos/core-applications";
 import { LinuxFileSystem } from "./linux-file-system.js";
 
 const settle = (): Promise<void> =>
