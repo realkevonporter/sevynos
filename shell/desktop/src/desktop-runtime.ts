@@ -891,6 +891,9 @@ export async function createDesktopRuntime(
       if (running !== undefined) await applications.closeWindow(running.windowId);
     },
   });
+  surfaces.configureSettingsUpdate((key, value) => {
+    settings.update({ [key]: value } as Partial<Omit<DesktopSettings, "version">>);
+  });
   if (options.launchDefaults !== false) {
     await applications.launch("org.sevynos.welcome");
     await applications.launch("org.sevynos.console");

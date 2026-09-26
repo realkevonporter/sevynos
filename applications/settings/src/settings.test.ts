@@ -75,21 +75,21 @@ describe("SettingsApplication", () => {
     );
   });
 
-  it("supports mobile hardware essential categories including display and biometrics", () => {
+  it("supports the rebuilt settings categories (no fabricated hardware sections)", () => {
     // Type and runtime exports check
     const categories: import("./index.js").SettingsCategory[] = [
       "appearance",
-      "display",
-      "biometrics",
       "network",
       "sound",
       "battery",
-      "storage",
       "applications",
       "shortcuts",
       "about",
     ];
-    expect(categories).toContain("display");
-    expect(categories).toContain("biometrics");
+    expect(categories).toContain("appearance");
+    expect(categories).toContain("network");
+    expect(categories).not.toContain("display");
+    expect(categories).not.toContain("biometrics");
+    expect(categories).not.toContain("storage");
   });
 });

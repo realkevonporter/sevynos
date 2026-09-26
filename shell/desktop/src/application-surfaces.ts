@@ -170,6 +170,7 @@ export class ApplicationSurfaceRegistry {
   readonly #isolatedTeardowns = new Map<GenesisWindowId, () => void>();
   #workerSnapshots: readonly ApplicationWorkerSnapshot[] = Object.freeze([]);
   #applicationManagement: ApplicationManagementController | undefined;
+  #onUpdateSetting: ((key: string, value: unknown) => void) | undefined;
 
   public constructor(
     onChange: ApplicationSurfaceListener,
@@ -217,6 +218,13 @@ export class ApplicationSurfaceRegistry {
     for (const [windowId, surface] of this.#surfaces) {
       if (surface.kind === "app-manager") this.#nativeSignatures.delete(windowId);
     }
+    this.#onChange();
+  }
+
+  public configureSettingsUpdate(
+    onUpdateSetting: (key: string, value: unknown) => void,
+  ): void {
+    this.#onUpdateSetting = onUpdateSetting;
     this.#onChange();
   }
 
@@ -757,6 +765,10 @@ export class ApplicationSurfaceRegistry {
           battery: this.#battery,
           audio: this.#audio,
           system: this.#system,
+          onUpdateSetting: this.#onUpdateSetting,
+          onUninstallApp: (appId: string) => {
+            void this.#applicationManagement?.terminate(appId);
+          },
         });
       case "system-monitor":
         return createElement(SystemMonitorApplication, {
