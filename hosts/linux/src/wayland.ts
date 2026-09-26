@@ -49,6 +49,7 @@ import type { NativeBridgeMessage } from "./native-ipc-protocol.js";
 import type { NativeBridgeTransport } from "./wayland-bridge.js";
 import { PointerEventCoalescer } from "./pointer-event-coalescer.js";
 import { PresentationFrameScheduler } from "./presentation-frame-scheduler.js";
+import { FrameMetrics } from "./frame-metrics.js";
 import {
   WaylandBridgeConnection,
   WaylandClipboardAdapter,
@@ -481,7 +482,13 @@ export async function startWaylandHost(
   const composer = new DesktopSceneComposer(runtime, undefined, () => {
     invalidate();
   });
-  const presenter = new WaylandFramePresenter(connection, marker);
+  // Debug-gated frame pipeline instrumentation (Phase 1). When enabled,
+  // the presenter records per-frame raster/damage/submit samples and a
+  // 1/sec SEVYN_PROBE_FRAMES line reports rolling fps, frame intervals,
+  // raster cost, damage area, pipe latency, and scheduler coalescing.
+  const frameMetrics =
+    process.env["SEVYN_FRAME_METRICS"] === "1" ? new FrameMetrics() : undefined;
+  const presenter = new WaylandFramePresenter(connection, marker, frameMetrics);
   presenter.initialize();
   presenter.setHardwareCursor(true);
   const planner = new DisplayRenderPlanner({
@@ -594,6 +601,7 @@ export async function startWaylandHost(
   });
   const unsubscribeFrames = connection.subscribe((message) => {
     if (message.type !== "frame-presented") return;
+    frameMetrics?.recordPresented(message.frameId, performance.now());
     frameScheduler.framePresented();
     if (!firstFramePresented) {
       firstFramePresented = true;
@@ -611,6 +619,20 @@ export async function startWaylandHost(
       traceFrames.delete(message.traceId);
     }
   });
+  if (frameMetrics !== undefined) {
+    const frameMetricsTimer = setInterval(() => {
+      const schedulerSnapshot = frameScheduler.snapshot;
+      console.log(
+        `SEVYN_PROBE_FRAMES ${JSON.stringify(
+          frameMetrics.summarize({
+            invalidationCount: schedulerSnapshot.invalidationCount,
+            submittedFrameCount: schedulerSnapshot.submittedFrameCount,
+          }),
+        )}`,
+      );
+    }, 1000);
+    frameMetricsTimer.unref();
+  }
   invalidate = (): void => {
     if (currentInputTraceId !== undefined) {
       traceRenderRequests.set(
