@@ -49,6 +49,7 @@ import type { NativeBridgeMessage } from "./native-ipc-protocol.js";
 import type { NativeBridgeTransport } from "./wayland-bridge.js";
 import { PointerEventCoalescer } from "./pointer-event-coalescer.js";
 import { PresentationFrameScheduler } from "./presentation-frame-scheduler.js";
+import { CARET_BLINK_PERIOD_MS } from "./software-frame-renderer.js";
 import { FrameMetrics } from "./frame-metrics.js";
 import {
   WaylandBridgeConnection,
@@ -497,6 +498,7 @@ export async function startWaylandHost(
   });
   let frames = 0;
   let latestScene: DesktopScene | undefined;
+  let latestSceneHasBlinkCommands = false;
   let firstFramePresented = false;
   let lastLayoutDiagnosticSignature: string | undefined;
   let lastLayoutViewportSignature: string | undefined;
@@ -569,6 +571,7 @@ export async function startWaylandHost(
   const executor = new GenesisFrameExecutor<DesktopScene>({
     createRenderPlans: () => {
       latestScene = composer.compose(viewport);
+      latestSceneHasBlinkCommands = sceneHasBlinkCommands(latestScene);
       emitLayoutDiagnostics(latestScene);
       return planner.createRenderPlans(latestScene);
     },
@@ -647,7 +650,26 @@ export async function startWaylandHost(
   };
   const unsubscribeRuntime = runtime.subscribe(invalidate);
   invalidate();
-  let nativePointerTargetWindowId: string | undefined;
+  // Caret blink driver (Phase 2 audit). The software rasterizer toggles
+  // `blink` material commands on a CARET_BLINK_PERIOD_MS phase grid anchored
+  // to the Unix epoch; this timer wakes the frame pipeline on every phase
+  // boundary while the composed scene contains a blink command, so a focused
+  // text caret visibly blinks even when nothing else invalidates the scene.
+  // The incremental renderer adds the caret regions to the frame damage on
+  // the phase flip. The timer is unref'd so it never keeps the host alive.
+  let blinkTimer: ReturnType<typeof setTimeout> | undefined;
+  const armBlinkTimer = (): void => {
+    const now = Date.now();
+    const delay = Math.max(1, CARET_BLINK_PERIOD_MS - (now % CARET_BLINK_PERIOD_MS));
+    blinkTimer = setTimeout(() => {
+      blinkTimer = undefined;
+      if (latestSceneHasBlinkCommands) invalidate();
+      armBlinkTimer();
+    }, delay);
+    blinkTimer.unref();
+  };
+  armBlinkTimer();
+  let nativePointerState: NativePointerDispatchState = NO_NATIVE_POINTER_TARGET;
 
   const handlePointerEvent = (event: PointerInputEvent): void => {
     if (event.type === "pointer-down") {
@@ -740,11 +762,11 @@ export async function startWaylandHost(
       buttons: buttonMask(event.buttons),
       pressure: event.pressure,
     });
-    nativePointerTargetWindowId = dispatchNativePointer(
+    nativePointerState = dispatchNativePointer(
       runtime,
       latestScene,
       event,
-      nativePointerTargetWindowId,
+      nativePointerState,
     );
     if (event.type === "pointer-down")
       connection.send({
@@ -849,6 +871,10 @@ export async function startWaylandHost(
     await persistence?.flush();
     await isolatedApplications?.shutdown();
     pointerCoalescer.close();
+    if (blinkTimer !== undefined) {
+      clearTimeout(blinkTimer);
+      blinkTimer = undefined;
+    }
     frameScheduler.stop();
     unsubscribePointer();
     unsubscribeWheel();
@@ -1172,12 +1198,28 @@ export function findNativePointerTarget(
   return topmost;
 }
 
+interface NativePointerDispatchState {
+  /**
+   * Window holding implicit pointer capture from pointer-down. While set,
+   * motion and release events route to this window even when the cursor
+   * leaves its bounds, so drags complete instead of sticking.
+   */
+  readonly capturedWindowId: string | undefined;
+  /** Last fresh hit-test target, used for hover enter/leave transitions. */
+  readonly hoveredWindowId: string | undefined;
+}
+
+const NO_NATIVE_POINTER_TARGET: NativePointerDispatchState = Object.freeze({
+  capturedWindowId: undefined,
+  hoveredWindowId: undefined,
+});
+
 function dispatchNativePointer(
   runtime: DesktopRuntime,
   scene: DesktopScene | undefined,
   event: PointerInputEvent,
-  previousWindowId: string | undefined,
-): string | undefined {
+  state: NativePointerDispatchState,
+): NativePointerDispatchState {
   const windowNodes =
     scene?.nodes.filter(
       (node): node is DesktopWindowSceneNode => node.kind === "desktop-window",
@@ -1216,31 +1258,74 @@ function dispatchNativePointer(
   };
 
   if (event.type === "pointer-cancel") {
-    if (previousWindowId !== undefined) {
-      runtime.surfaces.dispatchNativePointer(previousWindowId, "cancel", pointer);
-      runtime.surfaces.dispatchNativePointer(previousWindowId, "leave", pointer);
+    if (state.capturedWindowId !== undefined) {
+      runtime.surfaces.dispatchNativePointer(state.capturedWindowId, "cancel", pointer);
+      runtime.surfaces.dispatchNativePointer(state.capturedWindowId, "leave", pointer);
     }
-    return undefined;
+    return NO_NATIVE_POINTER_TARGET;
   }
 
-  // Native surface enter/leave events are boundary transitions, not motion events.
-  // Re-dispatching `enter` for every pointer move invalidates the application
-  // surface and forces its render commands to be rebuilt continuously.
-  if (targetWindowId !== previousWindowId) {
-    if (previousWindowId !== undefined)
-      runtime.surfaces.dispatchNativePointer(previousWindowId, "leave", pointer);
+  if (event.type === "pointer-down") {
+    // Native surface enter/leave events are boundary transitions, not motion
+    // events. Re-dispatching `enter` for every pointer move invalidates the
+    // application surface and forces its render commands to be rebuilt
+    // continuously.
+    if (state.hoveredWindowId !== undefined && state.hoveredWindowId !== targetWindowId)
+      runtime.surfaces.dispatchNativePointer(state.hoveredWindowId, "leave", pointer);
+    if (targetWindowId !== undefined) {
+      if (targetWindowId !== state.hoveredWindowId)
+        runtime.surfaces.dispatchNativePointer(targetWindowId, "enter", pointer);
+      runtime.surfaces.dispatchNativePointer(targetWindowId, "down", pointer);
+    }
+    // Pressing down captures the pointer to the target window; the matching
+    // release (or cancel) always returns here even if the cursor wandered off.
+    return { capturedWindowId: targetWindowId, hoveredWindowId: targetWindowId };
+  }
+
+  if (state.capturedWindowId !== undefined) {
+    if (event.type === "pointer-move") {
+      runtime.surfaces.dispatchNativePointer(state.capturedWindowId, "move", pointer);
+      return state;
+    }
+    // Pointer-down and pointer-cancel return above, so this is the release.
+    runtime.surfaces.dispatchNativePointer(state.capturedWindowId, "up", pointer);
+    // Release capture and settle hover where the cursor actually is.
+    if (targetWindowId !== state.capturedWindowId) {
+      runtime.surfaces.dispatchNativePointer(state.capturedWindowId, "leave", pointer);
+      if (targetWindowId !== undefined)
+        runtime.surfaces.dispatchNativePointer(targetWindowId, "enter", pointer);
+    }
+    return { capturedWindowId: undefined, hoveredWindowId: targetWindowId };
+  }
+
+  // No capture active: plain hover tracking.
+  if (targetWindowId !== state.hoveredWindowId) {
+    if (state.hoveredWindowId !== undefined)
+      runtime.surfaces.dispatchNativePointer(state.hoveredWindowId, "leave", pointer);
     if (targetWindowId !== undefined)
       runtime.surfaces.dispatchNativePointer(targetWindowId, "enter", pointer);
   }
 
-  if (targetWindowId !== undefined && event.type === "pointer-down")
-    runtime.surfaces.dispatchNativePointer(targetWindowId, "down", pointer);
-  else if (targetWindowId !== undefined && event.type === "pointer-up")
-    runtime.surfaces.dispatchNativePointer(targetWindowId, "up", pointer);
-  else if (targetWindowId !== undefined && event.type === "pointer-move")
+  if (targetWindowId !== undefined && event.type === "pointer-move")
     runtime.surfaces.dispatchNativePointer(targetWindowId, "move", pointer);
 
-  return targetWindowId;
+  return { capturedWindowId: undefined, hoveredWindowId: targetWindowId };
+}
+
+/**
+ * True when any window in the composed scene carries a `blink` material
+ * command (e.g. a focused text input caret). The compositor's blink timer
+ * uses this to decide whether a phase boundary needs a frame.
+ */
+function sceneHasBlinkCommands(scene: DesktopScene | undefined): boolean {
+  if (scene === undefined) return false;
+  return scene.nodes.some(
+    (node) =>
+      node.kind === "desktop-window" &&
+      node.nativeSurface?.commands.some(
+        (command) => command.kind === "material" && command.blink === true,
+      ) === true,
+  );
 }
 
 function findTargetWindowForWheel(

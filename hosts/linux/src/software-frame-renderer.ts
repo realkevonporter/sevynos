@@ -31,6 +31,17 @@ interface Bounds {
   readonly height: number;
 }
 export type FrameDamage = Bounds;
+/**
+ * Caret blink timing shared by the rasterizer, the damage tracker, and the
+ * compositor wake-up timer. `blink` material commands (e.g. the text input
+ * caret) are visible during phase 0 and hidden during phase 1 of each
+ * period, anchored to the Unix epoch so every layer agrees on the phase
+ * without extra signaling.
+ */
+export const CARET_BLINK_PERIOD_MS = 530;
+export function caretBlinkPhase(nowMs: number = Date.now()): 0 | 1 {
+  return Math.floor(nowMs / CARET_BLINK_PERIOD_MS) % 2 === 0 ? 0 : 1;
+}
 type DesktopCursorSceneNode = Extract<
   DesktopScene["nodes"][number],
   { readonly kind: "desktop-cursor" }
@@ -725,8 +736,8 @@ function drawNativeSurface(
         raster.popClip();
         break;
       case "material": {
-        // Skip rendering during blink-off phase (530ms cycle)
-        if (command.blink === true && Math.floor(Date.now() / 530) % 2 !== 0) break;
+        // Skip rendering during the blink-off phase of the caret blink cycle.
+        if (command.blink === true && caretBlinkPhase() !== 0) break;
         const opacity = command.opacity ?? 1;
         if (command.backdropBlur !== undefined && command.backdropBlur > 0) {
           raster.backdropBlur(

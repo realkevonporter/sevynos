@@ -558,6 +558,25 @@ describe("Sevyn React application runtime", () => {
     ).toMatchObject({ text: "abXcd" });
   });
 
+  it("marks the focused input caret as a blinking command", async () => {
+    const runtime = new SevynApplicationRuntime({ bounds });
+    runtime.mount(
+      NativeTextInput({
+        id: "blink-input",
+        role: "textbox",
+        defaultValue: "abc",
+        style: { width: 240, height: 40, fontSize: 15 },
+      }),
+    );
+    await settle();
+
+    runtime.dispatchPointer("down", { x: 29, y: 20, pointerId: 1, button: 0 });
+    const caret = runtime.snapshot.commands.find(
+      (command) => command.id === "blink-input.caret",
+    );
+    expect(caret).toMatchObject({ kind: "material", blink: true });
+  });
+
   it("bubbles pointer clicks on child text nodes up to the enclosing Pressable", async () => {
     let pressed = false;
     const runtime = new SevynApplicationRuntime({ bounds });

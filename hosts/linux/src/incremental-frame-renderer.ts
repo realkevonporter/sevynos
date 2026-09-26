@@ -3,6 +3,7 @@ import {
   type DesktopScene,
 } from "@sevynos/desktop-shell/internal";
 import {
+  caretBlinkPhase,
   drawDesktopCursor,
   renderDesktopBackground,
   renderDesktopScene,
@@ -26,6 +27,7 @@ export class IncrementalFrameRenderer {
   #width = 0;
   #height = 0;
   #includeCursor: boolean;
+  #lastBlinkPhase: 0 | 1 | undefined;
 
   public constructor(options: IncrementalFrameRendererOptions = {}) {
     this.#includeCursor = options.includeCursor ?? true;
@@ -63,7 +65,23 @@ export class IncrementalFrameRenderer {
     ) {
       canReuse = true;
       damage = calculateSceneDamage(previousScene, scene, width, height);
-      if (!this.#includeCursor && isCursorOnlyChange(previousScene, scene)) {
+      // A caret blink phase flip changes what the rasterizer draws for
+      // `blink` commands without changing the scene itself, so repaint
+      // their regions explicitly. This keeps the blink visible even when
+      // nothing else invalidates the scene.
+      const blinkPhase = caretBlinkPhase();
+      const blinkDamage =
+        this.#lastBlinkPhase !== undefined && blinkPhase !== this.#lastBlinkPhase
+          ? collectBlinkDamage(scene)
+          : [];
+      this.#lastBlinkPhase = blinkPhase;
+      if (blinkDamage.length > 0)
+        damage = mergeDamage([...damage, ...blinkDamage], width, height);
+      if (
+        blinkDamage.length === 0 &&
+        !this.#includeCursor &&
+        isCursorOnlyChange(previousScene, scene)
+      ) {
         this.#scene = scene;
         return Object.freeze({
           width,
@@ -105,7 +123,30 @@ export class IncrementalFrameRenderer {
     this.#backgroundSignature = undefined;
     this.#width = 0;
     this.#height = 0;
+    this.#lastBlinkPhase = undefined;
   }
+}
+
+/**
+ * Desktop-space damage regions for every `blink` material command in the
+ * scene (e.g. focused text input carets), translated from window-content
+ * local coordinates the same way the rasterizer positions them.
+ */
+export function collectBlinkDamage(scene: DesktopScene): FrameDamage[] {
+  const regions: FrameDamage[] = [];
+  for (const node of scene.nodes) {
+    if (node.kind !== "desktop-window" || node.nativeSurface === undefined) continue;
+    for (const command of node.nativeSurface.commands) {
+      if (command.kind !== "material" || command.blink !== true) continue;
+      regions.push({
+        x: node.contentBounds.x + command.bounds.x,
+        y: node.contentBounds.y + command.bounds.y,
+        width: command.bounds.width,
+        height: command.bounds.height,
+      });
+    }
+  }
+  return regions;
 }
 
 function desktopBackgroundSignature(scene: DesktopScene): string {
