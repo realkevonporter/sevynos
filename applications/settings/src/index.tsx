@@ -33,13 +33,7 @@ export const settingsManifest: SevynApplicationManifest = {
 };
 
 export type SettingsCategory =
-  | "appearance"
-  | "network"
-  | "sound"
-  | "battery"
-  | "applications"
-  | "shortcuts"
-  | "about";
+  "appearance" | "network" | "sound" | "battery" | "applications" | "shortcuts" | "about";
 
 export interface InstalledAppInfo {
   readonly id: string;
