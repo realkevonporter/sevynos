@@ -164,7 +164,7 @@ if [ "${SEVYN_HITTEST_PROBE:-0}" = "1" ]; then
   : > "$probe_log" 2>/dev/null || true
   tail -n +1 -f /tmp/genesis.log 2>/dev/null | while IFS= read -r line; do
     case "$line" in
-      SEVYN_PROBE_HITTEST\ *|*"TYPESCRIPT DISPLAY SIZE"*)
+      SEVYN_PROBE_HITTEST*|*"TYPESCRIPT DISPLAY SIZE"*)
         echo "$line" >> "$probe_log"
         ;;
     esac
