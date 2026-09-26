@@ -220,7 +220,7 @@ export function FilesApplication({
       await filesystem.moveToTrash(selectedPath);
       notifications?.show({
         title: "Moved to Trash",
-        message: `Moved ${selectedPath.split("/").pop()} to Trash`,
+        message: `Moved ${selectedPath.split("/").pop() ?? selectedPath} to Trash`,
       });
       void loadDirectory(currentPath);
     } catch {

@@ -747,53 +747,23 @@ export function TerminalApplication({
             outputLines = [
               {
                 id: nextLineId("out"),
-                text: "SevynOS System Doctor — Diagnostics & Integrity Report",
+                text: "SevynOS System Doctor — Diagnostics",
                 type: "info",
               },
               {
                 id: nextLineId("out"),
-                text: "  ✓ Genesis Window Server:    Operational (Wayland wl_surface/EGL active)",
+                text: `  • Installed Applications: ${String(apps.length)} apps in catalog`,
                 type: "output",
               },
               {
                 id: nextLineId("out"),
-                text: "  ✓ Render Protocol:          v1.0.0 (Borders, Shadows, Gradients, Blur enabled)",
+                text: `  • Protected System Apps: ${String(apps.filter((a) => a.system).length)} (shell, terminal)`,
                 type: "output",
               },
               {
                 id: nextLineId("out"),
-                text: "  ✓ App Sandbox Boundary:     Active (Node globals isolated, Hermes bytecode verified)",
+                text: "  • Note: Full system diagnostics require the host installer service.",
                 type: "output",
-              },
-              {
-                id: nextLineId("out"),
-                text: "  ✓ Console Security:         VT switching locked (VT_LOCKSWITCH 0x560B enforced)",
-                type: "output",
-              },
-              {
-                id: nextLineId("out"),
-                text: "  ✓ Kernel Integrity:         SysRq disabled (kernel.sysrq=0, sysrq_always_enabled=0)",
-                type: "output",
-              },
-              {
-                id: nextLineId("out"),
-                text: "  ✓ Failure Protection:       Emergency root shell disabled in appliance mode",
-                type: "output",
-              },
-              {
-                id: nextLineId("out"),
-                text: `  ✓ Installed Packages:       ${String(apps.length)} valid packages verified in registry`,
-                type: "output",
-              },
-              {
-                id: nextLineId("out"),
-                text: `  ✓ Pristine Store:           ${String(PRISTINE_PACKAGES.size)} recovery packages available in /usr/share/sevyn/pristine/`,
-                type: "output",
-              },
-              {
-                id: nextLineId("out"),
-                text: "Overall Health: OPTIMAL (No security escapes or integrity faults found)",
-                type: "success",
               },
             ];
             break;

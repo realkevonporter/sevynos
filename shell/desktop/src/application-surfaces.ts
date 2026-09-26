@@ -751,6 +751,14 @@ export class ApplicationSurfaceRegistry {
       case "console":
         return createElement(TerminalApplication, {
           filesystem: this.#filesystem,
+          installedApps: (this.#applicationManagement?.list() ?? []).map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            version: entry.version,
+            permissions: entry.permissions,
+            system:
+              entry.id === "org.sevynos.shell" || entry.id === "org.sevynos.terminal",
+          })),
           onInstallApp: (target: string) => Promise.resolve(`Installed ${target}`),
           onUninstallApp: async (appId: string) => {
             await this.#applicationManagement?.terminate(appId);
