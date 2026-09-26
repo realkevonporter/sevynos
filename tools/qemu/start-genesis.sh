@@ -19,6 +19,12 @@ case " $(cat /proc/cmdline) " in
     echo SEVYN_QEMU_FOCUS_TRACE_ENABLED
     ;;
 esac
+case " $(cat /proc/cmdline) " in
+  *" sevyn.hittest-probe=1 "*)
+    export SEVYN_HITTEST_PROBE=1
+    echo SEVYN_HITTEST_PROBE_ENABLED
+    ;;
+esac
 echo $$ > "$runtime_dir/start-genesis.pid"
 
 # Inhibit Linux virtual terminal switching (Ctrl+Alt+Fx)
@@ -149,6 +155,22 @@ if [ "${SEVYN_FOCUS_TRACE:-0}" = "1" ] && [ -c /dev/ttyS0 ]; then
   done &
   genesis_log_tail_pid=$!
 fi
+probe_log_tail_pid=""
+if [ "${SEVYN_HITTEST_PROBE:-0}" = "1" ]; then
+  # Persist the click-through probe output where it can be retrieved after
+  # the run: /var/lib/sevynos is the SEVYN_DATA volume when one is attached,
+  # tmpfs otherwise. Boot with: sevyn.hittest-probe=1
+  probe_log=/var/lib/sevynos/hittest-probe.log
+  : > "$probe_log" 2>/dev/null || true
+  tail -n +1 -f /tmp/genesis.log 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      SEVYN_PROBE_HITTEST\ *|*"TYPESCRIPT DISPLAY SIZE"*)
+        echo "$line" >> "$probe_log"
+        ;;
+    esac
+  done &
+  probe_log_tail_pid=$!
+fi
 node /opt/sevynos/genesis-wayland.mjs > /tmp/genesis.log 2>&1 &
 genesis_pid=$!
 echo "$genesis_pid" > "$runtime_dir/genesis.pid"
@@ -158,6 +180,10 @@ controlled_shutdown() {
   if [ -n "$genesis_log_tail_pid" ]; then
     kill "$genesis_log_tail_pid" 2>/dev/null || true
     wait "$genesis_log_tail_pid" 2>/dev/null || true
+  fi
+  if [ -n "$probe_log_tail_pid" ]; then
+    kill "$probe_log_tail_pid" 2>/dev/null || true
+    wait "$probe_log_tail_pid" 2>/dev/null || true
   fi
   kill "$weston_pid" 2>/dev/null || true
   wait "$weston_pid" 2>/dev/null || true
@@ -185,6 +211,10 @@ wait "$genesis_pid" || genesis_exit=$?
 if [ -n "$genesis_log_tail_pid" ]; then
   kill "$genesis_log_tail_pid" 2>/dev/null || true
   wait "$genesis_log_tail_pid" 2>/dev/null || true
+fi
+if [ -n "$probe_log_tail_pid" ]; then
+  kill "$probe_log_tail_pid" 2>/dev/null || true
+  wait "$probe_log_tail_pid" 2>/dev/null || true
 fi
 kill "$weston_pid" 2>/dev/null || true
 wait "$weston_pid" 2>/dev/null || true

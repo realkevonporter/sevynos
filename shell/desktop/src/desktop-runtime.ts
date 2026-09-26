@@ -25,6 +25,7 @@ import {
   WindowResizeRuntime,
   createKeyboardInputEvent,
   createPointerInputEvent,
+  type PointerFocusControllerEventListener,
   type PointerInputEvent,
 } from "@sevynos/input";
 
@@ -151,6 +152,13 @@ export interface CreateDesktopRuntimeOptions {
   readonly filesystem?: SevynFileSystem | undefined;
   readonly studio?: SevynStudioService | undefined;
   readonly createBrowserEngine?: (() => SevynBrowserEngine) | undefined;
+  /**
+   * Temporary diagnostic: when true, every pointer-down logs a
+   * SEVYN_PROBE_HITTEST line with the pointer position, the selected
+   * hit-test window, and every known window's bounds/z-index/state.
+   * Enable on bare metal with SEVYN_HITTEST_PROBE=1.
+   */
+  readonly hitTestProbe?: boolean | undefined;
 }
 
 export type DesktopRuntimeListener = () => void;
@@ -720,6 +728,8 @@ export async function createDesktopRuntime(
     hitTester,
 
     windowController: windows,
+
+    ...(options.hitTestProbe === true ? { onEvent: createHitTestProbe(windows) } : {}),
   });
 
   const dragController = new WindowDragController({
@@ -1127,6 +1137,55 @@ export async function createDesktopRuntime(
     createDesktopFolder: () => createDesktopEntry("directory"),
     createDesktopFile: () => createDesktopEntry("file"),
     requestRender: notify,
+  };
+}
+
+/**
+ * Temporary diagnostic for the bare-metal click-through investigation.
+ * Logs one JSON line per pointer-down with the pointer position, the
+ * window the hit tester selected, and every known window's
+ * bounds/z-index/state, so a bad click can be compared against the
+ * geometry the hit tester actually saw.
+ */
+function createHitTestProbe(windows: {
+  listWindows: () => readonly GenesisWindow[];
+}): PointerFocusControllerEventListener {
+  return (probeEvent) => {
+    if (
+      probeEvent.type !== "pointer-focus-hit" &&
+      probeEvent.type !== "pointer-focus-miss"
+    ) {
+      return;
+    }
+    if (probeEvent.event.type !== "pointer-down") {
+      return;
+    }
+    const snapshot = windows.listWindows().map((window) => ({
+      id: window.id,
+      x: window.bounds.x,
+      y: window.bounds.y,
+      width: window.bounds.width,
+      height: window.bounds.height,
+      zIndex: window.zIndex,
+      state: window.state,
+    }));
+    console.log(
+      `SEVYN_PROBE_HITTEST ${JSON.stringify({
+        pointer: {
+          x: probeEvent.event.position.x,
+          y: probeEvent.event.position.y,
+        },
+        hit:
+          probeEvent.type === "pointer-focus-hit"
+            ? {
+                id: probeEvent.hit.windowId,
+                localX: probeEvent.hit.localPoint.x,
+                localY: probeEvent.hit.localPoint.y,
+              }
+            : null,
+        windows: snapshot,
+      })}`,
+    );
   };
 }
 

@@ -88,6 +88,7 @@ describe("LinuxWirelessNetworkService", () => {
       discoverInterfaces: () => Promise.resolve(["wlan0"]),
       execute,
       delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
     });
 
     const scanned = await service.scan();
@@ -119,6 +120,7 @@ describe("LinuxWirelessNetworkService", () => {
         return Promise.resolve({ stdout: "OK\n", stderr: "" });
       },
       delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
     });
 
     await expect(service.setEnabled(false)).resolves.toMatchObject({

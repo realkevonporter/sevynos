@@ -138,8 +138,14 @@ fi
 fsck_status=0
 if [ -n "$data_device" ]; then
   e2fsck -p "$data_device" >/tmp/sevyn-fsck.log 2>&1 || fsck_status=$?
-  if [ "$fsck_status" -le 1 ] && mount -t ext4 "$data_device" /var/lib/sevynos; then
-    log_marker "SEVYN_PERSISTENT_STORAGE_MOUNTED device=$data_device"
+  if [ "$fsck_status" -le 1 ] && mount -t ext4 "$data_device" /var/lib/sevynos 2>/dev/null; then
+    log_marker "SEVYN_PERSISTENT_STORAGE_MOUNTED device=$data_device fstype=ext4"
+    log_marker "SEVYN_QEMU_PERSISTENT_STORAGE_MOUNTED"
+  elif mount -t vfat "$data_device" /var/lib/sevynos 2>/dev/null; then
+    # FAT32 fallback for SEVYN_DATA volumes created on machines without
+    # ext4 tooling (macOS/Windows). e2fsck fails fast on non-ext filesystems,
+    # so reaching this branch implies the ext4 mount did not succeed.
+    log_marker "SEVYN_PERSISTENT_STORAGE_MOUNTED device=$data_device fstype=vfat"
     log_marker "SEVYN_QEMU_PERSISTENT_STORAGE_MOUNTED"
   fi
 fi

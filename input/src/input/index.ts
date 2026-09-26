@@ -67,6 +67,10 @@ export { InputDispatcher } from "./input-dispatcher.js";
 export { FocusedInputRouter } from "./focused-input-router.js";
 export { PointerCaptureManager } from "./pointer-capture-manager.js";
 export { PointerFocusController } from "./pointer-focus-controller.js";
+export type {
+  PointerFocusControllerEvent,
+  PointerFocusControllerEventListener,
+} from "./pointer-focus-controller-events.js";
 export { WindowHitTester } from "./window-hit-tester.js";
 export { WindowResizeController } from "./window-resize-controller.js";
 export { WindowResizeEdgeDetector } from "./window-resize-edge-detector.js";

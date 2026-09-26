@@ -26,6 +26,12 @@ export interface LinuxWirelessNetworkServiceOptions {
   readonly execute?: LinuxCommandExecutor;
   readonly discoverInterfaces?: () => Promise<readonly string[]>;
   readonly delay?: (milliseconds: number) => Promise<void>;
+  /**
+   * Probe for the wpa_supplicant control socket. Injectable so tests can
+   * run on machines without wireless hardware; defaults to the real
+   * filesystem check.
+   */
+  readonly controlSocketAccessible?: (interfaceName: string) => Promise<boolean>;
 }
 
 const initialSnapshot = (): WirelessNetworkSnapshot =>
@@ -40,6 +46,7 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
   readonly #execute: LinuxCommandExecutor;
   readonly #discoverInterfaces: () => Promise<readonly string[]>;
   readonly #delay: (milliseconds: number) => Promise<void>;
+  readonly #controlSocketAccessible: (interfaceName: string) => Promise<boolean>;
   readonly #listeners = new Set<() => void>();
   #current = initialSnapshot();
   #enabled = true;
@@ -53,6 +60,13 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
         new Promise((resolve) => {
           setTimeout(resolve, milliseconds);
         }));
+    this.#controlSocketAccessible =
+      options.controlSocketAccessible ??
+      ((interfaceName) =>
+        access(`/run/wpa_supplicant/${interfaceName}`).then(
+          () => true,
+          () => false,
+        ));
   }
 
   #timer: NodeJS.Timeout | undefined;
@@ -361,12 +375,7 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
 
   async #ensureWpaSupplicant(interfaceName: string): Promise<void> {
     if (process.platform !== "linux") return;
-    const socketPath = `/run/wpa_supplicant/${interfaceName}`;
-    const exists = await access(socketPath).then(
-      () => true,
-      () => false,
-    );
-    if (exists) return;
+    if (await this.#controlSocketAccessible(interfaceName)) return;
     try {
       await this.#execute({
         executable: "/sbin/ip",
@@ -388,13 +397,7 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
       }).catch(() => undefined);
       for (let attempt = 0; attempt < 6; attempt += 1) {
         await this.#delay(250);
-        if (
-          await access(socketPath).then(
-            () => true,
-            () => false,
-          )
-        )
-          break;
+        if (await this.#controlSocketAccessible(interfaceName)) break;
       }
     } catch {
       // Best effort on live system
@@ -407,13 +410,11 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
   ): Promise<LinuxCommandResult> {
     await this.#ensureWpaSupplicant(interfaceName);
     if (process.platform === "linux") {
-      const socketPath = `/run/wpa_supplicant/${interfaceName}`;
-      const socketReady = await access(socketPath).then(
-        () => true,
-        () => false,
-      );
+      const socketReady = await this.#controlSocketAccessible(interfaceName);
       if (!socketReady)
-        throw new Error(`Wireless control socket at ${socketPath} is not available.`);
+        throw new Error(
+          `Wireless control socket at /run/wpa_supplicant/${interfaceName} is not available.`,
+        );
     }
     return this.#execute({
       executable: "/sbin/wpa_cli",

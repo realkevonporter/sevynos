@@ -58,6 +58,13 @@ export class LinuxStudioBuildService implements SevynStudioService {
           );
         }
       });
+      // A builder that fails fast may exit before reading stdin; without
+      // this listener the resulting EPIPE becomes an uncaught exception
+      // instead of the close handler's rejection above.
+      child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EPIPE")
+          console.error(`Sevyn Studio builder stdin failed: ${error.message}`);
+      });
       child.stdin.end(JSON.stringify(request));
     });
   }
