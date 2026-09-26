@@ -816,6 +816,9 @@ function paintNode(
             },
             color: colors.accent,
             radius: 1,
+            // The compositor toggles this command on the caret blink phase
+            // grid; see caretBlinkPhase in the Linux software frame renderer.
+            blink: true,
             ...(style.opacity === undefined ? {} : { opacity: style.opacity }),
           }),
         ),

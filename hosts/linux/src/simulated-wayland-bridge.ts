@@ -79,6 +79,7 @@ export class SimulatedWaylandBridgeTransport implements NativeBridgeTransport {
     x: number,
     y: number,
     traceId?: string,
+    buttons?: number,
   ): void {
     this.emit({
       type: "pointer",
@@ -87,7 +88,7 @@ export class SimulatedWaylandBridgeTransport implements NativeBridgeTransport {
       x,
       y,
       button: 0,
-      buttons: event === "down" ? 1 : 0,
+      buttons: buttons ?? (event === "down" ? 1 : 0),
       timestamp: Date.now(),
       ...(traceId === undefined ? {} : { traceId }),
     });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DesktopSceneComposer } from "@sevynos/desktop-shell";
 import { SimulatedWaylandBridgeTransport } from "./simulated-wayland-bridge.js";
-import { startWaylandHost } from "./wayland.js";
+import { startWaylandHost, type RunningWaylandHost } from "./wayland.js";
 
 const pause = (milliseconds = 0): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -200,4 +200,186 @@ describe("interactive Wayland host", () => {
     expect(host.runtime.cursor.state.position.x).toBe(799);
     await host.shutdown();
   }, 15_000);
+
+  it("keeps drag motion and release captured by the pointer-down window", async () => {
+    const bridge = new SimulatedWaylandBridgeTransport();
+    const markers: string[] = [];
+    const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
+    bridge.ready(1280, 720, 1);
+    const host = await starting;
+    await pause(30);
+
+    const { source, sourceId, otherId, outside } = dragFixture(markers, host);
+    const { calls } = spyNativePointer(host);
+
+    // Press in the topmost window, drag outside every window, release there.
+    bridge.pointer("down", source.x, source.y);
+    bridge.pointer("move", outside.x, outside.y, undefined, 1);
+    await pause();
+    bridge.pointer("up", outside.x, outside.y);
+    await pause();
+
+    // The drag's move and release stay captured by the pointer-down window
+    // even though the cursor left it; nothing leaks to the other window.
+    expect(typesFor(calls, sourceId)).toEqual(["enter", "down", "move", "up", "leave"]);
+    expect(typesFor(calls, otherId)).toEqual([]);
+
+    await host.shutdown();
+  });
+
+  it("releases pointer capture on pointer-cancel", async () => {
+    const bridge = new SimulatedWaylandBridgeTransport();
+    const markers: string[] = [];
+    const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
+    bridge.ready(1280, 720, 1);
+    const host = await starting;
+    await pause(30);
+
+    const { source, sourceId, otherId, outside } = dragFixture(markers, host);
+    const { calls } = spyNativePointer(host);
+
+    bridge.pointer("down", source.x, source.y);
+    bridge.pointer("cancel", outside.x, outside.y);
+    await pause();
+    // Capture is gone: hovering the desktop routes nowhere, and hovering the
+    // source window re-enters it like a fresh hover.
+    bridge.pointer("move", outside.x, outside.y);
+    await pause();
+    bridge.pointer("move", source.x, source.y);
+    await pause();
+
+    expect(typesFor(calls, sourceId)).toEqual([
+      "enter",
+      "down",
+      "cancel",
+      "leave",
+      "enter",
+      "move",
+    ]);
+    expect(typesFor(calls, otherId)).toEqual([]);
+
+    await host.shutdown();
+  });
 });
+
+interface WindowBounds {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * Builds a drag fixture from the host's window markers: the press point is
+ * the focused (topmost) window's content center so the hit test is
+ * unambiguous, and the drag point sits outside every window's full bounds.
+ */
+function dragFixture(
+  markers: readonly string[],
+  host: RunningWaylandHost,
+): {
+  source: { x: number; y: number };
+  sourceId: string;
+  otherId: string;
+  outside: { x: number; y: number };
+} {
+  const full = parseWindowBounds(markers, "GENESIS_WINDOW_BOUNDS ");
+  const content = parseWindowBounds(markers, "GENESIS_WINDOW_CONTENT_BOUNDS ");
+  const ids = [...full.keys()];
+  if (ids.length < 2) throw new Error("Expected at least two windows.");
+  const focusedId =
+    host.runtime.windows.listWindows().find((window) => window.state === "focused")?.id ??
+    ids[0];
+  if (focusedId === undefined) throw new Error("Expected a window id.");
+  const otherId = ids.find((id) => id !== focusedId);
+  if (otherId === undefined) throw new Error("Expected a second window.");
+  const sourceBounds = content.get(focusedId);
+  if (sourceBounds === undefined) throw new Error(`No content bounds for ${focusedId}.`);
+  const maxRight = Math.max(
+    ...ids.map((id) => {
+      const bounds = full.get(id);
+      if (bounds === undefined) throw new Error(`No full bounds for ${id}.`);
+      return bounds.x + bounds.width;
+    }),
+  );
+  const outside = { x: maxRight + 80, y: 360 };
+  if (outside.x >= 1280) throw new Error("No room outside the windows.");
+  for (const id of ids) {
+    const bounds = full.get(id);
+    if (bounds !== undefined && pointInBounds(outside, bounds))
+      throw new Error("The drag point landed inside a window.");
+  }
+  return {
+    source: {
+      x: sourceBounds.x + sourceBounds.width / 2,
+      y: sourceBounds.y + sourceBounds.height / 2,
+    },
+    sourceId: focusedId,
+    otherId,
+    outside,
+  };
+}
+
+function parseWindowBounds(
+  markers: readonly string[],
+  prefix: string,
+): Map<string, WindowBounds> {
+  const bounds = new Map<string, WindowBounds>();
+  for (const marker of markers) {
+    if (!marker.startsWith(prefix)) continue;
+    const fields: Record<string, string> = {};
+    for (const part of marker.split(" ")) {
+      const [key, value] = part.split("=");
+      if (key !== undefined && value !== undefined) fields[key] = value;
+    }
+    const { windowId, x, y, width, height } = fields;
+    if (
+      windowId === undefined ||
+      x === undefined ||
+      y === undefined ||
+      width === undefined ||
+      height === undefined
+    )
+      continue;
+    bounds.set(windowId, {
+      x: Number(x),
+      y: Number(y),
+      width: Number(width),
+      height: Number(height),
+    });
+  }
+  return bounds;
+}
+
+function pointInBounds(point: { x: number; y: number }, bounds: WindowBounds): boolean {
+  return (
+    point.x >= bounds.x &&
+    point.x < bounds.x + bounds.width &&
+    point.y >= bounds.y &&
+    point.y < bounds.y + bounds.height
+  );
+}
+
+function spyNativePointer(host: RunningWaylandHost): {
+  calls: { windowId: string; type: string }[];
+} {
+  const calls: { windowId: string; type: string }[] = [];
+  const surfaces = host.runtime.surfaces;
+  const original = surfaces.dispatchNativePointer.bind(surfaces);
+  surfaces.dispatchNativePointer = (
+    windowId: Parameters<typeof original>[0],
+    type: Parameters<typeof original>[1],
+    event: Parameters<typeof original>[2],
+  ) => {
+    calls.push({ windowId, type });
+    original(windowId, type, event);
+  };
+  return { calls };
+}
+
+function typesFor(
+  calls: readonly { windowId: string; type: string }[],
+  windowId: string,
+): string[] {
+  return calls.filter((call) => call.windowId === windowId).map((call) => call.type);
+}
