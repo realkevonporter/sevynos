@@ -1131,11 +1131,12 @@ function dispatchNativePointer(
   event: PointerInputEvent,
   previousWindowId: string | undefined,
 ): string | undefined {
-  const target = scene?.nodes
-    .filter(
-      (node): node is DesktopWindowSceneNode =>
-        node.kind === "desktop-window" && node.nativeSurface !== undefined,
-    )
+  const windowNodes =
+    scene?.nodes.filter(
+      (node): node is DesktopWindowSceneNode => node.kind === "desktop-window",
+    ) ?? [];
+  const target = windowNodes
+    .filter((node) => node.nativeSurface !== undefined)
     .sort((first, second) => second.order - first.order)
     .find(
       (node) =>
@@ -1144,6 +1145,30 @@ function dispatchNativePointer(
         event.position.y >= node.base.bounds.y + 46 &&
         event.position.y < node.base.bounds.y + node.base.bounds.height,
     );
+  if (process.env["SEVYN_HITTEST_PROBE"] === "1" && event.type === "pointer-down") {
+    /*
+     * Temporary diagnostic for the bare-metal click-through investigation.
+     * The desktop-runtime probe logs the focus controller's hit decision;
+     * this logs the Linux host's native pointer dispatch decision for the
+     * same click, so the two can be compared directly.
+     */
+    console.log(
+      `SEVYN_PROBE_HITTEST_NATIVE ${JSON.stringify({
+        pointer: { x: event.position.x, y: event.position.y },
+        target: target?.windowId ?? null,
+        nodes: windowNodes.map((node) => ({
+          id: node.windowId,
+          x: node.base.bounds.x,
+          y: node.base.bounds.y,
+          width: node.base.bounds.width,
+          height: node.base.bounds.height,
+          order: node.order,
+          nativeSurface: node.nativeSurface !== undefined,
+          state: runtime.windows.getWindow(node.windowId)?.state ?? "unknown",
+        })),
+      })}`,
+    );
+  }
   const targetWindowId = target?.windowId;
   const pointer = {
     x: event.position.x,
