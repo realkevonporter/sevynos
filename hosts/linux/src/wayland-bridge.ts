@@ -24,6 +24,7 @@ import type {
 } from "./host-adapters.js";
 import type { BinaryFramePacket } from "./binary-frame-protocol.js";
 import { FramebufferPool } from "./framebuffer-pool.js";
+import type { FrameMetrics } from "./frame-metrics.js";
 import { IncrementalFrameRenderer } from "./incremental-frame-renderer.js";
 import {
   validateLinuxHostMessage,
@@ -198,6 +199,7 @@ export class WaylandFramePresenter implements LinuxFramePresenter<DesktopScene> 
   public constructor(
     readonly connection: WaylandBridgeConnection,
     readonly diagnostic: (value: string) => void = () => undefined,
+    readonly metrics?: FrameMetrics,
   ) {}
   public initialize(): void {
     this.state = "initialized";
@@ -242,6 +244,13 @@ export class WaylandFramePresenter implements LinuxFramePresenter<DesktopScene> 
     if (frame.damage.length === 0) {
       this.#lastFrameSubmitted = false;
       this.#framebuffers.release(framebuffer);
+      this.metrics?.recordRaster({
+        frameId,
+        displayId: plan.displayId,
+        rasterMs: performance.now() - rasterStarted,
+        damageRectCount: 0,
+        damagePixelCount: 0,
+      });
       return new RenderResult({
         frameNumber: frameId,
         displayId: plan.displayId,
@@ -253,6 +262,16 @@ export class WaylandFramePresenter implements LinuxFramePresenter<DesktopScene> 
     }
     this.#lastFrameSubmitted = true;
     const rasterDuration = performance.now() - rasterStarted;
+    this.metrics?.recordRaster({
+      frameId,
+      displayId: plan.displayId,
+      rasterMs: rasterDuration,
+      damageRectCount: frame.damage.length,
+      damagePixelCount: frame.damage.reduce(
+        (total, rect) => total + rect.width * rect.height,
+        0,
+      ),
+    });
     if (traceId !== undefined)
       this.diagnostic(
         `TS_FRAME_RASTERIZED traceId=${traceId} frameId=${String(frameId)} durationMs=${rasterDuration.toFixed(3)}`,
@@ -283,6 +302,7 @@ export class WaylandFramePresenter implements LinuxFramePresenter<DesktopScene> 
         `TS_FRAME_ENCODED traceId=${traceId} frameId=${String(frameId)} durationMs=0.000 encodedBytes=${String(encodedBytes)} transport=binary-pipe`,
       );
     const sendStarted = performance.now();
+    this.metrics?.recordSubmitted(frameId, sendStarted);
     this.connection.sendFrame(
       {
         frameId,
