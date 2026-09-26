@@ -526,10 +526,7 @@ export function FilesApplication({
               style={styles.newFolderInput}
               value={renameName}
             />
-            <Pressable
-              onPress={() => void handleRename()}
-              style={styles.confirmButton}
-            >
+            <Pressable onPress={() => void handleRename()} style={styles.confirmButton}>
               <Text style={styles.confirmButtonText}>Rename</Text>
             </Pressable>
             <Pressable
