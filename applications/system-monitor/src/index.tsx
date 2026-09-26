@@ -5,9 +5,32 @@ import {
   StyleSheet,
   Text,
   View,
-  type SystemMonitorModel,
   type SevynApplicationManifest,
 } from "@sevynos/react-native";
+
+export interface SystemMonitorModel {
+  readonly runningApplicationSessions: number;
+  readonly openWindows: number;
+  readonly focusedWindow: string | undefined;
+  readonly cursorKind: string;
+  readonly frameExecutionCount: number;
+  readonly activeWorkspace: string;
+  readonly graphicsEngine?: string;
+  readonly applicationWorkers?: readonly {
+    readonly applicationId: string;
+    readonly status: string;
+    readonly metrics: {
+      readonly inboundMessages: number;
+      readonly outboundMessages: number;
+      readonly inboundQueueDepth: number;
+      readonly outboundQueueDepth: number;
+      readonly averageEventDuration: number;
+      readonly timeoutCount: number;
+      readonly restartCount: number;
+      readonly terminationReason?: string;
+    };
+  }[];
+}
 
 export const systemMonitorManifest: SevynApplicationManifest = {
   manifestVersion: 1,

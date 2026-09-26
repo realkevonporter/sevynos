@@ -30,7 +30,6 @@ export * from "./reconciler.js";
 export * from "./services.js";
 export * from "./settings-application.js";
 export * from "./surface.js";
-export * from "./system-applications.js";
 export * from "./native-adapter-contracts.js";
 export * from "./worker-execution.js";
 export * from "./worker-protocol.js";

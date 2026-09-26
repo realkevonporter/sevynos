@@ -119,25 +119,28 @@ test("desktop shell chrome and system applications stay on React Native", async 
     );
   }
 
-  const systemApplications = await readFile(
-    resolve(root, "frameworks/react-native/src/system-applications.ts"),
-    "utf8",
-  );
-  for (const application of [
-    "WelcomeApplication",
-    "InstallerApplication",
-    "GenesisConsoleApplication",
-    "SystemMonitorApplication",
-    "SettingsReactApplication",
-    "FilesApplication",
-    "BrowserApplication",
-    "TextEditorApplication",
-    "NotesApplication",
-    "ComponentGalleryApplication",
-    "AppManagerApplication",
-    "ReactNativeIdeApplication",
-  ])
-    assert.match(systemApplications, new RegExp(`function ${application}`), application);
+  for (const [component, application] of [
+    ["applications/welcome/src/index.tsx", "WelcomeApplication"],
+    ["applications/core/src/index.tsx", "InstallerApplication"],
+    ["applications/terminal/src/index.tsx", "TerminalApplication"],
+    ["applications/system-monitor/src/index.tsx", "SystemMonitorApplication"],
+    ["applications/settings/src/index.tsx", "SettingsApplication"],
+    ["applications/files/src/index.tsx", "FilesApplication"],
+    ["applications/browser/src/index.tsx", "BrowserApplication"],
+    ["applications/core/src/index.tsx", "TextEditorApplication"],
+    ["applications/core/src/index.tsx", "NotesApplication"],
+    ["applications/core/src/index.tsx", "ComponentGalleryApplication"],
+    ["applications/core/src/index.tsx", "AppManagerApplication"],
+    ["applications/core/src/index.tsx", "ReactNativeIdeApplication"],
+  ]) {
+    const source = await readFile(resolve(root, component), "utf8");
+    assert.match(
+      source,
+      new RegExp(`function ${application}`),
+      `${component}:${application}`,
+    );
+    assert.match(source, /from ["']react["']/, component);
+  }
 });
 
 test("desktop development reloads isolated shell bundles", async () => {

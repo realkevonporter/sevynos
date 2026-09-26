@@ -1,0 +1,30 @@
+{
+  "dependencies": {
+    "@sevynos/react-native": "workspace:*",
+    "@sevynos/sdk": "workspace:*",
+    "react": "^19.2.8"
+  },
+  "description": "Built-in core system applications (installer, gallery, text editor, app manager, IDE, notes) provided by the SevynOS shell.",
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "license": "GPL-3.0-or-later",
+  "name": "@sevynos/core-applications",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src --max-warnings=0",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "type": "module",
+  "version": "1.0.0"
+}

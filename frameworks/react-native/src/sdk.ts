@@ -20,7 +20,6 @@ export {
   type TextBrowserPage,
 } from "./services.js";
 export { type SevynSettingsModel } from "./settings-application.js";
-export { type SystemMonitorModel } from "./system-applications.js";
 export {
   useApplicationState,
   useDisplay,
