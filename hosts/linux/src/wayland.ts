@@ -143,6 +143,7 @@ export async function startWaylandHost(
   const runtime = await createDesktopRuntime({
     launchDefaults: false,
     ...(loadedSettings === undefined ? {} : { settings: loadedSettings }),
+    hitTestProbe: process.env["SEVYN_HITTEST_PROBE"] === "1",
     network,
     ...(options.power === undefined ? {} : { power: options.power }),
     battery,
