@@ -79,6 +79,11 @@ export function FilesApplication({
   const [backStack, setBackStack] = useState<readonly string[]>([]);
   const [forwardStack, setForwardStack] = useState<readonly string[]>([]);
   const [directoryError, setDirectoryError] = useState<string | undefined>(undefined);
+  const [isRenaming, setIsRenaming] = useState<boolean>(false);
+  const [renameName, setRenameName] = useState<string>("");
+  const [confirmEmptyTrash, setConfirmEmptyTrash] = useState<boolean>(false);
+
+  const isInTrash = currentPath === "/.Trash";
 
   const loadDirectory = useCallback(
     async (dirPath: string): Promise<boolean> => {
@@ -99,12 +104,17 @@ export function FilesApplication({
         return true;
       }
       try {
-        const items = await filesystem.list(dirPath);
+        // Special handling for Trash: use listTrash instead of list
+        const items =
+          dirPath === "/.Trash"
+            ? ((await filesystem.listTrash?.()) ?? [])
+            : await filesystem.list(dirPath);
         setEntries(items);
         setCurrentPath(dirPath);
         setSelectedPath(undefined);
         setSearchQuery("");
         setDirectoryError(undefined);
+        setConfirmEmptyTrash(false);
         return true;
       } catch (error: unknown) {
         const message =
@@ -202,6 +212,92 @@ export function FilesApplication({
     }
     setNewFolderName("");
     setIsCreatingFolder(false);
+  };
+
+  const handleDelete = async () => {
+    if (!selectedPath || !filesystem?.moveToTrash || isInTrash) return;
+    try {
+      await filesystem.moveToTrash(selectedPath);
+      notifications?.show({
+        title: "Moved to Trash",
+        message: `Moved ${selectedPath.split("/").pop()} to Trash`,
+      });
+      void loadDirectory(currentPath);
+    } catch {
+      notifications?.show({
+        title: "Error",
+        message: "Failed to move to Trash",
+      });
+    }
+  };
+
+  const handleRename = async () => {
+    if (!selectedPath || !renameName.trim() || !filesystem?.rename) return;
+    const dir = selectedPath.substring(0, selectedPath.lastIndexOf("/")) || "/";
+    const newPath = `${dir}/${renameName.trim()}`.replace(/\/\//g, "/");
+    try {
+      await filesystem.rename(selectedPath, newPath);
+      notifications?.show({
+        title: "Renamed",
+        message: `Renamed to ${renameName.trim()}`,
+      });
+      setIsRenaming(false);
+      setRenameName("");
+      void loadDirectory(currentPath);
+    } catch {
+      notifications?.show({
+        title: "Error",
+        message: "Failed to rename",
+      });
+    }
+  };
+
+  const handleRestore = async () => {
+    if (!selectedPath || !filesystem?.restoreFromTrash || !isInTrash) return;
+    const entry = entries.find((e) => e.path === selectedPath);
+    if (!entry) return;
+    try {
+      await filesystem.restoreFromTrash(entry.name);
+      notifications?.show({
+        title: "Restored",
+        message: `Restored ${entry.name}`,
+      });
+      void loadDirectory(currentPath);
+    } catch {
+      notifications?.show({
+        title: "Error",
+        message: "Failed to restore",
+      });
+    }
+  };
+
+  const handleEmptyTrash = async () => {
+    if (!filesystem?.emptyTrash || !isInTrash) return;
+    if (!confirmEmptyTrash) {
+      setConfirmEmptyTrash(true);
+      return;
+    }
+    try {
+      await filesystem.emptyTrash();
+      notifications?.show({
+        title: "Trash Emptied",
+        message: "All items permanently deleted",
+      });
+      setConfirmEmptyTrash(false);
+      void loadDirectory(currentPath);
+    } catch {
+      notifications?.show({
+        title: "Error",
+        message: "Failed to empty Trash",
+      });
+    }
+  };
+
+  const startRename = () => {
+    if (!selectedPath) return;
+    const name = selectedPath.split("/").pop() ?? "";
+    setRenameName(name);
+    setIsRenaming(true);
   };
 
   return (
@@ -334,6 +430,54 @@ export function FilesApplication({
               {viewMode === "grid" ? "☰" : "⊞"}
             </Text>
           </Pressable>
+
+          {/* File operations - only show when an item is selected */}
+          {selectedPath !== undefined && !isInTrash && (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Rename selected item"
+                onPress={startRename}
+                style={styles.actionButton}
+              >
+                <Text style={styles.actionButtonText}>✏️</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Move selected item to Trash"
+                onPress={() => void handleDelete()}
+                style={styles.actionButton}
+              >
+                <Text style={styles.actionButtonText}>🗑️</Text>
+              </Pressable>
+            </>
+          )}
+
+          {/* Trash operations */}
+          {isInTrash && (
+            <>
+              {selectedPath !== undefined && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Restore selected item"
+                  onPress={() => void handleRestore()}
+                  style={styles.actionButton}
+                >
+                  <Text style={styles.actionButtonText}>↩️ Restore</Text>
+                </Pressable>
+              )}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Empty Trash"
+                onPress={() => void handleEmptyTrash()}
+                style={styles.actionButton}
+              >
+                <Text style={styles.actionButtonText}>
+                  {confirmEmptyTrash ? "⚠️ Confirm" : "Empty"}
+                </Text>
+              </Pressable>
+            </>
+          )}
         </View>
 
         {directoryError !== undefined && (
@@ -363,6 +507,35 @@ export function FilesApplication({
               onPress={() => {
                 setIsCreatingFolder(false);
                 setNewFolderName("");
+              }}
+              style={styles.cancelButton}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {/* Inline Rename Prompt */}
+        {isRenaming && (
+          <View style={styles.newFolderBar}>
+            <TextInput
+              onChangeText={setRenameName}
+              onSubmitEditing={() => void handleRename()}
+              placeholder="New name…"
+              placeholderTextColor="#6B7280"
+              style={styles.newFolderInput}
+              value={renameName}
+            />
+            <Pressable
+              onPress={() => void handleRename()}
+              style={styles.confirmButton}
+            >
+              <Text style={styles.confirmButtonText}>Rename</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setIsRenaming(false);
+                setRenameName("");
               }}
               style={styles.cancelButton}
             >
