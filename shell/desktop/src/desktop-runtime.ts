@@ -729,9 +729,7 @@ export async function createDesktopRuntime(
 
     windowController: windows,
 
-    ...(options.hitTestProbe === true
-      ? { onEvent: createHitTestProbe(windows) }
-      : {}),
+    ...(options.hitTestProbe === true ? { onEvent: createHitTestProbe(windows) } : {}),
   });
 
   const dragController = new WindowDragController({
@@ -1191,7 +1189,8 @@ function createHitTestProbe(windows: {
   };
 }
 
-function mapKeyboardEventType(type: string): "key-down" | "key-up" {  switch (type) {
+function mapKeyboardEventType(type: string): "key-down" | "key-up" {
+  switch (type) {
     case "keydown":
       return "key-down";
     case "keyup":
