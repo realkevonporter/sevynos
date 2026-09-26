@@ -34,12 +34,9 @@ export const settingsManifest: SevynApplicationManifest = {
 
 export type SettingsCategory =
   | "appearance"
-  | "display"
-  | "biometrics"
   | "network"
   | "sound"
   | "battery"
-  | "storage"
   | "applications"
   | "shortcuts"
   | "about";
@@ -336,15 +333,6 @@ export function SettingsApplication({
   );
   const [appActionError, setAppActionError] = useState<string | null>(null);
   const [appActionSuccess, setAppActionSuccess] = useState<string | null>(null);
-  const [autoBrightness, setAutoBrightness] = useState<boolean>(false);
-  const [screenOrientation, setScreenOrientation] = useState<string>("portrait");
-  const [brightnessLevel, setBrightnessLevel] = useState<number>(80);
-  const [faceUnlockEnabled, setFaceUnlockEnabled] = useState<boolean>(true);
-  const [fingerprints, setFingerprints] = useState<readonly string[]>([
-    "Right Index Finger",
-  ]);
-  const [pinConfigured, setPinConfigured] = useState<boolean>(true);
-  const [biometricFeedback, setBiometricFeedback] = useState<string | null>(null);
 
   const handleIdleLockChange = (minutes: number) => {
     setIdleLockTimeout(minutes);
@@ -527,22 +515,6 @@ export function SettingsApplication({
             }}
           />
           <SidebarItem
-            active={activeCategory === "display"}
-            icon="📱"
-            label="Display & Rotation"
-            onPress={() => {
-              setActiveCategory("display");
-            }}
-          />
-          <SidebarItem
-            active={activeCategory === "biometrics"}
-            icon="🔒"
-            label="Biometrics & Security"
-            onPress={() => {
-              setActiveCategory("biometrics");
-            }}
-          />
-          <SidebarItem
             active={activeCategory === "network"}
             icon="📶"
             label="Network & Wi-Fi"
@@ -564,14 +536,6 @@ export function SettingsApplication({
             label="Power & Battery"
             onPress={() => {
               setActiveCategory("battery");
-            }}
-          />
-          <SidebarItem
-            active={activeCategory === "storage"}
-            icon="💾"
-            label="Storage & Disks"
-            onPress={() => {
-              setActiveCategory("storage");
             }}
           />
           <SidebarItem
@@ -723,266 +687,6 @@ export function SettingsApplication({
                       </Text>
                     </Pressable>
                   ))}
-                </View>
-              </View>
-            </View>
-          )}
-
-          {activeCategory === "display" && (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Display & Rotation</Text>
-              <Text style={styles.sectionSubtitle}>
-                Screen brightness, ambient light auto-adjustment, and mobile orientation
-                lock.
-              </Text>
-
-              {/* Brightness Card */}
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Brightness</Text>
-                <Text style={styles.cardDesc}>
-                  Adjust display backlight output level.
-                </Text>
-                <View style={styles.volumeControls}>
-                  <Pressable
-                    onPress={() => {
-                      setBrightnessLevel((b) => Math.max(10, b - 10));
-                    }}
-                    style={styles.volumeStepButton}
-                  >
-                    <Text style={styles.stepButtonText}>-</Text>
-                  </Pressable>
-                  <View style={styles.volumeBar}>
-                    <View
-                      style={{
-                        ...styles.volumeFill,
-                        width: brightnessLevel * 2,
-                      }}
-                    />
-                  </View>
-                  <Pressable
-                    onPress={() => {
-                      setBrightnessLevel((b) => Math.min(100, b + 10));
-                    }}
-                    style={styles.volumeStepButton}
-                  >
-                    <Text style={styles.stepButtonText}>+</Text>
-                  </Pressable>
-                  <Text style={styles.settingValue}>{brightnessLevel}%</Text>
-                </View>
-              </View>
-
-              {/* Auto Brightness Toggle */}
-              <View style={styles.card}>
-                <View style={styles.rowBetween}>
-                  <View>
-                    <Text style={styles.cardTitle}>Auto-Brightness</Text>
-                    <Text style={styles.cardDesc}>
-                      Automatically adjust screen brightness using ambient light lux
-                      readings.
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={() => {
-                      setAutoBrightness((prev) => !prev);
-                    }}
-                    style={
-                      autoBrightness ? styles.toggleButtonActive : styles.toggleButton
-                    }
-                  >
-                    <Text style={styles.toggleText}>{autoBrightness ? "ON" : "OFF"}</Text>
-                  </Pressable>
-                </View>
-              </View>
-
-              {/* Screen Orientation Lock */}
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Screen Orientation Lock</Text>
-                <Text style={styles.cardDesc}>
-                  Lock display to a fixed orientation or follow accelerometer tilt.
-                </Text>
-                <View style={styles.segmentedControl}>
-                  {[
-                    { label: "Portrait", value: "portrait" },
-                    { label: "Landscape L", value: "landscape-left" },
-                    { label: "Landscape R", value: "landscape-right" },
-                    { label: "Inverted", value: "portrait-upside-down" },
-                  ].map((option) => (
-                    <Pressable
-                      key={option.value}
-                      onPress={() => {
-                        setScreenOrientation(option.value);
-                      }}
-                      style={
-                        screenOrientation === option.value
-                          ? styles.segmentButtonActive
-                          : styles.segmentButton
-                      }
-                    >
-                      <Text
-                        style={
-                          screenOrientation === option.value
-                            ? styles.segmentTextActive
-                            : styles.segmentText
-                        }
-                      >
-                        {option.label}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-
-              {/* Proximity Screen Blanking */}
-              <View style={styles.card}>
-                <View style={styles.rowBetween}>
-                  <View>
-                    <Text style={styles.cardTitle}>Proximity Screen Blanking</Text>
-                    <Text style={styles.cardDesc}>
-                      Blanks display when device is held against the ear during cellular
-                      calls.
-                    </Text>
-                  </View>
-                  <Text style={styles.networkConnectedBadge}>Active</Text>
-                </View>
-              </View>
-            </View>
-          )}
-
-          {activeCategory === "biometrics" && (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Biometrics & Security</Text>
-              <Text style={styles.sectionSubtitle}>
-                Fingerprint enrollment, facial recognition liveness, and hardware keystore
-                vault.
-              </Text>
-
-              {biometricFeedback && (
-                <View style={styles.successBanner}>
-                  <Text style={styles.successBannerText}>{biometricFeedback}</Text>
-                </View>
-              )}
-
-              {/* Fingerprint Enrollment */}
-              <View style={styles.card}>
-                <View style={styles.rowBetween}>
-                  <View>
-                    <Text style={styles.cardTitle}>Fingerprint Authentication</Text>
-                    <Text style={styles.cardDesc}>
-                      Unlock device and authorize keystore operations via fprintd.
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={() => {
-                      const nextNum = fingerprints.length + 1;
-                      setFingerprints((prev) => [
-                        ...prev,
-                        `Fingerprint ${String(nextNum)}`,
-                      ]);
-                      setBiometricFeedback(
-                        `Enrolled Fingerprint ${String(nextNum)} via fprintd.`,
-                      );
-                    }}
-                    style={styles.toggleButtonActive}
-                  >
-                    <Text style={styles.toggleText}>+ Enroll New</Text>
-                  </Pressable>
-                </View>
-                <View style={{ marginTop: 12 }}>
-                  {fingerprints.map((fp, index) => (
-                    <View key={fp} style={styles.networkItem}>
-                      <Text style={styles.networkIcon}>👆</Text>
-                      <View style={styles.networkInfo}>
-                        <Text style={styles.networkName}>{fp}</Text>
-                        <Text style={styles.networkStatus}>
-                          Enrolled in hardware vault
-                        </Text>
-                      </View>
-                      <Pressable
-                        onPress={() => {
-                          setFingerprints((prev) => prev.filter((_, i) => i !== index));
-                          setBiometricFeedback(`Removed ${fp}.`);
-                        }}
-                        style={styles.muteButton}
-                      >
-                        <Text style={styles.muteButtonText}>Remove</Text>
-                      </Pressable>
-                    </View>
-                  ))}
-                </View>
-              </View>
-
-              {/* Face Unlock with Anti-Spoofing Liveness */}
-              <View style={styles.card}>
-                <View style={styles.rowBetween}>
-                  <View>
-                    <Text style={styles.cardTitle}>Face Unlock (Anti-Spoofing)</Text>
-                    <Text style={styles.cardDesc}>
-                      Requires genuine 3D facial presence and camera liveness
-                      verification.
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={() => {
-                      setFaceUnlockEnabled((prev) => !prev);
-                      setBiometricFeedback(
-                        faceUnlockEnabled
-                          ? "Face unlock disabled."
-                          : "Face unlock with anti-spoofing liveness enabled.",
-                      );
-                    }}
-                    style={
-                      faceUnlockEnabled ? styles.toggleButtonActive : styles.toggleButton
-                    }
-                  >
-                    <Text style={styles.toggleText}>
-                      {faceUnlockEnabled ? "ENABLED" : "DISABLED"}
-                    </Text>
-                  </Pressable>
-                </View>
-              </View>
-
-              {/* Security PIN Fallback */}
-              <View style={styles.card}>
-                <View style={styles.rowBetween}>
-                  <View>
-                    <Text style={styles.cardTitle}>Device Security PIN</Text>
-                    <Text style={styles.cardDesc}>
-                      Fallback passcode when biometric match is unavailable.
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={() => {
-                      setPinConfigured(true);
-                      setBiometricFeedback(
-                        "Device PIN verified and synchronized with encrypted keystore.",
-                      );
-                    }}
-                    style={styles.toggleButtonActive}
-                  >
-                    <Text style={styles.toggleText}>
-                      {pinConfigured ? "CONFIGURED" : "SET PIN"}
-                    </Text>
-                  </Pressable>
-                </View>
-              </View>
-
-              {/* Keystore Vault Information */}
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Biometric-Bound Keystore Vault</Text>
-                <Text style={styles.cardDesc}>
-                  Hardware-backed encrypted vault (/var/lib/sevynos/keystore/vault.json).
-                </Text>
-                <View style={styles.rowBetween}>
-                  <Text style={styles.settingLabel}>Vault Status</Text>
-                  <Text style={styles.networkConnectedBadge}>
-                    Locked & Hardware-Bound
-                  </Text>
-                </View>
-                <View style={styles.rowBetween}>
-                  <Text style={styles.settingLabel}>Cryptographic Driver</Text>
-                  <Text style={styles.settingValue}>
-                    AES-256-GCM / SevynOS Hardware Keystore
-                  </Text>
                 </View>
               </View>
             </View>
@@ -1230,26 +934,6 @@ export function SettingsApplication({
                       backgroundColor: isCharging ? "#10B981" : "#D7AC57",
                     }}
                   />
-                </View>
-              </View>
-            </View>
-          )}
-
-          {activeCategory === "storage" && (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Storage & Disks</Text>
-              <Text style={styles.sectionSubtitle}>
-                Manage local partitions, USB drives, and persistent storage.
-              </Text>
-
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>System Root (/)</Text>
-                <View style={styles.rowBetween}>
-                  <Text style={styles.settingLabel}>Used: 4.8 GB</Text>
-                  <Text style={styles.settingLabel}>Free: 28.4 GB</Text>
-                </View>
-                <View style={styles.storageBar}>
-                  <View style={{ ...styles.storageFill, width: 45 }} />
                 </View>
               </View>
             </View>
