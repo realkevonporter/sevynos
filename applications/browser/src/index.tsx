@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import {
   NativeImage,
   Pressable,
@@ -74,6 +74,7 @@ export function normalizeBrowserUrl(input: string): string {
 
 export interface BrowserApplicationProps {
   readonly engine?: SevynBrowserEngine | undefined;
+  readonly createEngine?: (() => SevynBrowserEngine | undefined) | undefined;
   readonly initialUrl?: string | undefined;
 }
 
@@ -116,8 +117,16 @@ export const DEFAULT_BOOKMARKS = [
 
 export function BrowserApplication({
   engine,
+  createEngine,
   initialUrl = "sevyn://start",
 }: BrowserApplicationProps): JSX.Element {
+  // Per-tab browser engines for true tab isolation. Each tab gets its own
+  // engine instance so navigation, history, and page state don't leak across tabs.
+  const tabEngines = useRef(new Map<string, SevynBrowserEngine>());
+  if (engine !== undefined && !tabEngines.current.has("tab-1")) {
+    tabEngines.current.set("tab-1", engine);
+  }
+
   const [tabs, setTabs] = useState<readonly BrowserTab[]>([
     {
       id: "tab-1",
@@ -132,8 +141,9 @@ export function BrowserApplication({
   const [addressInput, setAddressInput] = useState<string>(
     initialUrl === "sevyn://start" ? "" : initialUrl,
   );
+  const activeEngine = tabEngines.current.get(activeTabId);
   const [engineSnapshot, setEngineSnapshot] = useState<BrowserEngineSnapshot | undefined>(
-    engine?.snapshot(),
+    activeEngine?.snapshot(),
   );
 
   const activeTab: BrowserTab = tabs.find((t) => t.id === activeTabId) ??
@@ -147,9 +157,12 @@ export function BrowserApplication({
     };
 
   useEffect(() => {
-    if (!engine) return;
-    const unsubscribe = engine.subscribe(() => {
-      const snap = engine.snapshot();
+    const tabEngine = tabEngines.current.get(activeTabId);
+    if (!tabEngine) return;
+    // Sync snapshot immediately when switching tabs
+    setEngineSnapshot(tabEngine.snapshot());
+    const unsubscribe = tabEngine.subscribe(() => {
+      const snap = tabEngine.snapshot();
       setEngineSnapshot(snap);
       if (snap.url && snap.url !== "about:blank") {
         setTabs((prev) =>
@@ -168,7 +181,7 @@ export function BrowserApplication({
       }
     });
     return unsubscribe;
-  }, [engine, activeTabId]);
+  }, [activeTabId]);
 
   const navigateTo = useCallback(
     (targetUrl: string) => {
@@ -198,7 +211,7 @@ export function BrowserApplication({
       );
 
       if (!isInternal) {
-        if (!engine) {
+        if (!activeEngine) {
           setTabs((prev) =>
             prev.map((t) =>
               t.id === activeTabId
@@ -213,7 +226,7 @@ export function BrowserApplication({
           return;
         }
 
-        void engine.navigate(normalized).then((snap) => {
+        void activeEngine.navigate(normalized).then((snap) => {
           setEngineSnapshot(snap);
           setTabs((prev) =>
             prev.map((t) =>
@@ -235,28 +248,28 @@ export function BrowserApplication({
   );
 
   const handleBack = useCallback(() => {
-    if (engine) {
-      void engine.back().then((snap) => {
+    if (activeEngine) {
+      void activeEngine.back().then((snap) => {
         setEngineSnapshot(snap);
       });
     }
-  }, [engine]);
+  }, [activeEngine]);
 
   const handleForward = useCallback(() => {
-    if (engine) {
-      void engine.forward().then((snap) => {
+    if (activeEngine) {
+      void activeEngine.forward().then((snap) => {
         setEngineSnapshot(snap);
       });
     }
-  }, [engine]);
+  }, [activeEngine]);
 
   const handleReload = useCallback(() => {
-    if (!activeTab.url.startsWith("sevyn://") && engine) {
-      void engine.reload().then((snap) => {
+    if (!activeTab.url.startsWith("sevyn://") && activeEngine) {
+      void activeEngine.reload().then((snap) => {
         setEngineSnapshot(snap);
       });
     }
-  }, [activeTab.url, engine]);
+  }, [activeTab.url, activeEngine]);
 
   const handleHome = useCallback(() => {
     navigateTo("sevyn://start");
@@ -272,10 +285,16 @@ export function BrowserApplication({
       canGoBack: false,
       canGoForward: false,
     };
+    // Create a dedicated engine for the new tab for true isolation.
+    // Falls back to sharing if the factory is unavailable.
+    const newEngine = createEngine?.();
+    if (newEngine !== undefined) {
+      tabEngines.current.set(newId, newEngine);
+    }
     setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newId);
     setAddressInput("");
-  }, []);
+  }, [createEngine]);
 
   const handleCloseTab = useCallback(
     (tabId: string) => {
@@ -553,23 +572,23 @@ export function BrowserApplication({
                   pixels: engineSnapshot.pixels,
                 }}
                 onPointerDown={(event: BrowserPointerEvent) => {
-                  void engine.pointerDown(event.x, event.y, event.button ?? 0);
+                  void activeEngine?.pointerDown(event.x, event.y, event.button ?? 0);
                 }}
                 onPointerUp={(event: BrowserPointerEvent) => {
-                  void engine
-                    .pointerUp(event.x, event.y, event.button ?? 0)
+                  void activeEngine
+                    ?.pointerUp(event.x, event.y, event.button ?? 0)
                     .then((snap) => {
                       setEngineSnapshot(snap);
                     });
                 }}
                 onWheel={(event: BrowserWheelEvent) => {
-                  void engine.scroll(event.deltaY).then((snap) => {
+                  void activeEngine?.scroll(event.deltaY).then((snap) => {
                     setEngineSnapshot(snap);
                   });
                 }}
                 onKeyDown={(event: BrowserKeyboardEvent) => {
-                  void engine
-                    .key(event.key, event.code, {
+                  void activeEngine
+                    ?.key(event.key, event.code, {
                       shift: event.shift,
                       alt: event.alt,
                       control: event.control,

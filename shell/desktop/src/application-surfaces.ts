@@ -789,6 +789,7 @@ export class ApplicationSurfaceRegistry {
         const engine = this.#browserEngine(windowId);
         return createElement(BrowserApplication, {
           ...(engine === undefined ? {} : { engine }),
+          createEngine: () => this.#createBrowserEngine?.(),
         });
       }
       case "ide":
