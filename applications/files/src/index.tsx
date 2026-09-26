@@ -220,7 +220,7 @@ export function FilesApplication({
       await filesystem.moveToTrash(selectedPath);
       notifications?.show({
         title: "Moved to Trash",
-        message: `Moved ${selectedPath.split("/").pop()} to Trash`,
+        message: `Moved ${selectedPath.split("/").pop() ?? selectedPath} to Trash`,
       });
       void loadDirectory(currentPath);
     } catch {
@@ -526,10 +526,7 @@ export function FilesApplication({
               style={styles.newFolderInput}
               value={renameName}
             />
-            <Pressable
-              onPress={() => void handleRename()}
-              style={styles.confirmButton}
-            >
+            <Pressable onPress={() => void handleRename()} style={styles.confirmButton}>
               <Text style={styles.confirmButtonText}>Rename</Text>
             </Pressable>
             <Pressable
