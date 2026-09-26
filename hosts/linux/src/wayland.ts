@@ -1125,6 +1125,53 @@ function findWindowControl(
   return undefined;
 }
 
+/**
+ * Height of the compositor-drawn title bar in desktop-logical pixels. Must
+ * match DESKTOP_VISUAL_METRICS.titleBarHeight in
+ * shell/desktop/src/desktop-appearance.ts: a window's native surface covers
+ * only the content area below the title bar.
+ */
+const NATIVE_SURFACE_TITLE_BAR_HEIGHT = 46;
+
+/**
+ * Finds the window that should receive a native pointer/wheel event at the
+ * given desktop-logical point. The topmost window is selected by its full
+ * bounds (matching the desktop focus hit test), then the point must fall
+ * inside that window's content area below the title bar.
+ *
+ * A point on the title bar is window chrome: the desktop runtime handles it
+ * (focus/drag/window controls) and no native event is dispatched. It must
+ * NOT fall through to a window underneath — that fall-through was the
+ * bare-metal click-through bug (a title-bar click on the top window was
+ * delivered to the app below it).
+ */
+export function findNativePointerTarget(
+  scene: DesktopScene | undefined,
+  x: number,
+  y: number,
+): DesktopWindowSceneNode | undefined {
+  const topmost = scene?.nodes
+    .filter(
+      (node): node is DesktopWindowSceneNode =>
+        node.kind === "desktop-window" && node.nativeSurface !== undefined,
+    )
+    .sort((first, second) => second.order - first.order)
+    .find(
+      (node) =>
+        x >= node.base.bounds.x &&
+        x < node.base.bounds.x + node.base.bounds.width &&
+        y >= node.base.bounds.y &&
+        y < node.base.bounds.y + node.base.bounds.height,
+    );
+  if (topmost === undefined) {
+    return undefined;
+  }
+  if (y < topmost.base.bounds.y + NATIVE_SURFACE_TITLE_BAR_HEIGHT) {
+    return undefined;
+  }
+  return topmost;
+}
+
 function dispatchNativePointer(
   runtime: DesktopRuntime,
   scene: DesktopScene | undefined,
@@ -1135,16 +1182,7 @@ function dispatchNativePointer(
     scene?.nodes.filter(
       (node): node is DesktopWindowSceneNode => node.kind === "desktop-window",
     ) ?? [];
-  const target = windowNodes
-    .filter((node) => node.nativeSurface !== undefined)
-    .sort((first, second) => second.order - first.order)
-    .find(
-      (node) =>
-        event.position.x >= node.base.bounds.x &&
-        event.position.x < node.base.bounds.x + node.base.bounds.width &&
-        event.position.y >= node.base.bounds.y + 46 &&
-        event.position.y < node.base.bounds.y + node.base.bounds.height,
-    );
+  const target = findNativePointerTarget(scene, event.position.x, event.position.y);
   if (process.env["SEVYN_HITTEST_PROBE"] === "1" && event.type === "pointer-down") {
     /*
      * Temporary diagnostic for the bare-metal click-through investigation.
@@ -1210,20 +1248,7 @@ function findTargetWindowForWheel(
   x: number,
   y: number,
 ): string | undefined {
-  const target = scene?.nodes
-    .filter(
-      (node): node is DesktopWindowSceneNode =>
-        node.kind === "desktop-window" && node.nativeSurface !== undefined,
-    )
-    .sort((first, second) => second.order - first.order)
-    .find(
-      (node) =>
-        x >= node.base.bounds.x &&
-        x < node.base.bounds.x + node.base.bounds.width &&
-        y >= node.base.bounds.y + 46 &&
-        y < node.base.bounds.y + node.base.bounds.height,
-    );
-  return target?.windowId;
+  return findNativePointerTarget(scene, x, y)?.windowId;
 }
 
 function buttonNumber(button: string): number {
