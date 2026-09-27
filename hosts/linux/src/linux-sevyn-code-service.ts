@@ -196,10 +196,22 @@ export class LinuxSevynCodeService {
         this.#codeServer = undefined;
         reject(error);
       };
+      // Capture stderr for diagnostics if code-server fails to start
+      let stderrOutput = "";
+      child.stderr?.on("data", (data: Buffer) => {
+        stderrOutput += data.toString();
+        // Keep only the last 2KB to avoid memory bloat
+        if (stderrOutput.length > 2048) {
+          stderrOutput = stderrOutput.slice(-2048);
+        }
+      });
       const onExit = (code: number | null): void => {
         this.#codeServer = undefined;
         if (code !== 0 && code !== null) {
-          reject(new Error(`code-server exited with code ${String(code)}`));
+          const details = stderrOutput.trim()
+            ? ` stderr: ${stderrOutput.trim().slice(0, 500)}`
+            : "";
+          reject(new Error(`code-server exited with code ${String(code)}.${details}`));
         }
       };
       child.once("error", onError);
