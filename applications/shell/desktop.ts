@@ -46,6 +46,7 @@ export interface DesktopStatusBarRenderInput {
   readonly batteryCharging?: boolean | undefined;
   readonly audioVolume?: number | undefined;
   readonly audioMuted?: boolean | undefined;
+  readonly powerMenuOpen?: boolean | undefined;
 }
 
 export interface DesktopDockRenderInput {
@@ -247,6 +248,30 @@ export interface DesktopLockScreenUnlockActionSceneNode {
   readonly label: string;
 }
 
+export interface DesktopPowerButtonSceneNode {
+  readonly kind: "desktop-power-button";
+  readonly order: number;
+  readonly bounds: DesktopShellBounds;
+  readonly displayId: string;
+}
+
+export interface DesktopPowerMenuSceneNode {
+  readonly kind: "desktop-power-menu";
+  readonly order: number;
+  readonly bounds: DesktopShellBounds;
+  readonly displayId: string;
+  readonly open: boolean;
+}
+
+export interface DesktopPowerMenuEntrySceneNode {
+  readonly kind: "desktop-power-menu-entry";
+  readonly order: number;
+  readonly bounds: DesktopShellBounds;
+  readonly displayId: string;
+  readonly action: "shutdown" | "restart";
+  readonly label: string;
+}
+
 export type DesktopSystemApplicationSceneNode =
   | DesktopBackgroundSceneNode
   | DesktopStatusBarSceneNode
@@ -265,7 +290,10 @@ export type DesktopSystemApplicationSceneNode =
   | DesktopWorkspaceItemSceneNode
   | DesktopLockScreenSurfaceSceneNode
   | DesktopLockScreenClockSceneNode
-  | DesktopLockScreenUnlockActionSceneNode;
+  | DesktopLockScreenUnlockActionSceneNode
+  | DesktopPowerButtonSceneNode
+  | DesktopPowerMenuSceneNode
+  | DesktopPowerMenuEntrySceneNode;
 
 export function renderDesktopWorkspace(
   input: DesktopWorkspaceRenderInput,
@@ -335,38 +363,113 @@ export function renderDesktopWallpaper(
 
 export function renderDesktopStatusBar(
   input: DesktopStatusBarRenderInput,
-): readonly DesktopStatusBarSceneNode[] {
+): readonly (
+  | DesktopStatusBarSceneNode
+  | DesktopPowerButtonSceneNode
+  | DesktopPowerMenuSceneNode
+  | DesktopPowerMenuEntrySceneNode
+)[] {
+  const powerMenuOpen = input.powerMenuOpen ?? false;
   return Object.freeze(
-    input.displays.map((display) =>
-      Object.freeze({
-        kind: "desktop-status-bar" as const,
-        order: input.order,
-        bounds: {
-          x: display.bounds.x,
-          y: display.bounds.y,
-          width: display.bounds.width,
-          height: 52,
-        },
-        displayId: display.id,
-        activeWorkspace: input.activeWorkspace,
-        ...(input.timeText !== undefined ? { timeText: input.timeText } : {}),
-        ...(input.dateText !== undefined ? { dateText: input.dateText } : {}),
-        ...(input.wifiState !== undefined ? { wifiState: input.wifiState } : {}),
-        ...(input.wifiSignal !== undefined ? { wifiSignal: input.wifiSignal } : {}),
-        ...(input.wifiSsid !== undefined ? { wifiSsid: input.wifiSsid } : {}),
-        ...(input.batteryAvailable !== undefined
-          ? { batteryAvailable: input.batteryAvailable }
-          : {}),
-        ...(input.batteryPercent !== undefined
-          ? { batteryPercent: input.batteryPercent }
-          : {}),
-        ...(input.batteryCharging !== undefined
-          ? { batteryCharging: input.batteryCharging }
-          : {}),
-        ...(input.audioVolume !== undefined ? { audioVolume: input.audioVolume } : {}),
-        ...(input.audioMuted !== undefined ? { audioMuted: input.audioMuted } : {}),
-      }),
-    ),
+    input.displays.flatMap((display) => {
+      const statusBarBounds = {
+        x: display.bounds.x,
+        y: display.bounds.y,
+        width: display.bounds.width,
+        height: 52,
+      };
+      // Power button at far right of status bar
+      const powerButtonSize = 32;
+      const powerButtonBounds = {
+        x: display.bounds.x + display.bounds.width - powerButtonSize - 8,
+        y: display.bounds.y + Math.round((52 - powerButtonSize) / 2),
+        width: powerButtonSize,
+        height: powerButtonSize,
+      };
+      const nodes: (
+        | DesktopStatusBarSceneNode
+        | DesktopPowerButtonSceneNode
+        | DesktopPowerMenuSceneNode
+        | DesktopPowerMenuEntrySceneNode
+      )[] = [
+        Object.freeze({
+          kind: "desktop-status-bar" as const,
+          order: input.order,
+          bounds: statusBarBounds,
+          displayId: display.id,
+          activeWorkspace: input.activeWorkspace,
+          ...(input.timeText !== undefined ? { timeText: input.timeText } : {}),
+          ...(input.dateText !== undefined ? { dateText: input.dateText } : {}),
+          ...(input.wifiState !== undefined ? { wifiState: input.wifiState } : {}),
+          ...(input.wifiSignal !== undefined ? { wifiSignal: input.wifiSignal } : {}),
+          ...(input.wifiSsid !== undefined ? { wifiSsid: input.wifiSsid } : {}),
+          ...(input.batteryAvailable !== undefined
+            ? { batteryAvailable: input.batteryAvailable }
+            : {}),
+          ...(input.batteryPercent !== undefined
+            ? { batteryPercent: input.batteryPercent }
+            : {}),
+          ...(input.batteryCharging !== undefined
+            ? { batteryCharging: input.batteryCharging }
+            : {}),
+          ...(input.audioVolume !== undefined ? { audioVolume: input.audioVolume } : {}),
+          ...(input.audioMuted !== undefined ? { audioMuted: input.audioMuted } : {}),
+        }),
+        Object.freeze({
+          kind: "desktop-power-button" as const,
+          order: input.order + 0.1,
+          bounds: powerButtonBounds,
+          displayId: display.id,
+        }),
+      ];
+      // Power menu dropdown (when open)
+      if (powerMenuOpen) {
+        const menuWidth = 180;
+        const menuItemHeight = 40;
+        const menuBounds = {
+          x: powerButtonBounds.x + powerButtonBounds.width - menuWidth,
+          y: powerButtonBounds.y + powerButtonBounds.height + 4,
+          width: menuWidth,
+          height: menuItemHeight * 2 + 16,
+        };
+        nodes.push(
+          Object.freeze({
+            kind: "desktop-power-menu" as const,
+            order: input.order + 0.2,
+            bounds: menuBounds,
+            displayId: display.id,
+            open: true,
+          }),
+          Object.freeze({
+            kind: "desktop-power-menu-entry" as const,
+            order: input.order + 0.3,
+            bounds: {
+              x: menuBounds.x + 8,
+              y: menuBounds.y + 8,
+              width: menuWidth - 16,
+              height: menuItemHeight,
+            },
+            displayId: display.id,
+            action: "shutdown" as const,
+            label: "Shut Down",
+          }),
+          Object.freeze({
+            kind: "desktop-power-menu-entry" as const,
+            order: input.order + 0.3,
+            bounds: {
+              x: menuBounds.x + 8,
+              y: menuBounds.y + 8 + menuItemHeight,
+              width: menuWidth - 16,
+              height: menuItemHeight,
+            },
+            displayId: display.id,
+            action: "restart" as const,
+            label: "Restart",
+          }),
+        );
+      }
+      return Object.freeze(nodes);
+    }),
   );
 }
 

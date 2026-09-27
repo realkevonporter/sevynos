@@ -21,6 +21,9 @@ import type {
   DesktopWorkspaceItemSceneNode,
   DesktopWindowSwitcherEntrySceneNode,
   DesktopLockScreenUnlockActionSceneNode,
+  DesktopPowerButtonSceneNode,
+  DesktopPowerMenuSceneNode,
+  DesktopPowerMenuEntrySceneNode,
 } from "@sevynos/system-applications/desktop";
 import type { CursorKind } from "@sevynos/input";
 import type {
@@ -143,4 +146,7 @@ export type {
   DesktopWorkspaceItemSceneNode,
   DesktopWindowSwitcherEntrySceneNode,
   DesktopLockScreenUnlockActionSceneNode,
+  DesktopPowerButtonSceneNode,
+  DesktopPowerMenuSceneNode,
+  DesktopPowerMenuEntrySceneNode,
 };

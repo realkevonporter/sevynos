@@ -107,6 +107,7 @@ export class DesktopSceneComposer {
   #batterySnapshot: BatterySnapshot | undefined;
   #networkSnapshot: WirelessNetworkSnapshot | undefined;
   #audioSnapshot: AudioSnapshot | undefined;
+  #powerMenuOpen = false;
   #desktopEntries: readonly {
     readonly name: string;
     readonly path: string;
@@ -211,6 +212,22 @@ export class DesktopSceneComposer {
     }
     for (const unsub of this.#unsubscribers) unsub();
     this.#unsubscribers.length = 0;
+  }
+
+  public isPowerMenuOpen(): boolean {
+    return this.#powerMenuOpen;
+  }
+
+  public togglePowerMenu(): void {
+    this.#powerMenuOpen = !this.#powerMenuOpen;
+    this.#notifyServiceUpdate();
+  }
+
+  public closePowerMenu(): void {
+    if (this.#powerMenuOpen) {
+      this.#powerMenuOpen = false;
+      this.#notifyServiceUpdate();
+    }
   }
 
   async #refreshDesktopEntries(): Promise<void> {
@@ -403,6 +420,7 @@ export class DesktopSceneComposer {
       batteryCharging: this.#batterySnapshot?.charging,
       audioVolume: this.#audioSnapshot?.volume,
       audioMuted: this.#audioSnapshot?.muted,
+      powerMenuOpen: this.#powerMenuOpen,
     } satisfies DesktopStatusBarRenderInput) as readonly DesktopStatusBarSceneNode[];
     const workspaceNodes = renderDesktopWorkspace({
       display: primary.bounds,

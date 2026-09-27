@@ -222,6 +222,15 @@ function drawDesktopScene(
       case "desktop-status-bar":
         drawStatusBar(raster, node, appearance);
         break;
+      case "desktop-power-button":
+        drawPowerButton(raster, node.bounds, appearance);
+        break;
+      case "desktop-power-menu":
+        drawPowerMenu(raster, node.bounds, appearance);
+        break;
+      case "desktop-power-menu-entry":
+        drawPowerMenuEntry(raster, node.bounds, node.label, node.action, appearance);
+        break;
       case "desktop-window":
         drawWindow(raster, node, appearance);
         break;
@@ -1263,8 +1272,104 @@ function drawVectorIcon(
     return;
   }
 
+  if (lower.includes("camera") || lower.includes("photo-lens")) {
+    drawCameraVectorIcon(raster, cx, cy, width, height, color);
+    return;
+  }
+
+  if (lower.includes("music") || lower.includes("audio-note")) {
+    drawMusicVectorIcon(raster, cx, cy, width, height, color);
+    return;
+  }
+
+  if (lower.includes("installer") || lower.includes("package-box")) {
+    drawInstallerVectorIcon(raster, cx, cy, width, height, color);
+    return;
+  }
+
   // Fallback: rounded square badge
   raster.roundedRect({ x: cx - 7, y: cy - 7, width: 14, height: 14 }, 3, color);
+}
+
+function drawCameraVectorIcon(
+  raster: SoftwareRaster,
+  cx: number,
+  cy: number,
+  width: number,
+  height: number,
+  color: Rgba,
+): void {
+  const bw = width * 0.84;
+  const bh = height * 0.62;
+  const bx = Math.round(cx - bw / 2);
+  const by = Math.round(cy - bh / 2 + 2);
+  // Body
+  raster.roundedRect({ x: bx, y: by, width: bw, height: bh }, 4, color);
+  // Top hump (viewfinder)
+  const hw = bw * 0.36;
+  raster.roundedRect(
+    { x: Math.round(cx - hw / 2), y: by - 5, width: hw, height: 7 },
+    2,
+    color,
+  );
+  // Lens
+  const lr = Math.min(bw, bh) * 0.28;
+  raster.strokeCircle(cx, cy + 2, lr, parseColor("#000000"), 1.5);
+  raster.strokeCircle(cx, cy + 2, lr, withAlpha(color, 0.9), 1.2);
+  raster.fillCircle(cx, cy + 2, lr * 0.45, withAlpha(parseColor("#000000"), 0.55));
+  // Flash dot
+  raster.fillCircle(bx + bw - 6, by + 5, 1.8, withAlpha(parseColor("#000000"), 0.5));
+}
+
+function drawMusicVectorIcon(
+  raster: SoftwareRaster,
+  cx: number,
+  cy: number,
+  width: number,
+  height: number,
+  color: Rgba,
+): void {
+  // Eighth note: stem + beam + two heads
+  const s = Math.min(width, height);
+  // Stem
+  raster.fillRect(
+    {
+      x: Math.round(cx + s * 0.12),
+      y: Math.round(cy - s * 0.32),
+      width: 2.5,
+      height: Math.round(s * 0.52),
+    },
+    color,
+  );
+  // Beam (top bar)
+  raster.drawLine(cx + s * 0.12, cy - s * 0.32, cx - s * 0.22, cy - s * 0.22, color, 2.5);
+  // Left head
+  raster.fillCircle(cx - s * 0.22, cy + s * 0.18, s * 0.11, color);
+  // Right head
+  raster.fillCircle(cx + s * 0.16, cy + s * 0.2, s * 0.11, color);
+}
+
+function drawInstallerVectorIcon(
+  raster: SoftwareRaster,
+  cx: number,
+  cy: number,
+  width: number,
+  height: number,
+  color: Rgba,
+): void {
+  const bw = width * 0.72;
+  const bh = height * 0.72;
+  const bx = Math.round(cx - bw / 2);
+  const by = Math.round(cy - bh / 2);
+  // Package box
+  raster.roundedRect({ x: bx, y: by, width: bw, height: bh }, 3, color);
+  // Box tape lines
+  raster.drawLine(cx, by, cx, by + bh, withAlpha(parseColor("#000000"), 0.35), 1.5);
+  raster.drawLine(bx, cy, bx + bw, cy, withAlpha(parseColor("#000000"), 0.35), 1.5);
+  // Download arrow
+  raster.drawLine(cx, by + 4, cx, by + bh - 8, parseColor("#FFFFFF"), 2);
+  raster.drawLine(cx, by + bh - 8, cx - 4, by + bh - 12, parseColor("#FFFFFF"), 2);
+  raster.drawLine(cx, by + bh - 8, cx + 4, by + bh - 12, parseColor("#FFFFFF"), 2);
 }
 
 function resolveAppIconVisuals(label: string): {
@@ -1290,7 +1395,7 @@ function resolveAppIconVisuals(label: string): {
       icon: "compass",
     };
   }
-  if (lower.includes("studio") || lower.includes("ide")) {
+  if (lower.includes("studio") || lower.includes("ide") || lower.includes("sevyn code")) {
     return {
       gradientStart: "#6366F1",
       gradientEnd: "#4338CA",
@@ -1374,6 +1479,30 @@ function resolveAppIconVisuals(label: string): {
       icon: "calculator",
     };
   }
+  if (lower.includes("camera")) {
+    return {
+      gradientStart: "#8B5CF6",
+      gradientEnd: "#6D28D9",
+      symbol: "CA",
+      icon: "camera",
+    };
+  }
+  if (lower.includes("music")) {
+    return {
+      gradientStart: "#EC4899",
+      gradientEnd: "#BE185D",
+      symbol: "MU",
+      icon: "music",
+    };
+  }
+  if (lower.includes("install")) {
+    return {
+      gradientStart: "#14B8A6",
+      gradientEnd: "#0F766E",
+      symbol: "IN",
+      icon: "installer",
+    };
+  }
   return {
     gradientStart: "#6366F1",
     gradientEnd: "#4338CA",
@@ -1444,6 +1573,82 @@ function drawTaskbar(
     dockY + dockHeight - 10,
     parseColor(isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)"),
     1,
+  );
+}
+
+function drawPowerButton(
+  raster: SoftwareRaster,
+  bounds: Bounds,
+  appearance: DesktopAppearance,
+): void {
+  const isDark = appearance.mode === "dark";
+  const cx = bounds.x + bounds.width / 2;
+  const cy = bounds.y + bounds.height / 2;
+  const color = parseColor(isDark ? "#E5E7EB" : "#374151");
+
+  // Power symbol: circle with vertical line at top
+  const r = 8;
+  // Circle (3/4 arc, gap at top)
+  raster.strokeCircle(cx, cy + 1, r, color, 2);
+  // Vertical line at top
+  raster.drawLine(cx, cy - r - 1, cx, cy - 1, color, 2);
+}
+
+function drawPowerMenu(
+  raster: SoftwareRaster,
+  bounds: Bounds,
+  appearance: DesktopAppearance,
+): void {
+  const isDark = appearance.mode === "dark";
+  // Menu background with shadow
+  drawSoftShadow(raster, bounds, 12, appearance.taskbar.shadow);
+  raster.roundedRect(
+    bounds,
+    12,
+    parseColor(isDark ? "rgba(28, 32, 44, 0.96)" : "rgba(255, 255, 255, 0.96)"),
+    parseColor(isDark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.10)"),
+  );
+}
+
+function drawPowerMenuEntry(
+  raster: SoftwareRaster,
+  bounds: Bounds,
+  label: string,
+  action: "shutdown" | "restart",
+  appearance: DesktopAppearance,
+): void {
+  const isDark = appearance.mode === "dark";
+  const cx = bounds.x + 20;
+  const cy = bounds.y + bounds.height / 2;
+  const color = parseColor(isDark ? "#E5E7EB" : "#1F2937");
+
+  // Icon
+  if (action === "shutdown") {
+    // Power symbol
+    raster.strokeCircle(cx, cy + 1, 7, color, 1.8);
+    raster.drawLine(cx, cy - 7, cx, cy - 1, color, 1.8);
+  } else {
+    // Restart: circular arrow
+    raster.strokeCircle(cx, cy, 7, color, 1.8);
+    // Arrow head
+    raster.fillPolygon(
+      [
+        [cx + 5, cy - 7],
+        [cx + 9, cy - 3],
+        [cx + 3, cy - 3],
+      ],
+      color,
+    );
+  }
+
+  // Label
+  raster.drawText(
+    label,
+    bounds.x + 36,
+    bounds.y + Math.round((bounds.height - 12) / 2),
+    1.4,
+    color,
+    "start",
   );
 }
 
@@ -1537,8 +1742,8 @@ function drawStatusBar(
     "center",
   );
 
-  // Right: Status elements
-  let currentX = bounds.x + bounds.width - 16;
+  // Right: Status elements (leave room for power button at far right)
+  let currentX = bounds.x + bounds.width - 48;
 
   // 1. WiFi status pill
   const wifiState = node.wifiState ?? "unavailable";

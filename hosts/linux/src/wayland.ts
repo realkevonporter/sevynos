@@ -748,7 +748,22 @@ export async function startWaylandHost(
           case "desktop-diagnostics-control":
           case "desktop-recovery-control":
             break;
+          case "desktop-power-button":
+            composer.togglePowerMenu();
+            return;
+          case "desktop-power-menu-entry":
+            composer.closePowerMenu();
+            if (shellControl.action === "shutdown") {
+              void options.power?.shutdown();
+            } else if (shellControl.action === "restart") {
+              void options.power?.restart?.();
+            }
+            return;
         }
+      } else if (composer.isPowerMenuOpen()) {
+        // Clicked outside the menu: dismiss it
+        composer.closePowerMenu();
+        return;
       }
       const windowControl = findWindowControl(
         latestScene,
