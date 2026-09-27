@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, appendFileSync } from "node:fs";
 import { chown, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,21 @@ import type {
   BrowserEngineSnapshot,
   SevynBrowserEngine,
 } from "@sevynos/react-native/internal";
+
+/**
+ * Emit a marker to stdout and mirror to the serial console (if present),
+ * matching the Genesis marker behavior in wayland.ts.
+ */
+function emitServiceMarker(value: string): void {
+  console.log(value);
+  try {
+    if (existsSync("/dev/ttyS0")) {
+      appendFileSync("/dev/ttyS0", value + "\n");
+    }
+  } catch {
+    // Ignore errors writing to serial port
+  }
+}
 
 export interface ChromiumBrowserEngineOptions {
   readonly width?: number;
@@ -340,7 +356,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     this.#screencastFrames += 1;
     if (this.#screencastFirstFrameAt === 0) {
       this.#screencastFirstFrameAt = receivedAt;
-      console.log("SEVYN_CODE_SERVICE_FIRST_FRAME_RECEIVED");
+      emitServiceMarker("SEVYN_CODE_SERVICE_FIRST_FRAME_RECEIVED");
     }
     this.#screencastLastFrameAt = receivedAt;
     if (this.#pendingInputAt !== 0) {

@@ -14,7 +14,24 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, appendFileSync } from "node:fs";
 import { ChromiumBrowserEngine } from "./chromium-browser-engine.js";
+
+/**
+ * Emit a marker to stdout and mirror to the serial console (if present),
+ * matching the Genesis marker behavior in wayland.ts. Direct console.log
+ * alone is not visible on the QEMU serial console.
+ */
+function emitServiceMarker(value: string): void {
+  console.log(value);
+  try {
+    if (existsSync("/dev/ttyS0")) {
+      appendFileSync("/dev/ttyS0", value + "\n");
+    }
+  } catch {
+    // Ignore errors writing to serial port
+  }
+}
 
 export interface SevynCodeServiceOptions {
   readonly codeServerBinary?: string;
@@ -57,13 +74,13 @@ export class LinuxSevynCodeService {
 
     try {
       // 1. Launch code-server bound to localhost only
-      console.log("SEVYN_CODE_SERVICE_STARTING_CODE_SERVER");
+      emitServiceMarker("SEVYN_CODE_SERVICE_STARTING_CODE_SERVER");
       await this.#startCodeServer();
-      console.log("SEVYN_CODE_SERVICE_CODE_SERVER_READY");
+      emitServiceMarker("SEVYN_CODE_SERVICE_CODE_SERVER_READY");
 
       // 2. Launch Chromium pointing at code-server with screencast enabled
       const url = `http://127.0.0.1:${String(this.#port)}/`;
-      console.log("SEVYN_CODE_SERVICE_STARTING_CHROMIUM");
+      emitServiceMarker("SEVYN_CODE_SERVICE_STARTING_CHROMIUM");
       this.#engine = new ChromiumBrowserEngine({
         ...(this.#options.chromiumExecutable
           ? { executable: this.#options.chromiumExecutable }
@@ -72,12 +89,12 @@ export class LinuxSevynCodeService {
         screencastQuality: 80,
       });
       await this.#engine.navigate(url);
-      console.log("SEVYN_CODE_SERVICE_CHROMIUM_NAVIGATED");
+      emitServiceMarker("SEVYN_CODE_SERVICE_CHROMIUM_NAVIGATED");
       await this.#engine.startScreencast();
-      console.log("SEVYN_CODE_SERVICE_SCREENCAST_STARTED");
+      emitServiceMarker("SEVYN_CODE_SERVICE_SCREENCAST_STARTED");
 
       this.#started = true;
-      console.log("SEVYN_CODE_SERVICE_READY");
+      emitServiceMarker("SEVYN_CODE_SERVICE_READY");
     } catch (error) {
       // Clean up partial startup so nothing leaks
       await this.#cleanup();
