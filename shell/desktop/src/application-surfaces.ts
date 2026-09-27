@@ -152,6 +152,8 @@ export class ApplicationSurfaceRegistry {
   readonly #power: SevynPowerService;
   readonly #createBrowserEngine: (() => SevynBrowserEngine) | undefined;
   readonly #browserEngines = new Map<GenesisWindowId, SevynBrowserEngine>();
+  readonly #createSevynCodeEngine: (() => SevynBrowserEngine) | undefined;
+  readonly #sevynCodeEngines = new Map<GenesisWindowId, SevynBrowserEngine>();
   readonly #nativeRuntimes = new Map<GenesisWindowId, SevynApplicationRuntime>();
   readonly #nativeSignatures = new Map<GenesisWindowId, string>();
   readonly #nativeBounds = new Map<GenesisWindowId, NativeBounds>();
@@ -182,11 +184,13 @@ export class ApplicationSurfaceRegistry {
     audio?: SevynAudioService,
     system?: SevynSystemService,
     studio?: SevynStudioService,
+    createSevynCodeEngine?: () => SevynBrowserEngine,
   ) {
     this.#onChange = onChange;
     this.#network = network;
     this.#power = power;
     this.#createBrowserEngine = createBrowserEngine;
+    this.#createSevynCodeEngine = createSevynCodeEngine;
     this.#filesystem =
       filesystem ??
       new InMemoryFileSystem({
@@ -381,7 +385,7 @@ export class ApplicationSurfaceRegistry {
   public createIde(windowId: GenesisWindowId): IdeApplicationSurface {
     const surface: IdeApplicationSurface = Object.freeze({
       kind: "ide",
-      heading: "Sevyn Studio",
+      heading: "Sevyn Code",
     });
     this.#set(windowId, surface);
     return surface;
@@ -812,13 +816,21 @@ export class ApplicationSurfaceRegistry {
           createEngine: () => this.#createBrowserEngine?.(),
         });
       }
-      case "ide":
+      case "ide": {
+        const sevynCodeEngine = this.#sevynCodeEngine(windowId);
+        if (!sevynCodeEngine) {
+          // Sevyn Code engine not available — the host must provide it
+          // via createSevynCodeEngine. Fall back to a placeholder.
+          return createCoreSystemApplication({
+            kind: "ide",
+            browserEngine: this.#createBrowserEngine?.() as SevynBrowserEngine,
+          });
+        }
         return createCoreSystemApplication({
           kind: "ide",
-          filesystem: this.#filesystem,
-          notifications: this.#notifications,
-          ...(this.#studio === undefined ? {} : { studio: this.#studio }),
+          browserEngine: sevynCodeEngine,
         });
+      }
       case "text-editor":
         return createCoreSystemApplication({
           kind: "text-editor",
@@ -852,6 +864,14 @@ export class ApplicationSurfaceRegistry {
     if (existing !== undefined) return existing;
     const created = this.#createBrowserEngine?.();
     if (created !== undefined) this.#browserEngines.set(windowId, created);
+    return created;
+  }
+
+  #sevynCodeEngine(windowId: GenesisWindowId): SevynBrowserEngine | undefined {
+    const existing = this.#sevynCodeEngines.get(windowId);
+    if (existing !== undefined) return existing;
+    const created = this.#createSevynCodeEngine?.();
+    if (created !== undefined) this.#sevynCodeEngines.set(windowId, created);
     return created;
   }
 }

@@ -1,0 +1,10 @@
+# code-server configuration for Sevyn Code.
+# This file is installed to ~/.config/code-server/config.yaml in the image.
+# code-server binds to 127.0.0.1 only — never exposed to the network.
+# The SevynOS host streams the workbench via CDP screencast.
+
+bind-addr: 127.0.0.1:8080
+auth: none
+cert: false
+disable-telemetry: true
+disable-update-check: true

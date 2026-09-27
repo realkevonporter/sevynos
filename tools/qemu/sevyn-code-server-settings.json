@@ -1,0 +1,29 @@
+{
+  // Sevyn Code — VS Code settings for the SevynOS IDE.
+  // Installed to ~/.local/share/code-server/User/settings.json in the image.
+
+  // Use Open VSX (open-source extension registry), not Microsoft's marketplace.
+  // code-server defaults to Open VSX; these settings make it explicit.
+  "extensions.gallery.serviceUrl": "https://open-vsx.org/vscode/gallery",
+  "extensions.gallery.itemUrl": "https://open-vsx.org/vscode/item",
+
+  // The integrated terminal launches the Sevyn CLI as its default shell.
+  // There is no bash, no Linux shell — everything goes through SevynOS.
+  "terminal.integrated.defaultProfile.linux": "sevyn",
+  "terminal.integrated.profiles.linux": {
+    "sevyn": {
+      "path": "/usr/local/bin/sevyn",
+      "args": []
+    }
+  },
+  // Remove other shells from the profile list so Sevyn CLI is the only option.
+  "terminal.integrated.profiles.windows": {},
+  "terminal.integrated.profiles.osx": {},
+
+  // SevynOS-appropriate defaults
+  "telemetry.telemetryLevel": "off",
+  "update.mode": "none",
+  "workbench.startupEditor": "newUntitledFile",
+  "editor.fontSize": 14,
+  "workbench.colorTheme": "Default Dark+"
+}

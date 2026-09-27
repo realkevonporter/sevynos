@@ -26,6 +26,18 @@ FROM node:22-bookworm-slim AS node-runtime
 FROM node-runtime AS studio-tools
 RUN npm install --prefix /opt/sevynos/studio-tools --omit=dev esbuild@0.25.12
 
+# code-server (Sevyn Code IDE backend) — installed from the official release
+# tarball for reproducibility. Runs bound to 127.0.0.1 only; the SevynOS
+# host streams it via CDP screencast, never exposed to the network.
+FROM node-runtime AS sevyn-code-server
+ARG CODE_SERVER_VERSION=4.104.2
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" \
+    | tar -xz -C /opt \
+    && mv "/opt/code-server-${CODE_SERVER_VERSION}-linux-amd64" /opt/code-server \
+    && ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server
+
 FROM debian:bookworm-slim AS image
 RUN (sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources 2>/dev/null || sed -i 's/main/main contrib non-free non-free-firmware/' /etc/apt/sources.list 2>/dev/null || true) && \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -37,6 +49,8 @@ RUN (sed -i 's/Components: main/Components: main contrib non-free non-free-firmw
     v4l-utils ffmpeg && rm -rf /var/lib/apt/lists/*
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=studio-tools /opt/sevynos/studio-tools /opt/sevynos/studio-tools
+COPY --from=sevyn-code-server /opt/code-server /opt/code-server
+COPY --from=sevyn-code-server /usr/local/bin/code-server /usr/local/bin/code-server
 COPY --from=hermes-runtime /src/hermes-build/bin/hermesc /usr/local/lib/sevynos/hermesc
 COPY --from=bridge /src/target/release/sevyn-wayland-bridge /usr/local/bin/sevyn-wayland-bridge
 COPY --from=hermes-runtime /src/hermes-build/bin/sevyn-hermes-host /usr/local/bin/sevyn-hermes-host
@@ -51,6 +65,13 @@ COPY tools/qemu/build-font-atlas.py /usr/local/lib/sevynos/build-font-atlas.py
 COPY tools/qemu/generate-demo-audio.py /usr/local/lib/sevynos/generate-demo-audio.py
 COPY hosts/linux/native/smoke-wayland.sh /usr/local/bin/smoke-wayland
 COPY tools/qemu/init /init
+# Sevyn CLI — the only shell users ever see (no bash, no Linux shell)
+COPY tools/qemu/sevyn /usr/local/bin/sevyn
+RUN chmod +x /usr/local/bin/sevyn
+# Sevyn Code (code-server) configuration: Open VSX registry, Sevyn CLI terminal
+# Installed to the default user's config locations; code-server runs as that user.
+COPY tools/qemu/sevyn-code-server-config.yaml /etc/sevyn/code-server-config.yaml
+COPY tools/qemu/sevyn-code-server-settings.json /etc/sevyn/code-server-settings.json
 COPY tools/qemu/default.script /usr/share/udhcpc/default.script
 COPY tools/qemu/weston.ini /etc/xdg/weston/weston.ini
 COPY tools/qemu/wpa_supplicant.conf /etc/sevynos/wpa_supplicant.conf
