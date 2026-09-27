@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { isValidElement } from "react";
-import { InMemoryFileSystem, SystemNotificationService } from "@sevynos/react-native";
+import {
+  InMemoryFileSystem,
+  SystemNotificationService,
+  type BrowserEngineSnapshot,
+  type SevynBrowserEngine,
+} from "@sevynos/react-native";
 import {
   AppManagerApplication,
   ComponentGalleryApplication,
   InstallerApplication,
   NotesApplication,
-  ReactNativeIdeApplication,
   TextEditorApplication,
   createCoreSystemApplication,
 } from "./index.js";
@@ -18,7 +22,6 @@ describe("core system applications", () => {
       ComponentGalleryApplication,
       TextEditorApplication,
       AppManagerApplication,
-      ReactNativeIdeApplication,
       NotesApplication,
     ])
       expect(component).toBeTypeOf("function");
@@ -27,28 +30,29 @@ describe("core system applications", () => {
   it("creates a valid element for every core application kind", () => {
     const filesystem = new InMemoryFileSystem();
     const notifications = new SystemNotificationService();
-    const mockBrowserEngine = {
-      snapshot: () => ({
-        ready: false,
-        loading: false,
-        url: "about:blank",
-        title: "",
-        width: 0,
-        height: 0,
-        pixels: undefined,
-      }),
+    const emptySnapshot = (): BrowserEngineSnapshot => ({
+      ready: false,
+      loading: false,
+      url: "about:blank",
+      title: "",
+      width: 0,
+      height: 0,
+      pixels: undefined,
+    });
+    const mockBrowserEngine: SevynBrowserEngine = {
+      snapshot: emptySnapshot,
       subscribe: () => () => {},
-      navigate: async () => ({}),
-      back: async () => ({}),
-      forward: async () => ({}),
-      reload: async () => ({}),
-      resize: async () => ({}),
-      click: async () => ({}),
-      pointerDown: async () => ({}),
-      pointerUp: async () => ({}),
-      pointerMove: async () => ({}),
-      scroll: async () => ({}),
-      key: async () => ({}),
+      navigate: async () => emptySnapshot(),
+      back: async () => emptySnapshot(),
+      forward: async () => emptySnapshot(),
+      reload: async () => emptySnapshot(),
+      resize: async () => emptySnapshot(),
+      click: async () => emptySnapshot(),
+      pointerDown: async () => emptySnapshot(),
+      pointerUp: async () => emptySnapshot(),
+      pointerMove: async () => emptySnapshot(),
+      scroll: async () => emptySnapshot(),
+      key: async () => emptySnapshot(),
       close: async () => {},
     };
     const elements = [
