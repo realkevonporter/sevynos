@@ -41,19 +41,21 @@ describe("core system applications", () => {
     });
     const mockBrowserEngine: SevynBrowserEngine = {
       snapshot: emptySnapshot,
-      subscribe: () => () => {},
-      navigate: async () => emptySnapshot(),
-      back: async () => emptySnapshot(),
-      forward: async () => emptySnapshot(),
-      reload: async () => emptySnapshot(),
-      resize: async () => emptySnapshot(),
-      click: async () => emptySnapshot(),
-      pointerDown: async () => emptySnapshot(),
-      pointerUp: async () => emptySnapshot(),
-      pointerMove: async () => emptySnapshot(),
-      scroll: async () => emptySnapshot(),
-      key: async () => emptySnapshot(),
-      close: async () => {},
+      subscribe: () => {
+        return () => undefined;
+      },
+      navigate: () => Promise.resolve(emptySnapshot()),
+      back: () => Promise.resolve(emptySnapshot()),
+      forward: () => Promise.resolve(emptySnapshot()),
+      reload: () => Promise.resolve(emptySnapshot()),
+      resize: () => Promise.resolve(emptySnapshot()),
+      click: () => Promise.resolve(emptySnapshot()),
+      pointerDown: () => Promise.resolve(emptySnapshot()),
+      pointerUp: () => Promise.resolve(emptySnapshot()),
+      pointerMove: () => Promise.resolve(emptySnapshot()),
+      scroll: () => Promise.resolve(emptySnapshot()),
+      key: () => Promise.resolve(emptySnapshot()),
+      close: () => Promise.resolve(),
     };
     const elements = [
       createCoreSystemApplication({ kind: "installer" }),
