@@ -99,7 +99,7 @@ export class LinuxSevynCodeService {
     if (!this.#started) return { running: false };
     return {
       running: true,
-      port: this.#port,
+      codeServerPort: this.#port,
       url: `http://127.0.0.1:${String(this.#port)}/`,
     };
   }
