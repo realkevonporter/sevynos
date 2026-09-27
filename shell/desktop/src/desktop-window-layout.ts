@@ -214,9 +214,9 @@ export function getTaskbarBounds(
     };
   return {
     x: bounds.x + 12,
-    y: bounds.y + bounds.height - 64,
+    y: bounds.y + bounds.height - 88,
     width: bounds.width - 24,
-    height: 52,
+    height: 76,
   };
 }
 

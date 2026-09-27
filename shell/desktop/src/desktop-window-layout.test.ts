@@ -21,15 +21,15 @@ describe("Genesis desktop window layout", () => {
     const display = { x: 0, y: 0, width: 1280, height: 720 };
     expect(getTaskbarBounds(display, "bottom")).toEqual({
       x: 12,
-      y: 656,
+      y: 632,
       width: 1256,
-      height: 52,
+      height: 76,
     });
     expect(getWorkspaceBounds(display, "bottom")).toEqual({
       x: 0,
       y: 0,
       width: 1280,
-      height: 648,
+      height: 624,
     });
     expect(getWorkspaceBounds(display, "top")).toEqual({
       x: 0,
@@ -55,14 +55,14 @@ describe("Genesis desktop window layout", () => {
     {
       width: 1280,
       height: 720,
-      welcome: { x: 330, y: 114, width: 620, height: 420 },
-      console: { x: 358, y: 142, width: 620, height: 420 },
+      welcome: { x: 330, y: 102, width: 620, height: 420 },
+      console: { x: 358, y: 130, width: 620, height: 420 },
     },
     {
       width: 1024,
       height: 640,
-      welcome: { x: 202, y: 74, width: 620, height: 420 },
-      console: { x: 230, y: 102, width: 620, height: 420 },
+      welcome: { x: 202, y: 62, width: 620, height: 420 },
+      console: { x: 230, y: 90, width: 620, height: 420 },
     },
   ])(
     "creates responsive, distinct defaults at $width×$height",

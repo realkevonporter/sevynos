@@ -144,7 +144,7 @@ describe("Genesis desktop persistence", () => {
     const welcome = target.applications.getByApplicationId("org.sevynos.welcome");
     expect(target.windows.getWindow(welcome?.windowId ?? "")?.bounds).toEqual({
       x: 330,
-      y: 114,
+      y: 102,
       width: 620,
       height: 420,
     });

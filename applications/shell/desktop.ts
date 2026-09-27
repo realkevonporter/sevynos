@@ -475,11 +475,7 @@ export function renderDesktopStatusBar(
 
 export function renderDesktopDock(
   input: DesktopDockRenderInput,
-): readonly (
-  | DesktopTaskbarSceneNode
-  | DesktopTaskbarApplicationSceneNode
-  | DesktopWorkspaceControlSceneNode
-)[] {
+): readonly (DesktopTaskbarSceneNode | DesktopTaskbarApplicationSceneNode)[] {
   const taskbars = input.displays.map((display) =>
     Object.freeze({
       kind: "desktop-taskbar" as const,
@@ -512,18 +508,7 @@ export function renderDesktopDock(
       }),
     ];
   });
-  const workspaces = input.displays.flatMap((display) =>
-    input.workspaces.map((workspaceId, index) =>
-      Object.freeze({
-        kind: "desktop-workspace-control" as const,
-        order: input.order + 1,
-        bounds: workspaceBounds(display.taskbarBounds, input.position, index),
-        workspaceId,
-        active: workspaceId === input.activeWorkspace,
-      }),
-    ),
-  );
-  return Object.freeze([...taskbars, ...applications, ...workspaces]);
+  return Object.freeze([...taskbars, ...applications]);
 }
 
 export function renderDesktopLauncher(
@@ -766,7 +751,7 @@ function launcherButtonBounds(
     return { x: taskbar.x + 6, y: taskbar.y + 10, width: 40, height: 42 };
   const dockWidth = Math.min(taskbar.width - 48, 760);
   const dockX = Math.round(taskbar.x + (taskbar.width - dockWidth) / 2);
-  return { x: dockX + 10, y: taskbar.y + 6, width: 40, height: 40 };
+  return { x: dockX + 12, y: taskbar.y + 18, width: 40, height: 40 };
 }
 
 function runningApplicationBounds(
@@ -778,29 +763,7 @@ function runningApplicationBounds(
     return { x: taskbar.x + 6, y: taskbar.y + 60 + index * 48, width: 40, height: 40 };
   const dockWidth = Math.min(taskbar.width - 48, 760);
   const dockX = Math.round(taskbar.x + (taskbar.width - dockWidth) / 2);
-  return { x: dockX + 58 + index * 48, y: taskbar.y + 6, width: 42, height: 40 };
-}
-
-function workspaceBounds(
-  taskbar: DesktopShellBounds,
-  position: DesktopDockRenderInput["position"],
-  index: number,
-): DesktopShellBounds {
-  if (position === "left" || position === "right")
-    return {
-      x: taskbar.x + 14,
-      y: taskbar.y + taskbar.height - 132 + index * 28,
-      width: 24,
-      height: 24,
-    };
-  const dockWidth = Math.min(taskbar.width - 48, 760);
-  const dockX = Math.round(taskbar.x + (taskbar.width - dockWidth) / 2);
-  return {
-    x: dockX + dockWidth - 86 + index * 26,
-    y: taskbar.y + 10,
-    width: 22,
-    height: 28,
-  };
+  return { x: dockX + 64 + index * 52, y: taskbar.y + 18, width: 40, height: 40 };
 }
 
 export function getApplicationAliases(

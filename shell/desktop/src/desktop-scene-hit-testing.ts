@@ -47,7 +47,6 @@ export function hitTestDesktopSceneControl(
         node.kind === "desktop-launcher-search" ||
         node.kind === "desktop-taskbar-application" ||
         node.kind === "desktop-reset-action" ||
-        node.kind === "desktop-workspace-control" ||
         node.kind === "desktop-settings-control" ||
         node.kind === "desktop-diagnostics-control" ||
         node.kind === "desktop-recovery-control" ||

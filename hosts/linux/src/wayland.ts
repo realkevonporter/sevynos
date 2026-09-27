@@ -721,10 +721,6 @@ export async function startWaylandHost(
           case "desktop-reset-action":
             void persistence?.reset();
             return;
-          case "desktop-workspace-control":
-            runtime.environment.switchWorkspace(shellControl.workspaceId);
-            runtime.applications.synchronizeKeyboardFocus();
-            return;
           case "desktop-workspace-action":
             void (
               shellControl.action === "new-folder"

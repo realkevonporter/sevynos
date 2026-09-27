@@ -1555,22 +1555,12 @@ function drawTaskbar(
     parseColor(isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.50)"),
   );
   // Subtle divider between launcher and apps
-  const dividerX = dockX + 70;
+  const dividerX = dockX + 78;
   raster.drawLine(
     dividerX,
-    dockY + 10,
+    dockY + 14,
     dividerX,
-    dockY + dockHeight - 10,
-    parseColor(isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)"),
-    1,
-  );
-  // Subtle divider between apps and workspace switchers
-  const wsDividerX = dockX + dockWidth - 120;
-  raster.drawLine(
-    wsDividerX,
-    dockY + 10,
-    wsDividerX,
-    dockY + dockHeight - 10,
+    dockY + dockHeight - 14,
     parseColor(isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)"),
     1,
   );
