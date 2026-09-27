@@ -31,7 +31,6 @@ import {
   type SevynAudioService,
   type SevynSystemService,
   type SevynFileSystem,
-  type SevynStudioService,
 } from "@sevynos/react-native/internal";
 import {
   createCoreSystemApplication,
@@ -815,17 +814,23 @@ export class ApplicationSurfaceRegistry {
       }
       case "ide": {
         const sevynCodeEngine = this.#sevynCodeEngine(windowId);
-        if (!sevynCodeEngine) {
-          // Sevyn Code engine not available — the host must provide it
-          // via createSevynCodeEngine. Fall back to a placeholder.
+        if (sevynCodeEngine) {
           return createCoreSystemApplication({
             kind: "ide",
-            browserEngine: this.#createBrowserEngine?.()!,
+            browserEngine: sevynCodeEngine,
           });
+        }
+        // Sevyn Code engine not available — fall back to the browser engine
+        // if the host provides one, otherwise the IDE cannot start.
+        const fallbackEngine = this.#createBrowserEngine?.();
+        if (!fallbackEngine) {
+          throw new Error(
+            "Sevyn Code is unavailable: no browser engine was provided by the host.",
+          );
         }
         return createCoreSystemApplication({
           kind: "ide",
-          browserEngine: sevynCodeEngine,
+          browserEngine: fallbackEngine,
         });
       }
       case "text-editor":
