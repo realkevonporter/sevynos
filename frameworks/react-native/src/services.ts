@@ -134,6 +134,23 @@ export interface BrowserEngineSnapshot {
   readonly error?: string | undefined;
   readonly canGoBack?: boolean | undefined;
   readonly canGoForward?: boolean | undefined;
+  readonly zoomFactor?: number | undefined;
+  readonly downloads?: readonly BrowserDownload[] | undefined;
+}
+
+export interface BrowserDownload {
+  readonly guid: string;
+  readonly url: string;
+  readonly filename: string;
+  readonly state: "in_progress" | "completed" | "cancelled" | "interrupted";
+  readonly receivedBytes: number;
+  readonly totalBytes: number;
+}
+
+export interface FindInPageResult {
+  readonly found: boolean;
+  readonly activeMatchOrdinal?: number | undefined;
+  readonly matches?: number | undefined;
 }
 
 export interface SevynBrowserEngine {
@@ -158,6 +175,8 @@ export interface SevynBrowserEngine {
     code: string,
     modifiers?: { shift: boolean; alt: boolean; control: boolean; meta: boolean },
   ): Promise<BrowserEngineSnapshot>;
+  setZoomFactor(factor: number): Promise<BrowserEngineSnapshot>;
+  findInPage(text: string, forward?: boolean): Promise<FindInPageResult>;
   subscribe(listener: () => void): () => void;
   close(): Promise<void>;
 }

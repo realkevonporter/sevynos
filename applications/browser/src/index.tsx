@@ -159,6 +159,10 @@ export function BrowserApplication({
     readonly x: number;
     readonly y: number;
   } | null>(null);
+  const [findVisible, setFindVisible] = useState(false);
+  const [findText, setFindText] = useState("");
+  const [findResult, setFindResult] = useState<string | null>(null);
+  const [downloadsVisible, setDownloadsVisible] = useState(false);
 
   const activeTab: BrowserTab = tabs.find((t) => t.id === activeTabId) ??
     tabs[0] ?? {
@@ -290,6 +294,44 @@ export function BrowserApplication({
   const handleHome = useCallback(() => {
     navigateTo("sevyn://start");
   }, [navigateTo]);
+
+  const currentZoom = engineSnapshot?.zoomFactor ?? 1;
+
+  const handleZoomIn = useCallback(() => {
+    const next = Math.min(5, Math.round((currentZoom + 0.25) * 100) / 100);
+    void activeEngine?.setZoomFactor(next).then((snap) => {
+      setEngineSnapshot(snap);
+    });
+  }, [activeEngine, currentZoom]);
+
+  const handleZoomOut = useCallback(() => {
+    const next = Math.max(0.25, Math.round((currentZoom - 0.25) * 100) / 100);
+    void activeEngine?.setZoomFactor(next).then((snap) => {
+      setEngineSnapshot(snap);
+    });
+  }, [activeEngine, currentZoom]);
+
+  const handleZoomReset = useCallback(() => {
+    void activeEngine?.setZoomFactor(1).then((snap) => {
+      setEngineSnapshot(snap);
+    });
+  }, [activeEngine]);
+
+  const handleFindNext = useCallback(
+    (forward: boolean) => {
+      if (findText.trim() === "") return;
+      void activeEngine?.findInPage(findText, forward).then((result) => {
+        if (result.found) {
+          setFindResult(
+            result.matches !== undefined ? `${String(result.matches)} matches` : "Found",
+          );
+        } else {
+          setFindResult("No matches");
+        }
+      });
+    },
+    [activeEngine, findText],
+  );
 
   const isBookmarked = bookmarks.some((b) => b.url === activeTab.url);
 
@@ -447,6 +489,26 @@ export function BrowserApplication({
         <Pressable onPress={toggleBookmark} style={styles.navButton}>
           <Text style={styles.navButtonText}>{isBookmarked ? "★" : "☆"}</Text>
         </Pressable>
+
+        <Pressable
+          onPress={() => setDownloadsVisible((v) => !v)}
+          style={styles.navButton}
+        >
+          <Text style={styles.navButtonText}>
+            ⤓
+            {(engineSnapshot?.downloads?.length ?? 0) > 0
+              ? ` ${String(engineSnapshot?.downloads?.length ?? 0)}`
+              : ""}
+          </Text>
+        </Pressable>
+
+        {currentZoom !== 1 && (
+          <Pressable onPress={handleZoomReset} style={styles.zoomBadge}>
+            <Text
+              style={styles.zoomBadgeText}
+            >{`${String(Math.round(currentZoom * 100))}%`}</Text>
+          </Pressable>
+        )}
 
         {/* Omnibox Address / Search Input */}
         <View style={styles.addressBar}>
@@ -660,6 +722,31 @@ export function BrowserApplication({
                     });
                 }}
                 onKeyDown={(event: BrowserKeyboardEvent) => {
+                  const ctrl = event.control === true || event.meta === true;
+                  // Browser shortcuts (intercept before forwarding to page)
+                  if (ctrl && (event.key === "=" || event.key === "+")) {
+                    handleZoomIn();
+                    return;
+                  }
+                  if (ctrl && event.key === "-") {
+                    handleZoomOut();
+                    return;
+                  }
+                  if (ctrl && event.key === "0") {
+                    handleZoomReset();
+                    return;
+                  }
+                  if (ctrl && (event.key === "f" || event.key === "F")) {
+                    setFindVisible(true);
+                    setFindResult(null);
+                    return;
+                  }
+                  if (event.key === "Escape" && findVisible) {
+                    setFindVisible(false);
+                    setFindText("");
+                    setFindResult(null);
+                    return;
+                  }
                   void activeEngine
                     ?.key(event.key, event.code, {
                       shift: event.shift,
@@ -735,6 +822,72 @@ export function BrowserApplication({
               </Pressable>
             </View>
           </>
+        )}
+        {/* Find in page bar */}
+        {findVisible && (
+          <View style={styles.findBar}>
+            <TextInput
+              value={findText}
+              onChangeText={(text) => {
+                setFindText(text);
+                setFindResult(null);
+              }}
+              onSubmitEditing={() => handleFindNext(true)}
+              placeholder="Find in page"
+              placeholderTextColor="#64748B"
+              style={styles.findInput}
+            />
+            {findResult !== null && (
+              <Text style={styles.findResultText}>{findResult}</Text>
+            )}
+            <Pressable onPress={() => handleFindNext(false)} style={styles.findButton}>
+              <Text style={styles.findButtonText}>↑</Text>
+            </Pressable>
+            <Pressable onPress={() => handleFindNext(true)} style={styles.findButton}>
+              <Text style={styles.findButtonText}>↓</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setFindVisible(false);
+                setFindText("");
+                setFindResult(null);
+              }}
+              style={styles.findButton}
+            >
+              <Text style={styles.findButtonText}>✕</Text>
+            </Pressable>
+          </View>
+        )}
+        {/* Downloads panel */}
+        {downloadsVisible && (
+          <View style={styles.downloadsPanel}>
+            <View style={styles.downloadsHeader}>
+              <Text style={styles.downloadsTitle}>Downloads</Text>
+              <Pressable onPress={() => setDownloadsVisible(false)}>
+                <Text style={styles.findButtonText}>✕</Text>
+              </Pressable>
+            </View>
+            {(engineSnapshot?.downloads ?? []).length === 0 ? (
+              <Text style={styles.downloadsEmpty}>No downloads yet</Text>
+            ) : (
+              (engineSnapshot?.downloads ?? []).map((download) => (
+                <View key={download.guid} style={styles.downloadItem}>
+                  <Text style={styles.downloadFilename}>{download.filename}</Text>
+                  <Text style={styles.downloadStatus}>
+                    {download.state === "in_progress"
+                      ? download.totalBytes > 0
+                        ? `${String(Math.round((download.receivedBytes / download.totalBytes) * 100))}%`
+                        : "Downloading…"
+                      : download.state === "completed"
+                        ? "Completed"
+                        : download.state === "cancelled"
+                          ? "Cancelled"
+                          : "Interrupted"}
+                  </Text>
+                </View>
+              ))
+            )}
+          </View>
         )}
       </View>
     </View>
@@ -1087,6 +1240,94 @@ const styles = StyleSheet.create({
   contextMenuItemText: {
     color: "#E2E8F0",
     fontSize: 14,
+  },
+  zoomBadge: {
+    backgroundColor: "#1E293B",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginHorizontal: 4,
+  },
+  zoomBadgeText: {
+    color: "#93C5FD",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  findBar: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1E293B",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    zIndex: 1001,
+  },
+  findInput: {
+    width: 160,
+    height: 28,
+    backgroundColor: "#0F172A",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    color: "#E2E8F0",
+    fontSize: 13,
+  },
+  findResultText: {
+    color: "#94A3B8",
+    fontSize: 12,
+    marginHorizontal: 8,
+  },
+  findButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  findButtonText: {
+    color: "#E2E8F0",
+    fontSize: 14,
+  },
+  downloadsPanel: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: 280,
+    maxHeight: 320,
+    backgroundColor: "#1E293B",
+    borderRadius: 8,
+    padding: 12,
+    zIndex: 1001,
+  },
+  downloadsHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  downloadsTitle: {
+    color: "#E2E8F0",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  downloadsEmpty: {
+    color: "#64748B",
+    fontSize: 13,
+    textAlign: "center",
+    paddingVertical: 16,
+  },
+  downloadItem: {
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#334155",
+  },
+  downloadFilename: {
+    color: "#E2E8F0",
+    fontSize: 13,
+  },
+  downloadStatus: {
+    color: "#94A3B8",
+    fontSize: 12,
+    marginTop: 2,
   },
   loadingBarContainer: {
     height: 3,

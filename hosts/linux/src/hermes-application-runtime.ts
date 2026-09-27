@@ -404,6 +404,18 @@ function createRemoteWebViewEngine(): SevynBrowserEngine {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    setZoomFactor: (factor) => action("setZoomFactor", { factor }),
+    findInPage: (text, forward = true) =>
+      request("webview.action", { id, action: "findInPage", text, forward }).then(
+        (value) => {
+          const record = value as Record<string, unknown>;
+          return {
+            found: record["found"] === true,
+            matches:
+              typeof record["matches"] === "number" ? record["matches"] : undefined,
+          };
+        },
+      ),
     close: async () => {
       await request("webview.close", id);
       listeners.clear();

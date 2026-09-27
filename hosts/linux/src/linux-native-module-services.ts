@@ -1834,6 +1834,14 @@ export class LinuxNativeModuleServices {
       throw new Error("WebView id and action are required.");
     const engine = this.#webviews.get(id);
     if (engine === undefined) throw new Error("WebView session does not exist.");
+    // findInPage returns a result object, not a snapshot
+    if (action === "findInPage" && typeof record["text"] === "string") {
+      const result = await engine.findInPage(record["text"], record["forward"] !== false);
+      return {
+        found: result.found,
+        ...(result.matches === undefined ? {} : { matches: result.matches }),
+      };
+    }
     const snapshot =
       action === "back"
         ? await engine.back()
@@ -1843,56 +1851,58 @@ export class LinuxNativeModuleServices {
             ? await engine.reload()
             : action === "navigate" && typeof record["url"] === "string"
               ? await engine.navigate(record["url"])
-              : action === "scroll" && typeof record["deltaY"] === "number"
-                ? await engine.scroll(
-                    typeof record["x"] === "number" ? record["x"] : 0,
-                    typeof record["y"] === "number" ? record["y"] : 0,
-                    record["deltaY"],
-                    typeof record["deltaX"] === "number" ? record["deltaX"] : 0,
-                  )
-                : action === "resize" &&
-                    typeof record["width"] === "number" &&
-                    typeof record["height"] === "number"
-                  ? await engine.resize(record["width"], record["height"])
-                  : action === "key" &&
-                      typeof record["key"] === "string" &&
-                      typeof record["code"] === "string"
-                    ? await engine.key(
-                        record["key"],
-                        record["code"],
-                        typeof record["modifiers"] === "object" &&
-                          record["modifiers"] !== null
-                          ? (record["modifiers"] as {
-                              shift: boolean;
-                              alt: boolean;
-                              control: boolean;
-                              meta: boolean;
-                            })
-                          : undefined,
-                      )
-                    : action === "pointerDown" &&
-                        typeof record["x"] === "number" &&
-                        typeof record["y"] === "number"
-                      ? await engine.pointerDown(
-                          record["x"],
-                          record["y"],
-                          typeof record["button"] === "number" ? record["button"] : 0,
+              : action === "setZoomFactor" && typeof record["factor"] === "number"
+                ? await engine.setZoomFactor(record["factor"])
+                : action === "scroll" && typeof record["deltaY"] === "number"
+                  ? await engine.scroll(
+                      typeof record["x"] === "number" ? record["x"] : 0,
+                      typeof record["y"] === "number" ? record["y"] : 0,
+                      record["deltaY"],
+                      typeof record["deltaX"] === "number" ? record["deltaX"] : 0,
+                    )
+                  : action === "resize" &&
+                      typeof record["width"] === "number" &&
+                      typeof record["height"] === "number"
+                    ? await engine.resize(record["width"], record["height"])
+                    : action === "key" &&
+                        typeof record["key"] === "string" &&
+                        typeof record["code"] === "string"
+                      ? await engine.key(
+                          record["key"],
+                          record["code"],
+                          typeof record["modifiers"] === "object" &&
+                            record["modifiers"] !== null
+                            ? (record["modifiers"] as {
+                                shift: boolean;
+                                alt: boolean;
+                                control: boolean;
+                                meta: boolean;
+                              })
+                            : undefined,
                         )
-                      : action === "pointerUp" &&
+                      : action === "pointerDown" &&
                           typeof record["x"] === "number" &&
                           typeof record["y"] === "number"
-                        ? await engine.pointerUp(
+                        ? await engine.pointerDown(
                             record["x"],
                             record["y"],
                             typeof record["button"] === "number" ? record["button"] : 0,
                           )
-                        : action === "pointerMove" &&
+                        : action === "pointerUp" &&
                             typeof record["x"] === "number" &&
                             typeof record["y"] === "number"
-                          ? await engine.pointerMove(record["x"], record["y"])
-                          : (() => {
-                              throw new Error(`Unsupported WebView action ${action}.`);
-                            })();
+                          ? await engine.pointerUp(
+                              record["x"],
+                              record["y"],
+                              typeof record["button"] === "number" ? record["button"] : 0,
+                            )
+                          : action === "pointerMove" &&
+                              typeof record["x"] === "number" &&
+                              typeof record["y"] === "number"
+                            ? await engine.pointerMove(record["x"], record["y"])
+                            : (() => {
+                                throw new Error(`Unsupported WebView action ${action}.`);
+                              })();
     return this.#webViewFrame(id, snapshot);
   }
 

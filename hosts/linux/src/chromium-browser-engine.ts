@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 import WebSocket, { type RawData } from "ws";
 import type {
+  BrowserDownload,
   BrowserEngineSnapshot,
+  FindInPageResult,
   SevynBrowserEngine,
 } from "@sevynos/react-native/internal";
 
@@ -84,6 +86,8 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
   #screencastLastFrameAt = 0;
   #pendingInputAt = 0;
   #inputLatencies: number[] = [];
+  #zoomFactor = 1;
+  #downloads: BrowserDownload[] = [];
 
   public constructor(options: ChromiumBrowserEngineOptions = {}) {
     this.#current = blankSnapshot(options.width ?? 878, options.height ?? 501);
@@ -121,7 +125,16 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     return this.#enqueue(async () => {
       const connection = await this.#requireConnection();
       await connection.send("Page.navigate", { url: candidate.toString() });
-      return await this.#afterInput(650);
+      const snapshot = await this.#afterInput(650);
+      // Re-apply zoom since navigation resets page CSS
+      if (this.#zoomFactor !== 1) {
+        await connection
+          .send("Runtime.evaluate", {
+            expression: `document.documentElement.style.zoom = "${String(this.#zoomFactor)}"`,
+          })
+          .catch(() => undefined);
+      }
+      return snapshot;
     });
   }
 
@@ -255,6 +268,56 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       });
       return await this.#afterInput(80);
     });
+  }
+
+  public setZoomFactor(factor: number): Promise<BrowserEngineSnapshot> {
+    const clamped = Math.max(0.25, Math.min(5, factor));
+    return this.#enqueue(async () => {
+      const connection = await this.#requireConnection();
+      await connection.send("Runtime.evaluate", {
+        expression: `document.documentElement.style.zoom = "${String(clamped)}"`,
+      });
+      this.#zoomFactor = clamped;
+      this.#current = Object.freeze({
+        ...this.#current,
+        zoomFactor: clamped,
+        downloads: [...this.#downloads],
+      });
+      this.#emit();
+      return await this.#afterInput(150);
+    });
+  }
+
+  public findInPage(text: string, forward = true): Promise<FindInPageResult> {
+    return (async () => {
+      const connection = await this.#requireConnection();
+      const result = await connection.send<{
+        readonly result?: { readonly value?: unknown };
+      }>("Runtime.evaluate", {
+        expression: `(function() {
+          const found = window.find(${JSON.stringify(text)}, false, ${forward ? "false" : "true"}, true);
+          if (!found) return { found: false };
+          let count = 0;
+          try {
+            const bodyText = document.body.innerText || "";
+            const needle = ${JSON.stringify(text)}.toLowerCase();
+            let idx = 0;
+            while ((idx = bodyText.toLowerCase().indexOf(needle, idx)) !== -1) {
+              count++;
+              idx += needle.length;
+            }
+          } catch (e) { count = 0; }
+          return { found: true, matches: count };
+        })()`,
+        returnByValue: true,
+      });
+      const value = result.result?.value as
+        { found: boolean; matches?: number } | undefined;
+      return {
+        found: value?.found === true,
+        matches: typeof value?.matches === "number" ? value.matches : undefined,
+      };
+    })();
   }
 
   public subscribe(listener: () => void): () => void {
@@ -582,6 +645,10 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
         this.#scheduleCapture();
       else if (method === "Page.screencastFrame")
         void this.#handleScreencastFrame(params);
+      else if (method === "Browser.downloadWillBegin")
+        this.#handleDownloadWillBegin(params);
+      else if (method === "Browser.downloadProgress")
+        this.#handleDownloadProgress(params);
     });
     await this.#connection.send("Page.enable");
     await this.#connection.send("Runtime.enable");
@@ -589,6 +656,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       await this.#connection.send("Page.setDownloadBehavior", {
         behavior: "allow",
         downloadPath: this.#downloadDirectory,
+        eventsEnabled: true,
       });
     await this.#setViewport();
     if (this.#screencastEnabled) await this.#beginScreencast();
@@ -641,6 +709,8 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
         canGoBack: history !== undefined && history.currentIndex > 0,
         canGoForward:
           history !== undefined && history.currentIndex < history.entries.length - 1,
+        zoomFactor: this.#zoomFactor,
+        downloads: [...this.#downloads],
       }),
     );
   }
@@ -649,6 +719,76 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     this.#current = snapshot;
     this.#emit();
     return snapshot;
+  }
+
+  #handleDownloadWillBegin(params: unknown): void {
+    const record = params as Record<string, unknown>;
+    const guid = typeof record["guid"] === "string" ? record["guid"] : "";
+    const url = typeof record["url"] === "string" ? record["url"] : "";
+    const suggestedFilename =
+      typeof record["suggestedFilename"] === "string"
+        ? record["suggestedFilename"]
+        : "download";
+    if (guid === "") return;
+    const existing = this.#downloads.findIndex((d) => d.guid === guid);
+    const download: BrowserDownload = {
+      guid,
+      url,
+      filename: suggestedFilename,
+      state: "in_progress",
+      receivedBytes: 0,
+      totalBytes: 0,
+    };
+    if (existing >= 0) {
+      this.#downloads[existing] = download;
+    } else {
+      this.#downloads = [...this.#downloads, download];
+    }
+    this.#current = Object.freeze({
+      ...this.#current,
+      downloads: [...this.#downloads],
+    });
+    this.#emit();
+  }
+
+  #handleDownloadProgress(params: unknown): void {
+    const record = params as Record<string, unknown>;
+    const guid = typeof record["guid"] === "string" ? record["guid"] : "";
+    const state = typeof record["state"] === "string" ? record["state"] : "";
+    if (guid === "") return;
+    const index = this.#downloads.findIndex((d) => d.guid === guid);
+    if (index < 0) return;
+    const receivedBytes =
+      typeof record["receivedBytes"] === "number" ? record["receivedBytes"] : 0;
+    const totalBytes =
+      typeof record["totalBytes"] === "number" ? record["totalBytes"] : 0;
+    const downloadState =
+      state === "completed"
+        ? "completed"
+        : state === "canceled"
+          ? "cancelled"
+          : state === "interrupted"
+            ? "interrupted"
+            : "in_progress";
+    const previous = this.#downloads[index];
+    if (previous === undefined) return;
+    this.#downloads[index] = {
+      guid: previous.guid,
+      url: previous.url,
+      filename: previous.filename,
+      state: downloadState,
+      receivedBytes,
+      totalBytes,
+    };
+    // Keep only the last 20 downloads to bound memory
+    if (this.#downloads.length > 20) {
+      this.#downloads = this.#downloads.slice(-20);
+    }
+    this.#current = Object.freeze({
+      ...this.#current,
+      downloads: [...this.#downloads],
+    });
+    this.#emit();
   }
 
   #scheduleCapture(delayMilliseconds = 100): void {
