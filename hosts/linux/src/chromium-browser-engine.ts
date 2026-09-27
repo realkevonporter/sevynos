@@ -179,13 +179,18 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     return this.#pointer("mouseMoved", x, y, 0, false);
   }
 
-  public scroll(deltaY: number, deltaX = 0): Promise<BrowserEngineSnapshot> {
+  public scroll(
+    x: number,
+    y: number,
+    deltaY: number,
+    deltaX = 0,
+  ): Promise<BrowserEngineSnapshot> {
     return this.#enqueue(async () => {
       const connection = await this.#requireConnection();
       await connection.send("Input.dispatchMouseEvent", {
         type: "mouseWheel",
-        x: Math.round(this.#current.width / 2),
-        y: Math.round(this.#current.height / 2),
+        x: Math.max(0, Math.min(this.#current.width - 1, Math.round(x))),
+        y: Math.max(0, Math.min(this.#current.height - 1, Math.round(y))),
         deltaX,
         deltaY,
       });

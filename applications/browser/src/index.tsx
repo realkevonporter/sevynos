@@ -19,7 +19,10 @@ interface BrowserPointerEvent {
 }
 
 interface BrowserWheelEvent {
+  readonly x: number;
+  readonly y: number;
   readonly deltaY: number;
+  readonly deltaX?: number;
 }
 
 interface BrowserKeyboardEvent {
@@ -582,9 +585,11 @@ export function BrowserApplication({
                     });
                 }}
                 onWheel={(event: BrowserWheelEvent) => {
-                  void activeEngine?.scroll(event.deltaY).then((snap) => {
-                    setEngineSnapshot(snap);
-                  });
+                  void activeEngine
+                    ?.scroll(event.x, event.y, event.deltaY, event.deltaX)
+                    .then((snap) => {
+                      setEngineSnapshot(snap);
+                    });
                 }}
                 onKeyDown={(event: BrowserKeyboardEvent) => {
                   void activeEngine

@@ -134,7 +134,7 @@ const WebViewComponent = forwardRef<WebViewHandle, WebViewProps>((props, ref) =>
       update(() => engine.pointerUp(event.x, event.y, event.button));
     },
     onWheel: (event) => {
-      update(() => engine.scroll(event.deltaY));
+      update(() => engine.scroll(event.x, event.y, event.deltaY, event.deltaX));
     },
     onKeyDown: (event) => {
       update(() => engine.key(event.key, event.code, event));
