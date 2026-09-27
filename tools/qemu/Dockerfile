@@ -21,7 +21,7 @@ RUN printf '\nadd_subdirectory(tools/sevyn-host)\n' >> /src/hermes/CMakeLists.tx
     /src/hermes-build/bin/hermesc -O -emit-binary -out \
       /tmp/hermes-application-runtime.hbc /tmp/hermes-application-runtime.js
 
-FROM node:22-bookworm-slim AS node-runtime
+FROM node:24-bookworm-slim AS node-runtime
 
 FROM node-runtime AS studio-tools
 RUN npm install --prefix /opt/sevynos/studio-tools --omit=dev esbuild@0.25.12
