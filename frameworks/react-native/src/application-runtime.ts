@@ -358,6 +358,10 @@ export class SevynApplicationRuntime {
       const interactive = this.#findInteractiveAncestor(target);
       this.#pressedId = (interactive ?? target)?.id;
       target?.props.onPointerDown?.(targetEvent);
+      // Fire onContextMenu for secondary (right) button
+      if (event.button === 2) {
+        target?.props.onContextMenu?.(targetEvent);
+      }
       let candidate: NativeHostNode | undefined = target;
       while (candidate !== undefined) {
         if (candidate.props.onStartShouldSetResponder?.(targetEvent) === true) {
@@ -384,7 +388,9 @@ export class SevynApplicationRuntime {
       target?.props.onPointerUp?.(targetEvent);
       const interactive = this.#findInteractiveAncestor(target);
       const activeTarget = interactive ?? target;
+      // Only primary button (0) activates controls; right-click (2) does not
       if (
+        event.button === 0 &&
         activeTarget !== undefined &&
         (activeTarget.id === this.#pressedId || target?.id === this.#pressedId) &&
         !activeTarget.props.disabled
