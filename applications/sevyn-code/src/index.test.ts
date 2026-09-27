@@ -58,6 +58,11 @@ describe("SevynCodeApp", () => {
     expect(snapshot.ready).toBe(true);
     await engine.pointerMove(150, 250);
     await engine.scroll(120);
-    await engine.key("a", "KeyA", []);
+    await engine.key("a", "KeyA", {
+      shift: false,
+      alt: false,
+      control: false,
+      meta: false,
+    });
   });
 });
