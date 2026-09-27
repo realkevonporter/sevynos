@@ -27,6 +27,24 @@ describe("core system applications", () => {
   it("creates a valid element for every core application kind", () => {
     const filesystem = new InMemoryFileSystem();
     const notifications = new SystemNotificationService();
+    const mockBrowserEngine = {
+      snapshot: () => ({
+        ready: false,
+        loading: false,
+        url: "about:blank",
+        title: "",
+        width: 0,
+        height: 0,
+        pixels: undefined,
+      }),
+      subscribe: () => () => {},
+      navigate: async () => ({}),
+      pointerDown: async () => ({}),
+      pointerUp: async () => ({}),
+      pointerMove: async () => ({}),
+      wheel: async () => ({}),
+      key: async () => ({}),
+    };
     const elements = [
       createCoreSystemApplication({ kind: "installer" }),
       createCoreSystemApplication({ kind: "gallery" }),
@@ -35,7 +53,7 @@ describe("core system applications", () => {
         kind: "app-manager",
         applications: [],
       }),
-      createCoreSystemApplication({ kind: "ide", filesystem, notifications }),
+      createCoreSystemApplication({ kind: "ide", browserEngine: mockBrowserEngine }),
       createCoreSystemApplication({ kind: "notes", filesystem, notifications }),
       createCoreSystemApplication({ kind: "files", filesystem, notifications }),
     ];

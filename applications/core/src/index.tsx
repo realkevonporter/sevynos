@@ -6,10 +6,11 @@ import {
   Pressable,
   View,
   type FileSystemEntry,
+  type SevynBrowserEngine,
   type SevynFileSystem,
-  type SevynStudioService,
   type SystemNotificationService,
 } from "@sevynos/react-native";
+import { SevynCodeApp } from "@sevynos/app-sevyn-code";
 
 const heading = (id: string, text: string) =>
   NativeText({
@@ -2089,9 +2090,7 @@ export function createCoreSystemApplication(
       }
     | {
         readonly kind: "ide";
-        readonly filesystem: SevynFileSystem;
-        readonly notifications: SystemNotificationService;
-        readonly studio?: SevynStudioService;
+        readonly browserEngine: SevynBrowserEngine;
       }
     | {
         readonly kind: "notes";
@@ -2123,10 +2122,8 @@ export function createCoreSystemApplication(
           : { onTerminate: options.onTerminate }),
       });
     case "ide":
-      return createElement(ReactNativeIdeApplication, {
-        filesystem: options.filesystem,
-        notifications: options.notifications,
-        ...(options.studio === undefined ? {} : { studio: options.studio }),
+      return createElement(SevynCodeApp, {
+        engine: options.browserEngine,
       });
     case "notes":
       return createElement(NotesApplication, {

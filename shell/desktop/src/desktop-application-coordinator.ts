@@ -117,9 +117,9 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
     }),
     Object.freeze({
       id: "org.sevynos.ide",
-      name: "Sevyn Studio",
+      name: "Sevyn Code",
       kind: "ide",
-      title: "Sevyn Studio · React Native IDE",
+      title: "Sevyn Code · IDE",
       layout: windowLayout(1040, 700, 720, 480),
     }),
     Object.freeze({

@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@sevynos/app-sevyn-code": "workspace:*",
     "@sevynos/react-native": "workspace:*",
     "@sevynos/sdk": "workspace:*",
     "react": "^19.2.8"

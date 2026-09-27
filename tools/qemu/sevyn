@@ -1,0 +1,222 @@
+#!/usr/bin/env node
+/**
+ * Sevyn CLI — the only shell SevynOS users and developers ever see.
+ *
+ * This is the default shell for the Terminal app and for Sevyn Code's
+ * integrated terminal. It intentionally exposes only SevynOS concepts:
+ * apps, services, system state. There is no bash, no Linux shell escape.
+ *
+ * Usage:
+ *   sevyn <command> [args]
+ *   sevyn              (interactive REPL)
+ *
+ * Commands:
+ *   help               Show this help
+ *   apps list          List installed applications
+ *   apps install <path> Install a .sevyn bundle
+ *   apps uninstall <id> Uninstall an application
+ *   apps info <id>     Show application details
+ *   system info        Show system information
+ *   system power <action>  Power actions: shutdown, restart, suspend
+ *   version            Show Sevyn CLI version
+ *   exit               Exit the shell
+ */
+
+const SEVYN_CLI_VERSION = "0.1.0";
+const APPS_REGISTRY = "/var/lib/sevyn/apps/registry.json";
+
+function printHelp() {
+  console.log(`Sevyn CLI v${SEVYN_CLI_VERSION} — SevynOS command interface
+`);
+  console.log(`Usage: sevyn <command> [args]`);
+  console.log(``);
+  console.log(`Commands:`);
+  console.log(`  help                    Show this help`);
+  console.log(`  apps list               List installed applications`);
+  console.log(`  apps install <path>     Install a .sevyn bundle`);
+  console.log(`  apps uninstall <id>     Uninstall an application`);
+  console.log(`  apps info <id>          Show application details`);
+  console.log(`  system info             Show system information`);
+  console.log(`  system power <action>   Power: shutdown, restart, suspend`);
+  console.log(`  version                 Show Sevyn CLI version`);
+  console.log(`  exit                    Exit the shell`);
+  console.log(``);
+  console.log(`SevynOS exposes no Linux shell. Everything goes through SevynOS.`);
+}
+
+async function listApps() {
+  const { readFile } = await import("node:fs/promises");
+  try {
+    const data = await readFile(APPS_REGISTRY, "utf8");
+    const registry = JSON.parse(data);
+    const apps = registry.apps ?? [];
+    if (apps.length === 0) {
+      console.log("No applications installed.");
+      return;
+    }
+    console.log(`Installed applications (${apps.length}):`);
+    console.log(``);
+    for (const app of apps) {
+      const system = app.system ? " [system]" : "";
+      console.log(`  ${app.id}${system}`);
+      console.log(`    ${app.name} v${app.version}`);
+      if (app.description) console.log(`    ${app.description}`);
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.log("No applications installed.");
+    } else {
+      console.error(`Error reading app registry: ${error.message}`);
+      process.exit(1);
+    }
+  }
+}
+
+function systemInfo() {
+  const { arch, platform, release, totalmem, freemem, uptime } = process;
+  console.log(`SevynOS System Information`);
+  console.log(`  Platform: ${platform} (${arch()})`);
+  console.log(`  Kernel: ${release()}`);
+  console.log(
+    `  Memory: ${Math.round(freemem() / 1024 / 1024)}MB free / ${Math.round(totalmem() / 1024 / 1024)}MB total`,
+  );
+  console.log(`  Uptime: ${Math.round(uptime())}s`);
+  console.log(`  Sevyn CLI: v${SEVYN_CLI_VERSION}`);
+}
+
+async function runCommand(args) {
+  const [cmd, ...rest] = args;
+
+  switch (cmd) {
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      printHelp();
+      break;
+
+    case "version":
+    case "--version":
+    case "-v":
+      console.log(`sevyn v${SEVYN_CLI_VERSION}`);
+      break;
+
+    case "apps":
+      const [subcmd, ...subargs] = rest;
+      switch (subcmd) {
+        case "list":
+        case undefined:
+          await listApps();
+          break;
+        case "install":
+          if (!subargs[0]) {
+            console.error("Usage: sevyn apps install <path-to-.sevyn>");
+            process.exit(1);
+          }
+          console.log(`Installing ${subargs[0]}...`);
+          console.log(`(App installation via CLI is coming soon. Use the App Manager for now.)`);
+          break;
+        case "uninstall":
+          if (!subargs[0]) {
+            console.error("Usage: sevyn apps uninstall <app-id>");
+            process.exit(1);
+          }
+          console.log(`Uninstalling ${subargs[0]}...`);
+          console.log(`(App uninstallation via CLI is coming soon. Use the App Manager for now.)`);
+          break;
+        case "info":
+          if (!subargs[0]) {
+            console.error("Usage: sevyn apps info <app-id>");
+            process.exit(1);
+          }
+          console.log(`App info for ${subargs[0]}: (coming soon)`);
+          break;
+        default:
+          console.error(`Unknown apps subcommand: ${subcmd}`);
+          console.error(`Run 'sevyn apps help' for usage.`);
+          process.exit(1);
+      }
+      break;
+
+    case "system":
+      const [sysCmd, ...sysArgs] = rest;
+      switch (sysCmd) {
+        case "info":
+        case undefined:
+          systemInfo();
+          break;
+        case "power":
+          const action = sysArgs[0];
+          if (!["shutdown", "restart", "suspend"].includes(action)) {
+            console.error("Usage: sevyn system power <shutdown|restart|suspend>");
+            process.exit(1);
+          }
+          console.log(`${action} requested. (Power management via CLI is coming soon.)`);
+          break;
+        default:
+          console.error(`Unknown system subcommand: ${sysCmd}`);
+          process.exit(1);
+      }
+      break;
+
+    case "exit":
+    case "quit":
+      process.exit(0);
+      break;
+
+    default:
+      console.error(`Unknown command: ${cmd}`);
+      console.error(`Run 'sevyn help' for available commands.`);
+      process.exit(1);
+  }
+}
+
+async function repl() {
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: "sevyn> ",
+  });
+
+  console.log(`Sevyn CLI v${SEVYN_CLI_VERSION}`);
+  console.log(`Type 'help' for commands, 'exit' to quit.`);
+  console.log(``);
+
+  rl.prompt();
+  rl.on("line", async (line) => {
+    const trimmed = line.trim();
+    if (trimmed) {
+      const args = trimmed.split(/\s+/);
+      try {
+        await runCommand(args);
+      } catch (error) {
+        console.error(`Error: ${error.message}`);
+      }
+    }
+    rl.prompt();
+  });
+  rl.on("close", () => {
+    console.log(``);
+    process.exit(0);
+  });
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.length === 0) {
+    // Interactive mode when no args and stdin is a TTY
+    if (process.stdin.isTTY) {
+      await repl();
+    } else {
+      printHelp();
+    }
+  } else {
+    await runCommand(args);
+  }
+}
+
+main().catch((error) => {
+  console.error(`Sevyn CLI error: ${error.message}`);
+  process.exit(1);
+});
