@@ -338,11 +338,13 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     )
       return;
     const receivedAt = nowMilliseconds();
-    // Acknowledge immediately (fire-and-forget) so Chromium keeps streaming;
-    // a dropped or corrupt frame must not stall the pipeline.
-    void this.#connection
-      ?.send("Page.screencastFrameAck", { sessionId })
-      .catch(() => undefined);
+    // The ack is sent AFTER the frame is fully processed (below), not here.
+    // Page.screencastFrameAck is Chromium's flow control: it will not send the
+    // next frame until we ack this one. Acking early (before decode) lets
+    // Chromium outrun our decode/render pipeline, piling up unprocessed
+    // frames — each holding a base64 string plus a pixel buffer — until the
+    // heap exhausts. Acking late applies natural backpressure: at most one
+    // frame is ever in flight through our pipeline.
     let decoded: {
       readonly width: number;
       readonly height: number;
@@ -351,6 +353,10 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     try {
       decoded = await decodeJpeg(Buffer.from(frame.data, "base64"));
     } catch {
+      // Ack even on decode failure so a corrupt frame cannot stall the stream.
+      void this.#connection
+        ?.send("Page.screencastFrameAck", { sessionId })
+        .catch(() => undefined);
       return;
     }
     this.#screencastFrames += 1;
@@ -376,6 +382,12 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
         pixels: decoded.pixels,
       }),
     );
+    // Ack now that the frame is decoded and published. This is the backpressure
+    // point: Chromium sends the next frame only after receiving this ack, so
+    // the pipeline can never hold more than one in-flight frame.
+    void this.#connection
+      ?.send("Page.screencastFrameAck", { sessionId })
+      .catch(() => undefined);
   }
 
   #pointer(
