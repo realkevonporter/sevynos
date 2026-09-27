@@ -1857,7 +1857,19 @@ export class LinuxNativeModuleServices {
                   : action === "key" &&
                       typeof record["key"] === "string" &&
                       typeof record["code"] === "string"
-                    ? await engine.key(record["key"], record["code"])
+                    ? await engine.key(
+                        record["key"],
+                        record["code"],
+                        typeof record["modifiers"] === "object" &&
+                          record["modifiers"] !== null
+                          ? (record["modifiers"] as {
+                              shift: boolean;
+                              alt: boolean;
+                              control: boolean;
+                              meta: boolean;
+                            })
+                          : undefined,
+                      )
                     : action === "pointerDown" &&
                         typeof record["x"] === "number" &&
                         typeof record["y"] === "number"
@@ -1874,9 +1886,13 @@ export class LinuxNativeModuleServices {
                             record["y"],
                             typeof record["button"] === "number" ? record["button"] : 0,
                           )
-                        : (() => {
-                            throw new Error(`Unsupported WebView action ${action}.`);
-                          })();
+                        : action === "pointerMove" &&
+                            typeof record["x"] === "number" &&
+                            typeof record["y"] === "number"
+                          ? await engine.pointerMove(record["x"], record["y"])
+                          : (() => {
+                              throw new Error(`Unsupported WebView action ${action}.`);
+                            })();
     return this.#webViewFrame(id, snapshot);
   }
 

@@ -382,8 +382,24 @@ function createRemoteWebViewEngine(): SevynBrowserEngine {
     pointerDown: (x, y, button = 0) => action("pointerDown", { x, y, button }),
     pointerUp: (x, y, button = 0) => action("pointerUp", { x, y, button }),
     pointerMove: (x, y) => action("pointerMove", { x, y }),
-    scroll: (deltaY, deltaX) => action("scroll", { deltaY, deltaX }),
-    key: (key, code) => action("key", { key, code }),
+    scroll: (x, y, deltaY, deltaX) =>
+      action("scroll", { x, y, deltaY, deltaX: deltaX ?? 0 }),
+    key: (key, code, modifiers) =>
+      action(
+        "key",
+        modifiers === undefined
+          ? { key, code }
+          : {
+              key,
+              code,
+              modifiers: {
+                shift: modifiers.shift,
+                alt: modifiers.alt,
+                control: modifiers.control,
+                meta: modifiers.meta,
+              },
+            },
+      ),
     subscribe: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

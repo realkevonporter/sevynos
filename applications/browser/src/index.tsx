@@ -301,6 +301,14 @@ export function BrowserApplication({
 
   const handleCloseTab = useCallback(
     (tabId: string) => {
+      // Close the engine to avoid leaking the Chromium process
+      const engineToClose = tabEngines.current.get(tabId);
+      if (engineToClose !== undefined) {
+        void engineToClose.close().catch(() => {
+          // Ignore close errors — the process may already be gone
+        });
+        tabEngines.current.delete(tabId);
+      }
       if (tabs.length === 1) {
         navigateTo("sevyn://start");
         return;
@@ -576,6 +584,9 @@ export function BrowserApplication({
                 }}
                 onPointerDown={(event: BrowserPointerEvent) => {
                   void activeEngine?.pointerDown(event.x, event.y, event.button ?? 0);
+                }}
+                onPointerMove={(event: BrowserPointerEvent) => {
+                  void activeEngine?.pointerMove(event.x, event.y);
                 }}
                 onPointerUp={(event: BrowserPointerEvent) => {
                   void activeEngine
