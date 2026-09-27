@@ -86,7 +86,11 @@ export class LinuxSevynCodeService {
           ? { executable: this.#options.chromiumExecutable }
           : {}),
         screencast: true,
-        screencastQuality: 80,
+        // JPEG quality for the workbench stream. 90 keeps text sharp;
+        // lower values show visible compression smearing on glyph edges.
+        // Bandwidth is irrelevant (loopback only); the cost is slightly
+        // larger frames over the CDP pipe and a bit more decode CPU.
+        screencastQuality: 90,
       });
       await this.#engine.navigate(url);
       emitServiceMarker("SEVYN_CODE_SERVICE_CHROMIUM_NAVIGATED");
