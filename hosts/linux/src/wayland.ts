@@ -1459,7 +1459,9 @@ if (
     createSevynCodeEngine: () => {
       const engine = sevynCodeService.engine;
       if (!engine) {
-        console.error("Sevyn Code service is not running; IDE will show unavailable state.");
+        console.error(
+          "Sevyn Code service is not running; IDE will show unavailable state.",
+        );
         return undefined;
       }
       return engine;
