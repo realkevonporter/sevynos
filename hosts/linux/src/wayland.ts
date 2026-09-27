@@ -3,6 +3,16 @@ import { readFile, readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Log uncaught errors before the process exits so boot failures are diagnosable.
+process.on("uncaughtException", (error) => {
+  console.error("SEVYN_GENESIS_UNCAUGHT_EXCEPTION", error);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("SEVYN_GENESIS_UNHANDLED_REJECTION", reason);
+  process.exit(1);
+});
 import { DisplayRenderPlanner, GenesisFrameExecutor } from "@sevynos/graphics";
 import { createWheelInputEvent, type PointerInputEvent } from "@sevynos/input";
 import {
