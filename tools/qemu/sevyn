@@ -44,6 +44,34 @@ function printHelp() {
   console.log(`SevynOS exposes no Linux shell. Everything goes through SevynOS.`);
 }
 
+async function appInfo(appId) {
+  const { readFile } = await import("node:fs/promises");
+  try {
+    const data = await readFile(APPS_REGISTRY, "utf8");
+    const registry = JSON.parse(data);
+    const apps = registry.apps ?? [];
+    const app = apps.find((entry) => entry.id === appId);
+    if (!app) {
+      console.error(`No application found with id: ${appId}`);
+      process.exit(1);
+    }
+    console.log(`${app.name} v${app.version}`);
+    console.log(`  ID: ${app.id}`);
+    if (app.description) console.log(`  Description: ${app.description}`);
+    if (app.system) console.log(`  Type: system application`);
+    if (app.permissions?.length) {
+      console.log(`  Permissions: ${app.permissions.join(", ")}`);
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.error(`No application found with id: ${appId}`);
+    } else {
+      console.error(`Error reading app registry: ${error.message}`);
+    }
+    process.exit(1);
+  }
+}
+
 async function listApps() {
   const { readFile } = await import("node:fs/promises");
   try {
@@ -72,15 +100,15 @@ async function listApps() {
   }
 }
 
-function systemInfo() {
-  const { arch, platform, release, totalmem, freemem, uptime } = process;
+async function systemInfo() {
+  const os = await import("node:os");
   console.log(`SevynOS System Information`);
-  console.log(`  Platform: ${platform} (${arch()})`);
-  console.log(`  Kernel: ${release()}`);
+  console.log(`  Platform: ${os.platform()} (${os.arch()})`);
+  console.log(`  Kernel: ${os.release()}`);
   console.log(
-    `  Memory: ${Math.round(freemem() / 1024 / 1024)}MB free / ${Math.round(totalmem() / 1024 / 1024)}MB total`,
+    `  Memory: ${Math.round(os.freemem() / 1024 / 1024)}MB free / ${Math.round(os.totalmem() / 1024 / 1024)}MB total`,
   );
-  console.log(`  Uptime: ${Math.round(uptime())}s`);
+  console.log(`  Uptime: ${Math.round(os.uptime())}s`);
   console.log(`  Sevyn CLI: v${SEVYN_CLI_VERSION}`);
 }
 
@@ -101,7 +129,7 @@ async function runCommand(args) {
       console.log(`sevyn v${SEVYN_CLI_VERSION}`);
       break;
 
-    case "apps":
+    case "apps": {
       const [subcmd, ...subargs] = rest;
       switch (subcmd) {
         case "list":
@@ -113,27 +141,30 @@ async function runCommand(args) {
             console.error("Usage: sevyn apps install <path-to-.sevyn>");
             process.exit(1);
           }
-          console.log(`Installing ${subargs[0]}...`);
-          console.log(
-            `(App installation via CLI is coming soon. Use the App Manager for now.)`,
+          console.error(
+            `Installing ${subargs[0]}...`,
           );
+          console.error(
+            `Error: app installation via CLI is not yet supported. Use the App Manager for now.`,
+          );
+          process.exit(1);
           break;
         case "uninstall":
           if (!subargs[0]) {
             console.error("Usage: sevyn apps uninstall <app-id>");
             process.exit(1);
           }
-          console.log(`Uninstalling ${subargs[0]}...`);
-          console.log(
-            `(App uninstallation via CLI is coming soon. Use the App Manager for now.)`,
+          console.error(
+            `Error: app uninstallation via CLI is not yet supported. Use the App Manager for now.`,
           );
+          process.exit(1);
           break;
         case "info":
           if (!subargs[0]) {
             console.error("Usage: sevyn apps info <app-id>");
             process.exit(1);
           }
-          console.log(`App info for ${subargs[0]}: (coming soon)`);
+          await appInfo(subargs[0]);
           break;
         default:
           console.error(`Unknown apps subcommand: ${subcmd}`);
@@ -141,13 +172,14 @@ async function runCommand(args) {
           process.exit(1);
       }
       break;
+    }
 
-    case "system":
+    case "system": {
       const [sysCmd, ...sysArgs] = rest;
       switch (sysCmd) {
         case "info":
         case undefined:
-          systemInfo();
+          await systemInfo();
           break;
         case "power":
           const action = sysArgs[0];
@@ -155,13 +187,17 @@ async function runCommand(args) {
             console.error("Usage: sevyn system power <shutdown|restart|suspend>");
             process.exit(1);
           }
-          console.log(`${action} requested. (Power management via CLI is coming soon.)`);
+          console.error(
+            `Error: power management via CLI is not yet supported.`,
+          );
+          process.exit(1);
           break;
         default:
           console.error(`Unknown system subcommand: ${sysCmd}`);
           process.exit(1);
       }
       break;
+    }
 
     case "exit":
     case "quit":
