@@ -12,6 +12,7 @@ import {
   type WorkerServiceName,
   installNativeAdapters,
   type BrowserEngineSnapshot,
+  type FindInPageResult,
   type SevynBrowserEngine,
 } from "@sevynos/react-native/internal";
 
@@ -384,6 +385,29 @@ function createRemoteWebViewEngine(): SevynBrowserEngine {
     pointerMove: (x, y) => action("pointerMove", { x, y }),
     scroll: (deltaY, deltaX) => action("scroll", { deltaY, deltaX }),
     key: (key, code) => action("key", { key, code }),
+    setZoomFactor: (factor) => action("setZoomFactor", { factor }),
+    findInPage: (text, forward = true) =>
+      request("webview.action", { id, action: "findInPage", text, forward }).then(
+        (response): FindInPageResult => {
+          if (
+            response === null ||
+            typeof response !== "object" ||
+            Array.isArray(response)
+          ) {
+            return { found: false };
+          }
+          const record = response as Record<string, StructuredValue>;
+          return {
+            found: record["found"] === true,
+            ...(typeof record["matches"] === "number"
+              ? { matches: record["matches"] }
+              : {}),
+            ...(typeof record["activeMatchOrdinal"] === "number"
+              ? { activeMatchOrdinal: record["activeMatchOrdinal"] }
+              : {}),
+          };
+        },
+      ),
     subscribe: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
