@@ -137,10 +137,13 @@ export class LinuxSevynCodeService {
   }
 
   async #startCodeServer(): Promise<void> {
+    // Use the real path, not the /usr/local/bin symlink — the code-server
+    // wrapper script resolves its bundled node binary relative to $0, and
+    // the symlink makes it look in /usr/local/lib instead of /opt/code-server/lib.
     const binary =
       this.#options.codeServerBinary ??
       process.env["SEVYN_CODE_SERVER_BIN"] ??
-      "/usr/local/bin/code-server";
+      "/opt/code-server/bin/code-server";
 
     // Pre-flight check: verify the binary exists and is executable
     try {
