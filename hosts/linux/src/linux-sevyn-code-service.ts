@@ -163,6 +163,20 @@ export class LinuxSevynCodeService {
     // Try binding a test socket; EADDRNOTAVAIL means loopback isn't ready.
     await this.#waitForLoopback(15000);
 
+    const dataDir =
+      this.#options.codeServerDataDir ??
+      process.env["SEVYN_CODE_SERVER_DATA"] ??
+      "/var/lib/sevyn/code-server";
+
+    const workspaceDir =
+      this.#options.workspaceDir ??
+      process.env["SEVYN_CODE_WORKSPACE"] ??
+      "/home/user/Projects";
+
+    // First-run setup: install default settings, create the workspace,
+    // and seed a welcome README so the IDE never opens on an empty void.
+    await this.#firstRunSetup(dataDir, workspaceDir);
+
     const args = [
       "--bind-addr",
       `127.0.0.1:${String(this.#port)}`,
@@ -172,16 +186,7 @@ export class LinuxSevynCodeService {
       "--disable-update-check",
     ];
 
-    const dataDir =
-      this.#options.codeServerDataDir ??
-      process.env["SEVYN_CODE_SERVER_DATA"] ??
-      "/var/lib/sevyn/code-server";
     args.push("--user-data-dir", dataDir);
-
-    const workspaceDir =
-      this.#options.workspaceDir ??
-      process.env["SEVYN_CODE_WORKSPACE"] ??
-      "/home/user/Projects";
     args.push(workspaceDir);
 
     this.#codeServer = spawn(binary, args, {
@@ -303,5 +308,82 @@ export class LinuxSevynCodeService {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     throw new Error(`127.0.0.1 was not available within ${String(timeoutMs)}ms`);
+  }
+
+  /**
+   * First-run setup: install the default VS Code settings (terminal profile,
+   * Open VSX, theme) from /etc/sevyn, create the workspace directory, and
+   * seed a welcome README so the IDE never opens on an empty void.
+   *
+   * Existing user settings are never overwritten — this only seeds defaults
+   * that are missing.
+   */
+  async #firstRunSetup(dataDir: string, workspaceDir: string): Promise<void> {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+
+    // 1. Install default settings if the user hasn't customized them yet.
+    try {
+      const userDir = path.join(dataDir, "User");
+      fs.mkdirSync(userDir, { recursive: true });
+      const dest = path.join(userDir, "settings.json");
+      if (!fs.existsSync(dest)) {
+        const src = "/etc/sevyn/code-server-settings.json";
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, dest);
+        }
+      }
+    } catch {
+      // Best effort — code-server runs fine with stock settings.
+    }
+
+    // 2. Create the workspace directory.
+    try {
+      fs.mkdirSync(workspaceDir, { recursive: true });
+    } catch {
+      // If we can't create it, code-server will report the error.
+      return;
+    }
+
+    // 3. Seed a welcome README in an empty workspace.
+    try {
+      const entries = fs.readdirSync(workspaceDir);
+      if (entries.length > 0) return;
+
+      const readme = `# Welcome to Sevyn Code
+
+Sevyn Code is the SevynOS integrated development environment — a full
+code editor running right on your device.
+
+## Things to try
+
+- **Open a terminal** (Ctrl+\` or via the Terminal menu) and run \`sevyn\`.
+  The terminal runs the Sevyn CLI — there is no Linux shell here, everything
+  goes through SevynOS. Try \`sevyn system info\` or \`sevyn apps info\`.
+- **Install extensions** from the Extensions view. Extensions come from
+  [Open VSX](https://open-vsx.org), the open extension registry.
+- **Start a project** — create a folder in this workspace for your code.
+
+## Building SevynOS apps
+
+SevynOS apps are written in React Native and TypeScript, then bundled into
+\`.sevyn\` packages (a manifest, compiled Hermes bytecode, and assets).
+Install them with \`sevyn apps install <bundle>\`.
+
+Happy building.
+`;
+      fs.writeFileSync(path.join(workspaceDir, "README.md"), readme);
+    } catch {
+      // Best effort — an empty workspace still works.
+    }
+
+    // 4. Hand ownership to the user account when possible.
+    try {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      await promisify(execFile)("chown", ["-R", "user:user", dataDir, workspaceDir]);
+    } catch {
+      // Best effort — may already be owned correctly or chown unavailable.
+    }
   }
 }
