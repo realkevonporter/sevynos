@@ -142,6 +142,19 @@ export class LinuxSevynCodeService {
       process.env["SEVYN_CODE_SERVER_BIN"] ??
       "/usr/local/bin/code-server";
 
+    // Pre-flight check: verify the binary exists and is executable
+    try {
+      const { existsSync, accessSync, constants } = await import("node:fs");
+      if (!existsSync(binary)) {
+        throw new Error(`code-server binary not found at ${binary}`);
+      }
+      accessSync(binary, constants.X_OK);
+    } catch (error) {
+      throw new Error(
+        `code-server binary check failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     const args = [
       "--bind-addr",
       `127.0.0.1:${String(this.#port)}`,
