@@ -338,7 +338,10 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       return;
     }
     this.#screencastFrames += 1;
-    if (this.#screencastFirstFrameAt === 0) this.#screencastFirstFrameAt = receivedAt;
+    if (this.#screencastFirstFrameAt === 0) {
+      this.#screencastFirstFrameAt = receivedAt;
+      console.log("SEVYN_CODE_SERVICE_FIRST_FRAME_RECEIVED");
+    }
     this.#screencastLastFrameAt = receivedAt;
     if (this.#pendingInputAt !== 0) {
       const latency = receivedAt - this.#pendingInputAt;
