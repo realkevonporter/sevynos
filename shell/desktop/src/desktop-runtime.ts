@@ -152,6 +152,7 @@ export interface CreateDesktopRuntimeOptions {
   readonly filesystem?: SevynFileSystem | undefined;
   readonly studio?: SevynStudioService | undefined;
   readonly createBrowserEngine?: (() => SevynBrowserEngine) | undefined;
+  readonly createSevynCodeEngine?: (() => SevynBrowserEngine) | undefined;
   /**
    * Temporary diagnostic: when true, every pointer-down logs a
    * SEVYN_PROBE_HITTEST line with the pointer position, the selected
@@ -282,6 +283,7 @@ export async function createDesktopRuntime(
     options.audio,
     options.system,
     options.studio,
+    options.createSevynCodeEngine,
   );
 
   const nowDate = (): Date => new Date();
