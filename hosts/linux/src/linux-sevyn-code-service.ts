@@ -50,32 +50,43 @@ export class LinuxSevynCodeService {
   /**
    * Start code-server and the Chromium screencast pipeline.
    * Resolves when the workbench is streaming frames.
+   * On failure, any partially-started resources are cleaned up.
    */
   public async start(): Promise<void> {
     if (this.#started) return;
 
-    // 1. Launch code-server bound to localhost only
-    await this.#startCodeServer();
+    try {
+      // 1. Launch code-server bound to localhost only
+      await this.#startCodeServer();
 
-    // 2. Launch Chromium pointing at code-server with screencast enabled
-    const url = `http://127.0.0.1:${String(this.#port)}/`;
-    this.#engine = new ChromiumBrowserEngine({
-      ...(this.#options.chromiumExecutable
-        ? { executable: this.#options.chromiumExecutable }
-        : {}),
-      screencast: true,
-      screencastQuality: 80,
-    });
-    await this.#engine.navigate(url);
-    await this.#engine.startScreencast();
+      // 2. Launch Chromium pointing at code-server with screencast enabled
+      const url = `http://127.0.0.1:${String(this.#port)}/`;
+      this.#engine = new ChromiumBrowserEngine({
+        ...(this.#options.chromiumExecutable
+          ? { executable: this.#options.chromiumExecutable }
+          : {}),
+        screencast: true,
+        screencastQuality: 80,
+      });
+      await this.#engine.navigate(url);
+      await this.#engine.startScreencast();
 
-    this.#started = true;
+      this.#started = true;
+    } catch (error) {
+      // Clean up partial startup so nothing leaks
+      await this.#cleanup();
+      throw error;
+    }
   }
 
   /** Stop code-server and Chromium, releasing all resources. */
   public async stop(): Promise<void> {
-    if (!this.#started) return;
+    if (!this.#started && !this.#engine && !this.#codeServer) return;
+    await this.#cleanup();
+    this.#started = false;
+  }
 
+  async #cleanup(): Promise<void> {
     if (this.#engine) {
       await this.#engine.stopScreencast().catch(() => undefined);
       await this.#engine.close().catch(() => undefined);
@@ -86,8 +97,6 @@ export class LinuxSevynCodeService {
       this.#codeServer.kill("SIGTERM");
       this.#codeServer = undefined;
     }
-
-    this.#started = false;
   }
 
   /** The browser engine streaming the workbench. Undefined until start() resolves. */
@@ -139,15 +148,48 @@ export class LinuxSevynCodeService {
       },
     });
 
-    // Wait for code-server to be ready (poll the port)
-    await this.#waitForPort(this.#port, 30000);
-
-    this.#codeServer.on("error", () => {
-      // The service owner should call stop() and inspect status()
-      this.#codeServer = undefined;
-    });
-    this.#codeServer.on("exit", () => {
-      this.#codeServer = undefined;
+    // Attach error/exit handlers immediately — spawn failures (ENOENT)
+    // surface as async 'error' events, not synchronous throws.
+    await new Promise<void>((resolve, reject) => {
+      const child = this.#codeServer;
+      if (!child) {
+        reject(new Error("code-server failed to spawn"));
+        return;
+      }
+      const onError = (error: Error): void => {
+        this.#codeServer = undefined;
+        reject(error);
+      };
+      const onExit = (code: number | null): void => {
+        this.#codeServer = undefined;
+        if (code !== 0 && code !== null) {
+          reject(new Error(`code-server exited with code ${String(code)}`));
+        }
+      };
+      child.once("error", onError);
+      child.once("exit", onExit);
+      // Wait for code-server to be ready (poll the root path; with
+      // --auth none there is no /login page)
+      this.#waitForPort(this.#port, 30000).then(
+        () => {
+          child.off("error", onError);
+          child.off("exit", onExit);
+          // From here on, unexpected exits just clear the handle;
+          // the service owner should call stop() and inspect status()
+          child.on("error", () => {
+            this.#codeServer = undefined;
+          });
+          child.on("exit", () => {
+            this.#codeServer = undefined;
+          });
+          resolve();
+        },
+        (error: unknown) => {
+          child.off("error", onError);
+          child.off("exit", onExit);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
     });
   }
 
@@ -155,7 +197,7 @@ export class LinuxSevynCodeService {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
-        const response = await fetch(`http://127.0.0.1:${String(port)}/login`);
+        const response = await fetch(`http://127.0.0.1:${String(port)}/`);
         // Any HTTP response (even a redirect) means the server is up
         if (response.status < 500) return;
       } catch {
