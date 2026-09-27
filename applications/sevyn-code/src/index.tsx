@@ -34,7 +34,7 @@ export const sevynCodeManifest: SevynApplicationManifest = {
   icon: "icons/sevyn-code.svg",
   entrypoint: "dist/index.js",
   minimumSevynOSVersion: "0.1.0",
-  permissions: ["network:localhost"],
+  permissions: ["network"],
   services: ["sevyn-code"],
   windowModes: ["standard", "fullscreen"],
   instanceMode: "single",
@@ -48,6 +48,7 @@ interface SevynCodePointerEvent {
 
 interface SevynCodeWheelEvent {
   readonly deltaY: number;
+  readonly deltaX?: number;
 }
 
 interface SevynCodeKeyboardEvent {
@@ -80,9 +81,25 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
     return unsubscribe;
   }, [engine]);
 
+  const lastClickRef = useRef<{ x: number; y: number; time: number } | null>(null);
+
   const handlePointerDown = useCallback(
     (event: SevynCodePointerEvent) => {
-      void engine.pointerDown(event.x, event.y, event.button ?? 0);
+      const now = Date.now();
+      const last = lastClickRef.current;
+      if (
+        last &&
+        now - last.time < 500 &&
+        Math.abs(event.x - last.x) < 8 &&
+        Math.abs(event.y - last.y) < 8
+      ) {
+        // Double-click: select word
+        lastClickRef.current = null;
+        void engine.click(event.x, event.y, 2);
+      } else {
+        lastClickRef.current = { x: event.x, y: event.y, time: now };
+        void engine.pointerDown(event.x, event.y, event.button ?? 0);
+      }
     },
     [engine],
   );
@@ -103,23 +120,19 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
 
   const handleWheel = useCallback(
     (event: SevynCodeWheelEvent) => {
-      void engine.wheel(0, event.deltaY);
+      void engine.scroll(event.deltaY, event.deltaX ?? 0);
     },
     [engine],
   );
 
   const handleKey = useCallback(
     (event: SevynCodeKeyboardEvent) => {
-      if (event.key.length === 1) {
-        void engine.key("type", event.key);
-      } else {
-        void engine.key("press", event.key, {
-          shift: event.shift,
-          alt: event.alt,
-          control: event.control,
-          meta: event.meta,
-        });
-      }
+      void engine.key(event.key, event.code, {
+        shift: event.shift,
+        alt: event.alt,
+        control: event.control,
+        meta: event.meta,
+      });
     },
     [engine],
   );

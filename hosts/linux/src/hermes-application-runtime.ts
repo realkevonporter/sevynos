@@ -375,13 +375,14 @@ function createRemoteWebViewEngine(): SevynBrowserEngine {
     forward: () => action("forward"),
     reload: () => action("reload"),
     resize: (width, height) => action("resize", { width, height }),
-    click: async (x, y) => {
+    click: async (x, y, clickCount = 1) => {
       await action("pointerDown", { x, y });
-      return action("pointerUp", { x, y });
+      return action("pointerUp", { x, y, clickCount });
     },
     pointerDown: (x, y, button = 0) => action("pointerDown", { x, y, button }),
     pointerUp: (x, y, button = 0) => action("pointerUp", { x, y, button }),
-    scroll: (deltaY) => action("scroll", { deltaY }),
+    pointerMove: (x, y) => action("pointerMove", { x, y }),
+    scroll: (deltaY, deltaX = 0) => action("scroll", { deltaY, deltaX }),
     key: (key, code) => action("key", { key, code }),
     subscribe: (listener) => {
       listeners.add(listener);

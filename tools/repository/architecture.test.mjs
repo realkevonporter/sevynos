@@ -131,7 +131,7 @@ test("desktop shell chrome and system applications stay on React Native", async 
     ["applications/core/src/index.tsx", "NotesApplication"],
     ["applications/core/src/index.tsx", "ComponentGalleryApplication"],
     ["applications/core/src/index.tsx", "AppManagerApplication"],
-    ["applications/core/src/index.tsx", "ReactNativeIdeApplication"],
+    ["applications/sevyn-code/src/index.tsx", "SevynCodeApp"],
   ]) {
     const source = await readFile(resolve(root, component), "utf8");
     assert.match(

@@ -114,7 +114,9 @@ async function runCommand(args) {
             process.exit(1);
           }
           console.log(`Installing ${subargs[0]}...`);
-          console.log(`(App installation via CLI is coming soon. Use the App Manager for now.)`);
+          console.log(
+            `(App installation via CLI is coming soon. Use the App Manager for now.)`,
+          );
           break;
         case "uninstall":
           if (!subargs[0]) {
@@ -122,7 +124,9 @@ async function runCommand(args) {
             process.exit(1);
           }
           console.log(`Uninstalling ${subargs[0]}...`);
-          console.log(`(App uninstallation via CLI is coming soon. Use the App Manager for now.)`);
+          console.log(
+            `(App uninstallation via CLI is coming soon. Use the App Manager for now.)`,
+          );
           break;
         case "info":
           if (!subargs[0]) {

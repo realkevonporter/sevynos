@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { isValidElement } from "react";
-import { InMemoryFileSystem, SystemNotificationService } from "@sevynos/react-native";
+import {
+  InMemoryFileSystem,
+  SystemNotificationService,
+  type BrowserEngineSnapshot,
+  type SevynBrowserEngine,
+} from "@sevynos/react-native";
 import {
   AppManagerApplication,
   ComponentGalleryApplication,
   InstallerApplication,
   NotesApplication,
-  ReactNativeIdeApplication,
   TextEditorApplication,
   createCoreSystemApplication,
 } from "./index.js";
@@ -18,7 +22,6 @@ describe("core system applications", () => {
       ComponentGalleryApplication,
       TextEditorApplication,
       AppManagerApplication,
-      ReactNativeIdeApplication,
       NotesApplication,
     ])
       expect(component).toBeTypeOf("function");
@@ -27,23 +30,32 @@ describe("core system applications", () => {
   it("creates a valid element for every core application kind", () => {
     const filesystem = new InMemoryFileSystem();
     const notifications = new SystemNotificationService();
-    const mockBrowserEngine = {
-      snapshot: () => ({
-        ready: false,
-        loading: false,
-        url: "about:blank",
-        title: "",
-        width: 0,
-        height: 0,
-        pixels: undefined,
-      }),
-      subscribe: () => () => {},
-      navigate: async () => ({}),
-      pointerDown: async () => ({}),
-      pointerUp: async () => ({}),
-      pointerMove: async () => ({}),
-      wheel: async () => ({}),
-      key: async () => ({}),
+    const emptySnapshot = (): BrowserEngineSnapshot => ({
+      ready: false,
+      loading: false,
+      url: "about:blank",
+      title: "",
+      width: 0,
+      height: 0,
+      pixels: undefined,
+    });
+    const mockBrowserEngine: SevynBrowserEngine = {
+      snapshot: emptySnapshot,
+      subscribe: () => {
+        return () => undefined;
+      },
+      navigate: () => Promise.resolve(emptySnapshot()),
+      back: () => Promise.resolve(emptySnapshot()),
+      forward: () => Promise.resolve(emptySnapshot()),
+      reload: () => Promise.resolve(emptySnapshot()),
+      resize: () => Promise.resolve(emptySnapshot()),
+      click: () => Promise.resolve(emptySnapshot()),
+      pointerDown: () => Promise.resolve(emptySnapshot()),
+      pointerUp: () => Promise.resolve(emptySnapshot()),
+      pointerMove: () => Promise.resolve(emptySnapshot()),
+      scroll: () => Promise.resolve(emptySnapshot()),
+      key: () => Promise.resolve(emptySnapshot()),
+      close: () => Promise.resolve(),
     };
     const elements = [
       createCoreSystemApplication({ kind: "installer" }),

@@ -31,7 +31,6 @@ import {
   type SevynAudioService,
   type SevynSystemService,
   type SevynFileSystem,
-  type SevynStudioService,
 } from "@sevynos/react-native/internal";
 import {
   createCoreSystemApplication,
@@ -161,7 +160,6 @@ export class ApplicationSurfaceRegistry {
   readonly #battery: SevynBatteryService;
   readonly #audio: SevynAudioService;
   readonly #system: SevynSystemService;
-  readonly #studio: SevynStudioService | undefined;
   readonly #notifications = new SystemNotificationService();
   readonly #isolatedSnapshots = new Map<GenesisWindowId, NativeRuntimeSnapshot>();
   readonly #isolatedDispatchers = new Map<
@@ -183,7 +181,6 @@ export class ApplicationSurfaceRegistry {
     battery?: SevynBatteryService,
     audio?: SevynAudioService,
     system?: SevynSystemService,
-    studio?: SevynStudioService,
     createSevynCodeEngine?: () => SevynBrowserEngine,
   ) {
     this.#onChange = onChange;
@@ -212,7 +209,6 @@ export class ApplicationSurfaceRegistry {
     this.#battery = battery ?? new UnavailableBatteryService();
     this.#audio = audio ?? new UnavailableAudioService();
     this.#system = system ?? new UnavailableSystemService();
-    this.#studio = studio;
   }
 
   public configureApplicationManagement(
@@ -818,17 +814,23 @@ export class ApplicationSurfaceRegistry {
       }
       case "ide": {
         const sevynCodeEngine = this.#sevynCodeEngine(windowId);
-        if (!sevynCodeEngine) {
-          // Sevyn Code engine not available — the host must provide it
-          // via createSevynCodeEngine. Fall back to a placeholder.
+        if (sevynCodeEngine) {
           return createCoreSystemApplication({
             kind: "ide",
-            browserEngine: this.#createBrowserEngine?.() as SevynBrowserEngine,
+            browserEngine: sevynCodeEngine,
           });
+        }
+        // Sevyn Code engine not available — fall back to the browser engine
+        // if the host provides one, otherwise the IDE cannot start.
+        const fallbackEngine = this.#createBrowserEngine?.();
+        if (!fallbackEngine) {
+          throw new Error(
+            "Sevyn Code is unavailable: no browser engine was provided by the host.",
+          );
         }
         return createCoreSystemApplication({
           kind: "ide",
-          browserEngine: sevynCodeEngine,
+          browserEngine: fallbackEngine,
         });
       }
       case "text-editor":

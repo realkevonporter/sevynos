@@ -39,7 +39,6 @@ import type {
   SevynAudioService,
   SevynSystemService,
   SevynFileSystem,
-  SevynStudioService,
 } from "@sevynos/react-native/internal";
 import {
   SystemApplicationRuntime,
@@ -97,7 +96,6 @@ export interface DesktopRuntime {
   readonly audio?: SevynAudioService | undefined;
   readonly system?: SevynSystemService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
-  readonly studio?: SevynStudioService | undefined;
   readonly environment: DesktopEnvironment;
   readonly layout: DesktopWindowLayoutManager;
   readonly settings: DesktopSettingsService;
@@ -150,8 +148,8 @@ export interface CreateDesktopRuntimeOptions {
   readonly audio?: SevynAudioService | undefined;
   readonly system?: SevynSystemService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
-  readonly studio?: SevynStudioService | undefined;
   readonly createBrowserEngine?: (() => SevynBrowserEngine) | undefined;
+  readonly createSevynCodeEngine?: (() => SevynBrowserEngine) | undefined;
   /**
    * Temporary diagnostic: when true, every pointer-down logs a
    * SEVYN_PROBE_HITTEST line with the pointer position, the selected
@@ -281,7 +279,7 @@ export async function createDesktopRuntime(
     options.battery,
     options.audio,
     options.system,
-    options.studio,
+    options.createSevynCodeEngine,
   );
 
   const nowDate = (): Date => new Date();
@@ -1109,7 +1107,6 @@ export async function createDesktopRuntime(
     audio: options.audio,
     system: options.system,
     filesystem: surfaces.filesystem,
-    studio: options.studio,
     environment,
     layout,
     settings,

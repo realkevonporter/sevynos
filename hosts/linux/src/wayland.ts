@@ -41,8 +41,8 @@ import { LinuxAudioService } from "./linux-audio-service.js";
 import { LinuxNativeModuleServices } from "./linux-native-module-services.js";
 import { LinuxSystemService } from "./linux-system-service.js";
 import { LinuxFileSystem } from "./linux-file-system.js";
-import { LinuxStudioBuildService } from "./linux-studio-service.js";
 import { ChromiumBrowserEngine } from "./chromium-browser-engine.js";
+import { LinuxSevynCodeService } from "./linux-sevyn-code-service.js";
 import { HermesLinuxProcessApplicationExecutor } from "./linux-process-application-executor.js";
 import { NativeProcessBridgeTransport } from "./native-process-bridge-transport.js";
 import type { NativeBridgeMessage } from "./native-ipc-protocol.js";
@@ -81,6 +81,7 @@ export interface WaylandHostOptions {
   readonly system?: SevynSystemService;
   readonly filesystem?: SevynFileSystem;
   readonly createBrowserEngine?: () => SevynBrowserEngine;
+  readonly createSevynCodeEngine?: () => SevynBrowserEngine;
 }
 
 export async function startWaylandHost(
@@ -140,7 +141,6 @@ export async function startWaylandHost(
   const audio = options.audio ?? new LinuxAudioService();
   const system = options.system ?? new LinuxSystemService();
   const filesystem = options.filesystem ?? new LinuxFileSystem();
-  const studio = new LinuxStudioBuildService();
 
   const runtime = await createDesktopRuntime({
     launchDefaults: false,
@@ -152,10 +152,12 @@ export async function startWaylandHost(
     audio,
     system,
     filesystem,
-    studio,
     ...(options.createBrowserEngine === undefined
       ? {}
       : { createBrowserEngine: options.createBrowserEngine }),
+    ...(options.createSevynCodeEngine === undefined
+      ? {}
+      : { createSevynCodeEngine: options.createSevynCodeEngine }),
   });
   const openApplicationUrl = async (url: string): Promise<void> => {
     if (!/^(https?|sevyn):\/\//.test(url))
@@ -1423,6 +1425,18 @@ if (
     sleep: () => requestSleep(),
     logout: () => requestLogout(),
   });
+  // Start the Sevyn Code backend (code-server + Chromium screencast).
+  // If it fails (e.g. code-server not installed in dev), the IDE will
+  // show an error instead of crashing the host.
+  const sevynCodeService = new LinuxSevynCodeService();
+  try {
+    await sevynCodeService.start();
+  } catch (error) {
+    console.error(
+      "Sevyn Code service failed to start:",
+      error instanceof Error ? error.message : error,
+    );
+  }
   const host = await startWaylandHost(new NativeProcessBridgeTransport(executable), {
     persistence: new FileLinuxPersistenceAdapter(stateDirectory),
     network: new LinuxWirelessNetworkService(),
@@ -1432,6 +1446,13 @@ if (
     system: new LinuxSystemService(),
     filesystem: new LinuxFileSystem(),
     createBrowserEngine: () => new ChromiumBrowserEngine(),
+    createSevynCodeEngine: () => {
+      const engine = sevynCodeService.engine;
+      if (!engine) {
+        throw new Error("Sevyn Code service is not running.");
+      }
+      return engine;
+    },
     isolatedExecutor: new HermesLinuxProcessApplicationExecutor(),
     marker: (value) => {
       console.log(value);
@@ -1451,6 +1472,7 @@ if (
   requestPoweroff = async () => {
     if (stopping) return;
     stopping = true;
+    await sevynCodeService.stop().catch(() => undefined);
     await host.shutdown();
     console.log("SEVYN_GENESIS_CONTROLLED_SHUTDOWN_COMPLETE");
     process.exitCode = 0;
@@ -1458,6 +1480,7 @@ if (
   requestRestart = async () => {
     if (stopping) return;
     stopping = true;
+    await sevynCodeService.stop().catch(() => undefined);
     await host.shutdown();
     const { exec } = await import("child_process");
     exec("reboot");

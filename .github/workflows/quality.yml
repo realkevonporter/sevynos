@@ -14,11 +14,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
-      - run: corepack enable
+          node-version: 24
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
 
@@ -29,7 +30,7 @@ jobs:
       run:
         working-directory: hosts/linux/native
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install native build dependencies
         run: >-
           sudo apt-get update && sudo apt-get install --yes
