@@ -705,15 +705,15 @@ function launcherGridEntryBounds(
   grid: DesktopShellBounds,
   index: number,
 ): DesktopShellBounds {
-  const minimumTileWidth = 112;
+  const minimumTileWidth = 104;
   const maximumColumns = 8;
-  const gap = 18;
+  const gap = 14;
   const columns = Math.max(
     1,
     Math.min(maximumColumns, Math.floor((grid.width + gap) / (minimumTileWidth + gap))),
   );
   const tileWidth = Math.floor((grid.width - gap * (columns - 1)) / columns);
-  const tileHeight = 112;
+  const tileHeight = 96;
   const row = Math.floor(index / columns);
   const column = index % columns;
   return {
