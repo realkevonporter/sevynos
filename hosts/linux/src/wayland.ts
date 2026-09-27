@@ -1442,10 +1442,17 @@ if (
   try {
     await sevynCodeService.start();
   } catch (error) {
-    console.error(
-      "Sevyn Code service failed to start:",
-      error instanceof Error ? error.message : error,
-    );
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Sevyn Code service failed to start:", message);
+    // Mirror to serial so the failure is visible in QEMU logs
+    try {
+      const { existsSync, appendFileSync } = await import("node:fs");
+      if (existsSync("/dev/ttyS0")) {
+        appendFileSync("/dev/ttyS0", `SEVYN_CODE_SERVICE_FAILED: ${message}\n`);
+      }
+    } catch {
+      // Ignore errors writing to serial port
+    }
   }
   const host = await startWaylandHost(new NativeProcessBridgeTransport(executable), {
     persistence: new FileLinuxPersistenceAdapter(stateDirectory),
