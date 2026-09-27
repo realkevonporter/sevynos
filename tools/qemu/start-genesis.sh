@@ -220,5 +220,8 @@ kill "$weston_pid" 2>/dev/null || true
 wait "$weston_pid" 2>/dev/null || true
 if [ "$genesis_exit" -ne 0 ]; then
   echo "Genesis exited with code $genesis_exit"
+  echo "=== Genesis log tail ==="
+  tail -n 50 /tmp/genesis.log
+  echo "=== End Genesis log ==="
   exit "$genesis_exit"
 fi
