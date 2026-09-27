@@ -118,6 +118,22 @@ export interface SystemHardwareSnapshot {
   readonly uptimeSeconds: number;
 }
 
+export interface TimeSyncState {
+  readonly available: boolean;
+  readonly syncing: boolean;
+  readonly lastSyncAt?: number | undefined;
+  readonly offsetMs?: number | undefined;
+  readonly error?: string | undefined;
+  readonly timezone: string;
+}
+
+export interface SevynTimeService {
+  snapshot(): Promise<TimeSyncState>;
+  syncNow(): Promise<TimeSyncState>;
+  setTimezone(timezone: string): Promise<TimeSyncState>;
+  subscribe(listener: () => void): () => void;
+}
+
 export interface SevynSystemService {
   snapshot(): Promise<SystemHardwareSnapshot>;
   subscribe(listener: () => void): () => void;
@@ -256,6 +272,31 @@ export class UnavailableAudioService implements SevynAudioService {
       muted,
       outputDevice: "Default Output",
       hasHeadphones: false,
+    });
+  }
+  public subscribe(): () => void {
+    return () => undefined;
+  }
+}
+
+export class UnavailableTimeService implements SevynTimeService {
+  public snapshot(): Promise<TimeSyncState> {
+    return Promise.resolve({
+      available: false,
+      syncing: false,
+      timezone: "UTC",
+    });
+  }
+  public syncNow(): Promise<TimeSyncState> {
+    return Promise.reject(
+      new Error("Time synchronization is not available on this host."),
+    );
+  }
+  public setTimezone(timezone: string): Promise<TimeSyncState> {
+    return Promise.resolve({
+      available: false,
+      syncing: false,
+      timezone,
     });
   }
   public subscribe(): () => void {

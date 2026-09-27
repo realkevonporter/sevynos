@@ -141,4 +141,104 @@ describe("LinuxWirelessNetworkService", () => {
       ]),
     );
   });
+
+  it("saves the network configuration after a successful connection", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    let connected = false;
+    const execute: LinuxCommandExecutor = (request) => {
+      requests.push(request);
+      if (request.executable.endsWith("udhcpc"))
+        return Promise.resolve({ stdout: "lease acquired", stderr: "" });
+      const operation = request.arguments[4];
+      if (operation === "status")
+        return Promise.resolve({
+          stdout: connected
+            ? "wpa_state=COMPLETED\nssid=Sevyn Home\nip_address=192.168.1.20\n"
+            : "wpa_state=DISCONNECTED\n",
+          stderr: "",
+        });
+      if (operation === "scan_results")
+        return Promise.resolve({ stdout: scanOutput, stderr: "" });
+      if (operation === "add_network")
+        return Promise.resolve({ stdout: "0\n", stderr: "" });
+      if (operation === "select_network") connected = true;
+      return Promise.resolve({ stdout: "OK\n", stderr: "" });
+    };
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve(["wlan0"]),
+      execute,
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    await service.scan();
+    await service.connect("Sevyn Home", "test-password");
+    expect(requests.some((request) => request.arguments.includes("save_config"))).toBe(
+      true,
+    );
+  });
+
+  it("removes the network when connection fails", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    const execute: LinuxCommandExecutor = (request) => {
+      requests.push(request);
+      const operation = request.arguments[4];
+      if (operation === "status")
+        return Promise.resolve({ stdout: "wpa_state=DISCONNECTED\n", stderr: "" });
+      if (operation === "scan_results")
+        return Promise.resolve({ stdout: scanOutput, stderr: "" });
+      if (operation === "add_network")
+        return Promise.resolve({ stdout: "5\n", stderr: "" });
+      // Simulate connection timeout: never reaches COMPLETED
+      return Promise.resolve({ stdout: "OK\n", stderr: "" });
+    };
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve(["wlan0"]),
+      execute,
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    await service.scan();
+    const result = await service.connect("Sevyn Home", "wrong-password");
+    expect(result.state).toBe("failed");
+    expect(
+      requests.some(
+        (request) =>
+          request.arguments.includes("remove_network") && request.arguments.includes("5"),
+      ),
+    ).toBe(true);
+  });
+
+  it("disconnects from the current network", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    let connected = true;
+    const execute: LinuxCommandExecutor = (request) => {
+      requests.push(request);
+      const operation = request.arguments[4];
+      if (operation === "status")
+        return Promise.resolve({
+          stdout: connected
+            ? "wpa_state=COMPLETED\nssid=Sevyn Home\n"
+            : "wpa_state=DISCONNECTED\n",
+          stderr: "",
+        });
+      if (operation === "scan_results")
+        return Promise.resolve({ stdout: scanOutput, stderr: "" });
+      if (operation === "disconnect") connected = false;
+      return Promise.resolve({ stdout: "OK\n", stderr: "" });
+    };
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve(["wlan0"]),
+      execute,
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    const result = await service.disconnect();
+    expect(result.state).toBe("disconnected");
+    expect(requests.some((request) => request.arguments.includes("disconnect"))).toBe(
+      true,
+    );
+  });
 });

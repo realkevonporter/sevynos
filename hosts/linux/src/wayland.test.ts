@@ -38,7 +38,7 @@ describe("interactive Wayland host", () => {
       "GENESIS_DISPLAY_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=720 scale=1",
     );
     expect(markers).toContain(
-      "GENESIS_WORKSPACE_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=648",
+      "GENESIS_WORKSPACE_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=624",
     );
     expect(
       markers.some((value) =>
@@ -84,7 +84,7 @@ describe("interactive Wayland host", () => {
       "GENESIS_DISPLAY_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=640 scale=1",
     );
     expect(markers).toContain(
-      "GENESIS_WORKSPACE_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=568",
+      "GENESIS_WORKSPACE_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=544",
     );
     await host.shutdown();
     expect(bridge.sent.at(-1)?.type).toBe("shutdown-complete");
@@ -150,7 +150,7 @@ describe("interactive Wayland host", () => {
     const welcomeFrame = bridge.frames.at(-1);
     expect(welcomeFrame?.traceId).toBe("focus-welcome");
 
-    bridge.pointer("down", 668, 550, "focus-console");
+    bridge.pointer("down", 965, 300, "focus-console");
     bridge.keyboard("down", "z", "KeyZ");
     expect(
       host.runtime.windows.listWindows().find((window) => window.state === "focused")?.id,

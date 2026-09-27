@@ -10,6 +10,8 @@ import {
   type SevynBatteryService,
   type SevynPowerService,
   type SevynSystemService,
+  type SevynTimeService,
+  type TimeSyncState,
   type SevynWirelessNetworkService,
   type WirelessNetworkSnapshot,
   type SevynApplicationManifest,
@@ -33,7 +35,14 @@ export const settingsManifest: SevynApplicationManifest = {
 };
 
 export type SettingsCategory =
-  "appearance" | "network" | "sound" | "battery" | "applications" | "shortcuts" | "about";
+  | "appearance"
+  | "network"
+  | "sound"
+  | "battery"
+  | "datetime"
+  | "applications"
+  | "shortcuts"
+  | "about";
 
 export interface InstalledAppInfo {
   readonly id: string;
@@ -140,6 +149,7 @@ export interface SettingsApplicationProps {
   readonly power?: SevynPowerService | undefined;
   readonly battery?: SevynBatteryService | undefined;
   readonly audio?: SevynAudioService | undefined;
+  readonly time?: SevynTimeService | undefined;
   readonly system?: SevynSystemService | undefined;
   readonly onUpdateSetting?: ((key: string, value: unknown) => void) | undefined;
   readonly installedApplications?: readonly InstalledAppInfo[] | undefined;
@@ -293,6 +303,7 @@ export function SettingsApplication({
   settings = {},
   battery,
   audio,
+  time,
   network,
   onUpdateSetting,
   installedApplications,
@@ -319,6 +330,12 @@ export function SettingsApplication({
   const [wifiError, setWifiError] = useState<string | null>(null);
   const [batteryPercent, setBatteryPercent] = useState<number>(85);
   const [isCharging, setIsCharging] = useState<boolean>(true);
+  const [timeState, setTimeState] = useState<TimeSyncState>({
+    available: false,
+    syncing: false,
+    timezone: "UTC",
+  });
+  const [timezoneInput, setTimezoneInput] = useState<string>("");
   const [apps, setApps] = useState<readonly InstalledAppInfo[]>(
     installedApplications ?? DEFAULT_INSTALLED_APPS,
   );
@@ -346,7 +363,40 @@ export function SettingsApplication({
         setIsCharging(snap.charging);
       });
     }
-  }, [audio, battery]);
+    if (time) {
+      void time.snapshot().then((snap) => {
+        setTimeState(snap);
+        setTimezoneInput(snap.timezone);
+      });
+      return time.subscribe(() => {
+        void time.snapshot().then(setTimeState);
+      });
+    }
+    return undefined;
+  }, [audio, battery, time]);
+
+  const handleTimezoneSave = () => {
+    if (!time || timezoneInput.trim().length === 0) return;
+    void time
+      .setTimezone(timezoneInput.trim())
+      .then((snap) => {
+        setTimeState(snap);
+        setTimezoneInput(snap.timezone);
+      })
+      .catch((error: unknown) => {
+        console.warn("time.setTimezone failed:", error);
+      });
+  };
+
+  const handleSyncNow = () => {
+    if (!time) return;
+    void time
+      .syncNow()
+      .then(setTimeState)
+      .catch((error: unknown) => {
+        console.warn("time.syncNow failed:", error);
+      });
+  };
 
   useEffect(() => {
     if (!network) return undefined;
@@ -530,6 +580,14 @@ export function SettingsApplication({
             label="Power & Battery"
             onPress={() => {
               setActiveCategory("battery");
+            }}
+          />
+          <SidebarItem
+            active={activeCategory === "datetime"}
+            icon="🕐"
+            label="Date & Time"
+            onPress={() => {
+              setActiveCategory("datetime");
             }}
           />
           <SidebarItem
@@ -928,6 +986,61 @@ export function SettingsApplication({
                       backgroundColor: isCharging ? "#10B981" : "#D7AC57",
                     }}
                   />
+                </View>
+              </View>
+            </View>
+          )}
+
+          {activeCategory === "datetime" && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Date & Time</Text>
+              <Text style={styles.sectionSubtitle}>
+                System clock synchronization and timezone.
+              </Text>
+
+              <View style={styles.card}>
+                <View style={styles.rowBetween}>
+                  <View>
+                    <Text style={styles.cardTitle}>Clock Synchronization</Text>
+                    <Text style={styles.cardDesc}>
+                      {timeState.lastSyncAt
+                        ? `Last synced ${new Date(timeState.lastSyncAt).toLocaleString()}`
+                        : "Never synced"}
+                      {timeState.offsetMs !== undefined &&
+                        ` (offset ${String(timeState.offsetMs)} ms)`}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={handleSyncNow}
+                    style={
+                      timeState.syncing ? styles.muteButtonActive : styles.muteButton
+                    }
+                  >
+                    <Text style={styles.muteButtonText}>
+                      {timeState.syncing ? "Syncing…" : "Sync Now"}
+                    </Text>
+                  </Pressable>
+                </View>
+                {timeState.error && (
+                  <Text style={styles.cardDesc}>Sync failed: {timeState.error}</Text>
+                )}
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Timezone</Text>
+                <Text style={styles.cardDesc}>
+                  IANA timezone name, e.g. America/New_York
+                </Text>
+                <View style={styles.rowBetween}>
+                  <TextInput
+                    value={timezoneInput}
+                    onChangeText={setTimezoneInput}
+                    placeholder="America/New_York"
+                    style={styles.passwordInput}
+                  />
+                  <Pressable onPress={handleTimezoneSave} style={styles.muteButton}>
+                    <Text style={styles.muteButtonText}>Apply</Text>
+                  </Pressable>
                 </View>
               </View>
             </View>

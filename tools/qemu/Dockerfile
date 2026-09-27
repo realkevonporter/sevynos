@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 FROM debian:bookworm-slim AS image
 RUN (sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources 2>/dev/null || sed -i 's/main/main contrib non-free non-free-firmware/' /etc/apt/sources.list 2>/dev/null || true) && \
     apt-get update && apt-get install -y --no-install-recommends \
-    acpid at-spi2-core busybox-static chromium chromium-sandbox cpio dialog dosfstools e2fsprogs efibootmgr fonts-dejavu-core gzip grub-common grub2-common grub-efi-amd64-bin grub-pc-bin iproute2 libglib2.0-bin libnotify-bin live-boot linux-image-amd64 libxkbcommon0 os-prober parted python3 python3-pil speech-dispatcher squashfs-tools udev weston zstd ntfs-3g exfatprogs \
+    acpid at-spi2-core busybox-static chromium chromium-sandbox cpio dialog dosfstools e2fsprogs efibootmgr fonts-dejavu-core gzip grub-common grub2-common grub-efi-amd64-bin grub-pc-bin iproute2 libglib2.0-bin libnotify-bin live-boot linux-image-amd64 libxkbcommon0 os-prober parted python3 python3-pil speech-dispatcher squashfs-tools tzdata udev weston zstd ntfs-3g exfatprogs \
     libgl1-mesa-dri libegl-mesa0 libgbm1 libgles2 libglx-mesa0 mesa-va-drivers mesa-vulkan-drivers mesa-utils pciutils usbutils \
     alsa-utils alsa-ucm-conf pipewire pipewire-audio geoclue-2.0 geoclue-2-demo bluez iio-sensor-proxy fprintd libpam-fprintd firmware-sof-signed \
     firmware-amd-graphics firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-misc-nonfree \
