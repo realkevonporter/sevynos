@@ -192,7 +192,6 @@ export interface NativeEventHandlers {
   readonly onPointerDown?: (event: NativePointerEvent) => void;
   readonly onPointerMove?: (event: NativePointerEvent) => void;
   readonly onPointerUp?: (event: NativePointerEvent) => void;
-  readonly onContextMenu?: (event: NativePointerEvent) => void;
   readonly onStartShouldSetResponder?: (event: NativePointerEvent) => boolean;
   readonly onMoveShouldSetResponder?: (event: NativePointerEvent) => boolean;
   readonly onResponderGrant?: (event: NativePointerEvent) => void;

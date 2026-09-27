@@ -55,6 +55,8 @@ describe("core system applications", () => {
       pointerMove: () => Promise.resolve(emptySnapshot()),
       scroll: () => Promise.resolve(emptySnapshot()),
       key: () => Promise.resolve(emptySnapshot()),
+      setZoomFactor: () => Promise.resolve(emptySnapshot()),
+      findInPage: () => Promise.resolve({ found: false }),
       close: () => Promise.resolve(),
     };
     const elements = [
