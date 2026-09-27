@@ -39,11 +39,17 @@ describe("core system applications", () => {
       }),
       subscribe: () => () => {},
       navigate: async () => ({}),
+      back: async () => ({}),
+      forward: async () => ({}),
+      reload: async () => ({}),
+      resize: async () => ({}),
+      click: async () => ({}),
       pointerDown: async () => ({}),
       pointerUp: async () => ({}),
       pointerMove: async () => ({}),
-      wheel: async () => ({}),
+      scroll: async () => ({}),
       key: async () => ({}),
+      close: async () => {},
     };
     const elements = [
       createCoreSystemApplication({ kind: "installer" }),
