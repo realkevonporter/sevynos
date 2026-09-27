@@ -7,6 +7,7 @@ import {
   Text,
   TextInput,
   View,
+  useSevynApplicationSdk,
   type BrowserEngineSnapshot,
   type SevynBrowserEngine,
   type SevynApplicationManifest,
@@ -124,11 +125,22 @@ interface Bookmark {
   readonly icon: string;
 }
 
+interface HistoryEntry {
+  readonly url: string;
+  readonly title: string;
+  readonly visitedAt: number;
+}
+
+const BOOKMARKS_STORAGE_KEY = "sevyn.browser.bookmarks";
+const HISTORY_STORAGE_KEY = "sevyn.browser.history";
+const SESSION_STORAGE_KEY = "sevyn.browser.session";
+
 export function BrowserApplication({
   engine,
   createEngine,
   initialUrl = "sevyn://start",
 }: BrowserApplicationProps): JSX.Element {
+  const sdk = useSevynApplicationSdk();
   // Per-tab browser engines for true tab isolation. Each tab gets its own
   // engine instance so navigation, history, and page state don't leak across tabs.
   const tabEngines = useRef(new Map<string, SevynBrowserEngine>());
@@ -151,6 +163,97 @@ export function BrowserApplication({
     initialUrl === "sevyn://start" ? "" : initialUrl,
   );
   const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>(DEFAULT_BOOKMARKS);
+  const [bookmarksLoaded, setBookmarksLoaded] = useState(false);
+  const [history, setHistory] = useState<readonly HistoryEntry[]>([]);
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [bookmarksVisible, setBookmarksVisible] = useState(false);
+
+  // Load persisted bookmarks, history, and session on mount
+  useEffect(() => {
+    let cancelled = false;
+    const load = async (): Promise<void> => {
+      try {
+        const stored = await sdk.storage.get(BOOKMARKS_STORAGE_KEY);
+        if (!cancelled && stored !== undefined) {
+          const parsed = JSON.parse(stored) as readonly Bookmark[];
+          if (Array.isArray(parsed)) setBookmarks(parsed);
+        }
+      } catch {
+        // Keep defaults on storage failure
+      }
+      try {
+        const storedHistory = await sdk.storage.get(HISTORY_STORAGE_KEY);
+        if (!cancelled && storedHistory !== undefined) {
+          const parsed = JSON.parse(storedHistory) as readonly HistoryEntry[];
+          if (Array.isArray(parsed)) setHistory(parsed);
+        }
+      } catch {
+        // Keep empty history on storage failure
+      }
+      // Restore previous session tabs
+      try {
+        const sessionRaw = await sdk.storage.get(SESSION_STORAGE_KEY);
+        if (!cancelled && sessionRaw !== undefined) {
+          const session = JSON.parse(sessionRaw) as {
+            tabs: readonly { url: string; title: string }[];
+            activeTabId: string;
+          };
+          if (Array.isArray(session.tabs) && session.tabs.length > 0) {
+            const restoredTabs = session.tabs.map((t, index) => ({
+              id: `tab-restored-${String(index)}`,
+              url: t.url,
+              title: t.title,
+              loading: false,
+              canGoBack: false,
+              canGoForward: false,
+            }));
+            setTabs(restoredTabs);
+            const activeExists = session.tabs.some(
+              (_, index) => `tab-restored-${String(index)}` === session.activeTabId,
+            );
+            setActiveTabId(
+              activeExists ? session.activeTabId : (restoredTabs[0]?.id ?? "tab-1"),
+            );
+          }
+        }
+      } catch {
+        // Keep default tab on restore failure
+      }
+      if (!cancelled) setBookmarksLoaded(true);
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [sdk.storage]);
+
+  // Persist bookmarks
+  useEffect(() => {
+    if (!bookmarksLoaded) return;
+    void sdk.storage
+      .set(BOOKMARKS_STORAGE_KEY, JSON.stringify(bookmarks))
+      .catch(() => undefined);
+  }, [sdk.storage, bookmarks, bookmarksLoaded]);
+
+  // Persist history (cap at 200 entries)
+  useEffect(() => {
+    if (!bookmarksLoaded) return;
+    void sdk.storage
+      .set(HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, 200)))
+      .catch(() => undefined);
+  }, [sdk.storage, history, bookmarksLoaded]);
+
+  // Persist session (open tabs) — restore on launch
+  useEffect(() => {
+    if (!bookmarksLoaded) return;
+    const session = {
+      tabs: tabs.map((t) => ({ url: t.url, title: t.title })),
+      activeTabId,
+    };
+    void sdk.storage
+      .set(SESSION_STORAGE_KEY, JSON.stringify(session))
+      .catch(() => undefined);
+  }, [sdk.storage, tabs, activeTabId, bookmarksLoaded]);
   const activeEngine = tabEngines.current.get(activeTabId);
   const [engineSnapshot, setEngineSnapshot] = useState<BrowserEngineSnapshot | undefined>(
     activeEngine?.snapshot(),
@@ -198,6 +301,24 @@ export function BrowserApplication({
               : t,
           ),
         );
+        // Record history when a page finishes loading (skip internal pages)
+        if (
+          snap.loading === false &&
+          snap.ready === true &&
+          !snap.url.startsWith("sevyn://") &&
+          snap.url !== "about:blank"
+        ) {
+          setHistory((prev) => {
+            // Don't duplicate the most recent entry
+            if (prev[0]?.url === snap.url) return prev;
+            const entry: HistoryEntry = {
+              url: snap.url,
+              title: snap.title || snap.url,
+              visitedAt: Date.now(),
+            };
+            return [entry, ...prev].slice(0, 200);
+          });
+        }
       }
     });
     return unsubscribe;
@@ -509,6 +630,17 @@ export function BrowserApplication({
             >{`${String(Math.round(currentZoom * 100))}%`}</Text>
           </Pressable>
         )}
+
+        <Pressable onPress={() => setHistoryVisible((v) => !v)} style={styles.navButton}>
+          <Text style={styles.navButtonText}>🕐</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => setBookmarksVisible((v) => !v)}
+          style={styles.navButton}
+        >
+          <Text style={styles.navButtonText}>📑</Text>
+        </Pressable>
 
         {/* Omnibox Address / Search Input */}
         <View style={styles.addressBar}>
@@ -887,6 +1019,76 @@ export function BrowserApplication({
                 </View>
               ))
             )}
+          </View>
+        )}
+        {/* History panel */}
+        {historyVisible && (
+          <View style={styles.downloadsPanel}>
+            <View style={styles.downloadsHeader}>
+              <Text style={styles.downloadsTitle}>History</Text>
+              <Pressable onPress={() => setHistoryVisible(false)}>
+                <Text style={styles.findButtonText}>✕</Text>
+              </Pressable>
+            </View>
+            <Pressable onPress={() => setHistory([])} style={styles.clearHistoryButton}>
+              <Text style={styles.clearHistoryText}>Clear history</Text>
+            </Pressable>
+            <ScrollView style={styles.panelScroll}>
+              {history.length === 0 ? (
+                <Text style={styles.downloadsEmpty}>No history yet</Text>
+              ) : (
+                history.map((entry) => (
+                  <Pressable
+                    key={`${entry.url}-${String(entry.visitedAt)}`}
+                    onPress={() => {
+                      setHistoryVisible(false);
+                      navigateTo(entry.url);
+                    }}
+                    style={styles.downloadItem}
+                  >
+                    <Text style={styles.downloadFilename}>{entry.title}</Text>
+                    <Text style={styles.downloadStatus}>{entry.url}</Text>
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        )}
+        {/* Bookmarks manager panel */}
+        {bookmarksVisible && (
+          <View style={styles.downloadsPanel}>
+            <View style={styles.downloadsHeader}>
+              <Text style={styles.downloadsTitle}>Bookmarks</Text>
+              <Pressable onPress={() => setBookmarksVisible(false)}>
+                <Text style={styles.findButtonText}>✕</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={styles.panelScroll}>
+              {bookmarks.map((bookmark) => (
+                <View key={bookmark.url} style={styles.bookmarkRow}>
+                  <Pressable
+                    onPress={() => {
+                      setBookmarksVisible(false);
+                      navigateTo(bookmark.url);
+                    }}
+                    style={styles.bookmarkInfo}
+                  >
+                    <Text style={styles.downloadFilename}>
+                      {bookmark.icon} {bookmark.title}
+                    </Text>
+                    <Text style={styles.downloadStatus}>{bookmark.url}</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setBookmarks((prev) => prev.filter((b) => b.url !== bookmark.url));
+                    }}
+                    style={styles.bookmarkDelete}
+                  >
+                    <Text style={styles.bookmarkDeleteText}>✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
           </View>
         )}
       </View>
@@ -1328,6 +1530,35 @@ const styles = StyleSheet.create({
     color: "#94A3B8",
     fontSize: 12,
     marginTop: 2,
+  },
+  panelScroll: {
+    maxHeight: 240,
+  },
+  clearHistoryButton: {
+    paddingVertical: 6,
+    marginBottom: 4,
+  },
+  clearHistoryText: {
+    color: "#F87171",
+    fontSize: 13,
+  },
+  bookmarkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#334155",
+  },
+  bookmarkInfo: {
+    flex: 1,
+  },
+  bookmarkDelete: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  bookmarkDeleteText: {
+    color: "#F87171",
+    fontSize: 14,
   },
   loadingBarContainer: {
     height: 3,
