@@ -118,6 +118,12 @@ export const DEFAULT_BOOKMARKS = [
   { title: "Hacker News", url: "https://news.ycombinator.com", icon: "📰" },
 ];
 
+interface Bookmark {
+  readonly title: string;
+  readonly url: string;
+  readonly icon: string;
+}
+
 export function BrowserApplication({
   engine,
   createEngine,
@@ -144,10 +150,15 @@ export function BrowserApplication({
   const [addressInput, setAddressInput] = useState<string>(
     initialUrl === "sevyn://start" ? "" : initialUrl,
   );
+  const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>(DEFAULT_BOOKMARKS);
   const activeEngine = tabEngines.current.get(activeTabId);
   const [engineSnapshot, setEngineSnapshot] = useState<BrowserEngineSnapshot | undefined>(
     activeEngine?.snapshot(),
   );
+  const [contextMenu, setContextMenu] = useState<{
+    readonly x: number;
+    readonly y: number;
+  } | null>(null);
 
   const activeTab: BrowserTab = tabs.find((t) => t.id === activeTabId) ??
     tabs[0] ?? {
@@ -177,6 +188,8 @@ export function BrowserApplication({
                   title: snap.title || snap.url,
                   loading: snap.loading,
                   error: snap.error,
+                  canGoBack: snap.canGoBack ?? false,
+                  canGoForward: snap.canGoForward ?? false,
                 }
               : t,
           ),
@@ -278,6 +291,26 @@ export function BrowserApplication({
     navigateTo("sevyn://start");
   }, [navigateTo]);
 
+  const isBookmarked = bookmarks.some((b) => b.url === activeTab.url);
+
+  const toggleBookmark = useCallback(() => {
+    if (activeTab.url === "sevyn://start" || activeTab.url === "about:blank") return;
+    setBookmarks((prev) => {
+      const exists = prev.some((b) => b.url === activeTab.url);
+      if (exists) {
+        return prev.filter((b) => b.url !== activeTab.url);
+      }
+      return [
+        ...prev,
+        {
+          title: activeTab.title || activeTab.url,
+          url: activeTab.url,
+          icon: "⭐",
+        },
+      ];
+    });
+  }, [activeTab.url, activeTab.title]);
+
   const handleNewTab = useCallback(() => {
     const newId = `tab-${String(Date.now())}`;
     const newTab: BrowserTab = {
@@ -375,12 +408,32 @@ export function BrowserApplication({
 
       {/* Navigation Toolbar */}
       <View style={styles.toolbar}>
-        <Pressable onPress={handleBack} style={styles.navButton}>
-          <Text style={styles.navButtonText}>←</Text>
+        <Pressable
+          onPress={handleBack}
+          style={styles.navButton}
+          disabled={!activeTab.canGoBack}
+        >
+          <Text
+            style={
+              activeTab.canGoBack ? styles.navButtonText : styles.navButtonTextDisabled
+            }
+          >
+            ←
+          </Text>
         </Pressable>
 
-        <Pressable onPress={handleForward} style={styles.navButton}>
-          <Text style={styles.navButtonText}>→</Text>
+        <Pressable
+          onPress={handleForward}
+          style={styles.navButton}
+          disabled={!activeTab.canGoForward}
+        >
+          <Text
+            style={
+              activeTab.canGoForward ? styles.navButtonText : styles.navButtonTextDisabled
+            }
+          >
+            →
+          </Text>
         </Pressable>
 
         <Pressable onPress={handleReload} style={styles.navButton}>
@@ -389,6 +442,10 @@ export function BrowserApplication({
 
         <Pressable onPress={handleHome} style={styles.navButton}>
           <Text style={styles.navButtonText}>⌂</Text>
+        </Pressable>
+
+        <Pressable onPress={toggleBookmark} style={styles.navButton}>
+          <Text style={styles.navButtonText}>{isBookmarked ? "★" : "☆"}</Text>
         </Pressable>
 
         {/* Omnibox Address / Search Input */}
@@ -466,7 +523,7 @@ export function BrowserApplication({
             {/* Bookmarks Grid */}
             <Text style={styles.sectionHeader}>Quick Bookmarks</Text>
             <View style={styles.bookmarksGrid}>
-              {DEFAULT_BOOKMARKS.map((bookmark) => (
+              {bookmarks.map((bookmark) => (
                 <Pressable
                   key={bookmark.url}
                   onPress={() => {
@@ -614,6 +671,9 @@ export function BrowserApplication({
                       setEngineSnapshot(snap);
                     });
                 }}
+                onContextMenu={(event: BrowserPointerEvent) => {
+                  setContextMenu({ x: event.x, y: event.y });
+                }}
                 style={styles.webViewport}
               />
             ) : (
@@ -624,6 +684,57 @@ export function BrowserApplication({
               </View>
             )}
           </View>
+        )}
+        {/* Browser context menu (right-click) */}
+        {contextMenu && (
+          <>
+            <Pressable
+              onPress={() => setContextMenu(null)}
+              style={styles.contextMenuBackdrop}
+            />
+            <View
+              style={{
+                position: "absolute",
+                backgroundColor: "#1E293B",
+                borderRadius: 8,
+                paddingVertical: 4,
+                minWidth: 180,
+                left: contextMenu.x,
+                top: contextMenu.y,
+                zIndex: 1000,
+              }}
+            >
+              <Pressable
+                onPress={() => {
+                  setContextMenu(null);
+                  handleBack();
+                }}
+                style={styles.contextMenuItem}
+                disabled={!activeTab.canGoBack}
+              >
+                <Text style={styles.contextMenuItemText}>Back</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setContextMenu(null);
+                  handleForward();
+                }}
+                style={styles.contextMenuItem}
+                disabled={!activeTab.canGoForward}
+              >
+                <Text style={styles.contextMenuItemText}>Forward</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setContextMenu(null);
+                  handleReload();
+                }}
+                style={styles.contextMenuItem}
+              >
+                <Text style={styles.contextMenuItemText}>Reload</Text>
+              </Pressable>
+            </View>
+          </>
         )}
       </View>
     </View>
@@ -733,6 +844,11 @@ const styles = StyleSheet.create({
   },
   navButtonText: {
     color: "#E2E8F0",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  navButtonTextDisabled: {
+    color: "#475569",
     fontSize: 15,
     fontWeight: "600",
   },
@@ -955,6 +1071,22 @@ const styles = StyleSheet.create({
   },
   webContainer: {
     flex: 1,
+  },
+  contextMenuBackdrop: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 999,
+  },
+  contextMenuItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  contextMenuItemText: {
+    color: "#E2E8F0",
+    fontSize: 14,
   },
   loadingBarContainer: {
     height: 3,

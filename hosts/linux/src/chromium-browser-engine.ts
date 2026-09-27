@@ -619,6 +619,12 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       expression: "({title: document.title, url: location.href})",
       returnByValue: true,
     });
+    const history = await connection
+      .send<{
+        readonly currentIndex: number;
+        readonly entries: readonly unknown[];
+      }>("Page.getNavigationHistory")
+      .catch(() => undefined);
     const decoded = decodePng(Buffer.from(screenshot.data, "base64"));
     return this.#publish(
       Object.freeze({
@@ -632,6 +638,9 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
         width: decoded.width,
         height: decoded.height,
         pixels: decoded.pixels,
+        canGoBack: history !== undefined && history.currentIndex > 0,
+        canGoForward:
+          history !== undefined && history.currentIndex < history.entries.length - 1,
       }),
     );
   }

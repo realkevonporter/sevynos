@@ -132,6 +132,8 @@ export interface BrowserEngineSnapshot {
   readonly height: number;
   readonly pixels?: Uint8Array | undefined;
   readonly error?: string | undefined;
+  readonly canGoBack?: boolean | undefined;
+  readonly canGoForward?: boolean | undefined;
 }
 
 export interface SevynBrowserEngine {
