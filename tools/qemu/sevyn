@@ -23,7 +23,232 @@
  */
 
 const SEVYN_CLI_VERSION = "0.1.0";
-const APPS_REGISTRY = "/var/lib/sevyn/apps/registry.json";
+const APPS_DIR = process.env["SEVYN_APPS_DIR"] ?? "/var/lib/sevyn/apps";
+const APPS_REGISTRY = `${APPS_DIR}/registry.json`;
+
+/**
+ * Minimal ZIP reader for .sevyn bundles (standard ZIP format).
+ * Supports stored (method 0) and deflated (method 8) entries.
+ */
+async function readZipEntries(zipPath) {
+  const { readFile } = await import("node:fs/promises");
+  const { inflateRawSync } = await import("node:zlib");
+  const data = await readFile(zipPath);
+
+  // Find End of Central Directory (EOCD) by scanning backwards
+  let eocdOffset = -1;
+  for (let i = data.length - 22; i >= 0; i--) {
+    if (
+      data[i] === 0x50 &&
+      data[i + 1] === 0x4b &&
+      data[i + 2] === 0x05 &&
+      data[i + 3] === 0x06
+    ) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) {
+    throw new Error("Invalid .sevyn bundle: not a ZIP archive");
+  }
+
+  const entryCount = data.readUInt16LE(eocdOffset + 10);
+  const centralDirOffset = data.readUInt32LE(eocdOffset + 16);
+
+  const entries = new Map();
+  let offset = centralDirOffset;
+  for (let i = 0; i < entryCount; i++) {
+    if (data.readUInt32LE(offset) !== 0x02014b50) {
+      throw new Error("Invalid .sevyn bundle: corrupt central directory");
+    }
+    const method = data.readUInt16LE(offset + 10);
+    const compressedSize = data.readUInt32LE(offset + 20);
+    const fileNameLength = data.readUInt16LE(offset + 28);
+    const extraLength = data.readUInt16LE(offset + 30);
+    const commentLength = data.readUInt16LE(offset + 32);
+    const localHeaderOffset = data.readUInt32LE(offset + 42);
+    const fileName = data.toString("utf8", offset + 46, offset + 46 + fileNameLength);
+
+    // Local file header: skip to compressed data
+    const localNameLength = data.readUInt16LE(localHeaderOffset + 26);
+    const localExtraLength = data.readUInt16LE(localHeaderOffset + 28);
+    const dataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength;
+    const compressed = data.subarray(dataOffset, dataOffset + compressedSize);
+
+    let contents;
+    if (method === 0) {
+      contents = compressed;
+    } else if (method === 8) {
+      contents = inflateRawSync(compressed);
+    } else {
+      throw new Error(`Unsupported compression method ${method} for ${fileName}`);
+    }
+    entries.set(fileName, contents);
+    offset += 46 + fileNameLength + extraLength + commentLength;
+  }
+  return entries;
+}
+
+async function readRegistry() {
+  const { readFile } = await import("node:fs/promises");
+  try {
+    const data = await readFile(APPS_REGISTRY, "utf8");
+    return JSON.parse(data);
+  } catch (error) {
+    if (error.code === "ENOENT") return { apps: [] };
+    throw error;
+  }
+}
+
+async function writeRegistry(registry) {
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  const { dirname } = await import("node:path");
+  await mkdir(dirname(APPS_REGISTRY), { recursive: true });
+  await writeFile(APPS_REGISTRY, JSON.stringify(registry, null, 2));
+}
+
+async function installApp(bundlePath) {
+  const { stat, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { join, resolve } = await import("node:path");
+
+  const resolved = resolve(bundlePath);
+  try {
+    await stat(resolved);
+  } catch {
+    console.error(`Bundle not found: ${bundlePath}`);
+    process.exit(1);
+  }
+
+  console.log(`Installing ${bundlePath}...`);
+  let entries;
+  try {
+    entries = await readZipEntries(resolved);
+  } catch (error) {
+    console.error(`Invalid bundle: ${error.message}`);
+    process.exit(1);
+  }
+
+  const manifestData = entries.get("manifest.json");
+  if (!manifestData) {
+    console.error("Invalid bundle: manifest.json missing");
+    process.exit(1);
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestData.toString("utf8"));
+  } catch {
+    console.error("Invalid bundle: manifest.json is not valid JSON");
+    process.exit(1);
+  }
+
+  if (!manifest.id || !manifest.name || !manifest.version) {
+    console.error("Invalid bundle: manifest must include id, name, and version");
+    process.exit(1);
+  }
+
+  // Protected system apps (shell, terminal) cannot be replaced via CLI
+  if (manifest.system) {
+    console.error(
+      `Cannot install system application "${manifest.id}": protected system applications must be signed with an official SevynOS release key.`,
+    );
+    process.exit(1);
+  }
+
+  if (!entries.get("app.hbc")) {
+    console.error("Invalid bundle: app.hbc missing");
+    process.exit(1);
+  }
+
+  const registry = await readRegistry();
+  const apps = registry.apps ?? [];
+  if (apps.some((app) => app.system && app.id === manifest.id)) {
+    console.error(`Cannot replace protected system application "${manifest.id}".`);
+    process.exit(1);
+  }
+
+  const appDir = join(APPS_DIR, manifest.id);
+  await rm(appDir, { recursive: true, force: true });
+  await mkdir(appDir, { recursive: true });
+
+  for (const [name, contents] of entries) {
+    // Prevent zip-slip: entries must not escape the app directory
+    const target = join(appDir, name);
+    if (!target.startsWith(appDir + "/") && target !== appDir) {
+      console.error(`Invalid bundle: entry escapes app directory: ${name}`);
+      process.exit(1);
+    }
+    if (name.endsWith("/")) {
+      await mkdir(target, { recursive: true });
+    } else {
+      const { dirname } = await import("node:path");
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, contents);
+    }
+  }
+
+  const record = {
+    id: manifest.id,
+    name: manifest.name,
+    version: manifest.version,
+    ...(manifest.description ? { description: manifest.description } : {}),
+    system: false,
+    permissions: manifest.permissions ?? [],
+    installedAt: new Date().toISOString(),
+    path: appDir,
+  };
+  const existing = apps.findIndex((app) => app.id === manifest.id);
+  if (existing >= 0) {
+    apps[existing] = record;
+  } else {
+    apps.push(record);
+  }
+  registry.apps = apps;
+  await writeRegistry(registry);
+
+  console.log(`Installed ${manifest.name} v${manifest.version} (${manifest.id})`);
+}
+
+async function uninstallApp(appId) {
+  const { rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+
+  const registry = await readRegistry();
+  const apps = registry.apps ?? [];
+  const app = apps.find((entry) => entry.id === appId);
+  if (!app) {
+    console.error(`No application found with id: ${appId}`);
+    process.exit(1);
+  }
+  if (app.system) {
+    console.error(
+      `Cannot uninstall protected system application "${appId}". Core system applications (shell, terminal) are protected to preserve system integrity and recovery.`,
+    );
+    process.exit(1);
+  }
+
+  await rm(join(APPS_DIR, appId), { recursive: true, force: true });
+  registry.apps = apps.filter((entry) => entry.id !== appId);
+  await writeRegistry(registry);
+  console.log(`Uninstalled ${app.name} (${appId})`);
+}
+
+async function powerSystem(action) {
+  const { execFile } = await import("node:child_process");
+  const commands = {
+    shutdown: ["systemctl", ["poweroff"]],
+    restart: ["systemctl", ["reboot"]],
+    suspend: ["systemctl", ["suspend"]],
+  };
+  const [cmd, args] = commands[action];
+  execFile(cmd, args, (error) => {
+    if (error) {
+      console.error(`Failed to ${action}: ${error.message}`);
+      console.error("Power management requires systemd. This system may not support it.");
+      process.exit(1);
+    }
+  });
+}
 
 function printHelp() {
   console.log(`Sevyn CLI v${SEVYN_CLI_VERSION} — SevynOS command interface
@@ -42,6 +267,34 @@ function printHelp() {
   console.log(`  exit                    Exit the shell`);
   console.log(``);
   console.log(`SevynOS exposes no Linux shell. Everything goes through SevynOS.`);
+}
+
+async function appInfo(appId) {
+  const { readFile } = await import("node:fs/promises");
+  try {
+    const data = await readFile(APPS_REGISTRY, "utf8");
+    const registry = JSON.parse(data);
+    const apps = registry.apps ?? [];
+    const app = apps.find((entry) => entry.id === appId);
+    if (!app) {
+      console.error(`No application found with id: ${appId}`);
+      process.exit(1);
+    }
+    console.log(`${app.name} v${app.version}`);
+    console.log(`  ID: ${app.id}`);
+    if (app.description) console.log(`  Description: ${app.description}`);
+    if (app.system) console.log(`  Type: system application`);
+    if (app.permissions?.length) {
+      console.log(`  Permissions: ${app.permissions.join(", ")}`);
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      console.error(`No application found with id: ${appId}`);
+    } else {
+      console.error(`Error reading app registry: ${error.message}`);
+    }
+    process.exit(1);
+  }
 }
 
 async function listApps() {
@@ -72,15 +325,15 @@ async function listApps() {
   }
 }
 
-function systemInfo() {
-  const { arch, platform, release, totalmem, freemem, uptime } = process;
+async function systemInfo() {
+  const os = await import("node:os");
   console.log(`SevynOS System Information`);
-  console.log(`  Platform: ${platform} (${arch()})`);
-  console.log(`  Kernel: ${release()}`);
+  console.log(`  Platform: ${os.platform()} (${os.arch()})`);
+  console.log(`  Kernel: ${os.release()}`);
   console.log(
-    `  Memory: ${Math.round(freemem() / 1024 / 1024)}MB free / ${Math.round(totalmem() / 1024 / 1024)}MB total`,
+    `  Memory: ${Math.round(os.freemem() / 1024 / 1024)}MB free / ${Math.round(os.totalmem() / 1024 / 1024)}MB total`,
   );
-  console.log(`  Uptime: ${Math.round(uptime())}s`);
+  console.log(`  Uptime: ${Math.round(os.uptime())}s`);
   console.log(`  Sevyn CLI: v${SEVYN_CLI_VERSION}`);
 }
 
@@ -101,7 +354,7 @@ async function runCommand(args) {
       console.log(`sevyn v${SEVYN_CLI_VERSION}`);
       break;
 
-    case "apps":
+    case "apps": {
       const [subcmd, ...subargs] = rest;
       switch (subcmd) {
         case "list":
@@ -113,27 +366,21 @@ async function runCommand(args) {
             console.error("Usage: sevyn apps install <path-to-.sevyn>");
             process.exit(1);
           }
-          console.log(`Installing ${subargs[0]}...`);
-          console.log(
-            `(App installation via CLI is coming soon. Use the App Manager for now.)`,
-          );
+          await installApp(subargs[0]);
           break;
         case "uninstall":
           if (!subargs[0]) {
             console.error("Usage: sevyn apps uninstall <app-id>");
             process.exit(1);
           }
-          console.log(`Uninstalling ${subargs[0]}...`);
-          console.log(
-            `(App uninstallation via CLI is coming soon. Use the App Manager for now.)`,
-          );
+          await uninstallApp(subargs[0]);
           break;
         case "info":
           if (!subargs[0]) {
             console.error("Usage: sevyn apps info <app-id>");
             process.exit(1);
           }
-          console.log(`App info for ${subargs[0]}: (coming soon)`);
+          await appInfo(subargs[0]);
           break;
         default:
           console.error(`Unknown apps subcommand: ${subcmd}`);
@@ -141,13 +388,14 @@ async function runCommand(args) {
           process.exit(1);
       }
       break;
+    }
 
-    case "system":
+    case "system": {
       const [sysCmd, ...sysArgs] = rest;
       switch (sysCmd) {
         case "info":
         case undefined:
-          systemInfo();
+          await systemInfo();
           break;
         case "power":
           const action = sysArgs[0];
@@ -155,13 +403,14 @@ async function runCommand(args) {
             console.error("Usage: sevyn system power <shutdown|restart|suspend>");
             process.exit(1);
           }
-          console.log(`${action} requested. (Power management via CLI is coming soon.)`);
+          await powerSystem(action);
           break;
         default:
           console.error(`Unknown system subcommand: ${sysCmd}`);
           process.exit(1);
       }
       break;
+    }
 
     case "exit":
     case "quit":

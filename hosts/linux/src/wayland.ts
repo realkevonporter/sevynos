@@ -3,6 +3,16 @@ import { readFile, readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Log uncaught errors before the process exits so boot failures are diagnosable.
+process.on("uncaughtException", (error) => {
+  console.error("SEVYN_GENESIS_UNCAUGHT_EXCEPTION", error);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("SEVYN_GENESIS_UNHANDLED_REJECTION", reason);
+  process.exit(1);
+});
 import { DisplayRenderPlanner, GenesisFrameExecutor } from "@sevynos/graphics";
 import { createWheelInputEvent, type PointerInputEvent } from "@sevynos/input";
 import {
@@ -81,7 +91,7 @@ export interface WaylandHostOptions {
   readonly system?: SevynSystemService;
   readonly filesystem?: SevynFileSystem;
   readonly createBrowserEngine?: () => SevynBrowserEngine;
-  readonly createSevynCodeEngine?: () => SevynBrowserEngine;
+  readonly createSevynCodeEngine?: () => SevynBrowserEngine | undefined;
 }
 
 export async function startWaylandHost(
@@ -1449,7 +1459,10 @@ if (
     createSevynCodeEngine: () => {
       const engine = sevynCodeService.engine;
       if (!engine) {
-        throw new Error("Sevyn Code service is not running.");
+        console.error(
+          "Sevyn Code service is not running; IDE will show unavailable state.",
+        );
+        return undefined;
       }
       return engine;
     },

@@ -47,6 +47,8 @@ interface SevynCodePointerEvent {
 }
 
 interface SevynCodeWheelEvent {
+  readonly x: number;
+  readonly y: number;
   readonly deltaY: number;
   readonly deltaX?: number;
 }
@@ -61,11 +63,36 @@ interface SevynCodeKeyboardEvent {
 }
 
 interface SevynCodeAppProps {
-  /** The browser engine streaming the code-server workbench. */
-  readonly engine: SevynBrowserEngine;
+  /**
+   * The browser engine streaming the code-server workbench.
+   * When undefined, the app renders an unavailable state instead of crashing.
+   */
+  readonly engine?: SevynBrowserEngine | undefined;
 }
 
 export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
+  if (!engine) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.loadingOverlay}>
+          <Text style={styles.loadingTitle}>Sevyn Code</Text>
+          <Text style={styles.loadingText}>
+            The development environment is unavailable. The host did not provide a browser
+            engine.
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  return <SevynCodeWorkspace engine={engine} />;
+}
+
+function SevynCodeWorkspace({
+  engine,
+}: {
+  readonly engine: SevynBrowserEngine;
+}): JSX.Element {
   const [snapshot, setSnapshot] = useState<BrowserEngineSnapshot>(() =>
     engine.snapshot(),
   );
@@ -82,6 +109,8 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
   }, [engine]);
 
   const lastClickRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const clickCountRef = useRef(0);
+  const skipUpRef = useRef(false);
 
   const handlePointerDown = useCallback(
     (event: SevynCodePointerEvent) => {
@@ -93,11 +122,15 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
         Math.abs(event.x - last.x) < 8 &&
         Math.abs(event.y - last.y) < 8
       ) {
-        // Double-click: select word
+        // Multi-click: clickCount 2 = double (select word), 3 = triple (select line)
+        clickCountRef.current = Math.min(clickCountRef.current + 1, 3);
         lastClickRef.current = null;
-        void engine.click(event.x, event.y, 2);
+        skipUpRef.current = true;
+        void engine.click(event.x, event.y, clickCountRef.current);
       } else {
+        clickCountRef.current = 1;
         lastClickRef.current = { x: event.x, y: event.y, time: now };
+        skipUpRef.current = false;
         void engine.pointerDown(event.x, event.y, event.button ?? 0);
       }
     },
@@ -106,6 +139,12 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
 
   const handlePointerUp = useCallback(
     (event: SevynCodePointerEvent) => {
+      // Skip the up event when the down was consumed by a multi-click
+      // (engine.click already sent a complete down+up pair)
+      if (skipUpRef.current) {
+        skipUpRef.current = false;
+        return;
+      }
       void engine.pointerUp(event.x, event.y, event.button ?? 0);
     },
     [engine],
@@ -120,7 +159,7 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
 
   const handleWheel = useCallback(
     (event: SevynCodeWheelEvent) => {
-      void engine.scroll(event.deltaY, event.deltaX ?? 0);
+      void engine.scroll(event.x, event.y, event.deltaY, event.deltaX ?? 0);
     },
     [engine],
   );

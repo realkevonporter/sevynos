@@ -1226,7 +1226,7 @@ export function createCoreSystemApplication(
       }
     | {
         readonly kind: "ide";
-        readonly browserEngine: SevynBrowserEngine;
+        readonly browserEngine?: SevynBrowserEngine | undefined;
       }
     | {
         readonly kind: "notes";

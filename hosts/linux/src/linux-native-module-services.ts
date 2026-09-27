@@ -1844,7 +1844,12 @@ export class LinuxNativeModuleServices {
             : action === "navigate" && typeof record["url"] === "string"
               ? await engine.navigate(record["url"])
               : action === "scroll" && typeof record["deltaY"] === "number"
-                ? await engine.scroll(record["deltaY"])
+                ? await engine.scroll(
+                    typeof record["x"] === "number" ? record["x"] : 0,
+                    typeof record["y"] === "number" ? record["y"] : 0,
+                    record["deltaY"],
+                    typeof record["deltaX"] === "number" ? record["deltaX"] : 0,
+                  )
                 : action === "resize" &&
                     typeof record["width"] === "number" &&
                     typeof record["height"] === "number"

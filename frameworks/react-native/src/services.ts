@@ -145,7 +145,12 @@ export interface SevynBrowserEngine {
   pointerDown(x: number, y: number, button?: number): Promise<BrowserEngineSnapshot>;
   pointerUp(x: number, y: number, button?: number): Promise<BrowserEngineSnapshot>;
   pointerMove(x: number, y: number): Promise<BrowserEngineSnapshot>;
-  scroll(deltaY: number, deltaX?: number): Promise<BrowserEngineSnapshot>;
+  scroll(
+    x: number,
+    y: number,
+    deltaY: number,
+    deltaX?: number,
+  ): Promise<BrowserEngineSnapshot>;
   key(
     key: string,
     code: string,

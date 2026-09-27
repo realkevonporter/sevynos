@@ -57,7 +57,7 @@ describe("SevynCodeApp", () => {
     const snapshot = await engine.click(100, 200, 1);
     expect(snapshot.ready).toBe(true);
     await engine.pointerMove(150, 250);
-    await engine.scroll(120);
+    await engine.scroll(150, 250, 120);
     await engine.key("a", "KeyA", {
       shift: false,
       alt: false,

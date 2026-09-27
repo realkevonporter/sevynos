@@ -149,7 +149,7 @@ export interface CreateDesktopRuntimeOptions {
   readonly system?: SevynSystemService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
   readonly createBrowserEngine?: (() => SevynBrowserEngine) | undefined;
-  readonly createSevynCodeEngine?: (() => SevynBrowserEngine) | undefined;
+  readonly createSevynCodeEngine?: (() => SevynBrowserEngine | undefined) | undefined;
   /**
    * Temporary diagnostic: when true, every pointer-down logs a
    * SEVYN_PROBE_HITTEST line with the pointer position, the selected
