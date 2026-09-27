@@ -268,6 +268,20 @@ export class LinuxSevynCodeService {
 
   async #waitForLoopback(timeoutMs: number): Promise<void> {
     const { createServer } = await import("node:net");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+
+    // Try to bring up loopback explicitly — the minimal init may not do it.
+    // This is idempotent: safe to run even if lo is already up.
+    try {
+      await execFileAsync("ip", ["link", "set", "lo", "up"]);
+      await execFileAsync("ip", ["addr", "add", "127.0.0.1/8", "dev", "lo"]);
+    } catch {
+      // Best effort — the interface may already be configured, or `ip`
+      // may not be available. Fall through to the bind test below.
+    }
+
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const server = createServer();
