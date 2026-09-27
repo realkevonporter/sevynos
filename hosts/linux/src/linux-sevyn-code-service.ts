@@ -137,10 +137,45 @@ export class LinuxSevynCodeService {
   }
 
   async #startCodeServer(): Promise<void> {
+    // Use the real path, not the /usr/local/bin symlink — the code-server
+    // wrapper script resolves its bundled node binary relative to $0, and
+    // the symlink makes it look in /usr/local/lib instead of /opt/code-server/lib.
     const binary =
       this.#options.codeServerBinary ??
       process.env["SEVYN_CODE_SERVER_BIN"] ??
-      "/usr/local/bin/code-server";
+      "/opt/code-server/bin/code-server";
+
+    // Pre-flight check: verify the binary exists and is executable
+    try {
+      const { existsSync, accessSync, constants } = await import("node:fs");
+      if (!existsSync(binary)) {
+        throw new Error(`code-server binary not found at ${binary}`);
+      }
+      accessSync(binary, constants.X_OK);
+    } catch (error) {
+      throw new Error(
+        `code-server binary check failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    // Wait for 127.0.0.1 to become available — the loopback interface may not
+    // be configured yet when Genesis starts services during early boot.
+    // Try binding a test socket; EADDRNOTAVAIL means loopback isn't ready.
+    await this.#waitForLoopback(15000);
+
+    const dataDir =
+      this.#options.codeServerDataDir ??
+      process.env["SEVYN_CODE_SERVER_DATA"] ??
+      "/var/lib/sevyn/code-server";
+
+    const workspaceDir =
+      this.#options.workspaceDir ??
+      process.env["SEVYN_CODE_WORKSPACE"] ??
+      "/home/user/Projects";
+
+    // First-run setup: install default settings, create the workspace,
+    // and seed a welcome README so the IDE never opens on an empty void.
+    await this.#firstRunSetup(dataDir, workspaceDir);
 
     const args = [
       "--bind-addr",
@@ -151,16 +186,7 @@ export class LinuxSevynCodeService {
       "--disable-update-check",
     ];
 
-    const dataDir =
-      this.#options.codeServerDataDir ??
-      process.env["SEVYN_CODE_SERVER_DATA"] ??
-      "/var/lib/sevyn/code-server";
     args.push("--user-data-dir", dataDir);
-
-    const workspaceDir =
-      this.#options.workspaceDir ??
-      process.env["SEVYN_CODE_WORKSPACE"] ??
-      "/home/user/Projects";
     args.push(workspaceDir);
 
     this.#codeServer = spawn(binary, args, {
@@ -183,10 +209,22 @@ export class LinuxSevynCodeService {
         this.#codeServer = undefined;
         reject(error);
       };
+      // Capture stderr for diagnostics if code-server fails to start
+      let stderrOutput = "";
+      child.stderr?.on("data", (data: Buffer) => {
+        stderrOutput += data.toString();
+        // Keep only the last 2KB to avoid memory bloat
+        if (stderrOutput.length > 2048) {
+          stderrOutput = stderrOutput.slice(-2048);
+        }
+      });
       const onExit = (code: number | null): void => {
         this.#codeServer = undefined;
         if (code !== 0 && code !== null) {
-          reject(new Error(`code-server exited with code ${String(code)}`));
+          const details = stderrOutput.trim()
+            ? ` stderr: ${stderrOutput.trim().slice(0, 500)}`
+            : "";
+          reject(new Error(`code-server exited with code ${String(code)}.${details}`));
         }
       };
       child.once("error", onError);
@@ -231,5 +269,123 @@ export class LinuxSevynCodeService {
     throw new Error(
       `code-server did not become ready on port ${String(port)} within ${String(timeoutMs)}ms`,
     );
+  }
+
+  async #waitForLoopback(timeoutMs: number): Promise<void> {
+    const { createServer } = await import("node:net");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+
+    // Try to bring up loopback explicitly — the minimal init may not do it.
+    // This is idempotent: safe to run even if lo is already up.
+    try {
+      await execFileAsync("ip", ["link", "set", "lo", "up"]);
+      await execFileAsync("ip", ["addr", "add", "127.0.0.1/8", "dev", "lo"]);
+    } catch {
+      // Best effort — the interface may already be configured, or `ip`
+      // may not be available. Fall through to the bind test below.
+    }
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const server = createServer();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(0, "127.0.0.1", () => {
+            resolve();
+          });
+        });
+        server.close();
+        return; // 127.0.0.1 is available
+      } catch (error) {
+        // EADDRNOTAVAIL means loopback isn't configured yet — retry
+        if (error instanceof Error && "code" in error && error.code !== "EADDRNOTAVAIL") {
+          throw error;
+        }
+      } finally {
+        server.close();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`127.0.0.1 was not available within ${String(timeoutMs)}ms`);
+  }
+
+  /**
+   * First-run setup: install the default VS Code settings (terminal profile,
+   * Open VSX, theme) from /etc/sevyn, create the workspace directory, and
+   * seed a welcome README so the IDE never opens on an empty void.
+   *
+   * Existing user settings are never overwritten — this only seeds defaults
+   * that are missing.
+   */
+  async #firstRunSetup(dataDir: string, workspaceDir: string): Promise<void> {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+
+    // 1. Install default settings if the user hasn't customized them yet.
+    try {
+      const userDir = path.join(dataDir, "User");
+      fs.mkdirSync(userDir, { recursive: true });
+      const dest = path.join(userDir, "settings.json");
+      if (!fs.existsSync(dest)) {
+        const src = "/etc/sevyn/code-server-settings.json";
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, dest);
+        }
+      }
+    } catch {
+      // Best effort — code-server runs fine with stock settings.
+    }
+
+    // 2. Create the workspace directory.
+    try {
+      fs.mkdirSync(workspaceDir, { recursive: true });
+    } catch {
+      // If we can't create it, code-server will report the error.
+      return;
+    }
+
+    // 3. Seed a welcome README in an empty workspace.
+    try {
+      const entries = fs.readdirSync(workspaceDir);
+      if (entries.length > 0) return;
+
+      const readme = `# Welcome to Sevyn Code
+
+Sevyn Code is the SevynOS integrated development environment — a full
+code editor running right on your device.
+
+## Things to try
+
+- **Open a terminal** (Ctrl+\` or via the Terminal menu) and run \`sevyn\`.
+  The terminal runs the Sevyn CLI — there is no Linux shell here, everything
+  goes through SevynOS. Try \`sevyn system info\` or \`sevyn apps info\`.
+- **Install extensions** from the Extensions view. Extensions come from
+  [Open VSX](https://open-vsx.org), the open extension registry.
+- **Start a project** — create a folder in this workspace for your code.
+
+## Building SevynOS apps
+
+SevynOS apps are written in React Native and TypeScript, then bundled into
+\`.sevyn\` packages (a manifest, compiled Hermes bytecode, and assets).
+Install them with \`sevyn apps install <bundle>\`.
+
+Happy building.
+`;
+      fs.writeFileSync(path.join(workspaceDir, "README.md"), readme);
+    } catch {
+      // Best effort — an empty workspace still works.
+    }
+
+    // 4. Hand ownership to the user account when possible.
+    try {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      await promisify(execFile)("chown", ["-R", "user:user", dataDir, workspaceDir]);
+    } catch {
+      // Best effort — may already be owned correctly or chown unavailable.
+    }
   }
 }

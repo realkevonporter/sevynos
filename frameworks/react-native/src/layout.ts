@@ -148,6 +148,13 @@ function command(
   context: LayoutContext,
   value: NativeRenderCommand,
 ): NativeRenderCommand {
+  // Bitmap commands carry a full pixel buffer that is unique per frame (for
+  // example the Sevyn Code screencast). Serializing pixels into a cache
+  // signature would burn CPU on every frame and grow the cache without
+  // bound, since no two frames share a signature — each entry pins ~2MB of
+  // pixels plus a ~15MB JSON key until the process runs out of heap.
+  // Bitmaps never benefit from deduplication, so bypass the cache for them.
+  if (value.kind === "bitmap") return value;
   const signature = JSON.stringify(value);
   const cached = context.commandCache.get(signature);
   if (cached !== undefined) return cached;
