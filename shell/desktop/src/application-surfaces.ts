@@ -821,16 +821,11 @@ export class ApplicationSurfaceRegistry {
           });
         }
         // Sevyn Code engine not available — fall back to the browser engine
-        // if the host provides one, otherwise the IDE cannot start.
+        // if the host provides one, otherwise render the unavailable state.
         const fallbackEngine = this.#createBrowserEngine?.();
-        if (!fallbackEngine) {
-          throw new Error(
-            "Sevyn Code is unavailable: no browser engine was provided by the host.",
-          );
-        }
         return createCoreSystemApplication({
           kind: "ide",
-          browserEngine: fallbackEngine,
+          ...(fallbackEngine ? { browserEngine: fallbackEngine } : {}),
         });
       }
       case "text-editor":

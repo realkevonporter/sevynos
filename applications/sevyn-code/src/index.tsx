@@ -63,11 +63,36 @@ interface SevynCodeKeyboardEvent {
 }
 
 interface SevynCodeAppProps {
-  /** The browser engine streaming the code-server workbench. */
-  readonly engine: SevynBrowserEngine;
+  /**
+   * The browser engine streaming the code-server workbench.
+   * When undefined, the app renders an unavailable state instead of crashing.
+   */
+  readonly engine?: SevynBrowserEngine | undefined;
 }
 
 export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
+  if (!engine) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.loadingOverlay}>
+          <Text style={styles.loadingTitle}>Sevyn Code</Text>
+          <Text style={styles.loadingText}>
+            The development environment is unavailable. The host did not provide a browser
+            engine.
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  return <SevynCodeWorkspace engine={engine} />;
+}
+
+function SevynCodeWorkspace({
+  engine,
+}: {
+  readonly engine: SevynBrowserEngine;
+}): JSX.Element {
   const [snapshot, setSnapshot] = useState<BrowserEngineSnapshot>(() =>
     engine.snapshot(),
   );
