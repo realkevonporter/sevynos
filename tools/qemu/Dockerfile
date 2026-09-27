@@ -22,6 +22,10 @@ RUN printf '\nadd_subdirectory(tools/sevyn-host)\n' >> /src/hermes/CMakeLists.tx
       /tmp/hermes-application-runtime.hbc /tmp/hermes-application-runtime.js
 
 FROM node:24-bookworm-slim AS node-runtime
+# sharp (native JPEG decoder for the browser screencast pipeline) is external
+# to the esbuild bundle; installed here where npm exists, then copied into
+# the final image at /opt/sevynos where the bundle resolves it at runtime.
+RUN npm install --prefix /opt/sevynos --omit=dev sharp@0.35.4
 
 FROM node-runtime AS studio-tools
 RUN npm install --prefix /opt/sevynos/studio-tools --omit=dev esbuild@0.25.12
@@ -55,11 +59,9 @@ COPY --from=hermes-runtime /src/hermes-build/bin/hermesc /usr/local/lib/sevynos/
 COPY --from=bridge /src/target/release/sevyn-wayland-bridge /usr/local/bin/sevyn-wayland-bridge
 COPY --from=hermes-runtime /src/hermes-build/bin/sevyn-hermes-host /usr/local/bin/sevyn-hermes-host
 COPY --from=hermes-runtime /tmp/hermes-application-runtime.hbc /opt/sevynos/hermes-application-runtime.hbc
+COPY --from=node-runtime /opt/sevynos /opt/sevynos
 COPY hosts/linux/dist/genesis-wayland.mjs /opt/sevynos/genesis-wayland.mjs
 COPY hosts/linux/dist/third-party-application-process.mjs /opt/sevynos/third-party-application-process.mjs
-# sharp (native JPEG decoder for the browser screencast pipeline) is external
-# to the esbuild bundle; install it where the bundle can resolve it at runtime.
-RUN npm install --prefix /opt/sevynos --omit=dev sharp@0.35.4
 COPY hosts/linux/native/smoke-wayland.py /usr/local/lib/sevynos/smoke-wayland.py
 COPY tools/qemu/build-font-atlas.py /usr/local/lib/sevynos/build-font-atlas.py
 COPY tools/qemu/generate-demo-audio.py /usr/local/lib/sevynos/generate-demo-audio.py
