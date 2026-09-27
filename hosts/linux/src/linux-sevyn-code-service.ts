@@ -158,6 +158,11 @@ export class LinuxSevynCodeService {
       );
     }
 
+    // Wait for 127.0.0.1 to become available — the loopback interface may not
+    // be configured yet when Genesis starts services during early boot.
+    // Try binding a test socket; EADDRNOTAVAIL means loopback isn't ready.
+    await this.#waitForLoopback(15000);
+
     const args = [
       "--bind-addr",
       `127.0.0.1:${String(this.#port)}`,
@@ -259,5 +264,30 @@ export class LinuxSevynCodeService {
     throw new Error(
       `code-server did not become ready on port ${String(port)} within ${String(timeoutMs)}ms`,
     );
+  }
+
+  async #waitForLoopback(timeoutMs: number): Promise<void> {
+    const { createServer } = await import("node:net");
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const server = createServer();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(0, "127.0.0.1", () => resolve());
+        });
+        server.close();
+        return; // 127.0.0.1 is available
+      } catch (error) {
+        // EADDRNOTAVAIL means loopback isn't configured yet — retry
+        if (error instanceof Error && "code" in error && error.code !== "EADDRNOTAVAIL") {
+          throw error;
+        }
+      } finally {
+        server.close();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`127.0.0.1 was not available within ${String(timeoutMs)}ms`);
   }
 }
