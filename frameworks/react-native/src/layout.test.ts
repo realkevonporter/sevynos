@@ -455,3 +455,54 @@ describe("button chrome and control command emission", () => {
     }
   });
 });
+
+describe("bitmap command caching", () => {
+  it("does not retain bitmap commands in the command cache", () => {
+    const commandCache = new Map<string, unknown>();
+    const baseOptions = {
+      bounds: { x: 0, y: 0, width: 300, height: 200 },
+      appearance: "dark" as const,
+      accent: "#D7AC57",
+      reducedMotion: false,
+      changedNodeIds: [] as string[],
+      commandCache: commandCache as never,
+    };
+    // Simulate two screencast frames with different pixels sharing one cache,
+    // the way SevynApplicationRuntime reuses it across snapshots.
+    for (let frame = 0; frame < 2; frame++) {
+      const node = createHostNode(
+        "workbench",
+        "image",
+        {},
+        {
+          source: {
+            width: 2,
+            height: 2,
+            pixels: new Uint8Array([frame, 1, 2, 3]),
+          },
+        },
+      );
+      const result = layoutNativeTree({
+        ...baseOptions,
+        roots: [node],
+        revision: frame + 1,
+      });
+      const bitmap = result.snapshot.commands.find((c) => c.kind === "bitmap");
+      expect(bitmap).toBeDefined();
+      if (bitmap?.kind === "bitmap") {
+        // Each frame keeps its own pixels; a cache hit would return stale ones.
+        expect(bitmap.pixels[0]).toBe(frame);
+      }
+    }
+    // Bitmap frames are unique per frame, so caching them only grows the map
+    // without bound (each entry pins ~2MB of pixels plus a giant JSON key).
+    // Other static commands may still be cached; only bitmaps must bypass it.
+    const cachedBitmaps = [...commandCache.values()].filter(
+      (cached) =>
+        typeof cached === "object" &&
+        cached !== null &&
+        (cached as { kind?: unknown }).kind === "bitmap",
+    );
+    expect(cachedBitmaps).toHaveLength(0);
+  });
+});

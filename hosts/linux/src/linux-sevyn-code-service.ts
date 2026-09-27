@@ -293,7 +293,9 @@ export class LinuxSevynCodeService {
       try {
         await new Promise<void>((resolve, reject) => {
           server.once("error", reject);
-          server.listen(0, "127.0.0.1", () => resolve());
+          server.listen(0, "127.0.0.1", () => {
+            resolve();
+          });
         });
         server.close();
         return; // 127.0.0.1 is available
