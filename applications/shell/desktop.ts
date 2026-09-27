@@ -272,6 +272,24 @@ export interface DesktopPowerMenuEntrySceneNode {
   readonly label: string;
 }
 
+export interface DesktopContextMenuSceneNode {
+  readonly kind: "desktop-context-menu";
+  readonly order: number;
+  readonly bounds: DesktopShellBounds;
+  readonly displayId: string;
+  readonly open: boolean;
+}
+
+export interface DesktopContextMenuEntrySceneNode {
+  readonly kind: "desktop-context-menu-entry";
+  readonly order: number;
+  readonly bounds: DesktopShellBounds;
+  readonly displayId: string;
+  readonly action: string;
+  readonly label: string;
+  readonly disabled?: boolean;
+}
+
 export type DesktopSystemApplicationSceneNode =
   | DesktopBackgroundSceneNode
   | DesktopStatusBarSceneNode
@@ -293,7 +311,9 @@ export type DesktopSystemApplicationSceneNode =
   | DesktopLockScreenUnlockActionSceneNode
   | DesktopPowerButtonSceneNode
   | DesktopPowerMenuSceneNode
-  | DesktopPowerMenuEntrySceneNode;
+  | DesktopPowerMenuEntrySceneNode
+  | DesktopContextMenuSceneNode
+  | DesktopContextMenuEntrySceneNode;
 
 export function renderDesktopWorkspace(
   input: DesktopWorkspaceRenderInput,
@@ -471,6 +491,71 @@ export function renderDesktopStatusBar(
       return Object.freeze(nodes);
     }),
   );
+}
+
+export interface DesktopContextMenuItem {
+  readonly id: string;
+  readonly label: string;
+  readonly action: string;
+  readonly disabled?: boolean;
+}
+
+export interface DesktopContextMenuRenderInput {
+  readonly displays: readonly DesktopShellDisplay[];
+  readonly order: number;
+  readonly open: boolean;
+  readonly x: number;
+  readonly y: number;
+  readonly items: readonly DesktopContextMenuItem[];
+}
+
+export function renderDesktopContextMenu(
+  input: DesktopContextMenuRenderInput,
+): readonly (DesktopContextMenuSceneNode | DesktopContextMenuEntrySceneNode)[] {
+  if (!input.open || input.items.length === 0) return Object.freeze([]);
+  const display = input.displays[0];
+  if (display === undefined) return Object.freeze([]);
+  const menuWidth = 220;
+  const menuItemHeight = 36;
+  const padding = 8;
+  const menuHeight = input.items.length * menuItemHeight + padding * 2;
+  // Keep menu within display bounds
+  const x = Math.min(input.x, display.bounds.x + display.bounds.width - menuWidth - 8);
+  const y = Math.min(input.y, display.bounds.y + display.bounds.height - menuHeight - 8);
+  const menuBounds = {
+    x: Math.max(display.bounds.x + 8, x),
+    y: Math.max(display.bounds.y + 8, y),
+    width: menuWidth,
+    height: menuHeight,
+  };
+  const nodes: (DesktopContextMenuSceneNode | DesktopContextMenuEntrySceneNode)[] = [
+    Object.freeze({
+      kind: "desktop-context-menu" as const,
+      order: input.order,
+      bounds: menuBounds,
+      displayId: display.id,
+      open: true,
+    }),
+  ];
+  input.items.forEach((item, index) => {
+    nodes.push(
+      Object.freeze({
+        kind: "desktop-context-menu-entry" as const,
+        order: input.order + 0.1 + index * 0.01,
+        bounds: {
+          x: menuBounds.x + padding,
+          y: menuBounds.y + padding + index * menuItemHeight,
+          width: menuWidth - padding * 2,
+          height: menuItemHeight,
+        },
+        displayId: display.id,
+        action: item.action,
+        label: item.label,
+        ...(item.disabled === true ? { disabled: true } : {}),
+      }),
+    );
+  });
+  return Object.freeze(nodes);
 }
 
 export function renderDesktopDock(

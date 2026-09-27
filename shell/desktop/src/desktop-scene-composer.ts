@@ -6,7 +6,10 @@ import type {
   WirelessNetworkSnapshot,
 } from "@sevynos/react-native/internal";
 import { SystemApplicationId } from "@sevynos/system-applications";
-import { renderDesktopWorkspace } from "@sevynos/system-applications/desktop";
+import {
+  renderDesktopContextMenu,
+  renderDesktopWorkspace,
+} from "@sevynos/system-applications/desktop";
 import type {
   DesktopBackgroundSceneNode,
   DesktopDockRenderInput,
@@ -108,6 +111,15 @@ export class DesktopSceneComposer {
   #networkSnapshot: WirelessNetworkSnapshot | undefined;
   #audioSnapshot: AudioSnapshot | undefined;
   #powerMenuOpen = false;
+  #contextMenuOpen = false;
+  #contextMenuX = 0;
+  #contextMenuY = 0;
+  #contextMenuItems: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly action: string;
+    readonly disabled?: boolean;
+  }[] = Object.freeze([]);
   #desktopEntries: readonly {
     readonly name: string;
     readonly path: string;
@@ -226,6 +238,35 @@ export class DesktopSceneComposer {
   public closePowerMenu(): void {
     if (this.#powerMenuOpen) {
       this.#powerMenuOpen = false;
+      this.#notifyServiceUpdate();
+    }
+  }
+
+  public isContextMenuOpen(): boolean {
+    return this.#contextMenuOpen;
+  }
+
+  public openContextMenu(
+    x: number,
+    y: number,
+    items: readonly {
+      readonly id: string;
+      readonly label: string;
+      readonly action: string;
+      readonly disabled?: boolean;
+    }[],
+  ): void {
+    this.#contextMenuOpen = true;
+    this.#contextMenuX = x;
+    this.#contextMenuY = y;
+    this.#contextMenuItems = Object.freeze([...items]);
+    this.#notifyServiceUpdate();
+  }
+
+  public closeContextMenu(): void {
+    if (this.#contextMenuOpen) {
+      this.#contextMenuOpen = false;
+      this.#contextMenuItems = Object.freeze([]);
       this.#notifyServiceUpdate();
     }
   }
@@ -584,6 +625,19 @@ export class DesktopSceneComposer {
           label: "Quit",
         }),
       );
+    }
+
+    // Context menu (when open) — rendered above all content
+    if (this.#contextMenuOpen) {
+      const contextMenuNodes = renderDesktopContextMenu({
+        displays: shellDisplays,
+        order: topContentOrder + 30,
+        open: true,
+        x: this.#contextMenuX,
+        y: this.#contextMenuY,
+        items: this.#contextMenuItems,
+      });
+      nodes.push(...contextMenuNodes);
     }
 
     return Object.freeze({

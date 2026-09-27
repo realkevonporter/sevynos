@@ -685,6 +685,32 @@ export async function startWaylandHost(
 
   const handlePointerEvent = (event: PointerInputEvent): void => {
     if (event.type === "pointer-down") {
+      // Right-click: open context menu
+      if (event.button === "secondary") {
+        const items = getContextMenuItems(
+          latestScene,
+          event.position.x,
+          event.position.y,
+        );
+        composer.openContextMenu(event.position.x, event.position.y, items);
+        return;
+      }
+      // Close context menu on any primary click
+      if (composer.isContextMenuOpen()) {
+        const menuHit = hitTestDesktopSceneControl(
+          latestScene,
+          event.position.x,
+          event.position.y,
+        );
+        if (
+          menuHit?.kind === "desktop-context-menu-entry" &&
+          menuHit.action !== undefined
+        ) {
+          handleContextMenuAction(runtime, menuHit.action);
+        }
+        composer.closeContextMenu();
+        return;
+      }
       const shellControl = hitTestDesktopSceneControl(
         latestScene,
         event.position.x,
@@ -1410,6 +1436,42 @@ function launchInstallerTerminal(): void {
     console.error(`SEVYN_INSTALLER_LAUNCH_FAILED error=${error.message}`);
   });
   console.log("SEVYN_INSTALLER_LAUNCHED_FROM_DESKTOP");
+}
+
+function getContextMenuItems(
+  scene: DesktopScene | undefined,
+  x: number,
+  y: number,
+): readonly { readonly id: string; readonly label: string; readonly action: string }[] {
+  void scene;
+  void x;
+  void y;
+  // Desktop context menu: shown on right-click anywhere
+  // (window-specific menus can be added once window hit-testing is wired)
+  return [
+    { id: "launcher", label: "Open Launcher", action: "open-launcher" },
+    { id: "settings", label: "Settings", action: "open-settings" },
+    { id: "terminal", label: "Open Terminal", action: "open-terminal" },
+  ];
+}
+
+function handleContextMenuAction(runtime: DesktopRuntime, action: string): void {
+  switch (action) {
+    case "open-launcher":
+      runtime.applications.toggleLauncher();
+      break;
+    case "open-settings":
+      void runtime.applications.launch("org.sevynos.settings");
+      break;
+    case "open-terminal":
+      void runtime.applications.launch("org.sevynos.terminal");
+      break;
+    case "window-minimize":
+    case "window-maximize":
+    case "window-close":
+      // TODO: Implement window actions via runtime.windows
+      break;
+  }
 }
 
 if (

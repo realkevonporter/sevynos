@@ -231,6 +231,18 @@ function drawDesktopScene(
       case "desktop-power-menu-entry":
         drawPowerMenuEntry(raster, node.bounds, node.label, node.action, appearance);
         break;
+      case "desktop-context-menu":
+        drawContextMenu(raster, node.bounds, appearance);
+        break;
+      case "desktop-context-menu-entry":
+        drawContextMenuEntry(
+          raster,
+          node.bounds,
+          node.label,
+          node.disabled ?? false,
+          appearance,
+        );
+        break;
       case "desktop-window":
         drawWindow(raster, node, appearance);
         break;
@@ -1637,6 +1649,44 @@ function drawPowerMenuEntry(
     bounds.x + 36,
     bounds.y + Math.round((bounds.height - 12) / 2),
     1.4,
+    color,
+    "start",
+  );
+}
+
+function drawContextMenu(
+  raster: SoftwareRaster,
+  bounds: Bounds,
+  appearance: DesktopAppearance,
+): void {
+  const isDark = appearance.mode === "dark";
+  // Menu background with shadow
+  drawSoftShadow(raster, bounds, 12, appearance.taskbar.shadow);
+  raster.roundedRect(
+    bounds,
+    10,
+    parseColor(isDark ? "rgba(28, 32, 44, 0.98)" : "rgba(255, 255, 255, 0.98)"),
+    parseColor(isDark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.10)"),
+  );
+}
+
+function drawContextMenuEntry(
+  raster: SoftwareRaster,
+  bounds: Bounds,
+  label: string,
+  disabled: boolean,
+  appearance: DesktopAppearance,
+): void {
+  const isDark = appearance.mode === "dark";
+  const color = parseColor(
+    disabled ? (isDark ? "#6B7280" : "#9CA3AF") : isDark ? "#E5E7EB" : "#1F2937",
+  );
+  // Label
+  raster.drawText(
+    label,
+    bounds.x + 12,
+    bounds.y + Math.round((bounds.height - 12) / 2),
+    1.3,
     color,
     "start",
   );

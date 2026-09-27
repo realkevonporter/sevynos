@@ -24,6 +24,8 @@ import type {
   DesktopPowerButtonSceneNode,
   DesktopPowerMenuSceneNode,
   DesktopPowerMenuEntrySceneNode,
+  DesktopContextMenuSceneNode,
+  DesktopContextMenuEntrySceneNode,
 } from "@sevynos/system-applications/desktop";
 import type { CursorKind } from "@sevynos/input";
 import type {
@@ -149,4 +151,6 @@ export type {
   DesktopPowerButtonSceneNode,
   DesktopPowerMenuSceneNode,
   DesktopPowerMenuEntrySceneNode,
+  DesktopContextMenuSceneNode,
+  DesktopContextMenuEntrySceneNode,
 };

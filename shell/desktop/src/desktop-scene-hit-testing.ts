@@ -15,6 +15,7 @@ import type {
   DesktopLockScreenUnlockActionSceneNode,
   DesktopPowerButtonSceneNode,
   DesktopPowerMenuEntrySceneNode,
+  DesktopContextMenuEntrySceneNode,
 } from "./desktop-scene.js";
 
 export type DesktopSceneControlNode =
@@ -32,7 +33,8 @@ export type DesktopSceneControlNode =
   | DesktopWindowSwitcherEntrySceneNode
   | DesktopLockScreenUnlockActionSceneNode
   | DesktopPowerButtonSceneNode
-  | DesktopPowerMenuEntrySceneNode;
+  | DesktopPowerMenuEntrySceneNode
+  | DesktopContextMenuEntrySceneNode;
 
 export function hitTestDesktopSceneControl(
   scene: DesktopScene | undefined,
@@ -55,6 +57,7 @@ export function hitTestDesktopSceneControl(
         node.kind === "desktop-window-switcher-entry" ||
         node.kind === "desktop-power-button" ||
         node.kind === "desktop-power-menu-entry" ||
+        node.kind === "desktop-context-menu-entry" ||
         node.kind === "desktop-lock-screen-unlock",
     ) ?? [];
   return [...controls]
