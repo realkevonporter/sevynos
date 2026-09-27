@@ -67,11 +67,7 @@ async function readZipEntries(zipPath) {
     const extraLength = data.readUInt16LE(offset + 30);
     const commentLength = data.readUInt16LE(offset + 32);
     const localHeaderOffset = data.readUInt32LE(offset + 42);
-    const fileName = data.toString(
-      "utf8",
-      offset + 46,
-      offset + 46 + fileNameLength,
-    );
+    const fileName = data.toString("utf8", offset + 46, offset + 46 + fileNameLength);
 
     // Local file header: skip to compressed data
     const localNameLength = data.readUInt16LE(localHeaderOffset + 26);
@@ -85,9 +81,7 @@ async function readZipEntries(zipPath) {
     } else if (method === 8) {
       contents = inflateRawSync(compressed);
     } else {
-      throw new Error(
-        `Unsupported compression method ${method} for ${fileName}`,
-      );
+      throw new Error(`Unsupported compression method ${method} for ${fileName}`);
     }
     entries.set(fileName, contents);
     offset += 46 + fileNameLength + extraLength + commentLength;
@@ -149,9 +143,7 @@ async function installApp(bundlePath) {
   }
 
   if (!manifest.id || !manifest.name || !manifest.version) {
-    console.error(
-      "Invalid bundle: manifest must include id, name, and version",
-    );
+    console.error("Invalid bundle: manifest must include id, name, and version");
     process.exit(1);
   }
 
@@ -171,9 +163,7 @@ async function installApp(bundlePath) {
   const registry = await readRegistry();
   const apps = registry.apps ?? [];
   if (apps.some((app) => app.system && app.id === manifest.id)) {
-    console.error(
-      `Cannot replace protected system application "${manifest.id}".`,
-    );
+    console.error(`Cannot replace protected system application "${manifest.id}".`);
     process.exit(1);
   }
 
@@ -254,9 +244,7 @@ async function powerSystem(action) {
   execFile(cmd, args, (error) => {
     if (error) {
       console.error(`Failed to ${action}: ${error.message}`);
-      console.error(
-        "Power management requires systemd. This system may not support it.",
-      );
+      console.error("Power management requires systemd. This system may not support it.");
       process.exit(1);
     }
   });
