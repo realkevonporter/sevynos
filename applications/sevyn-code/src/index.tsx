@@ -34,7 +34,7 @@ export const sevynCodeManifest: SevynApplicationManifest = {
   icon: "icons/sevyn-code.svg",
   entrypoint: "dist/index.js",
   minimumSevynOSVersion: "0.1.0",
-  permissions: ["network:localhost"],
+  permissions: ["network"],
   services: ["sevyn-code"],
   windowModes: ["standard", "fullscreen"],
   instanceMode: "single",
@@ -94,32 +94,21 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
     [engine],
   );
 
-  const handlePointerMove = useCallback(
-    (event: SevynCodePointerEvent) => {
-      void engine.pointerMove(event.x, event.y);
-    },
-    [engine],
-  );
-
   const handleWheel = useCallback(
     (event: SevynCodeWheelEvent) => {
-      void engine.wheel(0, event.deltaY);
+      void engine.scroll(event.deltaY);
     },
     [engine],
   );
 
   const handleKey = useCallback(
     (event: SevynCodeKeyboardEvent) => {
-      if (event.key.length === 1) {
-        void engine.key("type", event.key);
-      } else {
-        void engine.key("press", event.key, {
-          shift: event.shift,
-          alt: event.alt,
-          control: event.control,
-          meta: event.meta,
-        });
-      }
+      void engine.key(event.key, event.code, {
+        shift: event.shift,
+        alt: event.alt,
+        control: event.control,
+        meta: event.meta,
+      });
     },
     [engine],
   );
@@ -146,7 +135,6 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
           style={styles.workbench}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
-          onPointerMove={handlePointerMove}
           onWheel={handleWheel}
           onKeyDown={handleKey}
         />
