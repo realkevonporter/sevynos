@@ -144,7 +144,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     });
   }
 
-  public click(x: number, y: number): Promise<BrowserEngineSnapshot> {
+  public click(x: number, y: number, clickCount = 1): Promise<BrowserEngineSnapshot> {
     return this.#enqueue(async () => {
       const connection = await this.#requireConnection();
       const point = {
@@ -155,13 +155,13 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
         type: "mousePressed",
         ...point,
         button: "left",
-        clickCount: 1,
+        clickCount,
       });
       await connection.send("Input.dispatchMouseEvent", {
         type: "mouseReleased",
         ...point,
         button: "left",
-        clickCount: 1,
+        clickCount,
       });
       return await this.#afterInput(250);
     });
@@ -175,14 +175,18 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
     return this.#pointer("mouseReleased", x, y, button, true);
   }
 
-  public scroll(deltaY: number): Promise<BrowserEngineSnapshot> {
+  public pointerMove(x: number, y: number): Promise<BrowserEngineSnapshot> {
+    return this.#pointer("mouseMoved", x, y, 0, false);
+  }
+
+  public scroll(deltaY: number, deltaX = 0): Promise<BrowserEngineSnapshot> {
     return this.#enqueue(async () => {
       const connection = await this.#requireConnection();
       await connection.send("Input.dispatchMouseEvent", {
         type: "mouseWheel",
         x: Math.round(this.#current.width / 2),
         y: Math.round(this.#current.height / 2),
-        deltaX: 0,
+        deltaX,
         deltaY,
       });
       return await this.#afterInput(120);
@@ -351,7 +355,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
   }
 
   #pointer(
-    type: "mousePressed" | "mouseReleased",
+    type: "mousePressed" | "mouseReleased" | "mouseMoved",
     x: number,
     y: number,
     button: number,

@@ -48,6 +48,7 @@ interface SevynCodePointerEvent {
 
 interface SevynCodeWheelEvent {
   readonly deltaY: number;
+  readonly deltaX?: number;
 }
 
 interface SevynCodeKeyboardEvent {
@@ -80,9 +81,25 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
     return unsubscribe;
   }, [engine]);
 
+  const lastClickRef = useRef<{ x: number; y: number; time: number } | null>(null);
+
   const handlePointerDown = useCallback(
     (event: SevynCodePointerEvent) => {
-      void engine.pointerDown(event.x, event.y, event.button ?? 0);
+      const now = Date.now();
+      const last = lastClickRef.current;
+      if (
+        last &&
+        now - last.time < 500 &&
+        Math.abs(event.x - last.x) < 8 &&
+        Math.abs(event.y - last.y) < 8
+      ) {
+        // Double-click: select word
+        lastClickRef.current = null;
+        void engine.click(event.x, event.y, 2);
+      } else {
+        lastClickRef.current = { x: event.x, y: event.y, time: now };
+        void engine.pointerDown(event.x, event.y, event.button ?? 0);
+      }
     },
     [engine],
   );
@@ -94,9 +111,16 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
     [engine],
   );
 
+  const handlePointerMove = useCallback(
+    (event: SevynCodePointerEvent) => {
+      void engine.pointerMove(event.x, event.y);
+    },
+    [engine],
+  );
+
   const handleWheel = useCallback(
     (event: SevynCodeWheelEvent) => {
-      void engine.scroll(event.deltaY);
+      void engine.scroll(event.deltaY, event.deltaX ?? 0);
     },
     [engine],
   );
@@ -135,6 +159,7 @@ export function SevynCodeApp({ engine }: SevynCodeAppProps): JSX.Element {
           style={styles.workbench}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
+          onPointerMove={handlePointerMove}
           onWheel={handleWheel}
           onKeyDown={handleKey}
         />
