@@ -41,7 +41,6 @@ import { LinuxAudioService } from "./linux-audio-service.js";
 import { LinuxNativeModuleServices } from "./linux-native-module-services.js";
 import { LinuxSystemService } from "./linux-system-service.js";
 import { LinuxFileSystem } from "./linux-file-system.js";
-import { LinuxStudioBuildService } from "./linux-studio-service.js";
 import { ChromiumBrowserEngine } from "./chromium-browser-engine.js";
 import { LinuxSevynCodeService } from "./linux-sevyn-code-service.js";
 import { HermesLinuxProcessApplicationExecutor } from "./linux-process-application-executor.js";
@@ -142,7 +141,6 @@ export async function startWaylandHost(
   const audio = options.audio ?? new LinuxAudioService();
   const system = options.system ?? new LinuxSystemService();
   const filesystem = options.filesystem ?? new LinuxFileSystem();
-  const studio = new LinuxStudioBuildService();
 
   const runtime = await createDesktopRuntime({
     launchDefaults: false,
@@ -154,7 +152,6 @@ export async function startWaylandHost(
     audio,
     system,
     filesystem,
-    studio,
     ...(options.createBrowserEngine === undefined
       ? {}
       : { createBrowserEngine: options.createBrowserEngine }),

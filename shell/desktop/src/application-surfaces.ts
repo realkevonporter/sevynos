@@ -161,7 +161,6 @@ export class ApplicationSurfaceRegistry {
   readonly #battery: SevynBatteryService;
   readonly #audio: SevynAudioService;
   readonly #system: SevynSystemService;
-  readonly #studio: SevynStudioService | undefined;
   readonly #notifications = new SystemNotificationService();
   readonly #isolatedSnapshots = new Map<GenesisWindowId, NativeRuntimeSnapshot>();
   readonly #isolatedDispatchers = new Map<
@@ -183,7 +182,6 @@ export class ApplicationSurfaceRegistry {
     battery?: SevynBatteryService,
     audio?: SevynAudioService,
     system?: SevynSystemService,
-    studio?: SevynStudioService,
     createSevynCodeEngine?: () => SevynBrowserEngine,
   ) {
     this.#onChange = onChange;
@@ -212,7 +210,6 @@ export class ApplicationSurfaceRegistry {
     this.#battery = battery ?? new UnavailableBatteryService();
     this.#audio = audio ?? new UnavailableAudioService();
     this.#system = system ?? new UnavailableSystemService();
-    this.#studio = studio;
   }
 
   public configureApplicationManagement(
@@ -823,7 +820,7 @@ export class ApplicationSurfaceRegistry {
           // via createSevynCodeEngine. Fall back to a placeholder.
           return createCoreSystemApplication({
             kind: "ide",
-            browserEngine: this.#createBrowserEngine?.() as SevynBrowserEngine,
+            browserEngine: this.#createBrowserEngine?.()!,
           });
         }
         return createCoreSystemApplication({
