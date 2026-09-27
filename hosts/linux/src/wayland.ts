@@ -91,7 +91,7 @@ export interface WaylandHostOptions {
   readonly system?: SevynSystemService;
   readonly filesystem?: SevynFileSystem;
   readonly createBrowserEngine?: () => SevynBrowserEngine;
-  readonly createSevynCodeEngine?: () => SevynBrowserEngine;
+  readonly createSevynCodeEngine?: () => SevynBrowserEngine | undefined;
 }
 
 export async function startWaylandHost(
@@ -1459,7 +1459,8 @@ if (
     createSevynCodeEngine: () => {
       const engine = sevynCodeService.engine;
       if (!engine) {
-        throw new Error("Sevyn Code service is not running.");
+        console.error("Sevyn Code service is not running; IDE will show unavailable state.");
+        return undefined;
       }
       return engine;
     },

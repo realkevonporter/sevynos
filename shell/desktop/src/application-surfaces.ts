@@ -151,7 +151,7 @@ export class ApplicationSurfaceRegistry {
   readonly #power: SevynPowerService;
   readonly #createBrowserEngine: (() => SevynBrowserEngine) | undefined;
   readonly #browserEngines = new Map<GenesisWindowId, SevynBrowserEngine>();
-  readonly #createSevynCodeEngine: (() => SevynBrowserEngine) | undefined;
+  readonly #createSevynCodeEngine: (() => SevynBrowserEngine | undefined) | undefined;
   readonly #sevynCodeEngines = new Map<GenesisWindowId, SevynBrowserEngine>();
   readonly #nativeRuntimes = new Map<GenesisWindowId, SevynApplicationRuntime>();
   readonly #nativeSignatures = new Map<GenesisWindowId, string>();
@@ -181,7 +181,7 @@ export class ApplicationSurfaceRegistry {
     battery?: SevynBatteryService,
     audio?: SevynAudioService,
     system?: SevynSystemService,
-    createSevynCodeEngine?: () => SevynBrowserEngine,
+    createSevynCodeEngine?: () => SevynBrowserEngine | undefined,
   ) {
     this.#onChange = onChange;
     this.#network = network;
