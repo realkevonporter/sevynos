@@ -50,9 +50,9 @@ async function main(): Promise<void> {
       // Type some text (exercises input -> frame path)
       await engine.key("type", `hello ${String(iteration)} `);
       // Scroll down and up (exercises frame delivery under motion)
-      await engine.scroll(300);
+      await engine.scroll(400, 300, 300);
       await new Promise((r) => setTimeout(r, 500));
-      await engine.scroll(-300);
+      await engine.scroll(400, 300, -300);
       await new Promise((r) => setTimeout(r, 500));
 
       // Report stats every 5 seconds
