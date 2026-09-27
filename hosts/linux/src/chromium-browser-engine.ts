@@ -304,12 +304,19 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       readonly data?: unknown;
       readonly sessionId?: unknown;
     };
-    if (typeof frame.data !== "string" || typeof frame.sessionId !== "string") return;
+    // Note: Chrome sends sessionId as a number despite the CDP spec saying string.
+    // Send it back as-is for the ack; Chromium matches it exactly.
+    const sessionId = frame.sessionId;
+    if (
+      typeof frame.data !== "string" ||
+      (typeof sessionId !== "string" && typeof sessionId !== "number")
+    )
+      return;
     const receivedAt = nowMilliseconds();
     // Acknowledge immediately (fire-and-forget) so Chromium keeps streaming;
     // a dropped or corrupt frame must not stall the pipeline.
     void this.#connection
-      ?.send("Page.screencastFrameAck", { sessionId: frame.sessionId })
+      ?.send("Page.screencastFrameAck", { sessionId })
       .catch(() => undefined);
     let decoded: {
       readonly width: number;
