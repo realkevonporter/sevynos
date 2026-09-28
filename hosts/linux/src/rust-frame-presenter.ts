@@ -77,13 +77,10 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
     }
     this.#frame += 1;
 
-    // Extract commands from the desktop scene and translate to Rust protocol.
-    // The scene graph structure is traversed here; the translator handles
-    // individual command mapping.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const scene = plan.scene as any;
-    const commands = scene.commands ?? scene.nodes ?? [];
-    const rustScene = translateScene(commands, width, height);
+    // Extract nodes from the desktop scene and translate to Rust protocol.
+    // The translator handles individual node mapping.
+    const nodes = plan.scene.nodes;
+    const rustScene = translateScene(nodes, width, height);
     const payload = serializeScene(rustScene);
 
     // Send to the Rust compositor via the bridge connection.

@@ -10,6 +10,15 @@
  */
 
 import type { Scene, SceneCommand, Rect, Color } from "./rust-scene-protocol.js";
+import type { NativeRenderCommand } from "@sevynos/react-native/internal";
+import type { DesktopSceneNode } from "@sevynos/desktop-shell/internal";
+
+/**
+ * Input to the translator: either low-level render commands or high-level
+ * desktop scene nodes. The translator handles both, mapping each to the
+ * corresponding Rust protocol command.
+ */
+export type TranslatableNode = NativeRenderCommand | DesktopSceneNode;
 
 function toRect(bounds: { x: number; y: number; width: number; height: number }): Rect {
   return {
@@ -31,12 +40,20 @@ function toColor(color: string, opacity = 1): Color {
 }
 
 /**
- * Translate a single NativeRenderCommand to a Rust SceneCommand.
- * Returns null for commands that have no Rust equivalent yet.
+ * Translate a single node to a Rust SceneCommand.
+ * Returns null for nodes that have no Rust equivalent yet.
+ *
+ * Note: This is prototype code. DesktopSceneNode and NativeRenderCommand
+ * have different shapes; the switch below handles the kinds that appear
+ * in practice, with property access guarded by the kind discriminant.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function translateCommand(cmd: any): SceneCommand | null {
-  const bounds = cmd.bounds ? toRect(cmd.bounds) : { x: 0, y: 0, width: 0, height: 0 };
+export function translateCommand(cmd: TranslatableNode): SceneCommand | null {
+  // All translatable nodes carry bounds; desktop nodes without explicit
+  // bounds fall back to a zero rect.
+  const rawBounds = "bounds" in cmd && cmd.bounds !== undefined
+    ? cmd.bounds
+    : { x: 0, y: 0, width: 0, height: 0 };
+  const bounds = toRect(rawBounds);
 
   switch (cmd.kind) {
     case "color":
@@ -152,10 +169,13 @@ export function translateCommand(cmd: any): SceneCommand | null {
 }
 
 /**
- * Translate a full scene's command list.
+ * Translate a full scene's node list.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function translateScene(commands: any[], width: number, height: number): Scene {
+export function translateScene(
+  commands: readonly TranslatableNode[],
+  width: number,
+  height: number,
+): Scene {
   const rustCommands: SceneCommand[] = [];
   for (const cmd of commands) {
     const translated = translateCommand(cmd);
