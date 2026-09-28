@@ -10,6 +10,8 @@ lto = true
 panic = "abort"
 
 [dependencies]
+base64 = "0.22"
+fontdue = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smithay-client-toolkit = "0.19.2"
