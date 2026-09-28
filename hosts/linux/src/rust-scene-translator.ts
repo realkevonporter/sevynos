@@ -11,12 +11,12 @@
 import type { Scene, SceneCommand, Rect, Color } from "./rust-scene-protocol.js";
 import type { DesktopSceneNode } from "@sevynos/desktop-shell/internal";
 
-type BoundsLike = {
+interface BoundsLike {
   readonly x: number;
   readonly y: number;
   readonly width: number;
   readonly height: number;
-};
+}
 
 function toRect(bounds: BoundsLike): Rect {
   return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };

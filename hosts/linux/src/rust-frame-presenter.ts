@@ -47,6 +47,7 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
   }
 
   public setHardwareCursor(_enabled: boolean): void {
+    void _enabled;
     // Cursor is rendered by the Rust compositor as a scene command.
   }
 
@@ -55,6 +56,7 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
   }
 
   public traceNextFrame(_traceId: string | undefined): void {
+    void _traceId;
     // Tracing is handled by the Rust compositor.
   }
 
