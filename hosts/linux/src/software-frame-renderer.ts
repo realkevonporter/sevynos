@@ -1392,28 +1392,33 @@ function drawTaskbar(
   );
   // Subtle inner border for frosted glass rim
   raster.roundedRect(
-    { x: dockX + 1, y: dockY + 1, width: dockWidth - 2, height: dockHeight - 2 },
+    {
+      x: dockBounds.x + 1,
+      y: dockBounds.y + 1,
+      width: dockBounds.width - 2,
+      height: dockBounds.height - 2,
+    },
     dockRadius - 1,
     TRANSPARENT,
     parseColor(isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.50)"),
   );
   // Subtle divider between launcher and apps
-  const dividerX = dockX + 64;
+  const dividerX = dockBounds.x + 64;
   raster.drawLine(
     dividerX,
-    dockY + 10,
+    dockBounds.y + 10,
     dividerX,
-    dockY + dockHeight - 10,
+    dockBounds.y + dockBounds.height - 10,
     parseColor(isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)"),
     1,
   );
   // Subtle divider between apps and workspace switchers
-  const wsDividerX = dockX + dockWidth - 120;
+  const wsDividerX = dockBounds.x + dockBounds.width - 120;
   raster.drawLine(
     wsDividerX,
-    dockY + 10,
+    dockBounds.y + 10,
     wsDividerX,
-    dockY + dockHeight - 10,
+    dockBounds.y + dockBounds.height - 10,
     parseColor(isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)"),
     1,
   );
