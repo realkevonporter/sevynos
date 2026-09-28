@@ -299,6 +299,70 @@ export function translateNode(node: DesktopSceneNode): SceneCommand[] {
       return cmds;
     }
 
+    // Lock screen.
+    case "desktop-lock-screen-surface": {
+      return [
+        {
+          kind: "color",
+          bounds: toRect(node.bounds),
+          color: toColor(PALETTE.background),
+          radius: 0,
+          opacity: 1,
+        },
+      ];
+    }
+
+    case "desktop-lock-screen-clock": {
+      const bounds = toRect(node.bounds);
+      return [
+        {
+          kind: "text",
+          bounds: toRect({ x: bounds.x, y: bounds.y, width: bounds.width, height: 80 }),
+          text: node.timeText,
+          size: 64,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        },
+        {
+          kind: "text",
+          bounds: toRect({
+            x: bounds.x,
+            y: bounds.y + 84,
+            width: bounds.width,
+            height: 30,
+          }),
+          text: node.dateText,
+          size: 18,
+          color: toColor(PALETTE.textDim),
+          align: "center",
+          opacity: 1,
+        },
+      ];
+    }
+
+    case "desktop-lock-screen-unlock": {
+      const bounds = toRect(node.bounds);
+      return [
+        {
+          kind: "color",
+          bounds,
+          color: toColor(PALETTE.accent),
+          radius: 24,
+          opacity: 1,
+        },
+        {
+          kind: "text",
+          bounds,
+          text: node.label,
+          size: 16,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        },
+      ];
+    }
+
     default: {
       // Exhaustiveness check: if a new node kind is added, TypeScript will
       // error here, forcing an explicit mapping decision.
