@@ -415,14 +415,12 @@ export async function startWaylandHost(
           save: (session) => persistenceAdapter.save("desktop-session", session),
           clear: () => persistenceAdapter.clear("desktop-session"),
         };
-  if (sessionAdapter !== undefined) {
-    const restored =
-      loadedSettings?.restorePreviousSession === true
-        ? await restoreDesktopSession(runtime, await sessionAdapter.load(), viewport)
-        : false;
-    if (!restored || runtime.applications.listRunning().length === 0)
-      await runtime.applications.resetToDefaults();
-  } else await runtime.applications.resetToDefaults();
+  if (sessionAdapter !== undefined && loadedSettings?.restorePreviousSession === true) {
+    await restoreDesktopSession(runtime, await sessionAdapter.load(), viewport);
+  }
+  // Fresh boot starts with a clean desktop (no auto-launched apps).
+  // resetToDefaults() is reserved for explicit user-initiated reset
+  // via persistence.reset().
   marker("SEVYN_GENESIS_SYSTEM_APPLICATIONS_LAUNCHED");
   const isolatedApplications =
     options.isolatedExecutor === undefined
