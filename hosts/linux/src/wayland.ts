@@ -63,6 +63,7 @@ import { PointerEventCoalescer } from "./pointer-event-coalescer.js";
 import { PresentationFrameScheduler } from "./presentation-frame-scheduler.js";
 import { CARET_BLINK_PERIOD_MS } from "./software-frame-renderer.js";
 import { FrameMetrics } from "./frame-metrics.js";
+import { RustFramePresenter } from "./rust-frame-presenter.js";
 import {
   WaylandBridgeConnection,
   WaylandClipboardAdapter,
@@ -518,7 +519,13 @@ export async function startWaylandHost(
   // raster cost, damage area, pipe latency, and scheduler coalescing.
   const frameMetrics =
     process.env["SEVYN_FRAME_METRICS"] === "1" ? new FrameMetrics() : undefined;
-  const presenter = new WaylandFramePresenter(connection, marker, frameMetrics);
+  // Rust compositor flag: when SEVYN_RUST_COMPOSITOR=1, delegate rasterization
+  // to the Rust compositor instead of the Node.js software renderer.
+  // This keeps pixel buffers out of the V8 heap.
+  const useRustCompositor = process.env["SEVYN_RUST_COMPOSITOR"] === "1";
+  const presenter = useRustCompositor
+    ? new RustFramePresenter(connection, marker)
+    : new WaylandFramePresenter(connection, marker, frameMetrics);
   presenter.initialize();
   presenter.setHardwareCursor(true);
   const planner = new DisplayRenderPlanner({

@@ -77,6 +77,20 @@ export class WaylandBridgeConnection {
   ): void {
     this.transport.sendFrame(frame, onFlushed);
   }
+  /**
+   * Send a scene description to the Rust compositor.
+   * Bypasses the sequenced control protocol — scenes are large and
+   * idempotent per frame. The Rust bridge detects them via the
+   * `"type":"scene"` discriminator in read_stdin.
+   */
+  public sendScene(sceneJson: string, onFlushed?: (error?: Error) => void): void {
+    // Write the pre-serialized scene directly; it already has the
+    // {"type":"scene","scene":{...}} envelope from serializeScene().
+    const transport = this.transport as {
+      send: (message: unknown, onFlushed?: (error?: Error) => void) => void;
+    };
+    transport.send(JSON.parse(sceneJson), onFlushed);
+  }
   public async close(): Promise<void> {
     this.#unsubscribe();
     this.#listeners.clear();

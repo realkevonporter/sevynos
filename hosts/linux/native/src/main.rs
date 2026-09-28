@@ -1,3 +1,4 @@
+mod compositor;
 mod gpu_presenter;
 
 use gpu_presenter::GpuPresenter;
@@ -95,6 +96,12 @@ enum HostMessage {
         request_id: String,
         text: String,
     },
+    /// Scene description for the Rust compositor.
+    /// Node.js sends this instead of rasterized pixels when
+    /// SEVYN_RUST_COMPOSITOR=1.
+    Scene {
+        scene: crate::compositor::protocol::Scene,
+    },
     ShutdownComplete,
 }
 
@@ -108,6 +115,9 @@ struct ValidatedMessage {
 enum InboundEvent {
     Control(Result<ValidatedMessage, String>),
     Frame(Result<Frame, String>),
+    /// A scene from the Rust compositor path (SEVYN_RUST_COMPOSITOR=1).
+    /// Contains draw commands for the Rust rasterizer.
+    Scene(crate::compositor::protocol::Scene),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +271,11 @@ struct Bridge {
     first_frame_received: bool,
     first_buffer_attached: bool,
     first_frame_presented: bool,
+    /// Rust compositor: framebuffer pool and rasterizer for scene rendering.
+    /// Used when SEVYN_RUST_COMPOSITOR=1 (Node sends scenes, not pixels).
+    compositor_pool: crate::compositor::FramebufferPool,
+    compositor_rasterizer: crate::compositor::Rasterizer,
+    compositor_frame_id: u64,
     busy_buffer_announced: bool,
     receiver: Receiver<InboundEvent>,
     loop_handle: LoopHandle<'static, Bridge>,
@@ -413,6 +428,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         first_frame_received: false,
         first_buffer_attached: false,
         first_frame_presented: false,
+        compositor_pool: crate::compositor::FramebufferPool::new(3),
+        compositor_rasterizer: crate::compositor::Rasterizer::new(),
+        compositor_frame_id: 0,
         busy_buffer_announced: false,
         receiver,
         loop_handle: event_loop.handle(),
@@ -438,7 +456,26 @@ fn read_stdin(sender: Sender<InboundEvent>) {
     let mut input = io::stdin().lock();
     loop {
         let result = match read_framed_message(&mut input) {
-            Ok(Some(line)) => parse_host_message(&line),
+            Ok(Some(line)) => {
+                // Fast path: scene messages for the Rust compositor bypass
+                // the sequenced control protocol. They are large (base64
+                // bitmaps) and idempotent per frame.
+                if line.contains("\"type\":\"scene\"") || line.contains("\"type\": \"scene\"") {
+                    match serde_json::from_str::<SceneEnvelope>(&line) {
+                        Ok(envelope) => {
+                            let _ = sender.send(InboundEvent::Scene(envelope.scene));
+                            continue;
+                        }
+                        Err(error) => {
+                            let _ = sender.send(InboundEvent::Control(Err(format!(
+                                "invalid scene message: {error}"
+                            ))));
+                            continue;
+                        }
+                    }
+                }
+                parse_host_message(&line)
+            }
             Ok(None) => break,
             Err(error) => {
                 let _ = sender.send(InboundEvent::Control(Err(error.to_string())));
@@ -449,6 +486,14 @@ fn read_stdin(sender: Sender<InboundEvent>) {
             break;
         }
     }
+}
+
+/// Envelope for scene messages sent to the Rust compositor.
+#[derive(Debug, Deserialize)]
+struct SceneEnvelope {
+    #[serde(rename = "type")]
+    _type: String,
+    scene: crate::compositor::protocol::Scene,
 }
 
 fn read_binary_frames(sender: Sender<InboundEvent>, trace_enabled: bool, started: Instant) {
@@ -537,6 +582,41 @@ fn parse_host_message(line: &str) -> Result<ValidatedMessage, String> {
 }
 
 impl Bridge {
+    /// Rasterize a scene using the Rust compositor.
+    /// Returns a Frame with the rasterized pixels for presentation.
+    fn rasterize_scene(
+        &mut self,
+        scene: &crate::compositor::protocol::Scene,
+    ) -> Result<Frame, String> {
+        let idx = self
+            .compositor_pool
+            .acquire(scene.width, scene.height)
+            .map_err(|e| format!("framebuffer pool exhausted: {e}"))?;
+        let fb = self
+            .compositor_pool
+            .get_mut(idx)
+            .ok_or("framebuffer not found")?;
+        self.compositor_rasterizer.render(scene, fb);
+
+        self.compositor_frame_id += 1;
+        let frame_id = self.compositor_frame_id;
+
+        // Copy pixels out; the framebuffer returns to the pool.
+        // In production, this copy is eliminated via shared memory.
+        let rgba = fb.pixels.clone();
+        self.compositor_pool.release(idx);
+
+        Ok(Frame {
+            frame_id,
+            display_id: "rust-compositor".to_string(),
+            width: scene.width,
+            height: scene.height,
+            trace_id: None,
+            damage: vec![],
+            rgba,
+        })
+    }
+
     fn emit(&mut self, message: Value) -> io::Result<()> {
         self.sequence += 1;
         let mut object = message.as_object().cloned().ok_or_else(|| {
@@ -590,6 +670,30 @@ impl Bridge {
                         "message":format!("Received binary frame {frame_id} for {width}x{height}."),
                     }))?;
                     self.draw(connection, queue_handle)?;
+                    continue;
+                }
+                InboundEvent::Scene(scene) => {
+                    // Rust compositor path: rasterize the scene description
+                    // instead of receiving pre-rasterized pixels.
+                    eprintln!(
+                        "GENESIS_SCENE_RECEIVED width={} height={} commands={}",
+                        scene.width,
+                        scene.height,
+                        scene.commands.len()
+                    );
+                    // Rasterize using the compositor module.
+                    // The framebuffer pool and rasterizer are held by the bridge.
+                    match self.rasterize_scene(&scene) {
+                        Ok(frame) => {
+                            let frame_id = frame.frame_id;
+                            self.surface.queue(frame);
+                            self.draw(connection, queue_handle)?;
+                            eprintln!("GENESIS_SCENE_RASTERIZED frameId={frame_id}");
+                        }
+                        Err(error) => {
+                            eprintln!("GENESIS_SCENE_REJECTED error={error}");
+                        }
+                    }
                     continue;
                 }
             };
@@ -711,6 +815,11 @@ impl Bridge {
                     self.emit(json!({"type":"clipboard-text","requestId":request_id,"text":""}))?;
                 }
                 HostMessage::ShutdownComplete => self.exit = true,
+                // Scene messages take the fast path in read_stdin and never
+                // reach the sequenced control protocol.
+                HostMessage::Scene { .. } => {
+                    eprintln!("GENESIS_SCENE_UNEXPECTED: scene via control channel");
+                }
             }
         }
         Ok(())
@@ -788,7 +897,10 @@ impl Bridge {
                     }
                     if !self.first_buffer_attached {
                         self.first_buffer_attached = true;
-                        eprintln!("GENESIS_WAYLAND_GPU_FRAME_PRESENTED frameId={}", frame.frame_id);
+                        eprintln!(
+                            "GENESIS_WAYLAND_GPU_FRAME_PRESENTED frameId={}",
+                            frame.frame_id
+                        );
                     }
                     return Ok(());
                 }
