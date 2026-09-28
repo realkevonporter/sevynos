@@ -345,7 +345,7 @@ export function renderDesktopStatusBar(
           x: display.bounds.x,
           y: display.bounds.y,
           width: display.bounds.width,
-          height: 52,
+          height: 28, // macOS menu bar height
         },
         displayId: display.id,
         activeWorkspace: input.activeWorkspace,

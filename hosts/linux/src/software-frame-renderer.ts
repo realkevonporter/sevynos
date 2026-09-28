@@ -1450,224 +1450,155 @@ function drawStatusBar(
   appearance: DesktopAppearance,
 ): void {
   const bounds = node.bounds;
-  const workspace = node.activeWorkspace;
   const isDark = appearance.mode === "dark";
+  // macOS-style translucent menu bar
   raster.fillRect(
     bounds,
-    parseColor(isDark ? "rgba(14, 17, 24, 0.88)" : "rgba(250, 251, 254, 0.90)"),
+    parseColor(isDark ? "rgba(20, 22, 30, 0.72)" : "rgba(250, 250, 252, 0.72)"),
   );
+  // Subtle bottom border
   raster.drawLine(
     bounds.x,
     bounds.y + bounds.height - 1,
     bounds.x + bounds.width,
     bounds.y + bounds.height - 1,
-    parseColor(isDark ? "rgba(255, 255, 255, 0.10)" : "rgba(0, 0, 0, 0.08)"),
+    parseColor(isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)"),
     1,
   );
 
   const centerY = bounds.y + Math.round(bounds.height / 2);
-  const textY = bounds.y + Math.round((bounds.height - 10) / 2);
+  const textColor = parseColor(isDark ? "#FFFFFF" : "#1A1C23");
+  const dimColor = parseColor(isDark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.75)");
 
-  // Left: Sevyn Emblem
+  // Left: Sevyn logo + app name + menus (macOS-style)
+  let leftX = bounds.x + 12;
+  // Sevyn emblem (replaces Apple logo)
   const emblemSize = 14;
-  const emblemX = bounds.x + 14;
   const emblemY = centerY - Math.round(emblemSize / 2);
   raster.roundedGradientRect(
-    { x: emblemX, y: emblemY, width: emblemSize, height: emblemSize },
+    { x: leftX, y: emblemY, width: emblemSize, height: emblemSize },
     4,
     parseColor("#E6C47A"),
     parseColor("#B8943D"),
   );
   raster.drawText(
     "S",
-    emblemX + emblemSize / 2,
+    leftX + emblemSize / 2,
     emblemY + 1,
-    1.1,
+    1.0,
     parseColor("#1C1917"),
     "center",
   );
+  leftX += emblemSize + 8;
 
-  raster.drawText(
-    "SevynOS",
-    emblemX + emblemSize + 8,
-    textY,
-    1.6,
-    parseColor(isDark ? "#FFFFFF" : "#1A1C23"),
-    "start",
-  );
+  // Active app name (bold)
+  raster.drawText("SevynOS", leftX, centerY - 5, 1.3, textColor, "start");
+  leftX += 62;
 
-  const wsLabel = workspace.replace("workspace-", "Workspace ");
-  const wsX = emblemX + emblemSize + 82;
-  raster.roundedRect(
-    { x: wsX, y: centerY - 9, width: 88, height: 18 },
-    9,
-    parseColor(isDark ? "rgba(212, 175, 55, 0.14)" : "rgba(212, 175, 55, 0.18)"),
-    parseColor(isDark ? "rgba(212, 175, 55, 0.32)" : "rgba(212, 175, 55, 0.38)"),
-  );
-  raster.drawText(
-    wsLabel,
-    wsX + 44,
-    textY + 1,
-    1.3,
-    parseColor(isDark ? "#E6C47A" : "#8A6D1C"),
-    "center",
-  );
-
-  // Center: Clock & Date
-  let centerText: string;
-  if (node.dateText && node.timeText) {
-    centerText = `${node.dateText}  ${node.timeText}`;
-  } else {
-    const now = new Date();
-    let hours = now.getHours();
-    const minutes = now.getMinutes().toString().padStart(2, "0");
-    const ampm = hours >= 12 ? "PM" : "AM";
-    hours = hours % 12 || 12;
-    centerText = `${String(hours)}:${minutes} ${ampm}`;
-  }
-  raster.drawText(
-    centerText,
-    bounds.x + Math.round(bounds.width / 2),
-    textY,
-    1.5,
-    parseColor(isDark ? "#E5E7EB" : "#1F2937"),
-    "center",
-  );
-
-  // Right: Status elements
-  let currentX = bounds.x + bounds.width - 16;
-
-  // 1. WiFi status pill
-  const wifiState = node.wifiState ?? "unavailable";
-  let pillText = "Connected";
-  let dotColor = "#34C759";
-  if (wifiState === "connected") {
-    pillText = node.wifiSsid
-      ? node.wifiSsid.length > 12
-        ? `${node.wifiSsid.slice(0, 11)}…`
-        : node.wifiSsid
-      : "Connected";
-    dotColor = "#34C759";
-  } else if (wifiState === "connecting") {
-    pillText = "Connecting…";
-    dotColor = "#FF9500";
-  } else if (wifiState === "disconnected") {
-    pillText = "Offline";
-    dotColor = isDark ? "#6B7280" : "#9CA3AF";
-  } else {
-    pillText = "No Wi-Fi";
-    dotColor = isDark ? "#4B5563" : "#D1D5DB";
+  // Menu items
+  const menus = ["File", "Edit", "View", "Window", "Help"];
+  for (const menu of menus) {
+    raster.drawText(menu, leftX, centerY - 5, 1.2, textColor, "start");
+    leftX += menu.length * 7 + 16;
   }
 
-  const pillW = Math.max(76, pillText.length * 7 + 28);
-  currentX -= pillW;
-  const connX = currentX;
-  raster.roundedRect(
-    { x: connX, y: centerY - 9, width: pillW, height: 18 },
-    9,
-    parseColor(isDark ? "rgba(255, 255, 255, 0.06)" : "rgba(0, 0, 0, 0.04)"),
-    parseColor(isDark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.10)"),
-  );
-  raster.fillCircle(connX + 11, centerY, 3, parseColor(dotColor));
-  raster.drawText(
-    pillText,
-    connX + 20,
-    textY + 1,
-    1.2,
-    parseColor(isDark ? "#CBD5E1" : "#475569"),
-    "start",
-  );
+  // Right: status icons + clock (macOS-style, right-aligned)
+  let rightX = bounds.x + bounds.width - 12;
 
-  // 2. Battery Capsule: only rendered when a battery is present
+  // Clock: macOS format "Mon Sep 28  6:09 PM"
+  const now = new Date();
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  let hours = now.getHours();
+  const minutes = now.getMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12 || 12;
+  const clockText = `${days[now.getDay()]} ${months[now.getMonth()]} ${now.getDate()}  ${hours}:${minutes} ${ampm}`;
+  const clockWidth = clockText.length * 6.5;
+  rightX -= clockWidth;
+  raster.drawText(clockText, rightX, centerY - 5, 1.2, textColor, "start");
+  rightX -= 16;
+
+  // Battery
   if (node.batteryAvailable !== false) {
     const pct = Math.min(100, Math.max(0, node.batteryPercent ?? 100));
-    const batW = 24;
-    const batH = 12;
-    currentX -= batW + 10;
-    const batX = currentX;
+    const batW = 22;
+    const batH = 11;
+    rightX -= batW + 4;
+    const batX = rightX;
     const batY = centerY - Math.round(batH / 2);
+    // Battery outline
     raster.roundedRect(
       { x: batX, y: batY, width: batW, height: batH },
-      3.5,
-      parseColor(isDark ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.05)"),
-      parseColor(isDark ? "rgba(255, 255, 255, 0.40)" : "rgba(0, 0, 0, 0.35)"),
+      3,
+      parseColor("rgba(0,0,0,0)"),
+      dimColor,
     );
-    raster.fillRect(
-      { x: batX + batW, y: batY + 3, width: 2, height: batH - 6 },
-      parseColor(isDark ? "rgba(255, 255, 255, 0.40)" : "rgba(0, 0, 0, 0.35)"),
-    );
-    const innerW = Math.max(2, Math.round(((batW - 4) * pct) / 100));
-    const batColor = node.batteryCharging
-      ? "#34C759"
-      : pct <= 20
-        ? "#FF3B30"
-        : pct <= 40
-          ? "#FF9500"
-          : "#34C759";
-    raster.roundedRect(
-      { x: batX + 2, y: batY + 2, width: innerW, height: batH - 4 },
-      2,
-      parseColor(batColor),
-    );
-    currentX -= 6;
-    raster.drawText(
-      `${String(pct)}%`,
-      currentX,
-      textY,
-      1.2,
-      parseColor(isDark ? "#9CA3AF" : "#6B7280"),
-      "end",
-    );
-    currentX -= 28;
-  }
-
-  // 3. WiFi Signal Bars
-  currentX -= 8;
-  const wifiX = currentX - 16;
-  currentX = wifiX;
-  const signal = node.wifiSignal ?? 100;
-  const isConnected = wifiState === "connected";
-  const barCount = !isConnected ? 0 : signal >= 66 ? 3 : signal >= 33 ? 2 : 1;
-  for (let i = 0; i < 3; i++) {
-    const barH = 4 + i * 3;
-    const filled = i < barCount;
-    const barColor = filled
-      ? "#34C759"
-      : isDark
-        ? "rgba(255, 255, 255, 0.20)"
-        : "rgba(0, 0, 0, 0.18)";
-    raster.roundedRect(
-      { x: wifiX + i * 5, y: centerY + 4 - barH, width: 3, height: barH },
-      1.5,
-      parseColor(barColor),
-    );
-  }
-
-  // 4. Audio Volume Indicator
-  if (node.audioVolume !== undefined) {
-    currentX -= 12;
-    const audioX = currentX - 14;
-    currentX = audioX;
-    const spkColor = node.audioMuted ? "#FF3B30" : isDark ? "#CBD5E1" : "#475569";
-    raster.fillRect(
-      { x: audioX, y: centerY - 3, width: 4, height: 6 },
-      parseColor(spkColor),
-    );
-    raster.roundedRect(
-      { x: audioX + 3, y: centerY - 5, width: 4, height: 10 },
-      1,
-      parseColor(spkColor),
-    );
-    if (!node.audioMuted) {
-      raster.drawText(
-        `${String(node.audioVolume)}%`,
-        audioX - 4,
-        textY,
-        1.1,
-        parseColor(isDark ? "#9CA3AF" : "#6B7280"),
-        "end",
+    // Battery fill
+    const fillW = Math.round((batW - 4) * (pct / 100));
+    if (fillW > 0) {
+      raster.fillRect(
+        { x: batX + 2, y: batY + 2, width: fillW, height: batH - 4 },
+        pct <= 20 ? parseColor("#FF3B30") : textColor,
       );
     }
+    // Battery cap
+    raster.fillRect(
+      { x: batX + batW + 1, y: batY + 3, width: 2, height: batH - 6 },
+      dimColor,
+    );
+    rightX -= 12;
+  }
+
+  // WiFi icon (signal bars)
+  const wifiState = node.wifiState ?? "unavailable";
+  const wifiColor = wifiState === "connected" ? textColor : dimColor;
+  rightX -= 16;
+  const wifiX = rightX;
+  const wifiY = centerY;
+  // Signal bars (4 bars, increasing height)
+  const signalLevel = wifiState === "connected" ? 4 : wifiState === "connecting" ? 2 : 1;
+  for (let i = 0; i < 4; i++) {
+    const barH = 3 + i * 2;
+    const barX = wifiX + i * 4;
+    const alpha = i < signalLevel ? 1 : 0.25;
+    raster.fillRect(
+      { x: barX, y: wifiY + 4 - barH, width: 2.5, height: barH },
+      parseColor(isDark ? `rgba(255,255,255,${alpha})` : `rgba(0,0,0,${alpha})`),
+    );
+  }
+  void wifiColor;
+  rightX -= 12;
+
+  // Volume icon
+  if (node.audioMuted !== undefined || node.audioVolume !== undefined) {
+    rightX -= 16;
+    const volX = rightX;
+    const volY = centerY;
+    // Speaker shape (simplified)
+    raster.fillRect({ x: volX + 2, y: volY - 3, width: 4, height: 6 }, dimColor);
+    raster.drawText(
+      node.audioMuted ? "✕" : "♪",
+      volX + 8,
+      volY - 6,
+      1.2,
+      dimColor,
+      "start",
+    );
+    rightX -= 8;
   }
 }
 
