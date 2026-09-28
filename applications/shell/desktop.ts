@@ -449,7 +449,7 @@ export function renderDesktopDock(
 function getFloatingDockBounds(
   taskbarBounds: DesktopShellBounds,
   iconCount: number,
-  workspaceCount: number = 0,
+  workspaceCount = 0,
 ): DesktopShellBounds {
   const tilePitch = 54; // 44px tile + 10px gap (matches PR #20)
   const workspacePitch = 32; // workspace indicator width + gap
