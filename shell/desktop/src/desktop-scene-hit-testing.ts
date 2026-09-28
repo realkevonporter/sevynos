@@ -54,13 +54,15 @@ export function hitTestDesktopSceneControl(
     ) ?? [];
   // When the launcher is open (modal overlay), prioritize launcher nodes
   // over dock/taskbar nodes that might geometrically overlap.
+  // Note: the array is reversed below, so launcher nodes go last here
+  // to be checked first.
   const hasLauncherEntries = controls.some(
     (node) => node.kind === "desktop-launcher-entry",
   );
   const prioritized = hasLauncherEntries
     ? [
-        ...controls.filter((node) => node.kind.startsWith("desktop-launcher")),
         ...controls.filter((node) => !node.kind.startsWith("desktop-launcher")),
+        ...controls.filter((node) => node.kind.startsWith("desktop-launcher")),
       ]
     : controls;
   return [...prioritized]
