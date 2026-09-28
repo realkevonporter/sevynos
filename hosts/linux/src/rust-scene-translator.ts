@@ -50,9 +50,10 @@ function toColor(color: string, opacity = 1): Color {
 export function translateCommand(cmd: TranslatableNode): SceneCommand | null {
   // All translatable nodes carry bounds; desktop nodes without explicit
   // bounds fall back to a zero rect.
-  const rawBounds = "bounds" in cmd && cmd.bounds !== undefined
-    ? cmd.bounds
-    : { x: 0, y: 0, width: 0, height: 0 };
+  const rawBounds =
+    "bounds" in cmd && cmd.bounds !== undefined
+      ? cmd.bounds
+      : { x: 0, y: 0, width: 0, height: 0 };
   const bounds = toRect(rawBounds);
 
   switch (cmd.kind) {
