@@ -2,166 +2,391 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
- * Translates TypeScript NativeRenderCommands to the Rust compositor protocol.
+ * Translates desktop scene nodes to the Rust compositor protocol.
  *
  * This is the bridge between the Node.js scene graph and the Rust rasterizer.
- * Each command type is mapped to its Rust equivalent; unsupported commands
- * fall back to a placeholder so the compositor never crashes on unknown input.
+ * Each desktop node type is mapped to one or more Rust scene commands.
  */
 
 import type { Scene, SceneCommand, Rect, Color } from "./rust-scene-protocol.js";
+import type { DesktopSceneNode } from "@sevynos/desktop-shell/internal";
 
-function toRect(bounds: { x: number; y: number; width: number; height: number }): Rect {
-  return {
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: bounds.height,
-  };
+interface BoundsLike {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
 
-function toColor(color: string, opacity = 1): Color {
-  // Parse hex colors like #RRGGBB or #RRGGBBAA.
-  const hex = color.replace("#", "");
-  const r = parseInt(hex.slice(0, 2), 16) / 255;
-  const g = parseInt(hex.slice(2, 4), 16) / 255;
-  const b = parseInt(hex.slice(4, 6), 16) / 255;
-  const a = hex.length >= 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+function toRect(bounds: BoundsLike): Rect {
+  return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+}
+
+function toColor(hex: string, opacity = 1): Color {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const a = h.length >= 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
   return { r, g, b, a: a * opacity };
 }
 
+/** Dark theme palette matching the existing Node renderer defaults. */
+const PALETTE = {
+  background: "#090b11",
+  surface: "#14161d",
+  surfaceElevated: "#1c1f28",
+  text: "#ffffff",
+  textDim: "#9aa0ae",
+  accent: "#4f7cff",
+  border: "#2a2e3a",
+} as const;
+
 /**
- * Translate a single NativeRenderCommand to a Rust SceneCommand.
- * Returns null for commands that have no Rust equivalent yet.
+ * Translate a single desktop scene node to Rust scene commands.
+ * Returns an array (nodes like buttons produce background + label).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function translateCommand(cmd: any): SceneCommand | null {
-  const bounds = cmd.bounds ? toRect(cmd.bounds) : { x: 0, y: 0, width: 0, height: 0 };
-
-  switch (cmd.kind) {
-    case "color":
-      return {
-        kind: "color",
-        bounds,
-        color: toColor(cmd.color ?? "#000000", cmd.opacity),
-        radius: cmd.radius ?? 0,
-        opacity: cmd.opacity ?? 1,
-      };
-
-    case "bitmap":
-      return {
-        kind: "bitmap",
-        bounds,
-        width: cmd.width,
-        height: cmd.height,
-        pixels_base64: Buffer.from(cmd.pixels).toString("base64"),
-        opacity: cmd.opacity ?? 1,
-      };
-
-    case "text": {
-      const lines = cmd.lines ?? [cmd.text ?? ""];
-      // For now, join lines; multi-line layout is a follow-up.
-      return {
-        kind: "text",
-        bounds,
-        text: lines.join("\n"),
-        size: cmd.size ?? 14,
-        color: toColor(cmd.color ?? "#ffffff", cmd.opacity),
-        align: cmd.align ?? "start",
-        opacity: cmd.opacity ?? 1,
-      };
+export function translateNode(node: DesktopSceneNode): SceneCommand[] {
+  switch (node.kind) {
+    case "desktop-window": {
+      return [
+        {
+          kind: "desktop-window",
+          bounds: toRect(node.base.bounds),
+          title: node.title,
+          focused: node.base.focused,
+        },
+      ];
     }
 
-    case "clip-start":
-      return { kind: "clip-start", bounds, radius: cmd.radius ?? 0 };
+    case "desktop-cursor": {
+      if (!node.visible) return [];
+      return [
+        {
+          kind: "desktop-cursor",
+          x: node.position.x,
+          y: node.position.y,
+          cursor_kind: node.cursorKind,
+        },
+      ];
+    }
 
-    case "clip-end":
-      return { kind: "clip-end" };
+    case "desktop-background": {
+      return [
+        {
+          kind: "desktop-background",
+          bounds: toRect(node.bounds),
+          color: toColor(PALETTE.background),
+        },
+      ];
+    }
 
-    case "gradient":
-      return {
-        kind: "gradient",
-        bounds,
-        start: toColor(cmd.from ?? "#000000", cmd.opacity),
-        end: toColor(cmd.to ?? "#ffffff", cmd.opacity),
-        angle: cmd.angle ?? 0,
-        opacity: cmd.opacity ?? 1,
-      };
+    case "desktop-status-bar": {
+      const cmds: SceneCommand[] = [
+        { kind: "desktop-status-bar", bounds: toRect(node.bounds) },
+      ];
+      // Clock text on the right side of the status bar.
+      if (node.timeText) {
+        cmds.push({
+          kind: "text",
+          bounds: toRect({
+            x: node.bounds.x + node.bounds.width - 120,
+            y: node.bounds.y,
+            width: 110,
+            height: node.bounds.height,
+          }),
+          text: node.timeText,
+          size: 13,
+          color: toColor(PALETTE.text),
+          align: "end",
+          opacity: 1,
+        });
+      }
+      return cmds;
+    }
 
-    case "icon":
-      return {
-        kind: "icon",
-        bounds,
-        name: cmd.name ?? "unknown",
-        color: toColor(cmd.color ?? "#ffffff", cmd.opacity),
-        size: cmd.size ?? 16,
-        opacity: cmd.opacity ?? 1,
-      };
+    case "desktop-taskbar": {
+      return [{ kind: "desktop-taskbar", bounds: toRect(node.bounds) }];
+    }
 
-    case "material":
-      return {
-        kind: "material",
-        bounds,
-        material: cmd.material ?? "regular",
-        radius: cmd.radius ?? 0,
-        opacity: cmd.opacity ?? 1,
-      };
+    // Settings / diagnostics / recovery controls render as labeled buttons.
+    case "desktop-settings-control":
+    case "desktop-diagnostics-control":
+    case "desktop-recovery-control":
+    case "desktop-workspace-action":
+    case "desktop-reset-action": {
+      const bounds = toRect(node.bounds);
+      return [
+        {
+          kind: "color",
+          bounds,
+          color: toColor(PALETTE.surfaceElevated),
+          radius: 8,
+          opacity: 1,
+        },
+        {
+          kind: "text",
+          bounds,
+          text: node.label,
+          size: 14,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        },
+      ];
+    }
 
-    case "desktop-background":
-      return {
-        kind: "desktop-background",
-        bounds,
-        color: toColor(cmd.color ?? "#141416"),
-      };
+    case "desktop-recovery": {
+      const bounds = toRect(node.bounds);
+      return [
+        {
+          kind: "color",
+          bounds,
+          color: toColor(PALETTE.surface),
+          radius: 0,
+          opacity: 1,
+        },
+        {
+          kind: "text",
+          bounds: toRect({
+            x: bounds.x,
+            y: bounds.y + 20,
+            width: bounds.width,
+            height: 60,
+          }),
+          text: node.message,
+          size: 16,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        },
+      ];
+    }
 
-    case "desktop-status-bar":
-      return { kind: "desktop-status-bar", bounds };
+    // Workspace items (files/folders on the desktop).
+    case "desktop-workspace-item": {
+      const bounds = toRect(node.bounds);
+      return [
+        {
+          kind: "icon",
+          bounds: toRect({ x: bounds.x + 8, y: bounds.y + 8, width: 32, height: 32 }),
+          name: node.itemKind === "directory" ? "folder" : "file",
+          size: 32,
+          color: toColor(PALETTE.accent),
+          opacity: 1,
+        },
+        {
+          kind: "text",
+          bounds: toRect({
+            x: bounds.x,
+            y: bounds.y + 44,
+            width: bounds.width,
+            height: 20,
+          }),
+          text: node.label,
+          size: 12,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        },
+      ];
+    }
 
-    case "desktop-window":
-      return {
-        kind: "desktop-window",
-        bounds,
-        title: cmd.title ?? "",
-        focused: cmd.focused ?? false,
-      };
+    // Launcher surface and entries.
+    case "desktop-launcher-surface": {
+      return [
+        {
+          kind: "color",
+          bounds: toRect(node.bounds),
+          color: toColor(PALETTE.surface),
+          radius: 12,
+          opacity: 0.98,
+        },
+      ];
+    }
 
-    case "desktop-taskbar":
-      return { kind: "desktop-taskbar", bounds };
+    case "desktop-launcher-button": {
+      return [
+        {
+          kind: "color",
+          bounds: toRect(node.bounds),
+          color: toColor(node.open ? PALETTE.accent : PALETTE.surfaceElevated),
+          radius: 8,
+          opacity: 1,
+        },
+      ];
+    }
 
-    case "desktop-cursor":
-      return {
-        kind: "desktop-cursor",
-        x: cmd.x ?? 0,
-        y: cmd.y ?? 0,
-        cursor_kind: cmd.cursor ?? "default",
-      };
+    case "desktop-launcher-header":
+    case "desktop-launcher-search":
+    case "desktop-launcher-entry":
+    case "desktop-taskbar-application": {
+      // These carry label/icon info in their specific shapes; render a
+      // generic row. The label property exists on entry nodes.
+      const label = "label" in node && typeof node.label === "string" ? node.label : "";
+      const bounds = toRect(node.bounds);
+      const cmds: SceneCommand[] = [
+        {
+          kind: "color",
+          bounds,
+          color: toColor(PALETTE.surface),
+          radius: 6,
+          opacity: 1,
+        },
+      ];
+      if (label) {
+        cmds.push({
+          kind: "text",
+          bounds,
+          text: label,
+          size: 14,
+          color: toColor(PALETTE.text),
+          align: "start",
+          opacity: 1,
+        });
+      }
+      return cmds;
+    }
 
-    case "separator":
-      return {
-        kind: "separator",
-        bounds,
-        color: toColor(cmd.color ?? "#333333"),
-        vertical: cmd.vertical ?? false,
-      };
+    case "desktop-workspace-control": {
+      return [
+        {
+          kind: "color",
+          bounds: toRect(node.bounds),
+          color: toColor(PALETTE.surfaceElevated),
+          radius: 6,
+          opacity: 1,
+        },
+      ];
+    }
 
-    default:
-      // Unsupported command types render as transparent placeholders.
-      // This ensures the compositor never crashes on new command kinds.
-      return null;
+    // Window switcher.
+    case "desktop-window-switcher-surface": {
+      return [
+        {
+          kind: "color",
+          bounds: toRect(node.bounds),
+          color: toColor(PALETTE.surface),
+          radius: 12,
+          opacity: 0.95,
+        },
+      ];
+    }
+
+    case "desktop-window-switcher-entry": {
+      const label = "label" in node && typeof node.label === "string" ? node.label : "";
+      const bounds = toRect(node.bounds);
+      const cmds: SceneCommand[] = [
+        {
+          kind: "color",
+          bounds,
+          color: toColor(PALETTE.surfaceElevated),
+          radius: 8,
+          opacity: 1,
+        },
+      ];
+      if (label) {
+        cmds.push({
+          kind: "text",
+          bounds,
+          text: label,
+          size: 13,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        });
+      }
+      return cmds;
+    }
+
+    // Lock screen.
+    case "desktop-lock-screen-surface": {
+      return [
+        {
+          kind: "color",
+          bounds: toRect(node.bounds),
+          color: toColor(PALETTE.background),
+          radius: 0,
+          opacity: 1,
+        },
+      ];
+    }
+
+    case "desktop-lock-screen-clock": {
+      const bounds = toRect(node.bounds);
+      return [
+        {
+          kind: "text",
+          bounds: toRect({ x: bounds.x, y: bounds.y, width: bounds.width, height: 80 }),
+          text: node.timeText,
+          size: 64,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        },
+        {
+          kind: "text",
+          bounds: toRect({
+            x: bounds.x,
+            y: bounds.y + 84,
+            width: bounds.width,
+            height: 30,
+          }),
+          text: node.dateText,
+          size: 18,
+          color: toColor(PALETTE.textDim),
+          align: "center",
+          opacity: 1,
+        },
+      ];
+    }
+
+    case "desktop-lock-screen-unlock": {
+      const bounds = toRect(node.bounds);
+      return [
+        {
+          kind: "color",
+          bounds,
+          color: toColor(PALETTE.accent),
+          radius: 24,
+          opacity: 1,
+        },
+        {
+          kind: "text",
+          bounds,
+          text: node.label,
+          size: 16,
+          color: toColor(PALETTE.text),
+          align: "center",
+          opacity: 1,
+        },
+      ];
+    }
+
+    default: {
+      // Exhaustiveness check: if a new node kind is added, TypeScript will
+      // error here, forcing an explicit mapping decision.
+      const _exhaustive: never = node;
+      void _exhaustive;
+      return [];
+    }
   }
 }
 
 /**
- * Translate a full scene's command list.
+ * Translate a full scene's node list, preserving order.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function translateScene(commands: any[], width: number, height: number): Scene {
+export function translateScene(
+  nodes: readonly DesktopSceneNode[],
+  width: number,
+  height: number,
+): Scene {
   const rustCommands: SceneCommand[] = [];
-  for (const cmd of commands) {
-    const translated = translateCommand(cmd);
-    if (translated !== null) {
-      rustCommands.push(translated);
-    }
+  for (const node of nodes) {
+    rustCommands.push(...translateNode(node));
   }
   return { width, height, commands: rustCommands };
 }
+
+// Backwards-compatible alias used by the presenter.
+export const translateCommand = translateNode;

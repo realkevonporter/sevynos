@@ -14,7 +14,7 @@
 
 import type { DesktopScene } from "@sevynos/desktop-shell/internal";
 import type { DisplayRenderPlan } from "@sevynos/graphics";
-import type { RenderResult } from "@sevynos/graphics";
+import { RenderResult } from "@sevynos/graphics";
 import type { LinuxFramePresenter } from "./host-adapters.js";
 import type { WaylandBridgeConnection } from "./wayland-bridge.js";
 import { translateScene } from "./rust-scene-translator.js";
@@ -47,6 +47,7 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
   }
 
   public setHardwareCursor(_enabled: boolean): void {
+    void _enabled;
     // Cursor is rendered by the Rust compositor as a scene command.
   }
 
@@ -55,6 +56,7 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
   }
 
   public traceNextFrame(_traceId: string | undefined): void {
+    void _traceId;
     // Tracing is handled by the Rust compositor.
   }
 
@@ -62,6 +64,7 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
     if (this.state !== "initialized") {
       throw new Error("Rust presenter is not initialized.");
     }
+    const startedAt = new Date();
     const width = plan.displayBounds.width;
     const height = plan.displayBounds.height;
     if (
@@ -76,13 +79,10 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
     }
     this.#frame += 1;
 
-    // Extract commands from the desktop scene and translate to Rust protocol.
-    // The scene graph structure is traversed here; the translator handles
-    // individual command mapping.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const scene = plan.scene as any;
-    const commands = scene.commands ?? scene.nodes ?? [];
-    const rustScene = translateScene(commands, width, height);
+    // Extract nodes from the desktop scene and translate to Rust protocol.
+    // The translator handles individual node mapping.
+    const nodes = plan.scene.nodes;
+    const rustScene = translateScene(nodes, width, height);
     const payload = serializeScene(rustScene);
 
     // Send to the Rust compositor via the bridge connection.
@@ -90,13 +90,19 @@ export class RustFramePresenter implements LinuxFramePresenter<DesktopScene> {
     this.#connection.sendScene(payload);
 
     this.#lastFrameSubmitted = true;
-    return {
-      frameId: this.#frame,
+    return new RenderResult({
+      frameNumber: this.#frame,
       displayId: plan.displayId,
-      submitted: true,
-      // Damage tracking is handled by the Rust compositor.
-      damage: [],
-    } as RenderResult;
+      status: "rendered",
+      startedAt,
+      completedAt: new Date(),
+      commandCount: rustScene.commands.length,
+    });
+  }
+
+  public present(plan: DisplayRenderPlan<DesktopScene>): Promise<void> {
+    this.render(plan);
+    return Promise.resolve();
   }
 
   public shutdown(): void {
