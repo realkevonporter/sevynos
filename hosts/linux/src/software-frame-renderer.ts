@@ -3451,6 +3451,34 @@ class SoftwareRaster {
       bounds.height <= 0
     )
       return;
+    // Fast path: 1:1 opaque blit via memcopy. The browser and Sevyn Code
+    // screencasts hit this path every frame (their bitmap bounds match the
+    // decoded source dimensions). The per-pixel loop below is ~50x slower
+    // and was saturating the event loop — causing heat, UI freeze, and
+    // heap growth until the compositor died.
+    // This path assumes an opaque source (true for JPEG-decoded screencast
+    // frames); transparent bitmaps fall through to the blending loop.
+    if (
+      opacity === 1 &&
+      bounds.width === sourceWidth &&
+      bounds.height === sourceHeight &&
+      Number.isInteger(bounds.x) &&
+      Number.isInteger(bounds.y)
+    ) {
+      const clip = this.#clip;
+      const startX = Math.max(clip.left, bounds.x);
+      const startY = Math.max(clip.top, bounds.y);
+      const endX = Math.min(clip.right, bounds.x + bounds.width);
+      const endY = Math.min(clip.bottom, bounds.y + bounds.height);
+      if (startX >= endX || startY >= endY) return;
+      const rowBytes = (endX - startX) * 4;
+      for (let y = startY; y < endY; y += 1) {
+        const srcOffset = ((y - bounds.y) * sourceWidth + (startX - bounds.x)) * 4;
+        const dstOffset = (y * this.width + startX) * 4;
+        this.pixels.set(source.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+      }
+      return;
+    }
     const clip = this.#clip;
     const startX = Math.max(clip.left, Math.floor(bounds.x));
     const startY = Math.max(clip.top, Math.floor(bounds.y));
