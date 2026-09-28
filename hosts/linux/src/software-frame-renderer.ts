@@ -239,7 +239,7 @@ function drawDesktopScene(
       case "desktop-window": {
         // macOS-style window open animation: scale-in from 95% with ease-out
         const now = Date.now();
-        const windowId = String(node.windowId);
+        const windowId = node.windowId;
         let firstSeen = windowFirstSeen.get(windowId);
         if (firstSeen === undefined) {
           firstSeen = now;
@@ -273,7 +273,7 @@ function drawDesktopScene(
         break;
       }
       case "desktop-taskbar":
-        drawTaskbar(raster, node.bounds, node.activeWorkspace, appearance, cursorPos);
+        drawTaskbar(raster, node.bounds, node.activeWorkspace, appearance);
         break;
       case "desktop-launcher-button":
         drawLauncherButton(
@@ -1448,7 +1448,6 @@ function drawTaskbar(
   bounds: Bounds,
   _workspace: string,
   appearance: DesktopAppearance,
-  cursorPos?: { x: number; y: number },
 ): void {
   const isDark = appearance.mode === "dark";
   // Bounds are now the floating dock directly (macOS-style), not full-width.
@@ -1593,7 +1592,9 @@ function drawStatusBar(
   const minutes = now.getMinutes().toString().padStart(2, "0");
   const ampm = hours >= 12 ? "PM" : "AM";
   hours = hours % 12 || 12;
-  const clockText = `${days[now.getDay()]} ${months[now.getMonth()]} ${now.getDate()}  ${hours}:${minutes} ${ampm}`;
+  const dayName = days[now.getDay()] ?? "Mon";
+  const monthName = months[now.getMonth()] ?? "Jan";
+  const clockText = `${dayName} ${monthName} ${String(now.getDate())}  ${String(hours)}:${minutes} ${ampm}`;
   const clockWidth = clockText.length * 6.5;
   rightX -= clockWidth;
   raster.drawText(clockText, rightX, centerY - 5, 1.2, textColor, "start");
@@ -1641,10 +1642,12 @@ function drawStatusBar(
   for (let i = 0; i < 4; i++) {
     const barH = 3 + i * 2;
     const barX = wifiX + i * 4;
-    const alpha = i < signalLevel ? 1 : 0.25;
+    const alpha: number = i < signalLevel ? 1 : 0.25;
     raster.fillRect(
       { x: barX, y: wifiY + 4 - barH, width: 2.5, height: barH },
-      parseColor(isDark ? `rgba(255,255,255,${alpha})` : `rgba(0,0,0,${alpha})`),
+      parseColor(
+        isDark ? `rgba(255,255,255,${String(alpha)})` : `rgba(0,0,0,${String(alpha)})`,
+      ),
     );
   }
   void wifiColor;
@@ -4057,17 +4060,4 @@ const FONT: Readonly<Record<string, readonly number[]>> = Object.freeze({
 function getCharacterAdvance(character: string, scale: number): number {
   const fontSize = scale * 7;
   return getNativeCharacterAdvance(character, fontSize);
-}
-
-function resolveWindowBadge(title: string): string {
-  const lower = title.toLocaleLowerCase();
-  if (lower.includes("studio") || lower.includes("ide")) return "</>";
-  if (lower.includes("console") || lower.includes("terminal")) return ">_";
-  if (lower.includes("browser") || lower.includes("web")) return "WB";
-  if (lower.includes("file")) return "FL";
-  if (lower.includes("setting")) return "⚙";
-  if (lower.includes("monitor")) return "SM";
-  if (lower.includes("note")) return "NT";
-  if (lower.includes("gallery")) return "UI";
-  return title.charAt(0) || "•";
 }
