@@ -381,7 +381,11 @@ export function renderDesktopDock(
   // Each display gets its own floating dock.
   const taskbars = input.displays.map((display) => {
     const displayApps = input.applications.filter((app) => app.displayId === display.id);
-    const dockBounds = getFloatingDockBounds(display.taskbarBounds, displayApps.length);
+    const dockBounds = getFloatingDockBounds(
+      display.taskbarBounds,
+      displayApps.length,
+      input.workspaces.length,
+    );
     return Object.freeze({
       kind: "desktop-taskbar" as const,
       order: input.order,
@@ -402,6 +406,7 @@ export function renderDesktopDock(
     const dockBounds = getFloatingDockBounds(
       display.taskbarBounds,
       displayApplications.length,
+      input.workspaces.length,
     );
     return [
       Object.freeze({
@@ -419,7 +424,11 @@ export function renderDesktopDock(
   });
   const workspaces = input.displays.flatMap((display) => {
     const displayApps = input.applications.filter((app) => app.displayId === display.id);
-    const dockBounds = getFloatingDockBounds(display.taskbarBounds, displayApps.length);
+    const dockBounds = getFloatingDockBounds(
+      display.taskbarBounds,
+      displayApps.length,
+      input.workspaces.length,
+    );
     return input.workspaces.map((workspaceId, index) =>
       Object.freeze({
         kind: "desktop-workspace-control" as const,
@@ -440,12 +449,17 @@ export function renderDesktopDock(
 function getFloatingDockBounds(
   taskbarBounds: DesktopShellBounds,
   iconCount: number,
+  workspaceCount: number = 0,
 ): DesktopShellBounds {
   const tilePitch = 54; // 44px tile + 10px gap (matches PR #20)
+  const workspacePitch = 32; // workspace indicator width + gap
+  const dividerWidth = 20; // divider between apps and workspaces
   const horizontalPadding = 16;
   const dockWidth = Math.max(
     80, // minimum width for empty dock
-    iconCount * tilePitch + horizontalPadding * 2,
+    iconCount * tilePitch +
+      (workspaceCount > 0 ? dividerWidth + workspaceCount * workspacePitch : 0) +
+      horizontalPadding * 2,
   );
   const dockHeight = 60;
   const bottomMargin = 8;

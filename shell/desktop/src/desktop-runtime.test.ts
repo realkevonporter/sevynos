@@ -216,14 +216,15 @@ describe("Genesis desktop host runtime", () => {
     expect(initial).toBeDefined();
     if (initial === undefined) return;
 
+    // Click in title bar center (away from traffic lights at left)
     dispatch(runtime, {
       type: "pointerdown",
-      x: initial.x + 40,
+      x: initial.x + initial.width / 2,
       y: initial.y + 20,
     });
     dispatch(runtime, {
       type: "pointermove",
-      x: initial.x + 140,
+      x: initial.x + initial.width / 2 + 100,
       y: initial.y + 90,
       timeStamp: 2,
     });
