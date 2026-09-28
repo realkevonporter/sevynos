@@ -675,7 +675,15 @@ function runningApplicationBounds(
     return { x: taskbar.x + 6, y: taskbar.y + 60 + index * 48, width: 40, height: 40 };
   const dockWidth = Math.min(taskbar.width - 48, 760);
   const dockX = Math.round(taskbar.x + (taskbar.width - dockWidth) / 2);
-  return { x: dockX + 58 + index * 48, y: taskbar.y + 6, width: 42, height: 40 };
+  const dockHeight = taskbar.height - 8;
+  const tileWidth = 44;
+  const tileHeight = 40;
+  return {
+    x: dockX + 78 + index * 54,
+    y: taskbar.y + 4 + Math.round((dockHeight - tileHeight) / 2),
+    width: tileWidth,
+    height: tileHeight,
+  };
 }
 
 function workspaceBounds(
