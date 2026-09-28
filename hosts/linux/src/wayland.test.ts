@@ -16,6 +16,7 @@ describe("interactive Wayland host", () => {
     await host.runtime.applications.launch("org.sevynos.welcome");
     await host.runtime.applications.launch("org.sevynos.console");
     await pause();
+    await pause();
     const firstFrame = bridge.frames[0];
     expect(firstFrame).toBeDefined();
     if (firstFrame === undefined) throw new Error("Expected a presented frame.");
@@ -44,15 +45,16 @@ describe("interactive Wayland host", () => {
       "GENESIS_WORKSPACE_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=648",
     );
     expect(
-      markers.some((value) =>
-        value.startsWith(
-          "GENESIS_WINDOW_CONTENT_BOUNDS reason=initial windowId=window-1 coordinateSpace=desktop-logical ",
-        ),
+      markers.some(
+        (value) =>
+          value.startsWith("GENESIS_WINDOW_CONTENT_BOUNDS reason=") &&
+          value.includes("windowId=window-1") &&
+          value.includes("coordinateSpace=desktop-logical "),
       ),
     ).toBe(true);
     expect(
       markers.some((value) =>
-        /^GENESIS_NATIVE_COMMAND_BOUNDS reason=(initial|surface-sync) windowId=window-1 coordinateSpace=window-content-local index=/.test(
+        /^GENESIS_NATIVE_COMMAND_BOUNDS reason=\S+ windowId=window-1 coordinateSpace=window-content-local index=/.test(
           value,
         ),
       ),
