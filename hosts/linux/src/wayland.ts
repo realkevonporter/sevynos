@@ -39,6 +39,7 @@ import type {
   SevynWirelessNetworkService,
   SevynBatteryService,
   SevynAudioService,
+  SevynTimeService,
   SevynSystemService,
   SevynFileSystem,
   SevynApplicationPackage,
@@ -48,6 +49,7 @@ import type {
 import { LinuxWirelessNetworkService } from "./linux-wireless-network-service.js";
 import { LinuxBatteryService } from "./linux-battery-service.js";
 import { LinuxAudioService } from "./linux-audio-service.js";
+import { LinuxTimeService } from "./linux-time-service.js";
 import { LinuxNativeModuleServices } from "./linux-native-module-services.js";
 import { LinuxSystemService } from "./linux-system-service.js";
 import { LinuxFileSystem } from "./linux-file-system.js";
@@ -88,6 +90,7 @@ export interface WaylandHostOptions {
   readonly power?: SevynPowerService;
   readonly battery?: SevynBatteryService;
   readonly audio?: SevynAudioService;
+  readonly time?: SevynTimeService;
   readonly system?: SevynSystemService;
   readonly filesystem?: SevynFileSystem;
   readonly createBrowserEngine?: () => SevynBrowserEngine;
@@ -149,8 +152,21 @@ export async function startWaylandHost(
   const network = options.network ?? new LinuxWirelessNetworkService();
   const battery = options.battery ?? new LinuxBatteryService();
   const audio = options.audio ?? new LinuxAudioService();
+  const time = options.time ?? new LinuxTimeService();
   const system = options.system ?? new LinuxSystemService();
   const filesystem = options.filesystem ?? new LinuxFileSystem();
+
+  // Sync the system clock as soon as Wi-Fi connects; NTP needs the network.
+  network.subscribe(() => {
+    void network
+      .snapshot()
+      .then((snapshot) => {
+        if (snapshot.state === "connected" && time instanceof LinuxTimeService) {
+          time.notifyNetworkAvailable();
+        }
+      })
+      .catch(() => undefined);
+  });
 
   const runtime = await createDesktopRuntime({
     launchDefaults: false,
@@ -160,6 +176,7 @@ export async function startWaylandHost(
     ...(options.power === undefined ? {} : { power: options.power }),
     battery,
     audio,
+    time,
     system,
     filesystem,
     ...(options.createBrowserEngine === undefined

@@ -7,6 +7,7 @@ import {
   Text,
   TextInput,
   View,
+  useOptionalSevynApplicationSdk,
   type BrowserEngineSnapshot,
   type SevynBrowserEngine,
   type SevynApplicationManifest,
@@ -118,11 +119,30 @@ export const DEFAULT_BOOKMARKS = [
   { title: "Hacker News", url: "https://news.ycombinator.com", icon: "📰" },
 ];
 
+interface Bookmark {
+  readonly title: string;
+  readonly url: string;
+  readonly icon: string;
+}
+
+interface HistoryEntry {
+  readonly url: string;
+  readonly title: string;
+  readonly visitedAt: number;
+}
+
+const BOOKMARKS_STORAGE_KEY = "sevyn.browser.bookmarks";
+const HISTORY_STORAGE_KEY = "sevyn.browser.history";
+const SESSION_STORAGE_KEY = "sevyn.browser.session";
+
 export function BrowserApplication({
   engine,
   createEngine,
   initialUrl = "sevyn://start",
 }: BrowserApplicationProps): JSX.Element {
+  // Storage is optional: the browser works without persistence when no SDK
+  // provider is present (e.g. in host runtime tests).
+  const storage = useOptionalSevynApplicationSdk()?.storage;
   // Per-tab browser engines for true tab isolation. Each tab gets its own
   // engine instance so navigation, history, and page state don't leak across tabs.
   const tabEngines = useRef(new Map<string, SevynBrowserEngine>());
@@ -144,10 +164,114 @@ export function BrowserApplication({
   const [addressInput, setAddressInput] = useState<string>(
     initialUrl === "sevyn://start" ? "" : initialUrl,
   );
+  const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>(DEFAULT_BOOKMARKS);
+  const [bookmarksLoaded, setBookmarksLoaded] = useState(false);
+  const [history, setHistory] = useState<readonly HistoryEntry[]>([]);
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [bookmarksVisible, setBookmarksVisible] = useState(false);
+
+  // Load persisted bookmarks, history, and session on mount
+  useEffect(() => {
+    if (storage === undefined) {
+      setBookmarksLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    const load = async (): Promise<void> => {
+      try {
+        const stored = await storage.get(BOOKMARKS_STORAGE_KEY);
+        if (!cancelled && stored !== undefined) {
+          const parsed = JSON.parse(stored) as readonly Bookmark[];
+          if (Array.isArray(parsed)) setBookmarks(parsed);
+        }
+      } catch {
+        // Keep defaults on storage failure
+      }
+      try {
+        const storedHistory = await storage.get(HISTORY_STORAGE_KEY);
+        if (!cancelled && storedHistory !== undefined) {
+          const parsed = JSON.parse(storedHistory) as readonly HistoryEntry[];
+          if (Array.isArray(parsed)) setHistory(parsed);
+        }
+      } catch {
+        // Keep empty history on storage failure
+      }
+      // Restore previous session tabs
+      try {
+        const sessionRaw = await storage.get(SESSION_STORAGE_KEY);
+        if (!cancelled && sessionRaw !== undefined) {
+          const session = JSON.parse(sessionRaw) as {
+            tabs: readonly { url: string; title: string }[];
+            activeTabId: string;
+          };
+          if (Array.isArray(session.tabs) && session.tabs.length > 0) {
+            const restoredTabs = session.tabs.map(
+              (t: { url: string; title: string }, index) => ({
+                id: `tab-restored-${String(index)}`,
+                url: t.url,
+                title: t.title,
+                loading: false,
+                canGoBack: false,
+                canGoForward: false,
+              }),
+            );
+            setTabs(restoredTabs);
+            const activeExists = session.tabs.some(
+              (_, index) => `tab-restored-${String(index)}` === session.activeTabId,
+            );
+            setActiveTabId(
+              activeExists ? session.activeTabId : (restoredTabs[0]?.id ?? "tab-1"),
+            );
+          }
+        }
+      } catch {
+        // Keep default tab on restore failure
+      }
+      if (!cancelled) setBookmarksLoaded(true);
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [storage]);
+
+  // Persist bookmarks
+  useEffect(() => {
+    if (!bookmarksLoaded || storage === undefined) return;
+    void storage
+      .set(BOOKMARKS_STORAGE_KEY, JSON.stringify(bookmarks))
+      .catch(() => undefined);
+  }, [storage, bookmarks, bookmarksLoaded]);
+
+  // Persist history (cap at 200 entries)
+  useEffect(() => {
+    if (!bookmarksLoaded || storage === undefined) return;
+    void storage
+      .set(HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, 200)))
+      .catch(() => undefined);
+  }, [storage, history, bookmarksLoaded]);
+
+  // Persist session (open tabs) — restore on launch
+  useEffect(() => {
+    if (!bookmarksLoaded || storage === undefined) return;
+    const session = {
+      tabs: tabs.map((t) => ({ url: t.url, title: t.title })),
+      activeTabId,
+    };
+    void storage.set(SESSION_STORAGE_KEY, JSON.stringify(session)).catch(() => undefined);
+  }, [storage, tabs, activeTabId, bookmarksLoaded]);
   const activeEngine = tabEngines.current.get(activeTabId);
   const [engineSnapshot, setEngineSnapshot] = useState<BrowserEngineSnapshot | undefined>(
     activeEngine?.snapshot(),
   );
+  const [contextMenu, setContextMenu] = useState<{
+    readonly x: number;
+    readonly y: number;
+  } | null>(null);
+  const [findVisible, setFindVisible] = useState(false);
+  const [findText, setFindText] = useState("");
+  const [findResult, setFindResult] = useState<string | null>(null);
+  const [downloadsVisible, setDownloadsVisible] = useState(false);
 
   const activeTab: BrowserTab = tabs.find((t) => t.id === activeTabId) ??
     tabs[0] ?? {
@@ -177,10 +301,30 @@ export function BrowserApplication({
                   title: snap.title || snap.url,
                   loading: snap.loading,
                   error: snap.error,
+                  canGoBack: snap.canGoBack ?? false,
+                  canGoForward: snap.canGoForward ?? false,
                 }
               : t,
           ),
         );
+        // Record history when a page finishes loading (skip internal pages)
+        if (
+          !snap.loading &&
+          snap.ready &&
+          !snap.url.startsWith("sevyn://") &&
+          snap.url !== "about:blank"
+        ) {
+          setHistory((prev) => {
+            // Don't duplicate the most recent entry
+            if (prev[0]?.url === snap.url) return prev;
+            const entry: HistoryEntry = {
+              url: snap.url,
+              title: snap.title || snap.url,
+              visitedAt: Date.now(),
+            };
+            return [entry, ...prev].slice(0, 200);
+          });
+        }
       }
     });
     return unsubscribe;
@@ -278,6 +422,64 @@ export function BrowserApplication({
     navigateTo("sevyn://start");
   }, [navigateTo]);
 
+  const currentZoom = engineSnapshot?.zoomFactor ?? 1;
+
+  const handleZoomIn = useCallback(() => {
+    const next = Math.min(5, Math.round((currentZoom + 0.25) * 100) / 100);
+    void activeEngine?.setZoomFactor(next).then((snap) => {
+      setEngineSnapshot(snap);
+    });
+  }, [activeEngine, currentZoom]);
+
+  const handleZoomOut = useCallback(() => {
+    const next = Math.max(0.25, Math.round((currentZoom - 0.25) * 100) / 100);
+    void activeEngine?.setZoomFactor(next).then((snap) => {
+      setEngineSnapshot(snap);
+    });
+  }, [activeEngine, currentZoom]);
+
+  const handleZoomReset = useCallback(() => {
+    void activeEngine?.setZoomFactor(1).then((snap) => {
+      setEngineSnapshot(snap);
+    });
+  }, [activeEngine]);
+
+  const handleFindNext = useCallback(
+    (forward: boolean) => {
+      if (findText.trim() === "") return;
+      void activeEngine?.findInPage(findText, forward).then((result) => {
+        if (result.found) {
+          setFindResult(
+            result.matches !== undefined ? `${String(result.matches)} matches` : "Found",
+          );
+        } else {
+          setFindResult("No matches");
+        }
+      });
+    },
+    [activeEngine, findText],
+  );
+
+  const isBookmarked = bookmarks.some((b) => b.url === activeTab.url);
+
+  const toggleBookmark = useCallback(() => {
+    if (activeTab.url === "sevyn://start" || activeTab.url === "about:blank") return;
+    setBookmarks((prev) => {
+      const exists = prev.some((b) => b.url === activeTab.url);
+      if (exists) {
+        return prev.filter((b) => b.url !== activeTab.url);
+      }
+      return [
+        ...prev,
+        {
+          title: activeTab.title || activeTab.url,
+          url: activeTab.url,
+          icon: "⭐",
+        },
+      ];
+    });
+  }, [activeTab.url, activeTab.title]);
+
   const handleNewTab = useCallback(() => {
     const newId = `tab-${String(Date.now())}`;
     const newTab: BrowserTab = {
@@ -301,6 +503,14 @@ export function BrowserApplication({
 
   const handleCloseTab = useCallback(
     (tabId: string) => {
+      // Close the engine to avoid leaking the Chromium process
+      const engineToClose = tabEngines.current.get(tabId);
+      if (engineToClose !== undefined) {
+        void engineToClose.close().catch(() => {
+          // Ignore close errors — the process may already be gone
+        });
+        tabEngines.current.delete(tabId);
+      }
       if (tabs.length === 1) {
         navigateTo("sevyn://start");
         return;
@@ -367,12 +577,32 @@ export function BrowserApplication({
 
       {/* Navigation Toolbar */}
       <View style={styles.toolbar}>
-        <Pressable onPress={handleBack} style={styles.navButton}>
-          <Text style={styles.navButtonText}>←</Text>
+        <Pressable
+          onPress={handleBack}
+          style={styles.navButton}
+          disabled={!activeTab.canGoBack}
+        >
+          <Text
+            style={
+              activeTab.canGoBack ? styles.navButtonText : styles.navButtonTextDisabled
+            }
+          >
+            ←
+          </Text>
         </Pressable>
 
-        <Pressable onPress={handleForward} style={styles.navButton}>
-          <Text style={styles.navButtonText}>→</Text>
+        <Pressable
+          onPress={handleForward}
+          style={styles.navButton}
+          disabled={!activeTab.canGoForward}
+        >
+          <Text
+            style={
+              activeTab.canGoForward ? styles.navButtonText : styles.navButtonTextDisabled
+            }
+          >
+            →
+          </Text>
         </Pressable>
 
         <Pressable onPress={handleReload} style={styles.navButton}>
@@ -381,6 +611,50 @@ export function BrowserApplication({
 
         <Pressable onPress={handleHome} style={styles.navButton}>
           <Text style={styles.navButtonText}>⌂</Text>
+        </Pressable>
+
+        <Pressable onPress={toggleBookmark} style={styles.navButton}>
+          <Text style={styles.navButtonText}>{isBookmarked ? "★" : "☆"}</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => {
+            setDownloadsVisible((v) => !v);
+          }}
+          style={styles.navButton}
+        >
+          <Text style={styles.navButtonText}>
+            ⤓
+            {(engineSnapshot?.downloads?.length ?? 0) > 0
+              ? ` ${String(engineSnapshot?.downloads?.length ?? 0)}`
+              : ""}
+          </Text>
+        </Pressable>
+
+        {currentZoom !== 1 && (
+          <Pressable onPress={handleZoomReset} style={styles.zoomBadge}>
+            <Text
+              style={styles.zoomBadgeText}
+            >{`${String(Math.round(currentZoom * 100))}%`}</Text>
+          </Pressable>
+        )}
+
+        <Pressable
+          onPress={() => {
+            setHistoryVisible((v) => !v);
+          }}
+          style={styles.navButton}
+        >
+          <Text style={styles.navButtonText}>🕐</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => {
+            setBookmarksVisible((v) => !v);
+          }}
+          style={styles.navButton}
+        >
+          <Text style={styles.navButtonText}>📑</Text>
         </Pressable>
 
         {/* Omnibox Address / Search Input */}
@@ -458,7 +732,7 @@ export function BrowserApplication({
             {/* Bookmarks Grid */}
             <Text style={styles.sectionHeader}>Quick Bookmarks</Text>
             <View style={styles.bookmarksGrid}>
-              {DEFAULT_BOOKMARKS.map((bookmark) => (
+              {bookmarks.map((bookmark) => (
                 <Pressable
                   key={bookmark.url}
                   onPress={() => {
@@ -577,6 +851,9 @@ export function BrowserApplication({
                 onPointerDown={(event: BrowserPointerEvent) => {
                   void activeEngine?.pointerDown(event.x, event.y, event.button ?? 0);
                 }}
+                onPointerMove={(event: BrowserPointerEvent) => {
+                  void activeEngine?.pointerMove(event.x, event.y);
+                }}
                 onPointerUp={(event: BrowserPointerEvent) => {
                   void activeEngine
                     ?.pointerUp(event.x, event.y, event.button ?? 0)
@@ -592,6 +869,31 @@ export function BrowserApplication({
                     });
                 }}
                 onKeyDown={(event: BrowserKeyboardEvent) => {
+                  const ctrl = event.control || event.meta;
+                  // Browser shortcuts (intercept before forwarding to page)
+                  if (ctrl && (event.key === "=" || event.key === "+")) {
+                    handleZoomIn();
+                    return;
+                  }
+                  if (ctrl && event.key === "-") {
+                    handleZoomOut();
+                    return;
+                  }
+                  if (ctrl && event.key === "0") {
+                    handleZoomReset();
+                    return;
+                  }
+                  if (ctrl && (event.key === "f" || event.key === "F")) {
+                    setFindVisible(true);
+                    setFindResult(null);
+                    return;
+                  }
+                  if (event.key === "Escape" && findVisible) {
+                    setFindVisible(false);
+                    setFindText("");
+                    setFindResult(null);
+                    return;
+                  }
                   void activeEngine
                     ?.key(event.key, event.code, {
                       shift: event.shift,
@@ -603,6 +905,9 @@ export function BrowserApplication({
                       setEngineSnapshot(snap);
                     });
                 }}
+                onContextMenu={(event: BrowserPointerEvent) => {
+                  setContextMenu({ x: event.x, y: event.y });
+                }}
                 style={styles.webViewport}
               />
             ) : (
@@ -612,6 +917,224 @@ export function BrowserApplication({
                 </Text>
               </View>
             )}
+          </View>
+        )}
+        {/* Browser context menu (right-click) */}
+        {contextMenu && (
+          <>
+            <Pressable
+              onPress={() => {
+                setContextMenu(null);
+              }}
+              style={styles.contextMenuBackdrop}
+            />
+            <View
+              style={{
+                position: "absolute",
+                backgroundColor: "#1E293B",
+                borderRadius: 8,
+                paddingVertical: 4,
+                minWidth: 180,
+                left: contextMenu.x,
+                top: contextMenu.y,
+                zIndex: 1000,
+              }}
+            >
+              <Pressable
+                onPress={() => {
+                  setContextMenu(null);
+                  handleBack();
+                }}
+                style={styles.contextMenuItem}
+                disabled={!activeTab.canGoBack}
+              >
+                <Text style={styles.contextMenuItemText}>Back</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setContextMenu(null);
+                  handleForward();
+                }}
+                style={styles.contextMenuItem}
+                disabled={!activeTab.canGoForward}
+              >
+                <Text style={styles.contextMenuItemText}>Forward</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setContextMenu(null);
+                  handleReload();
+                }}
+                style={styles.contextMenuItem}
+              >
+                <Text style={styles.contextMenuItemText}>Reload</Text>
+              </Pressable>
+            </View>
+          </>
+        )}
+        {/* Find in page bar */}
+        {findVisible && (
+          <View style={styles.findBar}>
+            <TextInput
+              value={findText}
+              onChangeText={(text) => {
+                setFindText(text);
+                setFindResult(null);
+              }}
+              onSubmitEditing={() => {
+                handleFindNext(true);
+              }}
+              placeholder="Find in page"
+              placeholderTextColor="#64748B"
+              style={styles.findInput}
+            />
+            {findResult !== null && (
+              <Text style={styles.findResultText}>{findResult}</Text>
+            )}
+            <Pressable
+              onPress={() => {
+                handleFindNext(false);
+              }}
+              style={styles.findButton}
+            >
+              <Text style={styles.findButtonText}>↑</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                handleFindNext(true);
+              }}
+              style={styles.findButton}
+            >
+              <Text style={styles.findButtonText}>↓</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setFindVisible(false);
+                setFindText("");
+                setFindResult(null);
+              }}
+              style={styles.findButton}
+            >
+              <Text style={styles.findButtonText}>✕</Text>
+            </Pressable>
+          </View>
+        )}
+        {/* Downloads panel */}
+        {downloadsVisible && (
+          <View style={styles.downloadsPanel}>
+            <View style={styles.downloadsHeader}>
+              <Text style={styles.downloadsTitle}>Downloads</Text>
+              <Pressable
+                onPress={() => {
+                  setDownloadsVisible(false);
+                }}
+              >
+                <Text style={styles.findButtonText}>✕</Text>
+              </Pressable>
+            </View>
+            {(engineSnapshot?.downloads ?? []).length === 0 ? (
+              <Text style={styles.downloadsEmpty}>No downloads yet</Text>
+            ) : (
+              (engineSnapshot?.downloads ?? []).map((download) => (
+                <View key={download.guid} style={styles.downloadItem}>
+                  <Text style={styles.downloadFilename}>{download.filename}</Text>
+                  <Text style={styles.downloadStatus}>
+                    {download.state === "in_progress"
+                      ? download.totalBytes > 0
+                        ? `${String(Math.round((download.receivedBytes / download.totalBytes) * 100))}%`
+                        : "Downloading…"
+                      : download.state === "completed"
+                        ? "Completed"
+                        : download.state === "cancelled"
+                          ? "Cancelled"
+                          : "Interrupted"}
+                  </Text>
+                </View>
+              ))
+            )}
+          </View>
+        )}
+        {/* History panel */}
+        {historyVisible && (
+          <View style={styles.downloadsPanel}>
+            <View style={styles.downloadsHeader}>
+              <Text style={styles.downloadsTitle}>History</Text>
+              <Pressable
+                onPress={() => {
+                  setHistoryVisible(false);
+                }}
+              >
+                <Text style={styles.findButtonText}>✕</Text>
+              </Pressable>
+            </View>
+            <Pressable
+              onPress={() => {
+                setHistory([]);
+              }}
+              style={styles.clearHistoryButton}
+            >
+              <Text style={styles.clearHistoryText}>Clear history</Text>
+            </Pressable>
+            <ScrollView style={styles.panelScroll}>
+              {history.length === 0 ? (
+                <Text style={styles.downloadsEmpty}>No history yet</Text>
+              ) : (
+                history.map((entry) => (
+                  <Pressable
+                    key={`${entry.url}-${String(entry.visitedAt)}`}
+                    onPress={() => {
+                      setHistoryVisible(false);
+                      navigateTo(entry.url);
+                    }}
+                    style={styles.downloadItem}
+                  >
+                    <Text style={styles.downloadFilename}>{entry.title}</Text>
+                    <Text style={styles.downloadStatus}>{entry.url}</Text>
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        )}
+        {/* Bookmarks manager panel */}
+        {bookmarksVisible && (
+          <View style={styles.downloadsPanel}>
+            <View style={styles.downloadsHeader}>
+              <Text style={styles.downloadsTitle}>Bookmarks</Text>
+              <Pressable
+                onPress={() => {
+                  setBookmarksVisible(false);
+                }}
+              >
+                <Text style={styles.findButtonText}>✕</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={styles.panelScroll}>
+              {bookmarks.map((bookmark) => (
+                <View key={bookmark.url} style={styles.bookmarkRow}>
+                  <Pressable
+                    onPress={() => {
+                      setBookmarksVisible(false);
+                      navigateTo(bookmark.url);
+                    }}
+                    style={styles.bookmarkInfo}
+                  >
+                    <Text style={styles.downloadFilename}>
+                      {bookmark.icon} {bookmark.title}
+                    </Text>
+                    <Text style={styles.downloadStatus}>{bookmark.url}</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setBookmarks((prev) => prev.filter((b) => b.url !== bookmark.url));
+                    }}
+                    style={styles.bookmarkDelete}
+                  >
+                    <Text style={styles.bookmarkDeleteText}>✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
           </View>
         )}
       </View>
@@ -722,6 +1245,11 @@ const styles = StyleSheet.create({
   },
   navButtonText: {
     color: "#E2E8F0",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  navButtonTextDisabled: {
+    color: "#475569",
     fontSize: 15,
     fontWeight: "600",
   },
@@ -944,6 +1472,139 @@ const styles = StyleSheet.create({
   },
   webContainer: {
     flex: 1,
+  },
+  contextMenuBackdrop: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 999,
+  },
+  contextMenuItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  contextMenuItemText: {
+    color: "#E2E8F0",
+    fontSize: 14,
+  },
+  zoomBadge: {
+    backgroundColor: "#1E293B",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginHorizontal: 4,
+  },
+  zoomBadgeText: {
+    color: "#93C5FD",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  findBar: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1E293B",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    zIndex: 1001,
+  },
+  findInput: {
+    width: 160,
+    height: 28,
+    backgroundColor: "#0F172A",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    color: "#E2E8F0",
+    fontSize: 13,
+  },
+  findResultText: {
+    color: "#94A3B8",
+    fontSize: 12,
+    marginHorizontal: 8,
+  },
+  findButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  findButtonText: {
+    color: "#E2E8F0",
+    fontSize: 14,
+  },
+  downloadsPanel: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: 280,
+    maxHeight: 320,
+    backgroundColor: "#1E293B",
+    borderRadius: 8,
+    padding: 12,
+    zIndex: 1001,
+  },
+  downloadsHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  downloadsTitle: {
+    color: "#E2E8F0",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  downloadsEmpty: {
+    color: "#64748B",
+    fontSize: 13,
+    textAlign: "center",
+    paddingVertical: 16,
+  },
+  downloadItem: {
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#334155",
+  },
+  downloadFilename: {
+    color: "#E2E8F0",
+    fontSize: 13,
+  },
+  downloadStatus: {
+    color: "#94A3B8",
+    fontSize: 12,
+    marginTop: 2,
+  },
+  panelScroll: {
+    maxHeight: 240,
+  },
+  clearHistoryButton: {
+    paddingVertical: 6,
+    marginBottom: 4,
+  },
+  clearHistoryText: {
+    color: "#F87171",
+    fontSize: 13,
+  },
+  bookmarkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#334155",
+  },
+  bookmarkInfo: {
+    flex: 1,
+  },
+  bookmarkDelete: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  bookmarkDeleteText: {
+    color: "#F87171",
+    fontSize: 14,
   },
   loadingBarContainer: {
     height: 3,

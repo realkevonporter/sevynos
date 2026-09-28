@@ -10,6 +10,8 @@ export {
   type SevynWirelessNetworkService,
   type SevynBatteryService,
   type SevynAudioService,
+  type SevynTimeService,
+  type TimeSyncState,
   type SevynSystemService,
   type SevynPowerService,
   type SevynStudioService,
@@ -45,6 +47,14 @@ export function useSevynApplicationSdk(): SevynApplicationSdk {
   if (sdk === undefined)
     throw new Error("This application requires a Sevyn application SDK provider.");
   return sdk;
+}
+/**
+ * Returns the current Sevyn application SDK, or undefined when no provider is
+ * present. Use this for optional features (like persistence) that should degrade
+ * gracefully instead of crashing the application.
+ */
+export function useOptionalSevynApplicationSdk(): SevynApplicationSdk | undefined {
+  return useContext(ApplicationSdkContext);
 }
 import { createContext, createElement, useContext, type ReactNode } from "react";
 import type { SevynApplicationSdk } from "./services.js";

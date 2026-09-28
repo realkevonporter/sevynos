@@ -7,6 +7,7 @@ import { inflateSync } from "node:zlib";
 import WebSocket, { type RawData } from "ws";
 import type {
   BrowserEngineSnapshot,
+  FindInPageResult,
   SevynBrowserEngine,
 } from "@sevynos/react-native/internal";
 
@@ -61,6 +62,7 @@ const blankSnapshot = (width: number, height: number): BrowserEngineSnapshot =>
     title: "New Tab",
     width,
     height,
+    zoomFactor: 1,
   });
 
 export class ChromiumBrowserEngine implements SevynBrowserEngine {
@@ -84,6 +86,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
   #screencastLastFrameAt = 0;
   #pendingInputAt = 0;
   #inputLatencies: number[] = [];
+  #zoomFactor = 1;
 
   public constructor(options: ChromiumBrowserEngineOptions = {}) {
     this.#current = blankSnapshot(options.width ?? 878, options.height ?? 501);
@@ -255,6 +258,31 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       });
       return await this.#afterInput(80);
     });
+  }
+
+  public setZoomFactor(factor: number): Promise<BrowserEngineSnapshot> {
+    return this.#enqueue(async () => {
+      const clamped = Math.max(0.25, Math.min(5, factor));
+      this.#zoomFactor = clamped;
+      const connection = await this.#requireConnection();
+      await connection.send("Runtime.evaluate", {
+        expression: `document.documentElement.style.setProperty("zoom", "${String(clamped)}")`,
+        returnByValue: true,
+      });
+      return await this.#afterInput(120);
+    });
+  }
+
+  public async findInPage(text: string, forward = true): Promise<FindInPageResult> {
+    if (this.#closed) throw new Error("The browser has closed.");
+    const connection = await this.#requireConnection();
+    const result = await connection.send<{
+      readonly result?: { readonly value?: boolean };
+    }>("Runtime.evaluate", {
+      expression: `window.find(${JSON.stringify(text)}, false, false, ${forward ? "true" : "false"}, false, false, false)`,
+      returnByValue: true,
+    });
+    return { found: result.result?.value === true };
   }
 
   public subscribe(listener: () => void): () => void {
@@ -620,6 +648,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
         width: decoded.width,
         height: decoded.height,
         pixels: decoded.pixels,
+        zoomFactor: this.#zoomFactor,
       }),
     );
   }

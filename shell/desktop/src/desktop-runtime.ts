@@ -37,6 +37,7 @@ import type {
   SevynWirelessNetworkService,
   SevynBatteryService,
   SevynAudioService,
+  SevynTimeService,
   SevynSystemService,
   SevynFileSystem,
 } from "@sevynos/react-native/internal";
@@ -94,6 +95,7 @@ export interface DesktopRuntime {
   readonly power?: SevynPowerService | undefined;
   readonly battery?: SevynBatteryService | undefined;
   readonly audio?: SevynAudioService | undefined;
+  readonly time?: SevynTimeService | undefined;
   readonly system?: SevynSystemService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
   readonly environment: DesktopEnvironment;
@@ -146,6 +148,7 @@ export interface CreateDesktopRuntimeOptions {
   readonly power?: SevynPowerService | undefined;
   readonly battery?: SevynBatteryService | undefined;
   readonly audio?: SevynAudioService | undefined;
+  readonly time?: SevynTimeService | undefined;
   readonly system?: SevynSystemService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
   readonly createBrowserEngine?: (() => SevynBrowserEngine) | undefined;
@@ -1105,6 +1108,7 @@ export async function createDesktopRuntime(
     power: powerProxy,
     battery: options.battery,
     audio: options.audio,
+    time: options.time,
     system: options.system,
     filesystem: surfaces.filesystem,
     environment,

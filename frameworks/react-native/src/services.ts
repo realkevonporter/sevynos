@@ -118,6 +118,22 @@ export interface SystemHardwareSnapshot {
   readonly uptimeSeconds: number;
 }
 
+export interface TimeSyncState {
+  readonly available: boolean;
+  readonly syncing: boolean;
+  readonly lastSyncAt?: number | undefined;
+  readonly offsetMs?: number | undefined;
+  readonly error?: string | undefined;
+  readonly timezone: string;
+}
+
+export interface SevynTimeService {
+  snapshot(): Promise<TimeSyncState>;
+  syncNow(): Promise<TimeSyncState>;
+  setTimezone(timezone: string): Promise<TimeSyncState>;
+  subscribe(listener: () => void): () => void;
+}
+
 export interface SevynSystemService {
   snapshot(): Promise<SystemHardwareSnapshot>;
   subscribe(listener: () => void): () => void;
@@ -132,6 +148,25 @@ export interface BrowserEngineSnapshot {
   readonly height: number;
   readonly pixels?: Uint8Array | undefined;
   readonly error?: string | undefined;
+  readonly canGoBack?: boolean | undefined;
+  readonly canGoForward?: boolean | undefined;
+  readonly zoomFactor?: number | undefined;
+  readonly downloads?: readonly BrowserDownload[] | undefined;
+}
+
+export interface BrowserDownload {
+  readonly guid: string;
+  readonly url: string;
+  readonly filename: string;
+  readonly receivedBytes: number;
+  readonly totalBytes: number;
+  readonly state: string;
+}
+
+export interface FindInPageResult {
+  readonly found: boolean;
+  readonly activeMatchOrdinal?: number | undefined;
+  readonly matches?: number | undefined;
 }
 
 export interface SevynBrowserEngine {
@@ -156,6 +191,8 @@ export interface SevynBrowserEngine {
     code: string,
     modifiers?: { shift: boolean; alt: boolean; control: boolean; meta: boolean },
   ): Promise<BrowserEngineSnapshot>;
+  setZoomFactor(factor: number): Promise<BrowserEngineSnapshot>;
+  findInPage(text: string, forward?: boolean): Promise<FindInPageResult>;
   subscribe(listener: () => void): () => void;
   close(): Promise<void>;
 }
@@ -256,6 +293,31 @@ export class UnavailableAudioService implements SevynAudioService {
       muted,
       outputDevice: "Default Output",
       hasHeadphones: false,
+    });
+  }
+  public subscribe(): () => void {
+    return () => undefined;
+  }
+}
+
+export class UnavailableTimeService implements SevynTimeService {
+  public snapshot(): Promise<TimeSyncState> {
+    return Promise.resolve({
+      available: false,
+      syncing: false,
+      timezone: "UTC",
+    });
+  }
+  public syncNow(): Promise<TimeSyncState> {
+    return Promise.reject(
+      new Error("Time synchronization is not available on this host."),
+    );
+  }
+  public setTimezone(timezone: string): Promise<TimeSyncState> {
+    return Promise.resolve({
+      available: false,
+      syncing: false,
+      timezone,
     });
   }
   public subscribe(): () => void {

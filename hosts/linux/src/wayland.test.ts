@@ -150,7 +150,7 @@ describe("interactive Wayland host", () => {
     const welcomeFrame = bridge.frames.at(-1);
     expect(welcomeFrame?.traceId).toBe("focus-welcome");
 
-    bridge.pointer("down", 668, 550, "focus-console");
+    bridge.pointer("down", 965, 300, "focus-console");
     bridge.keyboard("down", "z", "KeyZ");
     expect(
       host.runtime.windows.listWindows().find((window) => window.state === "focused")?.id,

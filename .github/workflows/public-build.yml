@@ -1,0 +1,44 @@
+name: Public build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-build
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build bootable image
+        run: pnpm qemu:build
+      - name: Publish nightly release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: nightly
+          name: Nightly build
+          body: |
+            Automated SevynOS build from the latest merge to main.
+
+            Commit: ${{ github.sha }}
+
+            This is a development snapshot, not a stable release.
+            Verify the download with the attached SHA256SUMS.
+          prerelease: true
+          makeLatest: false
+          allowUpdates: true
+          removeArtifacts: true
+          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS"
