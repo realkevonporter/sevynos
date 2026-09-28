@@ -1389,16 +1389,13 @@ function drawTaskbar(
   appearance: DesktopAppearance,
 ): void {
   const isDark = appearance.mode === "dark";
-  const dockWidth = Math.min(bounds.width - 48, 760);
-  const dockX = Math.round(bounds.x + (bounds.width - dockWidth) / 2);
-  const dockY = bounds.y + 4;
-  const dockHeight = bounds.height - 8;
-  const dockRadius = DESKTOP_VISUAL_METRICS.taskbarRadius;
+  // Bounds are now the floating dock directly (macOS-style), not full-width.
+  const dockRadius = 18; // macOS-like rounded corners
   const dockBounds = {
-    x: dockX,
-    y: dockY,
-    width: dockWidth,
-    height: dockHeight,
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
   };
 
   drawSoftShadow(raster, dockBounds, dockRadius, appearance.taskbar.shadow);
@@ -1411,10 +1408,10 @@ function drawTaskbar(
   );
   // Specular top highlight line
   raster.drawLine(
-    dockX + dockRadius,
-    dockY + 1,
-    dockX + dockWidth - dockRadius,
-    dockY + 1,
+    dockBounds.x + dockRadius,
+    dockBounds.y + 1,
+    dockBounds.x + dockBounds.width - dockRadius,
+    dockBounds.y + 1,
     parseColor(isDark ? "rgba(255, 255, 255, 0.28)" : "rgba(255, 255, 255, 0.90)"),
     1,
   );
