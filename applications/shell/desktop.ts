@@ -385,6 +385,7 @@ export function renderDesktopDock(
       display.taskbarBounds,
       displayApps.length,
       input.workspaces.length,
+      input.position,
     );
     return Object.freeze({
       kind: "desktop-taskbar" as const,
@@ -407,6 +408,7 @@ export function renderDesktopDock(
       display.taskbarBounds,
       displayApplications.length,
       input.workspaces.length,
+      input.position,
     );
     return [
       Object.freeze({
@@ -428,6 +430,7 @@ export function renderDesktopDock(
       display.taskbarBounds,
       displayApps.length,
       input.workspaces.length,
+      input.position,
     );
     return input.workspaces.map((workspaceId, index) =>
       Object.freeze({
@@ -450,6 +453,7 @@ function getFloatingDockBounds(
   taskbarBounds: DesktopShellBounds,
   iconCount: number,
   workspaceCount = 0,
+  position: DesktopDockRenderInput["position"] = "bottom",
 ): DesktopShellBounds {
   const tilePitch = 54; // 44px tile + 10px gap (matches PR #20)
   const workspacePitch = 32; // workspace indicator width + gap
@@ -462,13 +466,40 @@ function getFloatingDockBounds(
       horizontalPadding * 2,
   );
   const dockHeight = 60;
-  const bottomMargin = 8;
-  return {
-    x: Math.round(taskbarBounds.x + (taskbarBounds.width - dockWidth) / 2),
-    y: taskbarBounds.y + taskbarBounds.height - dockHeight - bottomMargin,
-    width: dockWidth,
-    height: dockHeight,
-  };
+  const margin = 8;
+
+  // Position the floating dock based on taskbar position
+  switch (position) {
+    case "top":
+      return {
+        x: Math.round(taskbarBounds.x + (taskbarBounds.width - dockWidth) / 2),
+        y: taskbarBounds.y + margin,
+        width: dockWidth,
+        height: dockHeight,
+      };
+    case "left":
+      return {
+        x: taskbarBounds.x + margin,
+        y: Math.round(taskbarBounds.y + (taskbarBounds.height - dockHeight) / 2),
+        width: dockWidth,
+        height: dockHeight,
+      };
+    case "right":
+      return {
+        x: taskbarBounds.x + taskbarBounds.width - dockWidth - margin,
+        y: Math.round(taskbarBounds.y + (taskbarBounds.height - dockHeight) / 2),
+        width: dockWidth,
+        height: dockHeight,
+      };
+    case "bottom":
+    default:
+      return {
+        x: Math.round(taskbarBounds.x + (taskbarBounds.width - dockWidth) / 2),
+        y: taskbarBounds.y + taskbarBounds.height - dockHeight - margin,
+        width: dockWidth,
+        height: dockHeight,
+      };
+  }
 }
 
 export function renderDesktopLauncher(
