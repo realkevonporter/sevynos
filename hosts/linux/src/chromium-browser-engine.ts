@@ -91,12 +91,13 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
   public constructor(options: ChromiumBrowserEngineOptions = {}) {
     this.#current = blankSnapshot(options.width ?? 878, options.height ?? 501);
     this.#executable = options.executable ?? "/usr/bin/chromium";
+    // No shared default profile: an engine without an explicit
+    // userDataDirectory gets its own temp dir (see #requireConnection).
+    // Two live Chromium processes can never share one profile directory —
+    // the second aborts with a ProcessSingleton error.
+    this.#configuredUserDataDirectory = options.userDataDirectory;
+    // A shared download folder is fine — only the profile dir takes a lock.
     const stateDirectory = process.env["SEVYN_STATE_DIRECTORY"];
-    this.#configuredUserDataDirectory =
-      options.userDataDirectory ??
-      (stateDirectory === undefined
-        ? undefined
-        : join(stateDirectory, "browser-profile"));
     this.#downloadDirectory =
       options.downloadDirectory ??
       (stateDirectory === undefined ? undefined : join(stateDirectory, "Downloads"));

@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Log uncaught errors before the process exits so boot failures are diagnosable.
@@ -1479,7 +1479,19 @@ if (
     audio: new LinuxAudioService(),
     system: new LinuxSystemService(),
     filesystem: new LinuxFileSystem(),
-    createBrowserEngine: () => new ChromiumBrowserEngine(),
+    createBrowserEngine: () => {
+      // The browser keeps a persistent profile; every other engine
+      // (Sevyn Code, webviews) gets an isolated temp profile so two
+      // Chromium processes never contend for one profile lock.
+      const browserStateDirectory = process.env["SEVYN_STATE_DIRECTORY"];
+      return new ChromiumBrowserEngine(
+        browserStateDirectory === undefined
+          ? {}
+          : {
+              userDataDirectory: join(browserStateDirectory, "browser-profile"),
+            },
+      );
+    },
     createSevynCodeEngine: () => {
       const engine = sevynCodeService.engine;
       if (!engine) {
