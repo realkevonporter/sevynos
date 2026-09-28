@@ -237,9 +237,9 @@ function drawDesktopScene(
         drawStatusBar(raster, node, appearance);
         break;
       case "desktop-window": {
-        // macOS-style window open animation: scale-in from 95% + fade
+        // macOS-style window open animation: scale-in from 95% with ease-out
         const now = Date.now();
-        const windowId = String(node.base.id);
+        const windowId = String(node.windowId);
         let firstSeen = windowFirstSeen.get(windowId);
         if (firstSeen === undefined) {
           firstSeen = now;
@@ -251,22 +251,17 @@ function drawDesktopScene(
           // Ease-out cubic for smooth deceleration
           const eased = 1 - Math.pow(1 - t, 3);
           const scale = 0.95 + 0.05 * eased;
-          // Apply scale by adjusting the node's bounds temporarily
-          const origBounds = node.bounds;
-          const centerX = origBounds.x + origBounds.width / 2;
-          const centerY = origBounds.y + origBounds.height / 2;
-          const newW = origBounds.width * scale;
-          const newH = origBounds.height * scale;
-          const scaledNode = {
+          const animatedNode = {
             ...node,
-            bounds: {
-              x: Math.round(centerX - newW / 2),
-              y: Math.round(centerY - newH / 2),
-              width: Math.round(newW),
-              height: Math.round(newH),
+            animationTransform: {
+              opacity: 1,
+              scaleX: scale,
+              scaleY: scale,
+              translateX: 0,
+              translateY: 0,
             },
           };
-          drawWindow(raster, scaledNode, appearance);
+          drawWindow(raster, animatedNode, appearance);
         } else {
           drawWindow(raster, node, appearance);
           // Clean up old entries to prevent memory leak
@@ -525,7 +520,21 @@ function drawWindow(
   node: DesktopWindowSceneNode,
   appearance: DesktopAppearance,
 ): void {
-  const bounds = node.base.bounds;
+  let bounds = node.base.bounds;
+  // Apply animation transform if present (macOS-style open animation)
+  if (node.animationTransform !== undefined) {
+    const t = node.animationTransform;
+    const centerX = bounds.x + bounds.width / 2 + t.translateX;
+    const centerY = bounds.y + bounds.height / 2 + t.translateY;
+    const newW = bounds.width * t.scaleX;
+    const newH = bounds.height * t.scaleY;
+    bounds = {
+      x: Math.round(centerX - newW / 2),
+      y: Math.round(centerY - newH / 2),
+      width: Math.round(newW),
+      height: Math.round(newH),
+    };
+  }
   const windowAppearance = appearance.window;
   const shadow = node.base.focused
     ? windowAppearance.focusedShadow
