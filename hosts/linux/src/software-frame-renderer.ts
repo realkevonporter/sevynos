@@ -1393,7 +1393,7 @@ function drawTaskbar(
   const dockX = Math.round(bounds.x + (bounds.width - dockWidth) / 2);
   const dockY = bounds.y + 4;
   const dockHeight = bounds.height - 8;
-  const dockRadius = Math.round(dockHeight / 2);
+  const dockRadius = DESKTOP_VISUAL_METRICS.taskbarRadius;
   const dockBounds = {
     x: dockX,
     y: dockY,
@@ -1402,7 +1402,7 @@ function drawTaskbar(
   };
 
   drawSoftShadow(raster, dockBounds, dockRadius, appearance.taskbar.shadow);
-  // Frosted glass capsule surface
+  // Frosted glass surface
   raster.roundedRect(
     dockBounds,
     dockRadius,
@@ -1426,7 +1426,7 @@ function drawTaskbar(
     parseColor(isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.50)"),
   );
   // Subtle divider between launcher and apps
-  const dividerX = dockX + 70;
+  const dividerX = dockX + 64;
   raster.drawLine(
     dividerX,
     dockY + 10,
