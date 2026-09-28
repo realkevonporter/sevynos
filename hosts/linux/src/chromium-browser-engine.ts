@@ -657,7 +657,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       expression: "({title: document.title, url: location.href})",
       returnByValue: true,
     });
-    const decoded = decodePng(Buffer.from(screenshot.data, "base64"));
+    const decoded = await decodePngFast(Buffer.from(screenshot.data, "base64"));
     return this.#publish(
       Object.freeze({
         ready: true,
@@ -1143,12 +1143,45 @@ export async function decodeJpeg(input: Uint8Array): Promise<{
   return decodeJpegPure(input);
 }
 
-/** Logs the active JPEG decoder once; the pure-TS fallback is ~25x slower. */
+/** Logs the active image decoder once; the pure-TS fallback is ~25x slower. */
 let decoderChoiceLogged = false;
 function logDecoderChoice(decoder: "sharp" | "pure-ts"): void {
   if (decoderChoiceLogged) return;
   decoderChoiceLogged = true;
-  emitServiceMarker(`SEVYN_JPEG_DECODER_${decoder === "sharp" ? "SHARP" : "PURE_TS"}`);
+  emitServiceMarker(`SEVYN_IMAGE_DECODER_${decoder === "sharp" ? "SHARP" : "PURE_TS"}`);
+}
+
+/**
+ * Async PNG decoder for the pull-mode screenshot pipeline. Prefers sharp
+ * (libvips, ~20ms at 1080p on a worker thread) over the synchronous pure-TS
+ * decodePng, which blocks the event loop for ~100-300ms at 1080p. A blocking
+ * decode stalls Genesis frame production for every open app while the
+ * natively composited cursor stays smooth.
+ */
+export async function decodePngFast(input: Uint8Array): Promise<{
+  readonly width: number;
+  readonly height: number;
+  readonly pixels: Uint8Array;
+}> {
+  const sharp = loadSharp();
+  if (sharp !== undefined) {
+    try {
+      const { data, info } = await sharp(Buffer.from(input))
+        .raw()
+        .ensureAlpha()
+        .toBuffer({ resolveWithObject: true });
+      logDecoderChoice("sharp");
+      return {
+        width: info.width,
+        height: info.height,
+        pixels: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+      };
+    } catch {
+      // Fall through to the pure-TS decoder below.
+    }
+  }
+  logDecoderChoice("pure-ts");
+  return decodePng(input);
 }
 
 /** Lazily loads sharp; returns undefined if the native module is unavailable. */
