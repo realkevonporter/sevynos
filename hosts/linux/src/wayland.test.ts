@@ -12,6 +12,9 @@ describe("interactive Wayland host", () => {
     const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
     bridge.ready(1280, 720, 1);
     const host = await starting;
+    // PR #27: Fresh boot no longer auto-launches apps. Launch explicitly for test.
+    await host.runtime.applications.launch("org.sevynos.welcome");
+    await host.runtime.applications.launch("org.sevynos.console");
     await pause();
     const firstFrame = bridge.frames[0];
     expect(firstFrame).toBeDefined();
@@ -137,6 +140,9 @@ describe("interactive Wayland host", () => {
     const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
     bridge.ready(1280, 720, 1);
     const host = await starting;
+    // PR #27: Fresh boot no longer auto-launches apps. Launch explicitly for test.
+    await host.runtime.applications.launch("org.sevynos.welcome");
+    await host.runtime.applications.launch("org.sevynos.console");
     await pause(30);
     bridge.autoPresentFrames = false;
     const baseline = bridge.frames.length;
@@ -182,6 +188,9 @@ describe("interactive Wayland host", () => {
     const starting = startWaylandHost(bridge);
     bridge.ready(1280, 720, 1);
     const host = await starting;
+    // PR #27: Fresh boot no longer auto-launches apps. Launch explicitly for test.
+    await host.runtime.applications.launch("org.sevynos.welcome");
+    await host.runtime.applications.launch("org.sevynos.console");
     await pause(30);
     bridge.autoPresentFrames = false;
     const baseline = bridge.frames.length;
@@ -207,6 +216,9 @@ describe("interactive Wayland host", () => {
     const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
     bridge.ready(1280, 720, 1);
     const host = await starting;
+    // PR #27: Fresh boot no longer auto-launches apps. Launch explicitly for test.
+    await host.runtime.applications.launch("org.sevynos.welcome");
+    await host.runtime.applications.launch("org.sevynos.console");
     await pause(30);
 
     const { source, sourceId, otherId, outside } = dragFixture(markers, host);
@@ -233,6 +245,9 @@ describe("interactive Wayland host", () => {
     const starting = startWaylandHost(bridge, { marker: (value) => markers.push(value) });
     bridge.ready(1280, 720, 1);
     const host = await starting;
+    // PR #27: Fresh boot no longer auto-launches apps. Launch explicitly for test.
+    await host.runtime.applications.launch("org.sevynos.welcome");
+    await host.runtime.applications.launch("org.sevynos.console");
     await pause(30);
 
     const { source, sourceId, otherId, outside } = dragFixture(markers, host);
