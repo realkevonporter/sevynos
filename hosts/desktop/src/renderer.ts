@@ -118,12 +118,12 @@ const persistenceAdapter: DesktopPersistenceAdapter = {
   save: (session) => window.genesisHost.saveDesktopSession(session),
   clear: () => window.genesisHost.clearDesktopSession(),
 };
-const restored = loadedSettings.restorePreviousSession
-  ? await restoreDesktopSession(runtime, await persistenceAdapter.load(), viewport)
-  : false;
-if (!restored || runtime.applications.listRunning().length === 0) {
-  await runtime.applications.resetToDefaults();
+if (loadedSettings.restorePreviousSession) {
+  await restoreDesktopSession(runtime, await persistenceAdapter.load(), viewport);
 }
+// Fresh boot starts with a clean desktop (no auto-launched apps).
+// resetToDefaults() is reserved for explicit user-initiated reset
+// via persistence.reset().
 await isolatedApplications.attachRunningApplications();
 const persistence = new DesktopPersistenceController({
   runtime,
