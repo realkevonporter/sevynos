@@ -38,7 +38,7 @@ describe("interactive Wayland host", () => {
       "GENESIS_DISPLAY_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=720 scale=1",
     );
     expect(markers).toContain(
-      "GENESIS_WORKSPACE_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=624",
+      "GENESIS_WORKSPACE_BOUNDS reason=initial id=display-wayland-output-1 x=0 y=0 width=1280 height=648",
     );
     expect(
       markers.some((value) =>
@@ -84,7 +84,7 @@ describe("interactive Wayland host", () => {
       "GENESIS_DISPLAY_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=640 scale=1",
     );
     expect(markers).toContain(
-      "GENESIS_WORKSPACE_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=544",
+      "GENESIS_WORKSPACE_BOUNDS reason=resize id=display-wayland-output-1 x=0 y=0 width=1024 height=568",
     );
     await host.shutdown();
     expect(bridge.sent.at(-1)?.type).toBe("shutdown-complete");
