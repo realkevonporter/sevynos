@@ -102,23 +102,32 @@ test("mobile shell chrome is composed with React Native components", async () =>
   assert.match(metroConfig, /\.endsWith\("\.js"\)/);
 });
 
-test("desktop shell chrome and system applications stay on React Native", async () => {
-  for (const component of [
-    "applications/shell/desktop-home/desktop.tsx",
-    "applications/shell/dock/desktop.tsx",
-    "applications/shell/status-bar/desktop.tsx",
-    "applications/shell/launcher/desktop.tsx",
-    "applications/shell/window-switcher/desktop.tsx",
-  ]) {
-    const source = await readFile(resolve(root, component), "utf8");
-    assert.match(source, /from ["']react-native["']/, component);
-    assert.doesNotMatch(
-      source,
-      /document\.|createElement\(["'](?:div|button|input)/,
-      component,
-    );
-  }
+test("desktop shell chrome is scene-node based with no duplicate React Native components", async () => {
+  const entries = await readdir(resolve(root, "applications/shell"), {
+    recursive: true,
+  });
+  const duplicates = entries.filter(
+    (entry) =>
+      /(^|\/)(desktop\.tsx|context-menu\.tsx)$/.test(entry) ||
+      entry === "notifications/center.tsx",
+  );
+  assert.deepEqual(duplicates, []);
 
+  const desktop = await readFile(resolve(root, "applications/shell/desktop.ts"), "utf8");
+  for (const renderer of [
+    "renderDesktopDock",
+    "renderDesktopStatusBar",
+    "renderDesktopLauncher",
+    "renderDesktopLockScreen",
+    "renderDesktopWindowSwitcher",
+    "renderDesktopWallpaper",
+  ]) {
+    assert.match(desktop, new RegExp(`export function ${renderer}\\(`), renderer);
+  }
+  assert.doesNotMatch(desktop, /from ["']react-native["']/);
+});
+
+test("system applications stay on React Native", async () => {
   for (const [component, application] of [
     ["applications/welcome/src/index.tsx", "WelcomeApplication"],
     ["applications/core/src/index.tsx", "InstallerApplication"],

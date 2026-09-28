@@ -17,10 +17,6 @@
     "./mobile": {
       "types": "./dist/mobile.d.ts",
       "import": "./dist/mobile.js"
-    },
-    "./components": {
-      "types": "./dist/components.d.ts",
-      "import": "./dist/components.js"
     }
   },
   "scripts": {
