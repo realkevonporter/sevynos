@@ -111,6 +111,12 @@ const ATLAS_GLYPH_CACHE = new Map<string, DecodedAtlasGlyph>();
  * The desktop scene and native application snapshots remain the source of truth;
  * this module only turns their render commands into RGBA pixels for Wayland.
  */
+
+// Tracks when windows first appear for open-animation (macOS-style scale-in).
+// Maps window ID -> timestamp (ms) when first seen.
+const windowFirstSeen = new Map<string, number>();
+const WINDOW_OPEN_ANIMATION_MS = 180;
+
 export function renderDesktopScene(
   scene: DesktopScene,
   width: number,
@@ -214,6 +220,14 @@ function drawDesktopScene(
   includeBackground: boolean,
 ): void {
   const appearance = resolveDesktopAppearance(scene.settings.theme);
+  // Extract cursor position for dock magnification (macOS-style)
+  let cursorPos: { x: number; y: number } | undefined;
+  for (const node of scene.nodes) {
+    if (node.kind === "desktop-cursor") {
+      cursorPos = { x: node.position.x, y: node.position.y };
+      break;
+    }
+  }
   for (const node of [...scene.nodes].sort((left, right) => left.order - right.order)) {
     switch (node.kind) {
       case "desktop-background":
@@ -222,11 +236,49 @@ function drawDesktopScene(
       case "desktop-status-bar":
         drawStatusBar(raster, node, appearance);
         break;
-      case "desktop-window":
-        drawWindow(raster, node, appearance);
+      case "desktop-window": {
+        // macOS-style window open animation: scale-in from 95% + fade
+        const now = Date.now();
+        const windowId = String(node.base.id);
+        let firstSeen = windowFirstSeen.get(windowId);
+        if (firstSeen === undefined) {
+          firstSeen = now;
+          windowFirstSeen.set(windowId, firstSeen);
+        }
+        const age = now - firstSeen;
+        if (age < WINDOW_OPEN_ANIMATION_MS) {
+          const t = age / WINDOW_OPEN_ANIMATION_MS; // 0 to 1
+          // Ease-out cubic for smooth deceleration
+          const eased = 1 - Math.pow(1 - t, 3);
+          const scale = 0.95 + 0.05 * eased;
+          // Apply scale by adjusting the node's bounds temporarily
+          const origBounds = node.bounds;
+          const centerX = origBounds.x + origBounds.width / 2;
+          const centerY = origBounds.y + origBounds.height / 2;
+          const newW = origBounds.width * scale;
+          const newH = origBounds.height * scale;
+          const scaledNode = {
+            ...node,
+            bounds: {
+              x: Math.round(centerX - newW / 2),
+              y: Math.round(centerY - newH / 2),
+              width: Math.round(newW),
+              height: Math.round(newH),
+            },
+          };
+          drawWindow(raster, scaledNode, appearance);
+        } else {
+          drawWindow(raster, node, appearance);
+          // Clean up old entries to prevent memory leak
+          if (windowFirstSeen.size > 100) {
+            const oldest = [...windowFirstSeen.entries()].sort((a, b) => a[1] - b[1])[0];
+            if (oldest) windowFirstSeen.delete(oldest[0]);
+          }
+        }
         break;
+      }
       case "desktop-taskbar":
-        drawTaskbar(raster, node.bounds, node.activeWorkspace, appearance);
+        drawTaskbar(raster, node.bounds, node.activeWorkspace, appearance, cursorPos);
         break;
       case "desktop-launcher-button":
         drawLauncherButton(
@@ -293,10 +345,34 @@ function drawDesktopScene(
           appearance,
         );
         break;
-      case "desktop-taskbar-application":
+      case "desktop-taskbar-application": {
+        // macOS-style dock magnification: scale icons near the cursor
+        let iconBounds = node.bounds;
+        if (cursorPos !== undefined) {
+          const iconCenterX = node.bounds.x + node.bounds.width / 2;
+          const iconCenterY = node.bounds.y + node.bounds.height / 2;
+          const dx = cursorPos.x - iconCenterX;
+          const dy = cursorPos.y - iconCenterY;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          // Magnification radius: 100px, max scale 1.5x at center
+          const maxDist = 100;
+          if (distance < maxDist) {
+            const t = 1 - distance / maxDist; // 0 (far) to 1 (center)
+            // Smooth falloff (ease-out)
+            const scale = 1 + 0.5 * t * t * (3 - 2 * t);
+            const newW = node.bounds.width * scale;
+            const newH = node.bounds.height * scale;
+            iconBounds = {
+              x: Math.round(iconCenterX - newW / 2),
+              y: Math.round(node.bounds.y + node.bounds.height - newH), // grow upward
+              width: Math.round(newW),
+              height: Math.round(newH),
+            };
+          }
+        }
         drawButton(
           raster,
-          node.bounds,
+          iconBounds,
           `${node.minimized ? "◇ " : ""}${node.label}`,
           node.focused,
           scene.settings.accentColor,
@@ -305,6 +381,7 @@ function drawDesktopScene(
           node.running ?? true,
         );
         break;
+      }
       case "desktop-reset-action":
         drawButton(
           raster,
@@ -1362,6 +1439,7 @@ function drawTaskbar(
   bounds: Bounds,
   _workspace: string,
   appearance: DesktopAppearance,
+  cursorPos?: { x: number; y: number },
 ): void {
   const isDark = appearance.mode === "dark";
   // Bounds are now the floating dock directly (macOS-style), not full-width.
