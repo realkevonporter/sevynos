@@ -491,42 +491,17 @@ function drawWindow(
         : windowAppearance.unfocusedTitleBar,
     ),
   );
-  const badgeSize = 22;
-  const badgeX = bounds.x + 16;
-  const badgeY =
-    bounds.y + Math.round((DESKTOP_VISUAL_METRICS.titleBarHeight - badgeSize) / 2);
-  const badgeBg = withAlpha(parseColor(appearance.button.surface), 0.85);
-  const badgeBorder = parseColor(appearance.button.border);
-  raster.roundedRect(
-    { x: badgeX, y: badgeY, width: badgeSize, height: badgeSize },
-    6,
-    badgeBg,
-    badgeBorder,
-  );
-  const monogram = resolveWindowBadge(node.title);
-  const badgeScale = monogram.length > 2 ? 1.1 : monogram.length > 1 ? 1.3 : 1.6;
-  raster.drawText(
-    monogram,
-    badgeX + badgeSize / 2,
-    badgeY + (badgeSize - Math.round(7 * badgeScale)) / 2,
-    badgeScale,
-    parseColor(
-      node.base.focused
-        ? appearance.button.activeIndicator
-        : appearance.window.unfocusedTitle,
-    ),
-    "center",
-  );
+  // macOS: title is centered, no badge
   raster.drawText(
     node.title,
-    badgeX + badgeSize + 8,
-    bounds.y + 16,
-    2,
+    bounds.x + bounds.width / 2,
+    bounds.y + 14,
+    1.4,
     parseColor(
       node.base.focused ? windowAppearance.focusedTitle : windowAppearance.unfocusedTitle,
     ),
-    "start",
-    Math.max(0, bounds.width - 190),
+    "center",
+    Math.max(0, bounds.width - 140), // leave room for traffic lights
   );
   raster.fillRect(
     {
