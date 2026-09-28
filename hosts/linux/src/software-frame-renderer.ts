@@ -111,6 +111,12 @@ const ATLAS_GLYPH_CACHE = new Map<string, DecodedAtlasGlyph>();
  * The desktop scene and native application snapshots remain the source of truth;
  * this module only turns their render commands into RGBA pixels for Wayland.
  */
+
+// Tracks when windows first appear for open-animation (macOS-style scale-in).
+// Maps window ID -> timestamp (ms) when first seen.
+const windowFirstSeen = new Map<string, number>();
+const WINDOW_OPEN_ANIMATION_MS = 180;
+
 export function renderDesktopScene(
   scene: DesktopScene,
   width: number,
@@ -214,6 +220,14 @@ function drawDesktopScene(
   includeBackground: boolean,
 ): void {
   const appearance = resolveDesktopAppearance(scene.settings.theme);
+  // Extract cursor position for dock magnification (macOS-style)
+  let cursorPos: { x: number; y: number } | undefined;
+  for (const node of scene.nodes) {
+    if (node.kind === "desktop-cursor") {
+      cursorPos = { x: node.position.x, y: node.position.y };
+      break;
+    }
+  }
   for (const node of [...scene.nodes].sort((left, right) => left.order - right.order)) {
     switch (node.kind) {
       case "desktop-background":
@@ -222,9 +236,42 @@ function drawDesktopScene(
       case "desktop-status-bar":
         drawStatusBar(raster, node, appearance);
         break;
-      case "desktop-window":
-        drawWindow(raster, node, appearance);
+      case "desktop-window": {
+        // macOS-style window open animation: scale-in from 95% with ease-out
+        const now = Date.now();
+        const windowId = node.windowId;
+        let firstSeen = windowFirstSeen.get(windowId);
+        if (firstSeen === undefined) {
+          firstSeen = now;
+          windowFirstSeen.set(windowId, firstSeen);
+        }
+        const age = now - firstSeen;
+        if (age < WINDOW_OPEN_ANIMATION_MS) {
+          const t = age / WINDOW_OPEN_ANIMATION_MS; // 0 to 1
+          // Ease-out cubic for smooth deceleration
+          const eased = 1 - Math.pow(1 - t, 3);
+          const scale = 0.95 + 0.05 * eased;
+          const animatedNode = {
+            ...node,
+            animationTransform: {
+              opacity: 1,
+              scaleX: scale,
+              scaleY: scale,
+              translateX: 0,
+              translateY: 0,
+            },
+          };
+          drawWindow(raster, animatedNode, appearance);
+        } else {
+          drawWindow(raster, node, appearance);
+          // Clean up old entries to prevent memory leak
+          if (windowFirstSeen.size > 100) {
+            const oldest = [...windowFirstSeen.entries()].sort((a, b) => a[1] - b[1])[0];
+            if (oldest) windowFirstSeen.delete(oldest[0]);
+          }
+        }
         break;
+      }
       case "desktop-taskbar":
         drawTaskbar(raster, node.bounds, node.activeWorkspace, appearance);
         break;
@@ -293,10 +340,34 @@ function drawDesktopScene(
           appearance,
         );
         break;
-      case "desktop-taskbar-application":
+      case "desktop-taskbar-application": {
+        // macOS-style dock magnification: scale icons near the cursor
+        let iconBounds = node.bounds;
+        if (cursorPos !== undefined) {
+          const iconCenterX = node.bounds.x + node.bounds.width / 2;
+          const iconCenterY = node.bounds.y + node.bounds.height / 2;
+          const dx = cursorPos.x - iconCenterX;
+          const dy = cursorPos.y - iconCenterY;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          // Magnification radius: 100px, max scale 1.5x at center
+          const maxDist = 100;
+          if (distance < maxDist) {
+            const t = 1 - distance / maxDist; // 0 (far) to 1 (center)
+            // Smooth falloff (ease-out)
+            const scale = 1 + 0.5 * t * t * (3 - 2 * t);
+            const newW = node.bounds.width * scale;
+            const newH = node.bounds.height * scale;
+            iconBounds = {
+              x: Math.round(iconCenterX - newW / 2),
+              y: Math.round(node.bounds.y + node.bounds.height - newH), // grow upward
+              width: Math.round(newW),
+              height: Math.round(newH),
+            };
+          }
+        }
         drawButton(
           raster,
-          node.bounds,
+          iconBounds,
           `${node.minimized ? "◇ " : ""}${node.label}`,
           node.focused,
           scene.settings.accentColor,
@@ -305,6 +376,7 @@ function drawDesktopScene(
           node.running ?? true,
         );
         break;
+      }
       case "desktop-reset-action":
         drawButton(
           raster,
@@ -448,7 +520,21 @@ function drawWindow(
   node: DesktopWindowSceneNode,
   appearance: DesktopAppearance,
 ): void {
-  const bounds = node.base.bounds;
+  let bounds = node.base.bounds;
+  // Apply animation transform if present (macOS-style open animation)
+  if (node.animationTransform !== undefined) {
+    const t = node.animationTransform;
+    const centerX = bounds.x + bounds.width / 2 + t.translateX;
+    const centerY = bounds.y + bounds.height / 2 + t.translateY;
+    const newW = bounds.width * t.scaleX;
+    const newH = bounds.height * t.scaleY;
+    bounds = {
+      x: Math.round(centerX - newW / 2),
+      y: Math.round(centerY - newH / 2),
+      width: Math.round(newW),
+      height: Math.round(newH),
+    };
+  }
   const windowAppearance = appearance.window;
   const shadow = node.base.focused
     ? windowAppearance.focusedShadow
@@ -491,42 +577,17 @@ function drawWindow(
         : windowAppearance.unfocusedTitleBar,
     ),
   );
-  const badgeSize = 22;
-  const badgeX = bounds.x + 16;
-  const badgeY =
-    bounds.y + Math.round((DESKTOP_VISUAL_METRICS.titleBarHeight - badgeSize) / 2);
-  const badgeBg = withAlpha(parseColor(appearance.button.surface), 0.85);
-  const badgeBorder = parseColor(appearance.button.border);
-  raster.roundedRect(
-    { x: badgeX, y: badgeY, width: badgeSize, height: badgeSize },
-    6,
-    badgeBg,
-    badgeBorder,
-  );
-  const monogram = resolveWindowBadge(node.title);
-  const badgeScale = monogram.length > 2 ? 1.1 : monogram.length > 1 ? 1.3 : 1.6;
-  raster.drawText(
-    monogram,
-    badgeX + badgeSize / 2,
-    badgeY + (badgeSize - Math.round(7 * badgeScale)) / 2,
-    badgeScale,
-    parseColor(
-      node.base.focused
-        ? appearance.button.activeIndicator
-        : appearance.window.unfocusedTitle,
-    ),
-    "center",
-  );
+  // macOS: title is centered, no badge
   raster.drawText(
     node.title,
-    badgeX + badgeSize + 8,
-    bounds.y + 16,
-    2,
+    bounds.x + bounds.width / 2,
+    bounds.y + 14,
+    1.4,
     parseColor(
       node.base.focused ? windowAppearance.focusedTitle : windowAppearance.unfocusedTitle,
     ),
-    "start",
-    Math.max(0, bounds.width - 190),
+    "center",
+    Math.max(0, bounds.width - 140), // leave room for traffic lights
   );
   raster.fillRect(
     {
@@ -1389,16 +1450,13 @@ function drawTaskbar(
   appearance: DesktopAppearance,
 ): void {
   const isDark = appearance.mode === "dark";
-  const dockWidth = Math.min(bounds.width - 48, 760);
-  const dockX = Math.round(bounds.x + (bounds.width - dockWidth) / 2);
-  const dockY = bounds.y + 4;
-  const dockHeight = bounds.height - 8;
-  const dockRadius = DESKTOP_VISUAL_METRICS.taskbarRadius;
+  // Bounds are now the floating dock directly (macOS-style), not full-width.
+  const dockRadius = 18; // macOS-like rounded corners
   const dockBounds = {
-    x: dockX,
-    y: dockY,
-    width: dockWidth,
-    height: dockHeight,
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
   };
 
   drawSoftShadow(raster, dockBounds, dockRadius, appearance.taskbar.shadow);
@@ -1411,37 +1469,42 @@ function drawTaskbar(
   );
   // Specular top highlight line
   raster.drawLine(
-    dockX + dockRadius,
-    dockY + 1,
-    dockX + dockWidth - dockRadius,
-    dockY + 1,
+    dockBounds.x + dockRadius,
+    dockBounds.y + 1,
+    dockBounds.x + dockBounds.width - dockRadius,
+    dockBounds.y + 1,
     parseColor(isDark ? "rgba(255, 255, 255, 0.28)" : "rgba(255, 255, 255, 0.90)"),
     1,
   );
   // Subtle inner border for frosted glass rim
   raster.roundedRect(
-    { x: dockX + 1, y: dockY + 1, width: dockWidth - 2, height: dockHeight - 2 },
+    {
+      x: dockBounds.x + 1,
+      y: dockBounds.y + 1,
+      width: dockBounds.width - 2,
+      height: dockBounds.height - 2,
+    },
     dockRadius - 1,
     TRANSPARENT,
     parseColor(isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.50)"),
   );
   // Subtle divider between launcher and apps
-  const dividerX = dockX + 64;
+  const dividerX = dockBounds.x + 64;
   raster.drawLine(
     dividerX,
-    dockY + 10,
+    dockBounds.y + 10,
     dividerX,
-    dockY + dockHeight - 10,
+    dockBounds.y + dockBounds.height - 10,
     parseColor(isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)"),
     1,
   );
   // Subtle divider between apps and workspace switchers
-  const wsDividerX = dockX + dockWidth - 120;
+  const wsDividerX = dockBounds.x + dockBounds.width - 120;
   raster.drawLine(
     wsDividerX,
-    dockY + 10,
+    dockBounds.y + 10,
     wsDividerX,
-    dockY + dockHeight - 10,
+    dockBounds.y + dockBounds.height - 10,
     parseColor(isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)"),
     1,
   );
@@ -1453,224 +1516,159 @@ function drawStatusBar(
   appearance: DesktopAppearance,
 ): void {
   const bounds = node.bounds;
-  const workspace = node.activeWorkspace;
   const isDark = appearance.mode === "dark";
+  // macOS-style translucent menu bar
   raster.fillRect(
     bounds,
-    parseColor(isDark ? "rgba(14, 17, 24, 0.88)" : "rgba(250, 251, 254, 0.90)"),
+    parseColor(isDark ? "rgba(20, 22, 30, 0.72)" : "rgba(250, 250, 252, 0.72)"),
   );
+  // Subtle bottom border
   raster.drawLine(
     bounds.x,
     bounds.y + bounds.height - 1,
     bounds.x + bounds.width,
     bounds.y + bounds.height - 1,
-    parseColor(isDark ? "rgba(255, 255, 255, 0.10)" : "rgba(0, 0, 0, 0.08)"),
+    parseColor(isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)"),
     1,
   );
 
   const centerY = bounds.y + Math.round(bounds.height / 2);
-  const textY = bounds.y + Math.round((bounds.height - 10) / 2);
+  const textColor = parseColor(isDark ? "#FFFFFF" : "#1A1C23");
+  const dimColor = parseColor(isDark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.75)");
 
-  // Left: Sevyn Emblem
+  // Left: Sevyn logo + app name + menus (macOS-style)
+  let leftX = bounds.x + 12;
+  // Sevyn emblem (replaces Apple logo)
   const emblemSize = 14;
-  const emblemX = bounds.x + 14;
   const emblemY = centerY - Math.round(emblemSize / 2);
   raster.roundedGradientRect(
-    { x: emblemX, y: emblemY, width: emblemSize, height: emblemSize },
+    { x: leftX, y: emblemY, width: emblemSize, height: emblemSize },
     4,
     parseColor("#E6C47A"),
     parseColor("#B8943D"),
   );
   raster.drawText(
     "S",
-    emblemX + emblemSize / 2,
+    leftX + emblemSize / 2,
     emblemY + 1,
-    1.1,
+    1.0,
     parseColor("#1C1917"),
     "center",
   );
+  leftX += emblemSize + 8;
 
-  raster.drawText(
-    "SevynOS",
-    emblemX + emblemSize + 8,
-    textY,
-    1.6,
-    parseColor(isDark ? "#FFFFFF" : "#1A1C23"),
-    "start",
-  );
+  // Active app name (bold)
+  raster.drawText("SevynOS", leftX, centerY - 5, 1.3, textColor, "start");
+  leftX += 62;
 
-  const wsLabel = workspace.replace("workspace-", "Workspace ");
-  const wsX = emblemX + emblemSize + 82;
-  raster.roundedRect(
-    { x: wsX, y: centerY - 9, width: 88, height: 18 },
-    9,
-    parseColor(isDark ? "rgba(212, 175, 55, 0.14)" : "rgba(212, 175, 55, 0.18)"),
-    parseColor(isDark ? "rgba(212, 175, 55, 0.32)" : "rgba(212, 175, 55, 0.38)"),
-  );
-  raster.drawText(
-    wsLabel,
-    wsX + 44,
-    textY + 1,
-    1.3,
-    parseColor(isDark ? "#E6C47A" : "#8A6D1C"),
-    "center",
-  );
-
-  // Center: Clock & Date
-  let centerText: string;
-  if (node.dateText && node.timeText) {
-    centerText = `${node.dateText}  ${node.timeText}`;
-  } else {
-    const now = new Date();
-    let hours = now.getHours();
-    const minutes = now.getMinutes().toString().padStart(2, "0");
-    const ampm = hours >= 12 ? "PM" : "AM";
-    hours = hours % 12 || 12;
-    centerText = `${String(hours)}:${minutes} ${ampm}`;
-  }
-  raster.drawText(
-    centerText,
-    bounds.x + Math.round(bounds.width / 2),
-    textY,
-    1.5,
-    parseColor(isDark ? "#E5E7EB" : "#1F2937"),
-    "center",
-  );
-
-  // Right: Status elements
-  let currentX = bounds.x + bounds.width - 16;
-
-  // 1. WiFi status pill
-  const wifiState = node.wifiState ?? "unavailable";
-  let pillText = "Connected";
-  let dotColor = "#34C759";
-  if (wifiState === "connected") {
-    pillText = node.wifiSsid
-      ? node.wifiSsid.length > 12
-        ? `${node.wifiSsid.slice(0, 11)}…`
-        : node.wifiSsid
-      : "Connected";
-    dotColor = "#34C759";
-  } else if (wifiState === "connecting") {
-    pillText = "Connecting…";
-    dotColor = "#FF9500";
-  } else if (wifiState === "disconnected") {
-    pillText = "Offline";
-    dotColor = isDark ? "#6B7280" : "#9CA3AF";
-  } else {
-    pillText = "No Wi-Fi";
-    dotColor = isDark ? "#4B5563" : "#D1D5DB";
+  // Menu items
+  const menus = ["File", "Edit", "View", "Window", "Help"];
+  for (const menu of menus) {
+    raster.drawText(menu, leftX, centerY - 5, 1.2, textColor, "start");
+    leftX += menu.length * 7 + 16;
   }
 
-  const pillW = Math.max(76, pillText.length * 7 + 28);
-  currentX -= pillW;
-  const connX = currentX;
-  raster.roundedRect(
-    { x: connX, y: centerY - 9, width: pillW, height: 18 },
-    9,
-    parseColor(isDark ? "rgba(255, 255, 255, 0.06)" : "rgba(0, 0, 0, 0.04)"),
-    parseColor(isDark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.10)"),
-  );
-  raster.fillCircle(connX + 11, centerY, 3, parseColor(dotColor));
-  raster.drawText(
-    pillText,
-    connX + 20,
-    textY + 1,
-    1.2,
-    parseColor(isDark ? "#CBD5E1" : "#475569"),
-    "start",
-  );
+  // Right: status icons + clock (macOS-style, right-aligned)
+  let rightX = bounds.x + bounds.width - 12;
 
-  // 2. Battery Capsule: only rendered when a battery is present
+  // Clock: macOS format "Mon Sep 28  6:09 PM"
+  const now = new Date();
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  let hours = now.getHours();
+  const minutes = now.getMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12 || 12;
+  const dayName = days[now.getDay()] ?? "Mon";
+  const monthName = months[now.getMonth()] ?? "Jan";
+  const clockText = `${dayName} ${monthName} ${String(now.getDate())}  ${String(hours)}:${minutes} ${ampm}`;
+  const clockWidth = clockText.length * 6.5;
+  rightX -= clockWidth;
+  raster.drawText(clockText, rightX, centerY - 5, 1.2, textColor, "start");
+  rightX -= 16;
+
+  // Battery
   if (node.batteryAvailable !== false) {
     const pct = Math.min(100, Math.max(0, node.batteryPercent ?? 100));
-    const batW = 24;
-    const batH = 12;
-    currentX -= batW + 10;
-    const batX = currentX;
+    const batW = 22;
+    const batH = 11;
+    rightX -= batW + 4;
+    const batX = rightX;
     const batY = centerY - Math.round(batH / 2);
+    // Battery outline
     raster.roundedRect(
       { x: batX, y: batY, width: batW, height: batH },
-      3.5,
-      parseColor(isDark ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.05)"),
-      parseColor(isDark ? "rgba(255, 255, 255, 0.40)" : "rgba(0, 0, 0, 0.35)"),
+      3,
+      parseColor("rgba(0,0,0,0)"),
+      dimColor,
     );
-    raster.fillRect(
-      { x: batX + batW, y: batY + 3, width: 2, height: batH - 6 },
-      parseColor(isDark ? "rgba(255, 255, 255, 0.40)" : "rgba(0, 0, 0, 0.35)"),
-    );
-    const innerW = Math.max(2, Math.round(((batW - 4) * pct) / 100));
-    const batColor = node.batteryCharging
-      ? "#34C759"
-      : pct <= 20
-        ? "#FF3B30"
-        : pct <= 40
-          ? "#FF9500"
-          : "#34C759";
-    raster.roundedRect(
-      { x: batX + 2, y: batY + 2, width: innerW, height: batH - 4 },
-      2,
-      parseColor(batColor),
-    );
-    currentX -= 6;
-    raster.drawText(
-      `${String(pct)}%`,
-      currentX,
-      textY,
-      1.2,
-      parseColor(isDark ? "#9CA3AF" : "#6B7280"),
-      "end",
-    );
-    currentX -= 28;
-  }
-
-  // 3. WiFi Signal Bars
-  currentX -= 8;
-  const wifiX = currentX - 16;
-  currentX = wifiX;
-  const signal = node.wifiSignal ?? 100;
-  const isConnected = wifiState === "connected";
-  const barCount = !isConnected ? 0 : signal >= 66 ? 3 : signal >= 33 ? 2 : 1;
-  for (let i = 0; i < 3; i++) {
-    const barH = 4 + i * 3;
-    const filled = i < barCount;
-    const barColor = filled
-      ? "#34C759"
-      : isDark
-        ? "rgba(255, 255, 255, 0.20)"
-        : "rgba(0, 0, 0, 0.18)";
-    raster.roundedRect(
-      { x: wifiX + i * 5, y: centerY + 4 - barH, width: 3, height: barH },
-      1.5,
-      parseColor(barColor),
-    );
-  }
-
-  // 4. Audio Volume Indicator
-  if (node.audioVolume !== undefined) {
-    currentX -= 12;
-    const audioX = currentX - 14;
-    currentX = audioX;
-    const spkColor = node.audioMuted ? "#FF3B30" : isDark ? "#CBD5E1" : "#475569";
-    raster.fillRect(
-      { x: audioX, y: centerY - 3, width: 4, height: 6 },
-      parseColor(spkColor),
-    );
-    raster.roundedRect(
-      { x: audioX + 3, y: centerY - 5, width: 4, height: 10 },
-      1,
-      parseColor(spkColor),
-    );
-    if (!node.audioMuted) {
-      raster.drawText(
-        `${String(node.audioVolume)}%`,
-        audioX - 4,
-        textY,
-        1.1,
-        parseColor(isDark ? "#9CA3AF" : "#6B7280"),
-        "end",
+    // Battery fill
+    const fillW = Math.round((batW - 4) * (pct / 100));
+    if (fillW > 0) {
+      raster.fillRect(
+        { x: batX + 2, y: batY + 2, width: fillW, height: batH - 4 },
+        pct <= 20 ? parseColor("#FF3B30") : textColor,
       );
     }
+    // Battery cap
+    raster.fillRect(
+      { x: batX + batW + 1, y: batY + 3, width: 2, height: batH - 6 },
+      dimColor,
+    );
+    rightX -= 12;
+  }
+
+  // WiFi icon (signal bars)
+  const wifiState = node.wifiState ?? "unavailable";
+  const wifiColor = wifiState === "connected" ? textColor : dimColor;
+  rightX -= 16;
+  const wifiX = rightX;
+  const wifiY = centerY;
+  // Signal bars (4 bars, increasing height)
+  const signalLevel = wifiState === "connected" ? 4 : wifiState === "connecting" ? 2 : 1;
+  for (let i = 0; i < 4; i++) {
+    const barH = 3 + i * 2;
+    const barX = wifiX + i * 4;
+    const alpha: number = i < signalLevel ? 1 : 0.25;
+    raster.fillRect(
+      { x: barX, y: wifiY + 4 - barH, width: 2.5, height: barH },
+      parseColor(
+        isDark ? `rgba(255,255,255,${String(alpha)})` : `rgba(0,0,0,${String(alpha)})`,
+      ),
+    );
+  }
+  void wifiColor;
+  rightX -= 12;
+
+  // Volume icon
+  if (node.audioMuted !== undefined || node.audioVolume !== undefined) {
+    rightX -= 16;
+    const volX = rightX;
+    const volY = centerY;
+    // Speaker shape (simplified)
+    raster.fillRect({ x: volX + 2, y: volY - 3, width: 4, height: 6 }, dimColor);
+    raster.drawText(
+      node.audioMuted ? "✕" : "♪",
+      volX + 8,
+      volY - 6,
+      1.2,
+      dimColor,
+      "start",
+    );
+    rightX -= 8;
   }
 }
 
@@ -4062,17 +4060,4 @@ const FONT: Readonly<Record<string, readonly number[]>> = Object.freeze({
 function getCharacterAdvance(character: string, scale: number): number {
   const fontSize = scale * 7;
   return getNativeCharacterAdvance(character, fontSize);
-}
-
-function resolveWindowBadge(title: string): string {
-  const lower = title.toLocaleLowerCase();
-  if (lower.includes("studio") || lower.includes("ide")) return "</>";
-  if (lower.includes("console") || lower.includes("terminal")) return ">_";
-  if (lower.includes("browser") || lower.includes("web")) return "WB";
-  if (lower.includes("file")) return "FL";
-  if (lower.includes("setting")) return "⚙";
-  if (lower.includes("monitor")) return "SM";
-  if (lower.includes("note")) return "NT";
-  if (lower.includes("gallery")) return "UI";
-  return title.charAt(0) || "•";
 }

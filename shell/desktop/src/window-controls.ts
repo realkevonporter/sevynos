@@ -20,29 +20,19 @@ export interface WindowControlHit {
   readonly control: WindowControlKind;
 }
 
-const CONTROL_SIZE = 28;
-const CONTROL_GAP = 6;
-const CONTROL_RIGHT_INSET = 10;
-const CONTROL_TOP_INSET = 9;
+const CONTROL_SIZE = 12; // macOS traffic light size
+const CONTROL_GAP = 8; // macOS spacing between lights
+const CONTROL_LEFT_INSET = 20; // macOS: 20px from left edge
+const CONTROL_TOP_INSET = 16; // vertically centered in title bar
 
-const CONTROL_ORDER: readonly WindowControlKind[] = [
-  "close",
-  "restore",
-  "maximize",
-  "minimize",
-];
+const CONTROL_ORDER: readonly WindowControlKind[] = ["close", "minimize", "maximize"];
 
 export function getWindowControlRects(
   window: GenesisWindow,
 ): readonly WindowControlRect[] {
   return CONTROL_ORDER.map((kind, index) => ({
     kind,
-    x:
-      window.bounds.x +
-      window.bounds.width -
-      CONTROL_RIGHT_INSET -
-      CONTROL_SIZE -
-      index * (CONTROL_SIZE + CONTROL_GAP),
+    x: window.bounds.x + CONTROL_LEFT_INSET + index * (CONTROL_SIZE + CONTROL_GAP),
     y: window.bounds.y + CONTROL_TOP_INSET,
     width: CONTROL_SIZE,
     height: CONTROL_SIZE,

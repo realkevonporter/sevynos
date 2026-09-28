@@ -345,7 +345,7 @@ export function renderDesktopStatusBar(
           x: display.bounds.x,
           y: display.bounds.y,
           width: display.bounds.width,
-          height: 52,
+          height: 28, // macOS menu bar height
         },
         displayId: display.id,
         activeWorkspace: input.activeWorkspace,
@@ -377,15 +377,24 @@ export function renderDesktopDock(
   | DesktopTaskbarApplicationSceneNode
   | DesktopWorkspaceControlSceneNode
 )[] {
-  const taskbars = input.displays.map((display) =>
-    Object.freeze({
+  // macOS-style floating dock: centered, width based on icon count.
+  // Each display gets its own floating dock.
+  const taskbars = input.displays.map((display) => {
+    const displayApps = input.applications.filter((app) => app.displayId === display.id);
+    const dockBounds = getFloatingDockBounds(
+      display.taskbarBounds,
+      displayApps.length,
+      input.workspaces.length,
+      input.position,
+    );
+    return Object.freeze({
       kind: "desktop-taskbar" as const,
       order: input.order,
-      bounds: display.taskbarBounds,
+      bounds: dockBounds,
       displayId: display.id,
       activeWorkspace: input.activeWorkspace,
-    }),
-  );
+    });
+  });
   const applications = input.applications.flatMap((application) => {
     const display = input.displays.find(
       (candidate) => candidate.id === application.displayId,
@@ -395,11 +404,17 @@ export function renderDesktopDock(
       (candidate) => candidate.displayId === application.displayId,
     );
     const index = displayApplications.indexOf(application);
+    const dockBounds = getFloatingDockBounds(
+      display.taskbarBounds,
+      displayApplications.length,
+      input.workspaces.length,
+      input.position,
+    );
     return [
       Object.freeze({
         kind: "desktop-taskbar-application" as const,
         order: input.order + 1,
-        bounds: runningApplicationBounds(display.taskbarBounds, input.position, index),
+        bounds: runningApplicationBounds(dockBounds, input.position, index),
         applicationId: application.applicationId,
         label: application.label,
         focused: application.focused,
@@ -409,18 +424,82 @@ export function renderDesktopDock(
       }),
     ];
   });
-  const workspaces = input.displays.flatMap((display) =>
-    input.workspaces.map((workspaceId, index) =>
+  const workspaces = input.displays.flatMap((display) => {
+    const displayApps = input.applications.filter((app) => app.displayId === display.id);
+    const dockBounds = getFloatingDockBounds(
+      display.taskbarBounds,
+      displayApps.length,
+      input.workspaces.length,
+      input.position,
+    );
+    return input.workspaces.map((workspaceId, index) =>
       Object.freeze({
         kind: "desktop-workspace-control" as const,
         order: input.order + 1,
-        bounds: workspaceBounds(display.taskbarBounds, input.position, index),
+        bounds: workspaceBounds(dockBounds, input.position, index),
         workspaceId,
         active: workspaceId === input.activeWorkspace,
       }),
-    ),
-  );
+    );
+  });
   return Object.freeze([...taskbars, ...applications, ...workspaces]);
+}
+
+/**
+ * Calculate macOS-style floating dock bounds: centered horizontally,
+ * width based on icon count, 8px from bottom edge.
+ */
+function getFloatingDockBounds(
+  taskbarBounds: DesktopShellBounds,
+  iconCount: number,
+  workspaceCount = 0,
+  position: DesktopDockRenderInput["position"] = "bottom",
+): DesktopShellBounds {
+  const tilePitch = 54; // 44px tile + 10px gap (matches PR #20)
+  const workspacePitch = 32; // workspace indicator width + gap
+  const dividerWidth = 20; // divider between apps and workspaces
+  const horizontalPadding = 16;
+  const dockWidth = Math.max(
+    80, // minimum width for empty dock
+    iconCount * tilePitch +
+      (workspaceCount > 0 ? dividerWidth + workspaceCount * workspacePitch : 0) +
+      horizontalPadding * 2,
+  );
+  const dockHeight = 60;
+  const margin = 8;
+
+  // Position the floating dock based on taskbar position
+  switch (position) {
+    case "top":
+      return {
+        x: Math.round(taskbarBounds.x + (taskbarBounds.width - dockWidth) / 2),
+        y: taskbarBounds.y + margin,
+        width: dockWidth,
+        height: dockHeight,
+      };
+    case "left":
+      return {
+        x: taskbarBounds.x + margin,
+        y: Math.round(taskbarBounds.y + (taskbarBounds.height - dockHeight) / 2),
+        width: dockWidth,
+        height: dockHeight,
+      };
+    case "right":
+      return {
+        x: taskbarBounds.x + taskbarBounds.width - dockWidth - margin,
+        y: Math.round(taskbarBounds.y + (taskbarBounds.height - dockHeight) / 2),
+        width: dockWidth,
+        height: dockHeight,
+      };
+    case "bottom":
+    default:
+      return {
+        x: Math.round(taskbarBounds.x + (taskbarBounds.width - dockWidth) / 2),
+        y: taskbarBounds.y + taskbarBounds.height - dockHeight - margin,
+        width: dockWidth,
+        height: dockHeight,
+      };
+  }
 }
 
 export function renderDesktopLauncher(
@@ -667,44 +746,48 @@ function launcherButtonBounds(
 }
 
 function runningApplicationBounds(
-  taskbar: DesktopShellBounds,
+  dockBounds: DesktopShellBounds,
   position: DesktopDockRenderInput["position"],
   index: number,
 ): DesktopShellBounds {
   if (position === "left" || position === "right")
-    return { x: taskbar.x + 6, y: taskbar.y + 60 + index * 48, width: 40, height: 40 };
-  const dockWidth = Math.min(taskbar.width - 48, 760);
-  const dockX = Math.round(taskbar.x + (taskbar.width - dockWidth) / 2);
-  const dockHeight = taskbar.height - 8;
+    return {
+      x: dockBounds.x + 6,
+      y: dockBounds.y + 60 + index * 48,
+      width: 40,
+      height: 40,
+    };
+  // Icons are laid out left-to-right within the floating dock, with padding.
   const tileWidth = 44;
-  const tileHeight = 40;
+  const tileHeight = 44;
+  const horizontalPadding = 16;
+  const tilePitch = 54;
   return {
-    x: dockX + 78 + index * 54,
-    y: taskbar.y + 4 + Math.round((dockHeight - tileHeight) / 2),
+    x: dockBounds.x + horizontalPadding + index * tilePitch,
+    y: dockBounds.y + Math.round((dockBounds.height - tileHeight) / 2),
     width: tileWidth,
     height: tileHeight,
   };
 }
 
 function workspaceBounds(
-  taskbar: DesktopShellBounds,
+  dockBounds: DesktopShellBounds,
   position: DesktopDockRenderInput["position"],
   index: number,
 ): DesktopShellBounds {
   if (position === "left" || position === "right")
     return {
-      x: taskbar.x + 14,
-      y: taskbar.y + taskbar.height - 132 + index * 28,
+      x: dockBounds.x + 14,
+      y: dockBounds.y + dockBounds.height - 132 + index * 28,
       width: 24,
       height: 24,
     };
-  const dockWidth = Math.min(taskbar.width - 48, 760);
-  const dockX = Math.round(taskbar.x + (taskbar.width - dockWidth) / 2);
+  // Workspace indicators at the right end of the floating dock.
   return {
-    x: dockX + dockWidth - 86 + index * 26,
-    y: taskbar.y + 10,
+    x: dockBounds.x + dockBounds.width - 16 - 22 - index * 26,
+    y: dockBounds.y + Math.round((dockBounds.height - 22) / 2),
     width: 22,
-    height: 28,
+    height: 22,
   };
 }
 
