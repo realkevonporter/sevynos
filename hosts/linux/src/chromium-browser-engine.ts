@@ -84,6 +84,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
   #screencastFrames = 0;
   #screencastFirstFrameAt = 0;
   #screencastLastFrameAt = 0;
+  #decodeInFlight = false;
   #pendingInputAt = 0;
   #inputLatencies: number[] = [];
   #zoomFactor = 1;
@@ -366,45 +367,65 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       (typeof sessionId !== "string" && typeof sessionId !== "number")
     )
       return;
-    const receivedAt = nowMilliseconds();
-    // Acknowledge immediately (fire-and-forget) so Chromium keeps streaming;
-    // a dropped or corrupt frame must not stall the pipeline.
-    void this.#connection
-      ?.send("Page.screencastFrameAck", { sessionId })
-      .catch(() => undefined);
-    let decoded: {
-      readonly width: number;
-      readonly height: number;
-      readonly pixels: Uint8Array;
+    const ack = (): void => {
+      // Always ack, even for dropped or undecodable frames: a missing ack
+      // stalls Chromium's screencast pipeline.
+      void this.#connection
+        ?.send("Page.screencastFrameAck", { sessionId })
+        .catch(() => undefined);
     };
-    try {
-      decoded = await decodeJpeg(Buffer.from(frame.data, "base64"));
-    } catch {
+    // Coalesce to a single in-flight decode. A newer frame makes any older
+    // undecoded frame stale, so frames arriving while a decode is running are
+    // acked and dropped. Without this, a decoder slower than Chromium's frame
+    // rate (e.g. the pure-TypeScript JPEG fallback at ~310ms/frame at 1080p)
+    // piles up concurrent decodes, each holding a full RGBA bitmap, until the
+    // host exhausts memory and the system freezes.
+    if (this.#decodeInFlight) {
+      ack();
       return;
     }
-    this.#screencastFrames += 1;
-    if (this.#screencastFirstFrameAt === 0) {
-      this.#screencastFirstFrameAt = receivedAt;
-      emitServiceMarker("SEVYN_CODE_SERVICE_FIRST_FRAME_RECEIVED");
+    this.#decodeInFlight = true;
+    try {
+      const receivedAt = nowMilliseconds();
+      let decoded: {
+        readonly width: number;
+        readonly height: number;
+        readonly pixels: Uint8Array;
+      };
+      try {
+        decoded = await decodeJpeg(Buffer.from(frame.data, "base64"));
+      } catch {
+        return;
+      }
+      this.#screencastFrames += 1;
+      if (this.#screencastFirstFrameAt === 0) {
+        this.#screencastFirstFrameAt = receivedAt;
+        emitServiceMarker("SEVYN_CODE_SERVICE_FIRST_FRAME_RECEIVED");
+      }
+      this.#screencastLastFrameAt = receivedAt;
+      if (this.#pendingInputAt !== 0) {
+        const latency = receivedAt - this.#pendingInputAt;
+        this.#pendingInputAt = 0;
+        this.#inputLatencies.push(latency);
+        if (this.#inputLatencies.length > 120) this.#inputLatencies.shift();
+      }
+      this.#publish(
+        Object.freeze({
+          ready: true,
+          loading: false,
+          url: this.#current.url,
+          title: this.#current.title,
+          width: decoded.width,
+          height: decoded.height,
+          pixels: decoded.pixels,
+        }),
+      );
+    } finally {
+      this.#decodeInFlight = false;
+      // Ack after the frame is processed so Chromium paces itself to the
+      // host's decode rate instead of streaming unboundedly.
+      ack();
     }
-    this.#screencastLastFrameAt = receivedAt;
-    if (this.#pendingInputAt !== 0) {
-      const latency = receivedAt - this.#pendingInputAt;
-      this.#pendingInputAt = 0;
-      this.#inputLatencies.push(latency);
-      if (this.#inputLatencies.length > 120) this.#inputLatencies.shift();
-    }
-    this.#publish(
-      Object.freeze({
-        ready: true,
-        loading: false,
-        url: this.#current.url,
-        title: this.#current.title,
-        width: decoded.width,
-        height: decoded.height,
-        pixels: decoded.pixels,
-      }),
-    );
   }
 
   #pointer(
@@ -1108,6 +1129,7 @@ export async function decodeJpeg(input: Uint8Array): Promise<{
         .raw()
         .ensureAlpha()
         .toBuffer({ resolveWithObject: true });
+      logDecoderChoice("sharp");
       return {
         width: info.width,
         height: info.height,
@@ -1117,7 +1139,16 @@ export async function decodeJpeg(input: Uint8Array): Promise<{
       // Fall through to the pure-TS decoder below.
     }
   }
+  logDecoderChoice("pure-ts");
   return decodeJpegPure(input);
+}
+
+/** Logs the active JPEG decoder once; the pure-TS fallback is ~25x slower. */
+let decoderChoiceLogged = false;
+function logDecoderChoice(decoder: "sharp" | "pure-ts"): void {
+  if (decoderChoiceLogged) return;
+  decoderChoiceLogged = true;
+  emitServiceMarker(`SEVYN_JPEG_DECODER_${decoder === "sharp" ? "SHARP" : "PURE_TS"}`);
 }
 
 /** Lazily loads sharp; returns undefined if the native module is unavailable. */
