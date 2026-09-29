@@ -3,6 +3,10 @@ import { DesktopSceneComposer } from "@sevynos/desktop-shell";
 import { SimulatedWaylandBridgeTransport } from "./simulated-wayland-bridge.js";
 import { startWaylandHost, type RunningWaylandHost } from "./wayland.js";
 
+// Layout bounds diagnostics are opt-in via SEVYN_LAYOUT_DIAGNOSTICS=1.
+// Enable for tests that assert on GENESIS_*_BOUNDS markers.
+process.env["SEVYN_LAYOUT_DIAGNOSTICS"] = "1";
+
 const pause = (milliseconds = 0): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 describe("interactive Wayland host", () => {
