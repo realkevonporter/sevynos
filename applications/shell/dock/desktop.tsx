@@ -306,6 +306,10 @@ function getFloatingDockBounds(
 
 const styles = StyleSheet.create({
   dock: {
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     alignItems: "center",
     backgroundColor: SevynShellTheme.colors.dockBackground,
     borderColor: SevynShellTheme.colors.dockBorder,

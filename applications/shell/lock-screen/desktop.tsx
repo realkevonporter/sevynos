@@ -93,6 +93,10 @@ export function DesktopLockScreen({
 
 const styles = StyleSheet.create({
   surface: {
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     alignItems: "center",
     backgroundColor: SevynShellTheme.colors.background,
     justifyContent: "center",

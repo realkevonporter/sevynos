@@ -129,6 +129,10 @@ export function DesktopLauncher(input: DesktopLauncherRenderInput): JSX.Element 
 
 const styles = StyleSheet.create({
   surface: {
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: SevynShellTheme.colors.launcherSurface,
     paddingBottom: SevynShellTheme.spacing.lg,
     paddingHorizontal: SevynShellTheme.spacing.lg,
