@@ -16,6 +16,7 @@ const qmp = resolve(output, "qmp.sock");
 await Promise.all([access(kernel), access(initrd), access(iso)]);
 const display = resolveQemuDisplayConfiguration();
 const focusTrace = process.env.SEVYN_QEMU_FOCUS_TRACE === "1";
+const bitmapDiagnostics = process.env.SEVYN_QEMU_BITMAP_DIAGNOSTICS === "1";
 const hasData = await access(data).then(
   () => true,
   () => false,
@@ -34,7 +35,7 @@ const qemuArguments = [
   `file=${iso},media=cdrom,readonly=on`,
   ...(hasData ? ["-drive", `file=${data},format=raw,if=virtio`] : []),
   "-append",
-  `boot=live components live-media-path=/live init=/init console=tty0 console=ttyS0,115200 panic=-1 loglevel=8 ignore_loglevel sevyn.live=1 ${display.kernelVideo}${focusTrace ? " sevyn.focus-trace=1" : ""}`,
+  `boot=live components live-media-path=/live init=/init console=tty0 console=ttyS0,115200 panic=-1 loglevel=8 ignore_loglevel sevyn.live=1 ${display.kernelVideo}${focusTrace ? " sevyn.focus-trace=1" : ""}${bitmapDiagnostics ? " sevyn.bitmap-diagnostics=1" : ""}`,
   "-device",
   display.device,
   ...resolveInteractiveHardwareArguments(),
