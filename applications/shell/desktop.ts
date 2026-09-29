@@ -7,7 +7,6 @@ export interface DesktopShellBounds {
 
 // Spacing tokens aligned with sevynTokens.spacing (xxs:4, xs:8, sm:12, md:16, lg:24, xl:32, xxl:48).
 // The shell chrome uses these directly to avoid a dependency on @sevynos/react-native.
-const SPACING_XS = 8;
 const SPACING_MD = 16;
 const SPACING_LG = 24;
 const SPACING_XL = 32;
