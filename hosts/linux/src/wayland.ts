@@ -541,15 +541,14 @@ export async function startWaylandHost(
     const { createShellComponentRegistry } =
       await import("@sevynos/desktop-shell/shell-component-registry");
     shellComponents = createShellComponentRegistry();
-    console.log(
-      `[SevynOS] RN shell components loaded: ${String(shellComponents.size)} components`,
-    );
+    marker(`SEVYN_RN_SHELL_COMPONENTS_LOADED count=${String(shellComponents.size)}`);
   } catch (error) {
     // Tests or environments without react-native: use legacy renderers.
-    console.error(
-      `[SevynOS] Failed to load RN shell components, using legacy: ${error instanceof Error ? error.message : String(error)}`,
+    marker(
+      `SEVYN_RN_SHELL_COMPONENTS_FAILED error=${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  let shellRenderLogged = false;
   const composer = new DesktopSceneComposer(
     runtime,
     undefined,
@@ -557,6 +556,15 @@ export async function startWaylandHost(
       invalidate();
     },
     shellComponents,
+    (applicationId, nodeCount, bounds) => {
+      // Log only the first compose to identify which shell surfaces render
+      // vs return null, without spamming every frame.
+      if (!shellRenderLogged) {
+        marker(
+          `SEVYN_SHELL_RENDER id=${applicationId} nodes=${String(nodeCount)} bounds=${bounds}`,
+        );
+      }
+    },
   );
   // Debug-gated frame pipeline instrumentation (Phase 1). When enabled,
   // the presenter records per-frame raster/damage/submit samples and a
@@ -652,6 +660,8 @@ export async function startWaylandHost(
   const executor = new GenesisFrameExecutor<DesktopScene>({
     createRenderPlans: () => {
       latestScene = composer.compose(viewport);
+      // Stop shell render diagnostics after the first compose.
+      shellRenderLogged = true;
       latestSceneHasBlinkCommands = sceneHasBlinkCommands(latestScene);
       emitLayoutDiagnostics(latestScene);
       return planner.createRenderPlans(latestScene);
