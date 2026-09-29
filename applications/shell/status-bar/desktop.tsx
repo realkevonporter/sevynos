@@ -285,6 +285,10 @@ const MENU_BAR_HEIGHT = 28;
 
 const styles = StyleSheet.create({
   menuBar: {
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     alignItems: "center",
     backgroundColor: SevynShellTheme.colors.statusBarBackground,
     borderBottomColor: SevynShellTheme.colors.statusBarBorder,

@@ -541,8 +541,14 @@ export async function startWaylandHost(
     const { createShellComponentRegistry } =
       await import("@sevynos/desktop-shell/shell-component-registry");
     shellComponents = createShellComponentRegistry();
-  } catch {
+    console.log(
+      `[SevynOS] RN shell components loaded: ${String(shellComponents.size)} components`,
+    );
+  } catch (error) {
     // Tests or environments without react-native: use legacy renderers.
+    console.error(
+      `[SevynOS] Failed to load RN shell components, using legacy: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   const composer = new DesktopSceneComposer(
     runtime,
