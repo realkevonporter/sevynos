@@ -861,10 +861,6 @@ export async function startWaylandHost(
   };
   const pointerCoalescer = new PointerEventCoalescer({
     dispatch: dispatchPointerEvent,
-    // Throttle hover moves to ~30fps. The hardware cursor (setHardwareCursor)
-    // stays smooth; this only limits software-driven effects like dock
-    // magnification, which trigger full-frame software rasterization.
-    hoverThrottleMs: 33,
   });
   const unsubscribePointer = pointer.subscribe((event) => {
     pointerCoalescer.push(event);

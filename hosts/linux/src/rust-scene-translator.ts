@@ -273,6 +273,12 @@ export function translateNode(node: DesktopSceneNode): SceneCommand[] {
       ];
     }
 
+    case "desktop-shell-surface": {
+      // React Native shell surfaces are rendered by the RN runtime, not the
+      // Rust compositor. Skip them here to avoid double-rendering.
+      return [];
+    }
+
     case "desktop-window-switcher-entry": {
       const label = "label" in node && typeof node.label === "string" ? node.label : "";
       const bounds = toRect(node.bounds);
