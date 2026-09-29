@@ -242,6 +242,7 @@ export const NativeModules = Object.freeze({
       preview: () => requireNativeAdapter("camera").preview?.(),
       status: () => requireNativeAdapter("camera").status?.(),
       setTorch: (enabled: boolean) => requireNativeAdapter("camera").setTorch?.(enabled),
+      readImage: (path: string) => requireNativeAdapter("camera").readImage?.(path),
     }),
     microphone: Object.freeze({
       start: (options?: unknown) => requireNativeAdapter("microphone").start(options),

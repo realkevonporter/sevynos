@@ -69,13 +69,26 @@ export function resolveLocalQemuArguments(
   platform = process.platform,
   architecture = process.arch,
 ) {
+  // Use -cpu max to enable AVX instructions required by sharp/libvips
+  // prebuilt binaries. QEMU's default CPU lacks these, causing
+  // "invalid opcode" crashes in the Genesis image decoder.
+  const argsWithCpu = hasExplicitCpu(qemuArguments)
+    ? [...qemuArguments]
+    : ["-cpu", "max", ...qemuArguments];
   if (
     platform !== "darwin" ||
     architecture !== "x64" ||
-    hasExplicitAccelerator(qemuArguments)
+    hasExplicitAccelerator(argsWithCpu)
   )
-    return [...qemuArguments];
-  return ["-accel", "hvf", ...qemuArguments];
+    return argsWithCpu;
+  return ["-accel", "hvf", ...argsWithCpu];
+}
+
+function hasExplicitCpu(argumentsValue) {
+  return argumentsValue.some(
+    (argument, index) =>
+      argument === "-cpu" || (index > 0 && argumentsValue[index - 1] === "-cpu"),
+  );
 }
 
 function hasExplicitAccelerator(argumentsValue) {

@@ -6,6 +6,7 @@ export const SEVYN_PACKAGE_VERSION = 1 as const;
 export type SevynPermission =
   | "filesystem.read"
   | "filesystem.write"
+  | "removable-storage"
   | "clipboard.read"
   | "clipboard.write"
   | "notifications"
@@ -480,6 +481,7 @@ export interface CameraService {
   recordStop?(): Promise<CameraRecordResult>;
   preview?(): Promise<CameraPreviewFrame>;
   status?(): Promise<CameraStatus>;
+  readImage?(path: string): Promise<CameraPreviewFrame>;
 }
 
 export interface MediaTrack {

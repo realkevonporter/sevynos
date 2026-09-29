@@ -40,12 +40,15 @@ export function createSystemApplication<State = unknown, Props = unknown>(
   });
 }
 
-export function createReactNativeSystemApplication<Props = unknown, State = unknown>(
+export function createReactNativeSystemApplication<State = unknown>(
   manifest: SystemApplicationManifest,
-  component: ComponentType<Props>,
-  options: Omit<SystemApplicationOptions<State, Props>, "component"> = {},
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  component: ComponentType<any>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  options: Omit<SystemApplicationOptions<State, any>, "component"> = {},
 ): SystemApplicationModule<State> {
-  return createSystemApplication<State, Props>(manifest, {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return createSystemApplication<State, any>(manifest, {
     ...options,
     component,
     render: options.render ?? (() => Object.freeze([])),

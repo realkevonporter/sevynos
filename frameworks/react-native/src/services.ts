@@ -6,6 +6,24 @@ export interface FileSystemEntry {
   readonly modified?: number | undefined;
   readonly mimeType?: string | undefined;
 }
+
+export interface SevynVolume {
+  readonly id: string;
+  readonly label: string;
+  readonly mountPoint: string;
+  readonly filesystem: string;
+  readonly device: string;
+  readonly sizeBytes: number;
+  readonly availableBytes: number;
+  readonly removable: boolean;
+}
+
+export interface SevynStorageService {
+  listVolumes(): Promise<readonly SevynVolume[]>;
+  subscribe(listener: (volumes: readonly SevynVolume[]) => void): () => void;
+  eject(volumeId: string): Promise<void>;
+}
+
 export interface SevynFileSystem {
   list(path: string): Promise<readonly FileSystemEntry[]>;
   read(path: string): Promise<string>;

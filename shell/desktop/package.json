@@ -13,6 +13,10 @@
     "./internal": {
       "types": "./dist/internal.d.ts",
       "import": "./dist/internal.js"
+    },
+    "./shell-component-registry": {
+      "types": "./dist/shell-component-registry.d.ts",
+      "import": "./dist/shell-component-registry.js"
     }
   },
   "scripts": {

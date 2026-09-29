@@ -17,6 +17,50 @@
     "./mobile": {
       "types": "./dist/mobile.d.ts",
       "import": "./dist/mobile.js"
+    },
+    "./desktop/dock": {
+      "types": "./dist/dock/desktop.d.ts",
+      "import": "./dist/dock/desktop.js"
+    },
+    "./desktop/status-bar": {
+      "types": "./dist/status-bar/desktop.d.ts",
+      "import": "./dist/status-bar/desktop.js"
+    },
+    "./desktop/wallpaper": {
+      "types": "./dist/wallpaper/desktop.d.ts",
+      "import": "./dist/wallpaper/desktop.js"
+    },
+    "./desktop/launcher": {
+      "types": "./dist/launcher/desktop.d.ts",
+      "import": "./dist/launcher/desktop.js"
+    },
+    "./desktop/window-switcher": {
+      "types": "./dist/window-switcher/desktop.d.ts",
+      "import": "./dist/window-switcher/desktop.js"
+    },
+    "./desktop/lock-screen": {
+      "types": "./dist/lock-screen/desktop.d.ts",
+      "import": "./dist/lock-screen/desktop.js"
+    },
+    "./desktop/app-drawer": {
+      "types": "./dist/app-drawer/desktop.d.ts",
+      "import": "./dist/app-drawer/desktop.js"
+    },
+    "./desktop/notifications": {
+      "types": "./dist/notifications/desktop.d.ts",
+      "import": "./dist/notifications/desktop.js"
+    },
+    "./desktop/quick-settings": {
+      "types": "./dist/quick-settings/desktop.d.ts",
+      "import": "./dist/quick-settings/desktop.js"
+    },
+    "./desktop/desktop-home": {
+      "types": "./dist/desktop-home/desktop.d.ts",
+      "import": "./dist/desktop-home/desktop.js"
+    },
+    "./desktop/window-chrome": {
+      "types": "./dist/window-chrome/desktop.d.ts",
+      "import": "./dist/window-chrome/desktop.js"
     }
   },
   "scripts": {

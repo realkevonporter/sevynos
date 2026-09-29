@@ -59,6 +59,21 @@ export function translateNode(node: DesktopSceneNode): SceneCommand[] {
       ];
     }
 
+    case "desktop-shell-surface": {
+      // React Native shell component: the software renderer draws the
+      // native surface commands. For the Rust compositor, pass through
+      // as a generic surface (full fidelity requires native command support).
+      return [
+        {
+          kind: "color",
+          bounds: toRect(node.bounds),
+          color: toColor(PALETTE.surface),
+          radius: 12,
+          opacity: 1,
+        },
+      ];
+    }
+
     case "desktop-cursor": {
       if (!node.visible) return [];
       return [

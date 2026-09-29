@@ -28,6 +28,7 @@ import {
   type DesktopScene,
   type DesktopWindowSceneNode,
 } from "@sevynos/desktop-shell";
+
 import {
   installNativeAdapters,
   WebSocket as SevynWebSocket,
@@ -287,6 +288,29 @@ export async function startWaylandHost(
       },
       status: () => nativeModules.request("camera.status", null),
       setTorch: (enabled) => nativeModules.request("camera.torch", enabled),
+      readImage: async (path: string) => {
+        const result = await nativeModules.request("camera.readImage", path);
+        if (typeof result !== "object" || result === null || Array.isArray(result))
+          return { width: 0, height: 0, available: false };
+        const frame = result as Readonly<Record<string, StructuredValue>>;
+        const width = typeof frame["width"] === "number" ? frame["width"] : 0;
+        const height = typeof frame["height"] === "number" ? frame["height"] : 0;
+        const timestamp =
+          typeof frame["timestamp"] === "number" ? frame["timestamp"] : Date.now();
+        if (frame["available"] === false || typeof frame["path"] !== "string")
+          return { width, height, available: false, timestamp };
+        const pixels = new Uint8Array(await readFile(frame["path"]));
+        if (pixels.byteLength !== width * height * 4)
+          throw new Error("Camera readImage returned an invalid pixel buffer.");
+        return {
+          width,
+          height,
+          pixels,
+          available: true,
+          path: frame["path"],
+          timestamp,
+        };
+      },
     },
     microphone: {
       start: async (options) => {
@@ -508,9 +532,26 @@ export async function startWaylandHost(
       void persistenceAdapter.save("desktop-settings", settings);
   });
   let invalidate = (): void => undefined;
-  const composer = new DesktopSceneComposer(runtime, undefined, () => {
-    invalidate();
-  });
+  // Load RN shell components dynamically. In unit tests (vitest), the
+  // `react-native` npm package cannot be parsed, so fall back to the legacy
+  // native renderers.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let shellComponents: ReadonlyMap<string, any> = new Map();
+  try {
+    const { createShellComponentRegistry } =
+      await import("@sevynos/desktop-shell/shell-component-registry");
+    shellComponents = createShellComponentRegistry();
+  } catch {
+    // Tests or environments without react-native: use legacy renderers.
+  }
+  const composer = new DesktopSceneComposer(
+    runtime,
+    undefined,
+    () => {
+      invalidate();
+    },
+    shellComponents,
+  );
   // Debug-gated frame pipeline instrumentation (Phase 1). When enabled,
   // the presenter records per-frame raster/damage/submit samples and a
   // 1/sec SEVYN_PROBE_FRAMES line reports rolling fps, frame intervals,
@@ -747,6 +788,18 @@ export async function startWaylandHost(
             runtime.environment.switchWorkspace(shellControl.workspaceId);
             runtime.applications.synchronizeKeyboardFocus();
             return;
+          case "desktop-shell-surface": {
+            // React Native shell component: dispatch pointer-down to the RN runtime.
+            // The component handles its own press actions via onPress handlers.
+            const surface = shellControl as unknown as {
+              readonly applicationId: string;
+              readonly bounds: { readonly x: number; readonly y: number };
+            };
+            const localX = event.position.x - surface.bounds.x;
+            const localY = event.position.y - surface.bounds.y;
+            composer.dispatchShellPointer(surface.applicationId, "down", localX, localY);
+            return;
+          }
           case "desktop-workspace-action":
             // Desktop background actions sit below windows. If the click is
             // inside a window, the window gets it, not the background.

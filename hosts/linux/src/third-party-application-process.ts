@@ -234,6 +234,30 @@ installNativeAdapters({
     },
     status: () => request("camera.status", null),
     setTorch: (enabled) => request("camera.torch", enabled),
+    readImage: async (path: string) => {
+      const result = await request("camera.readImage", path);
+      if (typeof result !== "object" || result === null || Array.isArray(result)) {
+        return { width: 0, height: 0, available: false };
+      }
+      const record = result as Record<string, StructuredValue>;
+      if (record["available"] === false || typeof record["path"] !== "string") {
+        return { width: 0, height: 0, available: false };
+      }
+      try {
+        const pixels = new Uint8Array(await readFile(record["path"]));
+        return {
+          width: typeof record["width"] === "number" ? record["width"] : 0,
+          height: typeof record["height"] === "number" ? record["height"] : 0,
+          pixels,
+          available: true,
+          path: record["path"],
+          timestamp:
+            typeof record["timestamp"] === "number" ? record["timestamp"] : Date.now(),
+        };
+      } catch {
+        return { width: 0, height: 0, available: false };
+      }
+    },
   },
   microphone: {
     start: async (options) => {

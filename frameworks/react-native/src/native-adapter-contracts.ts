@@ -72,6 +72,7 @@ export interface SevynNativeAdapters {
     preview?(): Promise<unknown>;
     status?(): Promise<unknown>;
     setTorch?(enabled: boolean): Promise<unknown>;
+    readImage?(path: string): Promise<unknown>;
   };
   readonly microphone?: {
     start(options?: unknown): Promise<void>;

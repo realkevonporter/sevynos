@@ -9,6 +9,6 @@ export const quickSettingsSystemApplication = createSystemApplication(
     id: SystemApplicationId.QuickSettings,
     name: "Quick Settings",
     roles: ["quick-settings"],
-    supportedDeviceClasses: ["mobile"],
+    supportedDeviceClasses: ["desktop", "laptop", "tablet", "mobile"],
   }),
 );

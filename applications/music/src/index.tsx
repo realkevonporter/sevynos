@@ -8,6 +8,7 @@ import {
   TextInput,
   View,
   sevynTokens,
+  type MediaPlaybackStatus,
   type MediaPlaylist,
   type MediaService,
   type MediaTrack,
@@ -779,32 +780,51 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
 
   const currentTrack = tracks[currentTrackIndex] ?? tracks[0] ?? DEFAULT_TRACKS[0];
 
-  // Playback timer simulation when playing
+  // Poll real playback status from the media service (replaces simulated timer).
   useEffect(() => {
-    if (!isPlaying || isPaused) return;
-    const interval = setInterval(() => {
-      setCurrentPositionSec((prev) => {
-        const dur = currentTrack?.durationSec ?? 180;
-        if (prev + 1 >= dur) {
-          // Track finished
-          if (repeatMode === "one") {
-            return 0;
+    if (!isPlaying) return;
+    const pollStatus = async (): Promise<void> => {
+      try {
+        const media = props.media ?? NativeModules.HardwareModules.media;
+        const status = (await media.status()) as MediaPlaybackStatus | undefined;
+        if (status) {
+          setCurrentPositionSec(status.currentPositionSec);
+          // Sync pause state with reality (e.g. ffplay died).
+          if (!status.playing && !status.paused) {
+            // Playback ended or failed; advance to next track or stop.
+            const dur = currentTrack?.durationSec ?? 180;
+            if (status.currentPositionSec >= dur - 1) {
+              if (repeatMode === "one") {
+                setCurrentPositionSec(0);
+              } else if (currentTrackIndex + 1 < tracks.length || repeatMode === "all") {
+                const nextIdx = (currentTrackIndex + 1) % tracks.length;
+                setCurrentTrackIndex(nextIdx);
+                setCurrentPositionSec(0);
+              } else {
+                setIsPlaying(false);
+              }
+            }
           }
-          if (currentTrackIndex + 1 < tracks.length || repeatMode === "all") {
-            const nextIdx = (currentTrackIndex + 1) % tracks.length;
-            setCurrentTrackIndex(nextIdx);
-            return 0;
-          }
-          setIsPlaying(false);
-          return dur;
         }
-        return prev + 1;
-      });
+      } catch {
+        // Status poll failed; keep last known position.
+      }
+    };
+    void pollStatus();
+    const interval = setInterval(() => {
+      void pollStatus();
     }, 1000);
     return () => {
       clearInterval(interval);
     };
-  }, [isPlaying, isPaused, currentTrack, currentTrackIndex, tracks.length, repeatMode]);
+  }, [
+    isPlaying,
+    props.media,
+    currentTrack,
+    currentTrackIndex,
+    tracks.length,
+    repeatMode,
+  ]);
 
   const handlePlayTrack = useCallback(
     async (track: MediaTrack, index: number) => {
@@ -851,7 +871,11 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Resume failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.resume();
+        try {
+          await NativeModules.HardwareModules.media.resume();
+        } catch (error: unknown) {
+          setPlaybackError(error instanceof Error ? error.message : "Resume failed.");
+        }
       }
     } else {
       setIsPaused(true);
@@ -862,7 +886,11 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Pause failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.pause();
+        try {
+          await NativeModules.HardwareModules.media.pause();
+        } catch (error: unknown) {
+          setPlaybackError(error instanceof Error ? error.message : "Pause failed.");
+        }
       }
     }
   }, [
@@ -922,7 +950,11 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Seek failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.seek(clamped);
+        try {
+          await NativeModules.HardwareModules.media.seek(clamped);
+        } catch (error: unknown) {
+          setPlaybackError(error instanceof Error ? error.message : "Seek failed.");
+        }
       }
     },
     [currentTrack, props.media],
@@ -939,7 +971,11 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           setPlaybackError(error instanceof Error ? error.message : "Volume failed.");
         }
       } else {
-        await NativeModules.HardwareModules.media.setVolume(clamped);
+        try {
+          await NativeModules.HardwareModules.media.setVolume(clamped);
+        } catch (error: unknown) {
+          setPlaybackError(error instanceof Error ? error.message : "Volume failed.");
+        }
       }
     },
     [props.media],

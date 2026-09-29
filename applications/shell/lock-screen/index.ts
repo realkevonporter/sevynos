@@ -2,11 +2,11 @@ import {
   createSystemApplication,
   systemApplicationManifest,
 } from "../create-system-application.js";
-import { SystemApplicationId } from "../identifiers.js";
 import {
   renderDesktopLockScreen,
   type DesktopLockScreenRenderInput,
 } from "../desktop.js";
+import { SystemApplicationId } from "../identifiers.js";
 
 export const lockScreenSystemApplication = createSystemApplication(
   systemApplicationManifest({

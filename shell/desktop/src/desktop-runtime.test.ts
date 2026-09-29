@@ -176,6 +176,8 @@ describe("Genesis desktop host runtime", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
     const scene = composer.compose({ width: 1200, height: 800, scaleFactor: 1 });
+    // In unit tests (no react-native), workspace uses the legacy native renderer.
+    // In production, the DesktopWorkspace RN component renders these entries.
     expect(
       scene.nodes
         .filter((node) => node.kind === "desktop-workspace-item")

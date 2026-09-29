@@ -9,6 +9,6 @@ export const appDrawerSystemApplication = createSystemApplication(
     id: SystemApplicationId.AppDrawer,
     name: "App Drawer",
     roles: ["app-drawer"],
-    supportedDeviceClasses: ["mobile"],
+    supportedDeviceClasses: ["desktop", "laptop", "tablet", "mobile"],
   }),
 );

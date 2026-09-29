@@ -12,6 +12,7 @@ import type {
   DesktopLauncherSearchSceneNode,
   DesktopLauncherSurfaceSceneNode,
   DesktopResetActionSceneNode,
+  DesktopShellSurfaceSceneNode,
   DesktopStatusBarSceneNode,
   DesktopSystemApplicationSceneNode,
   DesktopTaskbarApplicationSceneNode,
@@ -143,4 +144,5 @@ export type {
   DesktopWorkspaceItemSceneNode,
   DesktopWindowSwitcherEntrySceneNode,
   DesktopLockScreenUnlockActionSceneNode,
+  DesktopShellSurfaceSceneNode,
 };

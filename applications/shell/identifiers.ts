@@ -12,6 +12,7 @@ export const SystemApplicationId = Object.freeze({
   LockScreen: "org.sevynos.shell.lock-screen",
   SplitView: "org.sevynos.shell.split-view",
   WindowSwitcher: "org.sevynos.shell.window-switcher",
+  WindowChrome: "org.sevynos.shell.window-chrome",
 } as const);
 
 export const DeviceProfileId = Object.freeze({

@@ -8,30 +8,14 @@ import type {
 import { SystemApplicationId } from "@sevynos/system-applications";
 import { renderDesktopWorkspace } from "@sevynos/system-applications/desktop";
 import type {
-  DesktopBackgroundSceneNode,
   DesktopDockRenderInput,
   DesktopLauncherRenderInput,
-  DesktopLauncherButtonSceneNode,
-  DesktopLauncherEntrySceneNode,
-  DesktopLauncherHeaderSceneNode,
-  DesktopLauncherSearchSceneNode,
-  DesktopLauncherSurfaceSceneNode,
-  DesktopResetActionSceneNode,
   DesktopShellApplicationSummary,
   DesktopShellDisplay,
   DesktopStatusBarRenderInput,
-  DesktopStatusBarSceneNode,
-  DesktopTaskbarApplicationSceneNode,
-  DesktopTaskbarSceneNode,
   DesktopWallpaperRenderInput,
-  DesktopWorkspaceControlSceneNode,
   DesktopWindowSwitcherRenderInput,
-  DesktopWindowSwitcherSurfaceSceneNode,
-  DesktopWindowSwitcherEntrySceneNode,
   DesktopLockScreenRenderInput,
-  DesktopLockScreenSurfaceSceneNode,
-  DesktopLockScreenClockSceneNode,
-  DesktopLockScreenUnlockActionSceneNode,
 } from "@sevynos/system-applications/desktop";
 import type {
   DesktopScene,
@@ -43,6 +27,8 @@ import type {
 import { getWindowControlRects } from "./window-controls.js";
 import { getTaskbarBounds } from "./desktop-window-layout.js";
 import { DESKTOP_VISUAL_METRICS } from "./desktop-appearance.js";
+import { ShellComponentRenderer } from "./shell-component-renderer.js";
+import type { ComponentType } from "react";
 
 const MONTH_NAMES = [
   "Jan",
@@ -103,6 +89,7 @@ export class DesktopSceneComposer {
   readonly #runtime: DesktopRuntime;
   readonly #getFrameExecutionCount: () => number;
   readonly #onServiceUpdate: (() => void) | undefined;
+  readonly #shellRenderer: ShellComponentRenderer;
   #serviceUpdateTimer: ReturnType<typeof setTimeout> | undefined;
   #batterySnapshot: BatterySnapshot | undefined;
   #networkSnapshot: WirelessNetworkSnapshot | undefined;
@@ -119,10 +106,14 @@ export class DesktopSceneComposer {
     runtime: DesktopRuntime,
     getFrameExecutionCount = (): number => 0,
     onServiceUpdate?: () => void,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    shellComponents: ReadonlyMap<string, ComponentType<any>> = new Map(),
   ) {
     this.#runtime = runtime;
     this.#getFrameExecutionCount = getFrameExecutionCount;
+    this.#shellRenderer = new ShellComponentRenderer(() => this.#onServiceUpdate?.());
     this.#onServiceUpdate = onServiceUpdate;
+    this.#shellComponents = shellComponents;
     void this.#refreshDesktopEntries();
     this.#unsubscribers.push(
       runtime.subscribe(() => {
@@ -229,6 +220,100 @@ export class DesktopSceneComposer {
     } finally {
       this.#desktopRefreshInFlight = false;
     }
+  }
+
+  /**
+   * React Native shell components, keyed by application ID. Injected by the
+   * real host entrypoint via `createShellComponentRegistry()`; unit tests
+   * pass nothing, so the legacy native renderers are used there and
+   * `react-native` never enters the test bundle.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly #shellComponents: ReadonlyMap<string, ComponentType<any>>;
+
+  /**
+   * Render a shell application, using its React Native component if available,
+   * otherwise falling back to the legacy native render function.
+   *
+   * For RN components, renders one surface per display (or a single surface
+   * with the given bounds for overlays). When no component is registered for
+   * the application (e.g. unit tests), falls back to the legacy render.
+   */
+  #renderShellApplication(
+    applicationId: string,
+    input: unknown,
+    getBounds: (display: {
+      readonly id: string;
+      readonly bounds: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+      readonly taskbarBounds: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+    }) => {
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+    },
+    getOrder: () => number,
+    displays: readonly {
+      readonly id: string;
+      readonly bounds: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+      readonly taskbarBounds: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+    }[],
+  ): readonly DesktopSceneNode[] {
+    const component = this.#shellComponents.get(applicationId);
+    if (component !== undefined) {
+      const nodes: DesktopSceneNode[] = [];
+      for (const display of displays) {
+        const bounds = getBounds(display);
+        const node = this.#shellRenderer.render(
+          applicationId,
+          component,
+          input,
+          bounds,
+          getOrder(),
+          display.id,
+        );
+        if (node !== undefined) nodes.push(node);
+      }
+      return Object.freeze(nodes);
+    }
+    // Fallback to legacy render
+    return this.#runtime.shell.render(
+      applicationId,
+      input,
+    ) as readonly DesktopSceneNode[];
+  }
+
+  /**
+   * Dispatch a pointer event to a React Native shell component.
+   * Returns true if the event was handled.
+   */
+  public dispatchShellPointer(
+    applicationId: string,
+    type: "down" | "up" | "move",
+    x: number,
+    y: number,
+  ): boolean {
+    return this.#shellRenderer.dispatchPointer(applicationId, type, x, y);
   }
 
   public compose(viewport: DesktopViewport): DesktopScene {
@@ -386,10 +471,17 @@ export class DesktopSceneComposer {
               ? "disconnected"
               : "unavailable";
 
-    const backgroundNodes = this.#runtime.shell.render(SystemApplicationId.Wallpaper, {
+    const wallpaperInput = {
       displays: shellDisplays,
-    } satisfies DesktopWallpaperRenderInput) as readonly DesktopBackgroundSceneNode[];
-    const statusBarNodes = this.#runtime.shell.render(SystemApplicationId.StatusBar, {
+    } satisfies DesktopWallpaperRenderInput;
+    const backgroundNodes = this.#renderShellApplication(
+      SystemApplicationId.Wallpaper,
+      wallpaperInput,
+      (display) => display.bounds,
+      () => 0,
+      shellDisplays,
+    );
+    const statusBarInput = {
       displays: shellDisplays,
       activeWorkspace: this.#runtime.environment.activeWorkspace,
       order: topContentOrder,
@@ -403,25 +495,51 @@ export class DesktopSceneComposer {
       batteryCharging: this.#batterySnapshot?.charging,
       audioVolume: this.#audioSnapshot?.volume,
       audioMuted: this.#audioSnapshot?.muted,
-    } satisfies DesktopStatusBarRenderInput) as readonly DesktopStatusBarSceneNode[];
-    const workspaceNodes = renderDesktopWorkspace({
+    } satisfies DesktopStatusBarRenderInput;
+    const statusBarNodes = this.#renderShellApplication(
+      SystemApplicationId.StatusBar,
+      statusBarInput,
+      (display) => display.bounds,
+      () => topContentOrder,
+      shellDisplays,
+    );
+    const workspaceInput = {
       display: primary.bounds,
       entries: this.#desktopEntries,
       order: 0.5,
-    });
-    const dockNodes = this.#runtime.shell.render(SystemApplicationId.Dock, {
+    };
+    // Try RN component first; fall back to direct native renderer in tests
+    // (no react-native) or if the RN component fails to load.
+    let workspaceNodes: readonly DesktopSceneNode[];
+    const workspaceComponent = this.#shellComponents.get(SystemApplicationId.DesktopHome);
+    if (workspaceComponent !== undefined) {
+      workspaceNodes = this.#renderShellApplication(
+        SystemApplicationId.DesktopHome,
+        workspaceInput,
+        (display) => display.bounds,
+        () => 0.5,
+        shellDisplays,
+      );
+    } else {
+      // Legacy fallback: direct native renderer (used in unit tests)
+      workspaceNodes = renderDesktopWorkspace(workspaceInput);
+    }
+    const dockInput = {
       displays: shellDisplays,
       position: taskbarPosition,
       applications: dockApplications,
       activeWorkspace: this.#runtime.environment.activeWorkspace,
       workspaces: this.#runtime.environment.listWorkspaces(),
       order: topContentOrder + 2,
-    } satisfies DesktopDockRenderInput) as readonly (
-      | DesktopTaskbarSceneNode
-      | DesktopTaskbarApplicationSceneNode
-      | DesktopWorkspaceControlSceneNode
-    )[];
-    const launcherNodes = this.#runtime.shell.render(SystemApplicationId.Launcher, {
+    } satisfies DesktopDockRenderInput;
+    const dockNodes = this.#renderShellApplication(
+      SystemApplicationId.Dock,
+      dockInput,
+      (display) => display.taskbarBounds,
+      () => topContentOrder + 2,
+      shellDisplays,
+    );
+    const launcherInput = {
       open: this.#runtime.applications.launcherOpen,
       searchQuery: this.#runtime.applications.launcherSearchQuery,
       taskbarBounds,
@@ -436,43 +554,78 @@ export class DesktopSceneComposer {
         }),
       ),
       order: topContentOrder + 1,
-    } satisfies DesktopLauncherRenderInput) as readonly (
-      | DesktopLauncherButtonSceneNode
-      | DesktopLauncherSurfaceSceneNode
-      | DesktopLauncherHeaderSceneNode
-      | DesktopLauncherSearchSceneNode
-      | DesktopLauncherEntrySceneNode
-      | DesktopResetActionSceneNode
-    )[];
+    } satisfies DesktopLauncherRenderInput;
+    const launcherNodes = this.#renderShellApplication(
+      SystemApplicationId.Launcher,
+      launcherInput,
+      () => primary.bounds,
+      () => topContentOrder + 1,
+      [
+        {
+          id: "primary",
+          bounds: primary.bounds,
+          taskbarBounds: taskbarBounds,
+        },
+      ],
+    );
+    const switcherInput = {
+      open: true,
+      displayBounds: primary.bounds,
+      applications: this.#runtime.applications.switcherApplications,
+      selectedApplicationId: this.#runtime.applications.switcherSelectedApplicationId,
+      order: topContentOrder + 10,
+    } satisfies DesktopWindowSwitcherRenderInput;
     const switcherNodes = this.#runtime.applications.switcherOpen
-      ? (this.#runtime.shell.render(SystemApplicationId.WindowSwitcher, {
-          open: true,
-          displayBounds: primary.bounds,
-          applications: this.#runtime.applications.switcherApplications,
-          selectedApplicationId: this.#runtime.applications.switcherSelectedApplicationId,
-          order: topContentOrder + 10,
-        } satisfies DesktopWindowSwitcherRenderInput) as readonly (
-          DesktopWindowSwitcherSurfaceSceneNode | DesktopWindowSwitcherEntrySceneNode
-        )[])
+      ? this.#renderShellApplication(
+          SystemApplicationId.WindowSwitcher,
+          switcherInput,
+          () => primary.bounds,
+          () => topContentOrder + 10,
+          [
+            {
+              id: "primary",
+              bounds: primary.bounds,
+              taskbarBounds: taskbarBounds,
+            },
+          ],
+        )
       : [];
+    const lockScreenInput = {
+      displayBounds: primary.bounds,
+      locked: true,
+      order: topContentOrder + 100,
+      timeText,
+      dateText,
+    } satisfies DesktopLockScreenRenderInput;
     const lockScreenNodes = this.#runtime.applications.isLocked
-      ? (this.#runtime.shell.render(SystemApplicationId.LockScreen, {
-          displayBounds: primary.bounds,
-          locked: true,
-          order: topContentOrder + 100,
-          timeText,
-          dateText,
-        } satisfies DesktopLockScreenRenderInput) as readonly (
-          | DesktopLockScreenSurfaceSceneNode
-          | DesktopLockScreenClockSceneNode
-          | DesktopLockScreenUnlockActionSceneNode
-        )[])
+      ? this.#renderShellApplication(
+          SystemApplicationId.LockScreen,
+          lockScreenInput,
+          () => primary.bounds,
+          () => topContentOrder + 100,
+          [
+            {
+              id: "primary",
+              bounds: primary.bounds,
+              taskbarBounds: taskbarBounds,
+            },
+          ],
+        )
       : [];
+    // Window chrome (title bars + traffic lights) as React Native.
+    // TEMPORARILY DISABLED: The full-display surface intercepts all pointer
+    // events, preventing interaction with browser/Sevyn Code windows underneath.
+    // TODO: Fix hit testing to only intercept title bar areas, or use per-window
+    // surfaces. Native chrome remains active via the compositor.
+    // The WindowChrome RN component exists and is registered, but not wired
+    // into the scene until the hit-testing issue is resolved.
+    const windowChromeNodes: readonly DesktopSceneNode[] = [];
     const nodes: DesktopSceneNode[] = [
       ...backgroundNodes,
       ...workspaceNodes,
       ...statusBarNodes,
       ...windowNodes,
+      ...windowChromeNodes,
       ...windowNodes.flatMap(
         (node) =>
           node.nativeSurface?.commands.flatMap((command) =>

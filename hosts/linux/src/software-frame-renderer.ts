@@ -446,6 +446,22 @@ function drawDesktopScene(
       case "desktop-cursor":
         if (includeCursor)
           drawCursor(raster, node, scene.settings.cursorSize, appearance);
+        break;
+      case "desktop-shell-surface": {
+        // React Native shell component: draw the native surface commands.
+        const surface = (
+          node as unknown as {
+            readonly nativeSurface?:
+              { readonly commands: readonly NativeRenderCommand[] } | undefined;
+          }
+        ).nativeSurface;
+        if (surface !== undefined) {
+          raster.pushClip(node.bounds);
+          drawNativeSurface(raster, surface.commands, node.bounds.x, node.bounds.y);
+          raster.popClip();
+        }
+        break;
+      }
     }
   }
 }

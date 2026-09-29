@@ -31,7 +31,9 @@ import {
   type SevynAudioService,
   type SevynSystemService,
   type SevynFileSystem,
+  type SevynStorageService,
 } from "@sevynos/react-native/internal";
+import { LinuxVolumeService } from "./volume-service.js";
 import {
   createCoreSystemApplication,
   type AppManagerEntry,
@@ -157,6 +159,7 @@ export class ApplicationSurfaceRegistry {
   readonly #nativeSignatures = new Map<GenesisWindowId, string>();
   readonly #nativeBounds = new Map<GenesisWindowId, NativeBounds>();
   readonly #filesystem: SevynFileSystem;
+  readonly #storage: SevynStorageService;
   readonly #battery: SevynBatteryService;
   readonly #audio: SevynAudioService;
   readonly #system: SevynSystemService;
@@ -188,6 +191,10 @@ export class ApplicationSurfaceRegistry {
     this.#power = power;
     this.#createBrowserEngine = createBrowserEngine;
     this.#createSevynCodeEngine = createSevynCodeEngine;
+    // Volume service for USB/removable drives. Starts polling /proc/mounts.
+    const volumeService = new LinuxVolumeService();
+    volumeService.start();
+    this.#storage = volumeService;
     this.#filesystem =
       filesystem ??
       new InMemoryFileSystem({
@@ -795,6 +802,7 @@ export class ApplicationSurfaceRegistry {
       case "files":
         return createElement(FilesApplication, {
           filesystem: this.#filesystem,
+          storage: this.#storage,
           notifications: this.#notifications,
         });
       case "camera":

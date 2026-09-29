@@ -17,6 +17,7 @@ import type { FileSystemEntry, SevynFileSystem } from "@sevynos/react-native/int
 export interface LinuxFileSystemOptions {
   readonly rootDirectory?: string;
   readonly defaultFiles?: boolean;
+  readonly volumeService?: { isVolumePath(path: string): boolean } | undefined;
 }
 
 const MIME_TYPES: Readonly<Record<string, string>> = Object.freeze({
@@ -56,6 +57,7 @@ export class LinuxFileSystem implements SevynFileSystem {
   #trashInfoDir: string;
   #initialized = false;
   readonly #defaultFiles: boolean;
+  readonly #volumeService: { isVolumePath(path: string): boolean } | undefined;
 
   public constructor(options: LinuxFileSystemOptions = {}) {
     this.#root = resolve(
@@ -67,6 +69,7 @@ export class LinuxFileSystem implements SevynFileSystem {
     this.#trashFilesDir = join(this.#trashDir, "files");
     this.#trashInfoDir = join(this.#trashDir, "info");
     this.#defaultFiles = options.defaultFiles ?? true;
+    this.#volumeService = options.volumeService;
   }
 
   public get rootDirectory(): string {
@@ -438,8 +441,11 @@ export class LinuxFileSystem implements SevynFileSystem {
 
   #assertContained(path: string): void {
     const candidate = resolve(path);
-    if (candidate !== this.#root && !candidate.startsWith(this.#root + sep))
+    if (candidate !== this.#root && !candidate.startsWith(this.#root + sep)) {
+      // Allow removable volumes (USB drives) mounted under /media.
+      if (this.#volumeService?.isVolumePath(candidate) === true) return;
       throw new Error("Path is outside user storage.");
+    }
   }
 
   #assertMutablePath(path: string): void {

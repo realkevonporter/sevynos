@@ -13,6 +13,7 @@ import {
   type CameraService,
   type CameraStatus,
   type SevynApplicationManifest,
+  type SevynFileSystem,
 } from "@sevynos/react-native";
 
 export interface CameraBitmapSource {
@@ -52,6 +53,7 @@ export interface CameraItem {
 
 export interface CameraApplicationProps {
   readonly camera?: CameraService | undefined;
+  readonly filesystem?: SevynFileSystem | undefined;
   readonly permissions?:
     | {
         readonly has: (permission: string) => boolean;
@@ -609,6 +611,11 @@ const styles = StyleSheet.create({
   photoViewerContainer: {
     alignItems: "center",
   },
+  photoViewerImage: {
+    width: "100%",
+    height: 220,
+    borderRadius: 8,
+  },
   photoCanvas: {
     width: "100%",
     height: 220,
@@ -674,15 +681,91 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
   const [selectedCapture, setSelectedCapture] = useState<CameraItem | undefined>(
     undefined,
   );
+
+  // Load persisted photos/videos from disk on launch.
+  useEffect(() => {
+    const filesystem = props.filesystem;
+    if (!filesystem) return;
+    void (async () => {
+      try {
+        const items: CameraItem[] = [];
+        // Photos are stored in <root>/photos, videos in <root>/videos
+        // The filesystem root is the app's data directory.
+        for (const dir of ["photos", "videos"]) {
+          try {
+            const entries = await filesystem.list(dir);
+            for (const entry of entries) {
+              const isVideo = dir === "videos";
+              const name = entry.name.toLowerCase();
+              if (isVideo && !name.endsWith(".mp4")) continue;
+              if (!isVideo && !name.endsWith(".jpg") && !name.endsWith(".jpeg")) continue;
+              items.push({
+                id: `${dir}-${entry.name}`,
+                type: isVideo ? "video" : "photo",
+                path: entry.path,
+                timestamp: entry.modified ?? Date.now(),
+              });
+            }
+          } catch {
+            // Directory may not exist yet; skip.
+          }
+        }
+        // Sort by timestamp, newest first.
+        items.sort((a, b) => b.timestamp - a.timestamp);
+        setCaptures(items);
+      } catch {
+        // Gallery stays empty if we can't list.
+      }
+    })();
+  }, [props.filesystem]);
   const [galleryOpen, setGalleryOpen] = useState<boolean>(false);
   const [shutterFlash, setShutterFlash] = useState<boolean>(false);
-  const [isPlayingVideo, setIsPlayingVideo] = useState<boolean>(false);
-  const [playbackSeconds, setPlaybackSeconds] = useState<number>(0);
+  const [photoBitmap, setPhotoBitmap] = useState<CameraBitmapSource | undefined>(
+    undefined,
+  );
+  const [photoLoadError, setPhotoLoadError] = useState<string | undefined>(undefined);
+
+  // Load the real JPEG when a photo is selected in the viewer.
+  // For videos, load the first frame as a thumbnail.
+  useEffect(() => {
+    if (selectedCapture?.type !== "photo" && selectedCapture?.type !== "video") {
+      setPhotoBitmap(undefined);
+      setPhotoLoadError(undefined);
+      return;
+    }
+    setPhotoBitmap(undefined);
+    setPhotoLoadError(undefined);
+    void (async () => {
+      try {
+        const camera = props.camera ?? NativeModules.HardwareModules.camera;
+        if (!camera.readImage) {
+          throw new Error("Image reading is not available.");
+        }
+        const frame = (await camera.readImage(selectedCapture.path)) as
+          CameraPreviewFrame | undefined;
+        if (!frame?.available || !frame.pixels) {
+          throw new Error(
+            selectedCapture.type === "video"
+              ? "Could not load the video thumbnail."
+              : "Could not load the photo.",
+          );
+        }
+        setPhotoBitmap({
+          width: frame.width,
+          height: frame.height,
+          pixels: frame.pixels,
+        });
+      } catch (error: unknown) {
+        setPhotoLoadError(
+          error instanceof Error ? error.message : "Could not load the media.",
+        );
+      }
+    })();
+  }, [selectedCapture, props.camera]);
   const [operationError, setOperationError] = useState<string | undefined>(undefined);
 
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const previewTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const playbackTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const checkHardware = useCallback(async (): Promise<void> => {
     setLoadingHardware(true);
@@ -712,19 +795,21 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
     }
   }, [permissionGranted, checkHardware]);
 
-  // Live preview polling
+  // Live preview polling — paused while recording (v4l2 device is held by recorder).
   useEffect(() => {
     if (!permissionGranted || hardwareStatus?.available === false) return;
+    if (isRecording) return;
     const fetchPreview = async (): Promise<void> => {
       try {
         if (camera.preview !== undefined) {
           const frame = await camera.preview();
           setPreviewFrame(frame);
+          // Clear any stale error on success.
+          setOperationError(undefined);
         }
-      } catch (error: unknown) {
-        setOperationError(
-          error instanceof Error ? error.message : "Camera preview failed.",
-        );
+      } catch {
+        // Don't set a permanent error for transient preview failures;
+        // the viewfinder will show the last good frame.
       }
     };
     void fetchPreview();
@@ -737,7 +822,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
         previewTimerRef.current = null;
       }
     };
-  }, [permissionGranted, hardwareStatus, camera]);
+  }, [permissionGranted, hardwareStatus, camera, isRecording]);
 
   // Video recording timer
   useEffect(() => {
@@ -759,36 +844,6 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
       }
     };
   }, [isRecording]);
-
-  // In-app video playback timer
-  useEffect(() => {
-    if (isPlayingVideo && selectedCapture?.type === "video") {
-      const maxSeconds = Math.max(
-        1,
-        Math.round((selectedCapture.durationMs ?? 5000) / 1000),
-      );
-      playbackTimerRef.current = setInterval(() => {
-        setPlaybackSeconds((prev) => {
-          if (prev >= maxSeconds) {
-            setIsPlayingVideo(false);
-            return 0;
-          }
-          return prev + 1;
-        });
-      }, 1000);
-    } else {
-      if (playbackTimerRef.current !== null) {
-        clearInterval(playbackTimerRef.current);
-        playbackTimerRef.current = null;
-      }
-    }
-    return () => {
-      if (playbackTimerRef.current !== null) {
-        clearInterval(playbackTimerRef.current);
-        playbackTimerRef.current = null;
-      }
-    };
-  }, [isPlayingVideo, selectedCapture]);
 
   const handleGrantPermission = async (): Promise<void> => {
     if (props.permissions !== undefined) {
@@ -884,8 +939,6 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
     setCaptures((prev) => prev.filter((c) => c.id !== id));
     if (selectedCapture?.id === id) {
       setSelectedCapture(undefined);
-      setIsPlayingVideo(false);
-      setPlaybackSeconds(0);
     }
   };
 
@@ -1215,8 +1268,6 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
                     style={styles.galleryItemRow}
                     onPress={() => {
                       setSelectedCapture(item);
-                      setIsPlayingVideo(false);
-                      setPlaybackSeconds(0);
                     }}
                   >
                     <View style={styles.galleryItemIconContainer}>
@@ -1267,8 +1318,6 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
                 style={styles.closeButton}
                 onPress={() => {
                   setSelectedCapture(undefined);
-                  setIsPlayingVideo(false);
-                  setPlaybackSeconds(0);
                 }}
               >
                 <Text style={styles.closeButtonText}>✕</Text>
@@ -1278,90 +1327,54 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
             <View style={styles.viewerBody}>
               {selectedCapture.type === "video" ? (
                 <View style={styles.videoPlayerContainer}>
-                  <View style={styles.videoCanvas}>
-                    <Text style={styles.videoCanvasIcon}>🎬</Text>
-                    <Text style={styles.videoCanvasState}>
-                      {isPlayingVideo ? "Playing clip..." : "Paused"}
-                    </Text>
-                    <Text style={styles.videoCanvasTimer}>
-                      {formatDuration(playbackSeconds)} /{" "}
-                      {formatDuration(
-                        Math.max(
-                          1,
-                          Math.round((selectedCapture.durationMs ?? 5000) / 1000),
-                        ),
-                      )}
-                    </Text>
-                  </View>
-
-                  {/* Scrubber track */}
-                  <View style={styles.scrubberTrack}>
-                    <View
-                      style={StyleSheet.flatten([
-                        styles.scrubberProgress,
-                        {
-                          width: Math.max(
-                            0,
-                            Math.min(
-                              360,
-                              Math.round(
-                                (playbackSeconds /
-                                  Math.max(
-                                    1,
-                                    Math.round(
-                                      (selectedCapture.durationMs ?? 5000) / 1000,
-                                    ),
-                                  )) *
-                                  360,
-                              ),
-                            ),
-                          ),
-                        },
-                      ])}
+                  {photoBitmap !== undefined ? (
+                    <NativeImage
+                      key={`video-thumb-${selectedCapture.id}`}
+                      style={styles.photoViewerImage}
+                      source={photoBitmap}
                     />
-                  </View>
+                  ) : photoLoadError !== undefined ? (
+                    <View style={styles.videoCanvas}>
+                      <Text style={styles.videoCanvasIcon}>⚠️</Text>
+                      <Text style={styles.videoCanvasState}>{photoLoadError}</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.videoCanvas}>
+                      <Text style={styles.videoCanvasIcon}>🎬</Text>
+                      <Text style={styles.videoCanvasState}>Loading thumbnail…</Text>
+                    </View>
+                  )}
+                  <Text style={styles.videoCanvasTimer}>
+                    {formatDuration(
+                      Math.max(
+                        1,
+                        Math.round((selectedCapture.durationMs ?? 5000) / 1000),
+                      ),
+                    )}{" "}
+                    video • Full playback coming soon
+                  </Text>
 
-                  {/* Player controls */}
-                  <View style={styles.playerControlsRow}>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={
-                        isPlayingVideo ? "Pause video playback" : "Play video"
-                      }
-                      style={StyleSheet.flatten([
-                        styles.actionButton,
-                        styles.primaryButton,
-                      ])}
-                      onPress={() => {
-                        setIsPlayingVideo((prev) => !prev);
-                      }}
-                    >
-                      <Text style={styles.primaryButtonText}>
-                        {isPlayingVideo ? "Pause" : "Play"}
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Restart video"
-                      style={StyleSheet.flatten([
-                        styles.actionButton,
-                        styles.secondaryButton,
-                      ])}
-                      onPress={() => {
-                        setPlaybackSeconds(0);
-                        setIsPlayingVideo(true);
-                      }}
-                    >
-                      <Text style={styles.secondaryButtonText}>Restart</Text>
-                    </Pressable>
-                  </View>
+                  {/* Video info — full playback coming soon */}
                 </View>
               ) : (
                 <View style={styles.photoViewerContainer}>
-                  <View style={styles.photoCanvas}>
-                    <Text style={styles.photoCanvasIcon}>🖼️</Text>
-                    <Text style={styles.photoCanvasText}>1280 × 720 JPEG Image</Text>
-                  </View>
+                  {photoBitmap !== undefined ? (
+                    <NativeImage
+                      key={`photo-${selectedCapture.id}`}
+                      style={styles.photoViewerImage}
+                      source={photoBitmap}
+                    />
+                  ) : photoLoadError !== undefined ? (
+                    <View style={styles.photoCanvas}>
+                      <Text style={styles.photoCanvasIcon}>⚠️</Text>
+                      <Text style={styles.photoCanvasText}>{photoLoadError}</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.photoCanvas}>
+                      <Text style={styles.photoCanvasIcon}>🖼️</Text>
+                      <Text style={styles.photoCanvasText}>Loading photo…</Text>
+                    </View>
+                  )}
                 </View>
               )}
 
