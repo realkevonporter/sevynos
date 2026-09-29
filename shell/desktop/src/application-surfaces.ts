@@ -652,20 +652,6 @@ export class ApplicationSurfaceRegistry {
         });
         return;
       }
-      // Browser surfaces use Chromium, not a native RN runtime.
-      // Route wheel events to the browser engine's scroll method.
-      if (surface?.kind === "browser") {
-        const browserEngine = this.#browserEngine(windowId);
-        if (browserEngine !== undefined) {
-          void browserEngine.scroll(
-            localEvent.x,
-            localEvent.y,
-            localEvent.deltaY,
-            localEvent.deltaX,
-          );
-        }
-        return;
-      }
       this.#nativeRuntimes.get(windowId)?.dispatchWheel(localEvent);
       return;
     }

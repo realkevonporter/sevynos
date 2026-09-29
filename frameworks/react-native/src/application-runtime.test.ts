@@ -49,6 +49,7 @@ describe("Sevyn React application runtime", () => {
             id: "increment",
             role: "button",
             label: "Increment",
+            style: { height: 44 },
             onPress: () => {
               setCount((value) => value + 1);
             },
@@ -64,8 +65,8 @@ describe("Sevyn React application runtime", () => {
         (command) => command.kind === "text" && command.text === "0",
       ),
     ).toBe(true);
-    runtime.dispatchPointer("down", { x: 20, y: 260, pointerId: 1, button: 0 });
-    runtime.dispatchPointer("up", { x: 20, y: 260, pointerId: 1, button: 0 });
+    runtime.dispatchPointer("down", { x: 20, y: 54, pointerId: 1, button: 0 });
+    runtime.dispatchPointer("up", { x: 20, y: 54, pointerId: 1, button: 0 });
     await settle();
     expect(
       runtime.snapshot.commands.some(
@@ -588,6 +589,7 @@ describe("Sevyn React application runtime", () => {
             key: "button-with-child",
             id: "button-with-child",
             role: "tab",
+            style: { width: 100, height: 44 },
             onPress: () => {
               pressed = true;
             },
