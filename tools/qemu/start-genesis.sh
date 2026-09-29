@@ -25,6 +25,12 @@ case " $(cat /proc/cmdline) " in
     echo SEVYN_HITTEST_PROBE_ENABLED
     ;;
 esac
+case " $(cat /proc/cmdline) " in
+  *" sevyn.bitmap-diagnostics=1 "*)
+    export SEVYN_BITMAP_DIAGNOSTICS=1
+    echo SEVYN_BITMAP_DIAGNOSTICS_ENABLED
+    ;;
+esac
 echo $$ > "$runtime_dir/start-genesis.pid"
 
 # Inhibit Linux virtual terminal switching (Ctrl+Alt+Fx)
