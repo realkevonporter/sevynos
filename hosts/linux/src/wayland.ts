@@ -542,9 +542,6 @@ export async function startWaylandHost(
   const traceRenderRequests = new Map<string, number>();
   const traceFrames = new Map<string, number>();
   const emitLayoutDiagnostics = (scene: DesktopScene): void => {
-    // Layout bounds diagnostics are opt-in via SEVYN_LAYOUT_DIAGNOSTICS=1.
-    // They spam the log on every surface-sync and must stay off in production.
-    if (process.env["SEVYN_LAYOUT_DIAGNOSTICS"] !== "1") return;
     const windows = scene.nodes.filter(
       (node): node is DesktopWindowSceneNode => node.kind === "desktop-window",
     );
