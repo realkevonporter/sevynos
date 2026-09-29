@@ -42,6 +42,35 @@ export interface ChromiumBrowserEngineOptions {
   readonly screencastQuality?: number;
 }
 
+/**
+ * Bitmap lifecycle tracking for OOM diagnostics.
+ * Counts active bitmap allocations and logs periodic memory usage.
+ * Enable via SEVYN_BITMAP_DIAGNOSTICS=1.
+ */
+let activeBitmapBytes = 0;
+let bitmapAllocationCount = 0;
+let lastBitmapDiagnosticAt = 0;
+
+function trackBitmapAllocation(width: number, height: number): void {
+  if (process.env["SEVYN_BITMAP_DIAGNOSTICS"] !== "1") return;
+  const bytes = width * height * 4;
+  activeBitmapBytes += bytes;
+  bitmapAllocationCount += 1;
+  const now = Date.now();
+  // Log every 5 seconds to avoid spam
+  if (now - lastBitmapDiagnosticAt > 5000) {
+    lastBitmapDiagnosticAt = now;
+    const mem = process.memoryUsage();
+    emitServiceMarker(
+      `SEVYN_BITMAP_DIAGNOSTICS allocations=${String(bitmapAllocationCount)} ` +
+        `activeBytes=${String(activeBitmapBytes)} ` +
+        `heapUsed=${String(Math.round(mem.heapUsed / 1024 / 1024))}MB ` +
+        `heapTotal=${String(Math.round(mem.heapTotal / 1024 / 1024))}MB ` +
+        `external=${String(Math.round(mem.external / 1024 / 1024))}MB`,
+    );
+  }
+}
+
 export interface ScreencastStats {
   readonly active: boolean;
   readonly frames: number;
@@ -409,6 +438,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
         this.#inputLatencies.push(latency);
         if (this.#inputLatencies.length > 120) this.#inputLatencies.shift();
       }
+      trackBitmapAllocation(decoded.width, decoded.height);
       this.#publish(
         Object.freeze({
           ready: true,
@@ -658,6 +688,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
       returnByValue: true,
     });
     const decoded = await decodePngFast(Buffer.from(screenshot.data, "base64"));
+    trackBitmapAllocation(decoded.width, decoded.height);
     return this.#publish(
       Object.freeze({
         ready: true,
