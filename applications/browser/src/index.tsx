@@ -1172,7 +1172,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: "rgba(255, 255, 255, 0.04)",
     maxWidth: 200,
-    gap: 6,
+    gap: 8,
   },
   tabActive: {
     height: 32,
@@ -1185,7 +1185,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 2,
     borderColor: "#D7AC57",
     maxWidth: 200,
-    gap: 6,
+    gap: 8,
   },
   tabIcon: {
     fontSize: 12,
@@ -1204,7 +1204,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   tabCloseButton: {
-    padding: 2,
+    padding: 4,
     borderRadius: 4,
   },
   tabCloseText: {
@@ -1262,8 +1262,8 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.12)",
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 10,
-    gap: 6,
+    paddingHorizontal: 12,
+    gap: 8,
   },
   securityBadge: {
     fontSize: 12,
@@ -1283,7 +1283,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
   },
   goButton: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     height: 34,
     borderRadius: 8,
     backgroundColor: "#D7AC57",
@@ -1303,7 +1303,7 @@ const styles = StyleSheet.create({
   },
   startHeader: {
     alignItems: "center",
-    marginBottom: 28,
+    marginBottom: 24,
   },
   logoBadge: {
     width: 56,
@@ -1323,7 +1323,7 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: "700",
     color: "#F3F4F6",
-    marginBottom: 6,
+    marginBottom: 8,
   },
   startSubtitle: {
     fontSize: 14,
@@ -1340,7 +1340,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "rgba(215, 172, 87, 0.3)",
-    padding: 6,
+    padding: 8,
     marginBottom: 32,
   },
   heroSearchInput: {
@@ -1353,7 +1353,7 @@ const styles = StyleSheet.create({
   heroSearchButton: {
     backgroundColor: "#D7AC57",
     borderRadius: 8,
-    paddingHorizontal: 20,
+    paddingHorizontal: 24,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -1386,7 +1386,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.08)",
-    padding: 14,
+    padding: 12,
     alignItems: "center",
     gap: 4,
   },
@@ -1427,7 +1427,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 40,
+    padding: 48,
   },
   errorIcon: {
     fontSize: 48,
@@ -1451,8 +1451,8 @@ const styles = StyleSheet.create({
   },
   retryButton: {
     backgroundColor: "#D7AC57",
-    paddingHorizontal: 18,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
     borderRadius: 8,
   },
   retryButtonText: {
@@ -1462,8 +1462,8 @@ const styles = StyleSheet.create({
   },
   homeSecondaryButton: {
     backgroundColor: "rgba(255, 255, 255, 0.08)",
-    paddingHorizontal: 18,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
     borderRadius: 8,
   },
   homeSecondaryButtonText: {
@@ -1483,7 +1483,7 @@ const styles = StyleSheet.create({
   },
   contextMenuItem: {
     paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingVertical: 8,
   },
   contextMenuItemText: {
     color: "#E2E8F0",
@@ -1492,7 +1492,7 @@ const styles = StyleSheet.create({
   zoomBadge: {
     backgroundColor: "#1E293B",
     borderRadius: 12,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 4,
     marginHorizontal: 4,
   },

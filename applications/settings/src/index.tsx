@@ -1297,7 +1297,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.08)",
   },
   sidebarHeader: {
-    padding: 18,
+    padding: 16,
     borderBottomWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.06)",
   },
@@ -1308,25 +1308,25 @@ const styles = StyleSheet.create({
   },
   navList: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 8,
   },
   sidebarItem: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 8,
-    gap: 10,
+    gap: 8,
     marginBottom: 4,
   },
   sidebarItemActive: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 8,
-    gap: 10,
+    gap: 8,
     marginBottom: 4,
     backgroundColor: "rgba(215, 172, 87, 0.15)",
   },
@@ -1347,7 +1347,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   panelScroll: {
-    padding: 28,
+    padding: 24,
   },
   section: {
     maxWidth: 680,
@@ -1356,7 +1356,7 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: "700",
     color: "#F3F4F6",
-    marginBottom: 6,
+    marginBottom: 8,
   },
   sectionSubtitle: {
     fontSize: 13,
@@ -1368,7 +1368,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.08)",
-    padding: 18,
+    padding: 16,
     marginBottom: 16,
   },
   cardTitle: {
@@ -1439,6 +1439,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     paddingVertical: 8,
+    gap: 12,
   },
   settingLabel: {
     fontSize: 13,
@@ -1455,13 +1456,13 @@ const styles = StyleSheet.create({
   },
   toggleButton: {
     paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 16,
     backgroundColor: "rgba(255, 255, 255, 0.1)",
   },
   toggleButtonActive: {
     paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 16,
     backgroundColor: "#10B981",
   },
@@ -1473,7 +1474,7 @@ const styles = StyleSheet.create({
   networkItem: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.05)",
     gap: 12,
@@ -1501,7 +1502,7 @@ const styles = StyleSheet.create({
   volumeControls: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 8,
     marginTop: 8,
   },
   volumeStepButton: {
@@ -1530,13 +1531,13 @@ const styles = StyleSheet.create({
   },
   muteButton: {
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 6,
     backgroundColor: "rgba(255, 255, 255, 0.08)",
   },
   muteButtonActive: {
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 6,
     backgroundColor: "#EF4444",
   },
@@ -1555,7 +1556,7 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     backgroundColor: "rgba(255, 255, 255, 0.1)",
     overflow: "hidden",
-    marginTop: 10,
+    marginTop: 8,
   },
   batteryFill: {
     height: 10,
@@ -1613,7 +1614,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginBottom: 2,
+    marginBottom: 4,
   },
   appName: {
     fontSize: 14,
@@ -1626,8 +1627,8 @@ const styles = StyleSheet.create({
   },
   protectedBadge: {
     backgroundColor: "rgba(215, 172, 87, 0.15)",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderRadius: 4,
     borderWidth: 1,
     borderColor: "rgba(215, 172, 87, 0.4)",
@@ -1639,8 +1640,8 @@ const styles = StyleSheet.create({
   },
   deletableBadge: {
     backgroundColor: "rgba(59, 130, 246, 0.15)",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderRadius: 4,
   },
   deletableBadgeText: {
@@ -1668,8 +1669,8 @@ const styles = StyleSheet.create({
   },
   permissionPill: {
     backgroundColor: "rgba(255, 255, 255, 0.06)",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderRadius: 4,
   },
   permissionPillText: {
@@ -1688,7 +1689,7 @@ const styles = StyleSheet.create({
   },
   lockedBadge: {
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 6,
     backgroundColor: "rgba(255, 255, 255, 0.05)",
   },
@@ -1701,7 +1702,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.4)",
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 6,
   },
   uninstallButtonText: {
@@ -1714,7 +1715,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(16, 185, 129, 0.4)",
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 6,
   },
   reinstallButtonText: {
@@ -1729,7 +1730,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingVertical: 10,
+    paddingVertical: 8,
     gap: 16,
   },
   shortcutRowBorder: {
@@ -1768,7 +1769,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#D7AC57",
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 6,
   },
   scanButtonText: {
@@ -1785,9 +1786,9 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(239, 68, 68, 0.12)",
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.3)",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
   disconnectButtonText: {
     fontSize: 11,
@@ -1799,8 +1800,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.16)",
     paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 6,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
   joinButtonText: {
     fontSize: 12,
@@ -1808,19 +1809,20 @@ const styles = StyleSheet.create({
     color: "#F3F4F6",
   },
   networkItemCard: {
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255, 255, 255, 0.06)",
   },
   networkRow: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 12,
   },
   passwordRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginTop: 10,
+    marginTop: 8,
     paddingLeft: 34,
   },
   passwordInput: {
@@ -1853,7 +1855,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.4)",
     paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderRadius: 8,
     marginBottom: 16,
   },

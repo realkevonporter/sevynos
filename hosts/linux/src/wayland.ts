@@ -748,6 +748,11 @@ export async function startWaylandHost(
             runtime.applications.synchronizeKeyboardFocus();
             return;
           case "desktop-workspace-action":
+            // Desktop background actions sit below windows. If the click is
+            // inside a window, the window gets it, not the background.
+            if (isPointInsideAnyWindow(latestScene, event.position.x, event.position.y)) {
+              break;
+            }
             void (
               shellControl.action === "new-folder"
                 ? runtime.createDesktopFolder()
@@ -762,8 +767,15 @@ export async function startWaylandHost(
             });
             return;
           case "desktop-workspace-item":
-            void runtime.applications.launch("org.sevynos.files");
-            return;
+            // Desktop icons sit below windows in z-order. If the click lands
+            // inside a window's bounds, the window gets it, not the icon.
+            if (
+              !isPointInsideAnyWindow(latestScene, event.position.x, event.position.y)
+            ) {
+              void runtime.applications.launch("org.sevynos.files");
+              return;
+            }
+            break;
           case "desktop-settings-control":
             applySettingsAction(runtime, shellControl.action);
             return;
@@ -1153,6 +1165,29 @@ function findWindowAt(
         y >= window.base.bounds.y &&
         y < window.base.bounds.y + window.base.bounds.height,
     );
+}
+
+/**
+ * Returns true if the point lies inside any window's bounds.
+ * Desktop icons and background actions sit below windows in z-order,
+ * so clicks inside a window must not trigger them.
+ */
+function isPointInsideAnyWindow(
+  scene: DesktopScene | undefined,
+  x: number,
+  y: number,
+): boolean {
+  const windows =
+    scene?.nodes.filter(
+      (node): node is DesktopWindowSceneNode => node.kind === "desktop-window",
+    ) ?? [];
+  return windows.some(
+    (window) =>
+      x >= window.base.bounds.x &&
+      x < window.base.bounds.x + window.base.bounds.width &&
+      y >= window.base.bounds.y &&
+      y < window.base.bounds.y + window.base.bounds.height,
+  );
 }
 
 function focusedWindowId(runtime: DesktopRuntime): string | undefined {
