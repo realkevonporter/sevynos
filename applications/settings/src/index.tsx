@@ -1439,6 +1439,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     paddingVertical: 8,
+    gap: 12,
   },
   settingLabel: {
     fontSize: 13,
@@ -1785,9 +1786,9 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(239, 68, 68, 0.12)",
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.3)",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
   disconnectButtonText: {
     fontSize: 11,
@@ -1799,8 +1800,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.16)",
     paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 6,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
   joinButtonText: {
     fontSize: 12,
@@ -1815,6 +1816,7 @@ const styles = StyleSheet.create({
   networkRow: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 12,
   },
   passwordRow: {
     flexDirection: "row",
