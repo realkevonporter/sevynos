@@ -538,8 +538,10 @@ export async function startWaylandHost(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let shellComponents: ReadonlyMap<string, any> = new Map();
   try {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const { createShellComponentRegistry } =
       await import("@sevynos/desktop-shell/shell-component-registry");
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
     shellComponents = createShellComponentRegistry();
     marker(`SEVYN_RN_SHELL_COMPONENTS_LOADED count=${String(shellComponents.size)}`);
   } catch (error) {
@@ -557,7 +559,7 @@ export async function startWaylandHost(
     },
     shellComponents,
   );
-  composer.onShellRender = (applicationId, nodeCount, bounds) => {
+  composer.onShellRender = (applicationId: string, nodeCount: number, bounds: string) => {
     // Log only the first compose to identify which shell surfaces render
     // vs return null, without spamming every frame.
     if (!shellRenderLogged) {
@@ -813,6 +815,7 @@ export async function startWaylandHost(
             };
             const localX = event.position.x - surface.bounds.x;
             const localY = event.position.y - surface.bounds.y;
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-call
             composer.dispatchShellPointer(surface.applicationId, "down", localX, localY);
             return;
           }

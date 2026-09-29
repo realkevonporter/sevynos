@@ -285,7 +285,7 @@ export class DesktopSceneComposer {
     const component = this.#shellComponents.get(applicationId);
     if (component !== undefined) {
       const nodes: DesktopSceneNode[] = [];
-      let firstBounds: string = "none";
+      let firstBounds = "none";
       for (const display of displays) {
         const bounds = getBounds(display);
         if (firstBounds === "none") {
