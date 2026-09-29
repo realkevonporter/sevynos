@@ -89,9 +89,10 @@ export class DesktopSceneComposer {
   readonly #runtime: DesktopRuntime;
   readonly #getFrameExecutionCount: () => number;
   readonly #onServiceUpdate: (() => void) | undefined;
-  readonly #onShellRender:
-    ((applicationId: string, nodeCount: number, bounds: string) => void) | undefined;
   readonly #shellRenderer: ShellComponentRenderer;
+  /** Optional diagnostic callback set by the host (not a constructor param to keep the signature stable). */
+  public onShellRender:
+    ((applicationId: string, nodeCount: number, bounds: string) => void) | undefined;
   #serviceUpdateTimer: ReturnType<typeof setTimeout> | undefined;
   #batterySnapshot: BatterySnapshot | undefined;
   #networkSnapshot: WirelessNetworkSnapshot | undefined;
@@ -110,14 +111,12 @@ export class DesktopSceneComposer {
     onServiceUpdate?: () => void,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     shellComponents: ReadonlyMap<string, ComponentType<any>> = new Map(),
-    onShellRender?: (applicationId: string, nodeCount: number, bounds: string) => void,
   ) {
     this.#runtime = runtime;
     this.#getFrameExecutionCount = getFrameExecutionCount;
     this.#shellRenderer = new ShellComponentRenderer(() => this.#onServiceUpdate?.());
     this.#onServiceUpdate = onServiceUpdate;
     this.#shellComponents = shellComponents;
-    this.#onShellRender = onShellRender;
     void this.#refreshDesktopEntries();
     this.#unsubscribers.push(
       runtime.subscribe(() => {
@@ -304,8 +303,8 @@ export class DesktopSceneComposer {
       }
       // Diagnostic: report which shell components actually produce nodes.
       // A component returning null (e.g. closed Launcher) produces zero nodes.
-      if (this.#onShellRender !== undefined) {
-        this.#onShellRender(applicationId, nodes.length, firstBounds);
+      if (this.onShellRender !== undefined) {
+        this.onShellRender(applicationId, nodes.length, firstBounds);
       }
       return Object.freeze(nodes);
     }
