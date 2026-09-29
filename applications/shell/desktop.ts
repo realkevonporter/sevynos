@@ -5,6 +5,13 @@ export interface DesktopShellBounds {
   readonly height: number;
 }
 
+// Spacing tokens aligned with sevynTokens.spacing (xxs:4, xs:8, sm:12, md:16, lg:24, xl:32, xxl:48).
+// The shell chrome uses these directly to avoid a dependency on @sevynos/react-native.
+const SPACING_XS = 8;
+const SPACING_MD = 16;
+const SPACING_LG = 24;
+const SPACING_XL = 32;
+
 export interface DesktopShellDisplay {
   readonly id: string;
   readonly bounds: DesktopShellBounds;
@@ -503,10 +510,10 @@ export function renderDesktopWindowSwitcher(
 )[] {
   if (!input.open || input.applications.length === 0) return Object.freeze([]);
 
-  const margin = 32;
+  const margin = SPACING_XL;
   const itemWidth = 140;
   const itemHeight = 140;
-  const gap = 16;
+  const gap = SPACING_MD;
   const maxColumns = 6;
   const columns = Math.min(input.applications.length, maxColumns);
   const rows = Math.ceil(input.applications.length / maxColumns);
@@ -574,7 +581,7 @@ interface DesktopLauncherLayout {
 }
 
 function launcherLayout(display: DesktopShellBounds): DesktopLauncherLayout {
-  const margin = 24;
+  const margin = SPACING_LG;
   const bottomInset = margin + 72;
   const surface = {
     x: display.x,
@@ -619,7 +626,7 @@ function launcherGridEntryBounds(
 ): DesktopShellBounds {
   const minimumTileWidth = 112;
   const maximumColumns = 8;
-  const gap = 18;
+  const gap = SPACING_MD;
   const columns = Math.max(
     1,
     Math.min(maximumColumns, Math.floor((grid.width + gap) / (minimumTileWidth + gap))),
