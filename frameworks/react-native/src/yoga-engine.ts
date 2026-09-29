@@ -52,6 +52,7 @@ function applyStylesToYogaNode(
 
   // AlignItems
   if (style.alignItems === "center") nodeYoga.setAlignItems(Align.Center);
+  else if (style.alignItems === "flex-start") nodeYoga.setAlignItems(Align.FlexStart);
   else if (style.alignItems === "flex-end") nodeYoga.setAlignItems(Align.FlexEnd);
   else if (style.alignItems === "stretch") nodeYoga.setAlignItems(Align.Stretch);
   else if (style.alignItems === "baseline") nodeYoga.setAlignItems(Align.Baseline);
@@ -127,8 +128,11 @@ function applyStylesToYogaNode(
 
   // AlignSelf
   if (style.alignSelf === "center") nodeYoga.setAlignSelf(Align.Center);
+  else if (style.alignSelf === "flex-start") nodeYoga.setAlignSelf(Align.FlexStart);
   else if (style.alignSelf === "flex-end") nodeYoga.setAlignSelf(Align.FlexEnd);
   else if (style.alignSelf === "stretch") nodeYoga.setAlignSelf(Align.Stretch);
+  else if (style.alignSelf === "baseline") nodeYoga.setAlignSelf(Align.Baseline);
+  else if (style.alignSelf === "auto") nodeYoga.setAlignSelf(Align.Auto);
 }
 
 function resolveEdges(
@@ -251,14 +255,6 @@ export function computeYogaLayout(
   // `content` has already had the parent's padding removed by the renderer.
   applyStylesToYogaNode(root, style, false, false);
 
-  const hasAnyFlex = relativeChildren.some(
-    (c) => (c.props.style?.flexGrow ?? 0) > 0 || (c.props.style?.flex ?? 0) > 0,
-  );
-  const hasAnyMainDimension = relativeChildren.some(
-    (c) => (isRow ? c.props.style?.width : c.props.style?.height) !== undefined,
-  );
-  const shouldDefaultDistribute = !hasAnyFlex && !hasAnyMainDimension && !isScroll;
-
   const childNodes: {
     node: NativeHostNode;
     yoga: ReturnType<typeof Yoga.Node.create>;
@@ -283,15 +279,6 @@ export function computeYogaLayout(
       if (subChildren.length > 0) {
         populateChildren(childYoga, subChildren, 1);
       }
-    }
-
-    if (
-      shouldDefaultDistribute &&
-      !isText &&
-      (cStyle.flexGrow ?? 0) === 0 &&
-      (cStyle.flex ?? 0) === 0
-    ) {
-      childYoga.setFlexGrow(1);
     }
 
     root.insertChild(childYoga, i);
