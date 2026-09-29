@@ -133,6 +133,16 @@ function applyStylesToYogaNode(
   else if (style.alignSelf === "stretch") nodeYoga.setAlignSelf(Align.Stretch);
   else if (style.alignSelf === "baseline") nodeYoga.setAlignSelf(Align.Baseline);
   else if (style.alignSelf === "auto") nodeYoga.setAlignSelf(Align.Auto);
+
+  // Position: absolute children are positioned via left/top/right/bottom
+  // and excluded from flex layout by Yoga automatically.
+  if (style.position === "absolute") {
+    nodeYoga.setPositionType(Yoga.POSITION_TYPE_ABSOLUTE);
+    if (typeof style.left === "number") nodeYoga.setPosition(Edge.Left, style.left);
+    if (typeof style.top === "number") nodeYoga.setPosition(Edge.Top, style.top);
+    if (typeof style.right === "number") nodeYoga.setPosition(Edge.Right, style.right);
+    if (typeof style.bottom === "number") nodeYoga.setPosition(Edge.Bottom, style.bottom);
+  }
 }
 
 function resolveEdges(
@@ -209,8 +219,7 @@ function populateChildren(
       attachTextMeasure(childYoga, child);
     } else {
       const subChildren = child.children.filter(
-        (c): c is NativeHostNode =>
-          !c.hidden && c.kind === "host" && c.props.style?.position !== "absolute",
+        (c): c is NativeHostNode => !c.hidden && c.kind === "host",
       );
       if (subChildren.length > 0) {
         populateChildren(childYoga, subChildren, depth + 1);
@@ -273,8 +282,7 @@ export function computeYogaLayout(
       attachTextMeasure(childYoga, child);
     } else {
       const subChildren = child.children.filter(
-        (c): c is NativeHostNode =>
-          !c.hidden && c.kind === "host" && c.props.style?.position !== "absolute",
+        (c): c is NativeHostNode => !c.hidden && c.kind === "host",
       );
       if (subChildren.length > 0) {
         populateChildren(childYoga, subChildren, 1);
