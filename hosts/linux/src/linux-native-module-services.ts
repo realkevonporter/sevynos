@@ -103,6 +103,7 @@ export class LinuxNativeModuleServices {
     if (service === "camera.status") return this.#statusCamera();
     if (service === "camera.capture") return this.#captureCamera();
     if (service === "camera.preview") return this.#previewCamera();
+    if (service === "camera.readImage") return this.#readImageCamera(value);
     if (service === "camera.recordStart") return this.#startCameraRecord();
     if (service === "camera.recordStop") return this.#stopCameraRecord();
     if (service === "camera.torch") return this.#setTorch(value);
@@ -389,6 +390,69 @@ export class LinuxNativeModuleServices {
         available: false,
         timestamp: Date.now(),
       };
+    }
+  }
+
+  async #readImageCamera(value: StructuredValue): Promise<StructuredValue> {
+    const path = typeof value === "string" ? value : (value as { path?: string }).path;
+    if (!path || typeof path !== "string") {
+      return { width: 0, height: 0, available: false };
+    }
+    // Security: only allow reading from the camera's own photos/videos directories
+    const allowedPrefixes = [`${this.#root}/photos/`, `${this.#root}/videos/`];
+    if (!allowedPrefixes.some((prefix) => path.startsWith(prefix))) {
+      return { width: 0, height: 0, available: false };
+    }
+    const rgbaPath = `${this.#root}/camera-read-image.rgba`;
+    try {
+      // Probe dimensions first
+      const probe = await run("ffprobe", [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0",
+        path,
+      ]);
+      const parts = probe.trim().split(",").map(Number);
+      const w = parts[0] ?? NaN;
+      const h = parts[1] ?? NaN;
+      const width = Number.isFinite(w) && w > 0 ? w : 1280;
+      const height = Number.isFinite(h) && h > 0 ? h : 720;
+      // Scale down if too large for IPC (max ~1MP)
+      const maxPixels = 1000000;
+      const scale = Math.min(1, Math.sqrt(maxPixels / (width * height)));
+      const outW = Math.floor(width * scale);
+      const outH = Math.floor(height * scale);
+      await run("ffmpeg", [
+        "-nostdin",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        path,
+        "-frames:v",
+        "1",
+        "-vf",
+        `scale=${String(outW)}:${String(outH)}`,
+        "-pix_fmt",
+        "rgba",
+        "-f",
+        "rawvideo",
+        rgbaPath,
+      ]);
+      return {
+        width: outW,
+        height: outH,
+        available: true,
+        path: rgbaPath,
+        timestamp: Date.now(),
+      };
+    } catch {
+      return { width: 0, height: 0, available: false };
     }
   }
 

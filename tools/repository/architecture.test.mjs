@@ -102,17 +102,29 @@ test("mobile shell chrome is composed with React Native components", async () =>
   assert.match(metroConfig, /\.endsWith\("\.js"\)/);
 });
 
-test("desktop shell chrome is scene-node based with no duplicate React Native components", async () => {
+test("desktop shell chrome is React Native based", async () => {
   const entries = await readdir(resolve(root, "applications/shell"), {
     recursive: true,
   });
-  const duplicates = entries.filter(
-    (entry) =>
-      /(^|\/)(desktop\.tsx|context-menu\.tsx)$/.test(entry) ||
-      entry === "notifications/center.tsx",
-  );
-  assert.deepEqual(duplicates, []);
+  // Every desktop shell app must have its RN component. These are the
+  // components rendered by ShellComponentRenderer via the registry.
+  const expected = [
+    "dock/desktop.tsx",
+    "status-bar/desktop.tsx",
+    "wallpaper/desktop.tsx",
+    "launcher/desktop.tsx",
+    "window-switcher/desktop.tsx",
+    "lock-screen/desktop.tsx",
+    "app-drawer/desktop.tsx",
+    "notifications/desktop.tsx",
+    "quick-settings/desktop.tsx",
+  ];
+  for (const file of expected) {
+    assert.ok(entries.includes(file), `missing ${file}`);
+  }
 
+  // The legacy native renderers remain as fallback for tests and until the
+  // RN components are fully verified on hardware.
   const desktop = await readFile(resolve(root, "applications/shell/desktop.ts"), "utf8");
   for (const renderer of [
     "renderDesktopDock",

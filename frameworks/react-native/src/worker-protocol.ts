@@ -79,6 +79,7 @@ export type WorkerServiceName =
   | "camera.recordStart"
   | "camera.recordStop"
   | "camera.preview"
+  | "camera.readImage"
   | "camera.status"
   | "camera.torch"
   | "battery.status"

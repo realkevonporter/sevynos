@@ -10,6 +10,8 @@ import {
   type SevynFileSystem,
   type SystemNotificationService,
   type SevynApplicationManifest,
+  type SevynStorageService,
+  type SevynVolume,
 } from "@sevynos/react-native";
 
 export const filesManifest: SevynApplicationManifest = {
@@ -23,7 +25,7 @@ export const filesManifest: SevynApplicationManifest = {
   icon: "icons/files.svg",
   entrypoint: "dist/index.js",
   minimumSevynOSVersion: "0.1.0",
-  permissions: ["filesystem.read", "filesystem.write"],
+  permissions: ["filesystem.read", "filesystem.write", "removable-storage"],
   services: [],
   windowModes: ["standard"],
   instanceMode: "multiple",
@@ -31,6 +33,7 @@ export const filesManifest: SevynApplicationManifest = {
 
 export interface FilesApplicationProps {
   readonly filesystem?: SevynFileSystem | undefined;
+  readonly storage?: SevynStorageService | undefined;
   readonly notifications?: SystemNotificationService | undefined;
   readonly initialPath?: string | undefined;
 }
@@ -66,12 +69,14 @@ function getFileIcon(name: string, kind: "file" | "directory"): string {
 
 export function FilesApplication({
   filesystem,
+  storage,
   notifications,
   initialPath = "/",
 }: FilesApplicationProps): JSX.Element {
   const [currentPath, setCurrentPath] = useState<string>(initialPath);
   const [entries, setEntries] = useState<readonly FileSystemEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | undefined>(undefined);
+  const [volumes, setVolumes] = useState<readonly SevynVolume[]>([]);
   const [newFolderName, setNewFolderName] = useState<string>("");
   const [isCreatingFolder, setIsCreatingFolder] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
@@ -134,6 +139,22 @@ export function FilesApplication({
     void loadDirectory(initialPath);
   }, [loadDirectory, initialPath]);
 
+  // Subscribe to USB/removable volume changes.
+  useEffect(() => {
+    if (!storage) return;
+    const unsubscribe = storage.subscribe((newVolumes: readonly SevynVolume[]) => {
+      setVolumes(newVolumes);
+    });
+    // Also fetch initial list.
+    void storage
+      .listVolumes()
+      .then(setVolumes)
+      .catch(() => {
+        // Volumes unavailable; sidebar shows none.
+      });
+    return unsubscribe;
+  }, [storage]);
+
   const navigateTo = useCallback(
     async (path: string): Promise<void> => {
       if (path === currentPath) return;
@@ -143,6 +164,25 @@ export function FilesApplication({
       }
     },
     [currentPath, loadDirectory],
+  );
+
+  const handleEject = useCallback(
+    async (volumeId: string): Promise<void> => {
+      if (!storage) return;
+      try {
+        await storage.eject(volumeId);
+        // If we were browsing the ejected volume, go home.
+        const volume = volumes.find((v) => v.id === volumeId);
+        if (volume && currentPath.startsWith(volume.mountPoint)) {
+          await navigateTo("/");
+        }
+      } catch (error: unknown) {
+        setDirectoryError(
+          error instanceof Error ? error.message : "Could not eject the device.",
+        );
+      }
+    },
+    [storage, volumes, currentPath, navigateTo],
   );
 
   const handleNavigateBack = async (): Promise<void> => {
@@ -328,6 +368,42 @@ export function FilesApplication({
             );
           })}
         </ScrollView>
+        {/* Removable Devices (USB drives) */}
+        {volumes.length > 0 && (
+          <>
+            <Text style={styles.sidebarSectionTitle}>Devices</Text>
+            <ScrollView style={styles.quickLocations}>
+              {volumes.map((volume) => {
+                const isActive = currentPath === volume.mountPoint;
+                return (
+                  <View key={volume.id} style={styles.deviceRow}>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${volume.label}`}
+                      onPress={() => void navigateTo(volume.mountPoint)}
+                      style={isActive ? styles.locationItemActive : styles.locationItem}
+                    >
+                      <Text style={styles.locationIcon}>💾</Text>
+                      <Text
+                        style={isActive ? styles.locationNameActive : styles.locationName}
+                      >
+                        {volume.label}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Eject ${volume.label}`}
+                      onPress={() => void handleEject(volume.id)}
+                      style={styles.ejectButton}
+                    >
+                      <Text style={styles.ejectIcon}>⏏</Text>
+                    </Pressable>
+                  </View>
+                );
+              })}
+            </ScrollView>
+          </>
+        )}
       </View>
 
       {/* Main Files Area */}
@@ -653,6 +729,19 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     gap: 8,
     marginBottom: 4,
+  },
+  deviceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  ejectButton: {
+    padding: 8,
+    marginLeft: 4,
+  },
+  ejectIcon: {
+    fontSize: 14,
+    color: "#9aa4b2",
   },
   locationItemActive: {
     flexDirection: "row",

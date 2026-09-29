@@ -271,7 +271,27 @@ export type DesktopSystemApplicationSceneNode =
   | DesktopWorkspaceItemSceneNode
   | DesktopLockScreenSurfaceSceneNode
   | DesktopLockScreenClockSceneNode
-  | DesktopLockScreenUnlockActionSceneNode;
+  | DesktopLockScreenUnlockActionSceneNode
+  | DesktopShellSurfaceSceneNode;
+
+/**
+ * Generic scene node for React Native shell components.
+ * The `nativeSurface` carries the RN-rendered commands; the rasterizer
+ * draws them via the standard native surface path.
+ */
+export interface DesktopShellSurfaceSceneNode {
+  readonly kind: "desktop-shell-surface";
+  readonly order: number;
+  readonly bounds: DesktopShellBounds;
+  readonly displayId: string;
+  readonly applicationId: string;
+  readonly nativeSurface:
+    | {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        readonly commands: readonly any[];
+      }
+    | undefined;
+}
 
 export function renderDesktopWorkspace(
   input: DesktopWorkspaceRenderInput,

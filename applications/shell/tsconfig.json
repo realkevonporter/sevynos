@@ -11,6 +11,10 @@
     "types": ["react"]
   },
   "include": ["**/*.ts", "**/*.tsx"],
-  "references": [{ "path": "../../shell/core" }],
+  "references": [
+    {
+      "path": "../../shell/core"
+    }
+  ],
   "exclude": ["dist", "node_modules"]
 }

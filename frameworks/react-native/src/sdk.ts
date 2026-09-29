@@ -4,6 +4,8 @@ export {
   type FileSystemEntry,
   type SevynApplicationSdk,
   type SevynFileSystem,
+  type SevynStorageService,
+  type SevynVolume,
   type SystemNotification,
   type BrowserEngineSnapshot,
   type SevynBrowserEngine,
