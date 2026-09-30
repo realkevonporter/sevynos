@@ -38,17 +38,58 @@ function flattenStyleRecursive(style: unknown): Record<string, unknown> | undefi
       const flattened = flattenStyleRecursive(item);
       if (flattened) Object.assign(result, flattened);
     }
-    return result;
+    return resolveLogicalProps(result);
   }
   if (typeof style === "object") {
-    return style as Record<string, unknown>;
+    return resolveLogicalProps(style as Record<string, unknown>);
   }
   return undefined;
+}
+
+/**
+ * Resolve logical (RTL-aware) style properties to physical ones.
+ * Based on the `direction` style or default LTR.
+ */
+function resolveLogicalProps(style: Record<string, unknown>): Record<string, unknown> {
+  const direction = style["direction"];
+  // In RTL, start=end and left=right are swapped.
+  const isRTL = direction === "rtl";
+  const result = { ...style };
+
+  // Helper to get logical value, preferring the logical prop over physical.
+  const resolve = (logical: string, physicalLTR: string, physicalRTL: string): void => {
+    const value = result[logical];
+    if (value !== undefined) {
+      const physical = isRTL ? physicalRTL : physicalLTR;
+      // Only set if physical not already explicitly set (physical wins).
+      if (result[physical] === undefined) {
+        result[physical] = value;
+      }
+      delete result[logical];
+    }
+  };
+
+  resolve("start", "left", "right");
+  resolve("end", "right", "left");
+  resolve("marginStart", "marginLeft", "marginRight");
+  resolve("marginEnd", "marginRight", "marginLeft");
+  resolve("paddingStart", "paddingLeft", "paddingRight");
+  resolve("paddingEnd", "paddingRight", "paddingLeft");
+  resolve("borderStartWidth", "borderLeftWidth", "borderRightWidth");
+  resolve("borderEndWidth", "borderRightWidth", "borderLeftWidth");
+
+  return result;
 }
 
 function element(type: NativeElementType, props: NativeComponentProps): ReactElement {
   const { style, ...rest } = props;
   const flattenedStyle = flattenStyleRecursive(style);
+  // Handle display: "none" at the framework level by not rendering.
+  // The host may also handle it, but this ensures consistent behavior.
+  const display = flattenedStyle?.["display"];
+  if (display === "none") {
+    return null as unknown as ReactElement;
+  }
   return createElement(
     type,
     {
@@ -235,15 +276,39 @@ export function Pressable(props: PressableProps): ReactElement {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { style: _style, children: _children, ...restProps } = props;
 
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimer.current !== null) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  }, []);
+
   const handlePressIn = useCallback(() => {
     setPressed(true);
     props.onPressIn?.();
-  }, [props.onPressIn]);
+    // Start long-press timer.
+    if (props.onLongPress) {
+      clearLongPressTimer();
+      const delay = props.delayLongPress ?? 500;
+      longPressTimer.current = setTimeout(() => {
+        longPressTimer.current = null;
+        props.onLongPress?.();
+      }, delay);
+    }
+  }, [props.onPressIn, props.onLongPress, props.delayLongPress, clearLongPressTimer]);
 
   const handlePressOut = useCallback(() => {
     setPressed(false);
+    clearLongPressTimer();
     props.onPressOut?.();
-  }, [props.onPressOut]);
+  }, [props.onPressOut, clearLongPressTimer]);
+
+  // Clear timer on unmount.
+  useEffect(() => {
+    return clearLongPressTimer;
+  }, [clearLongPressTimer]);
 
   return element("button", {
     ...restProps,
@@ -301,7 +366,23 @@ export interface TextInputHandle {
 }
 export type NativeTextInputMethods = TextInputHandle;
 
-export const NativeTextInput = (props: NativeComponentProps): ReactElement => {
+export interface TextInputProps extends NativeComponentProps {
+  readonly onChange?: (event: {
+    readonly nativeEvent: { readonly text: string };
+  }) => void;
+  readonly onChangeText?: (text: string) => void;
+  readonly returnKeyType?: "done" | "go" | "next" | "search" | "send" | "default";
+  readonly autoFocus?: boolean;
+  readonly placeholder?: string;
+  readonly secureTextEntry?: boolean;
+  readonly multiline?: boolean;
+  readonly editable?: boolean;
+  readonly maxLength?: number;
+  readonly keyboardType?:
+    "default" | "email-address" | "numeric" | "phone-pad" | "number-pad";
+}
+
+export const NativeTextInput = (props: TextInputProps): ReactElement => {
   const ref = (props as { ref?: unknown }).ref;
   if (ref && typeof ref === "object" && "current" in ref) {
     ref.current = {
@@ -311,8 +392,11 @@ export const NativeTextInput = (props: NativeComponentProps): ReactElement => {
       isFocused: () => false,
     };
   }
+  const { autoFocus, ...restProps } = props;
+  // autoFocus: focus on mount. The host handles the actual focus via the prop.
   return element("input", {
-    ...props,
+    ...restProps,
+    ...(autoFocus !== undefined ? { autoFocus } : {}),
     // React Native TextInput is intrinsically focusable. Requiring every app to
     // duplicate that fact with accessibilityRole made otherwise-valid inputs
     // ignore pointer and keyboard focus in the SevynOS host.
@@ -347,9 +431,24 @@ export interface ScrollViewHandle {
 }
 export type NativeScrollViewMethods = ScrollViewHandle;
 
-export const NativeScrollView = (
-  props: NativeComponentProps & { readonly refreshControl?: ReactElement | null },
-): ReactElement => {
+export interface NativeScrollEvent {
+  readonly nativeEvent: {
+    readonly contentOffset: { readonly x: number; readonly y: number };
+    readonly contentSize: { readonly width: number; readonly height: number };
+    readonly layoutMeasurement: { readonly width: number; readonly height: number };
+  };
+}
+
+export interface ScrollViewProps extends NativeComponentProps {
+  readonly horizontal?: boolean;
+  readonly contentContainerStyle?: NativeStyle;
+  readonly onScroll?: (event: NativeScrollEvent) => void;
+  readonly onContentSizeChange?: (width: number, height: number) => void;
+  readonly scrollEventThrottle?: number;
+  readonly refreshControl?: ReactElement | null;
+}
+
+export const NativeScrollView = (props: ScrollViewProps): ReactElement => {
   const ref = (props as { ref?: unknown }).ref;
   if (ref && typeof ref === "object" && "current" in ref) {
     ref.current = {
@@ -358,11 +457,22 @@ export const NativeScrollView = (
       flashScrollIndicators: () => undefined,
     };
   }
-  const controlProps = props.refreshControl?.props as
+  const {
+    refreshControl,
+    contentContainerStyle,
+    horizontal,
+    onScroll,
+    onContentSizeChange,
+    scrollEventThrottle,
+    ...restProps
+  } = props;
+  void onContentSizeChange;
+  void scrollEventThrottle;
+  const controlProps = refreshControl?.props as
     { readonly refreshing?: boolean; readonly onRefresh?: () => void } | undefined;
-  const children = props.refreshControl
+  const innerChildren = refreshControl
     ? [
-        props.refreshControl,
+        refreshControl,
         ...(Array.isArray(props.children)
           ? (props.children as readonly ReactNode[])
           : props.children == null
@@ -370,8 +480,18 @@ export const NativeScrollView = (
             : [props.children]),
       ]
     : props.children;
+  // Wrap children in a content container for contentContainerStyle.
+  const children =
+    contentContainerStyle === undefined
+      ? innerChildren
+      : element("view", {
+          style: contentContainerStyle,
+          children: innerChildren,
+        });
   return element("scroll", {
-    ...props,
+    ...restProps,
+    ...(horizontal !== undefined ? { horizontal } : {}),
+    ...(onScroll !== undefined ? { onScroll } : {}),
     ...(controlProps?.onRefresh === undefined
       ? {}
       : { onRefresh: controlProps.onRefresh }),
@@ -1002,9 +1122,33 @@ export function VirtualizedList<ItemT>(props: VirtualizedListProps<ItemT>): Reac
     listChildren.push(renderListComponent(props.ListFooterComponent, "__footer"));
   }
 
-  const handleScroll = (offset: number): void => {
+  const handleScroll = (event: NativeScrollEvent | number): void => {
+    // Handle both the new event shape and legacy number offset (from host).
+    const offset =
+      typeof event === "number"
+        ? event
+        : props.horizontal
+          ? event.nativeEvent.contentOffset.x
+          : event.nativeEvent.contentOffset.y;
     setScrollOffset(Math.max(0, offset));
-    props.onScroll?.(offset);
+    // Send RN-compatible scroll event shape.
+    const scrollEvent: NativeScrollEvent = {
+      nativeEvent: {
+        contentOffset: {
+          x: props.horizontal ? Math.max(0, offset) : 0,
+          y: props.horizontal ? 0 : Math.max(0, offset),
+        },
+        contentSize: {
+          width: props.horizontal ? contentLength : viewportSize,
+          height: props.horizontal ? viewportSize : contentLength,
+        },
+        layoutMeasurement: {
+          width: props.horizontal ? viewportSize : viewportSize,
+          height: props.horizontal ? viewportSize : viewportSize,
+        },
+      },
+    };
+    props.onScroll?.(scrollEvent);
     const distanceFromEnd = Math.max(0, contentLength - viewportSize - offset);
     const threshold = Math.max(0, props.onEndReachedThreshold ?? 2) * viewportSize;
     if (

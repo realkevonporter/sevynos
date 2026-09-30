@@ -112,6 +112,7 @@ export interface NativeStyle {
   readonly shadowOffset?: { readonly width: number; readonly height: number };
   readonly shadowOpacity?: number;
   readonly shadowRadius?: number;
+  readonly boxShadow?: string;
   readonly scale?: number;
   readonly translateX?: number;
   readonly translateY?: number;
@@ -122,12 +123,29 @@ export interface NativeStyle {
   readonly lineHeight?: number;
   readonly letterSpacing?: number;
   readonly textAlign?: "auto" | "left" | "right" | "center" | "justify";
+  readonly textAlignVertical?: "auto" | "top" | "bottom" | "center";
   readonly wrap?: boolean;
   readonly textDecorationLine?:
     "none" | "underline" | "line-through" | "underline line-through";
+  readonly textDecorationStyle?: "solid" | "double" | "dotted" | "dashed";
+  readonly textDecorationColor?: string;
+  readonly textTransform?: "none" | "uppercase" | "lowercase" | "capitalize";
+  readonly textShadowColor?: string;
+  readonly textShadowOffset?: { readonly width: number; readonly height: number };
+  readonly textShadowRadius?: number;
+  readonly verticalAlign?: "auto" | "top" | "bottom" | "middle";
+  readonly marginStart?: number;
+  readonly marginEnd?: number;
+  readonly paddingStart?: number;
+  readonly paddingEnd?: number;
+  readonly borderStartWidth?: number;
+  readonly borderEndWidth?: number;
+  readonly start?: number;
+  readonly end?: number;
   readonly zIndex?: number;
   readonly aspectRatio?: number | string;
   readonly transform?: readonly Record<string, unknown>[];
+  readonly display?: "none" | "flex";
 }
 export interface NativeBitmapSource {
   readonly width: number;
@@ -220,7 +238,13 @@ export interface NativeEventHandlers {
   }) => void;
   readonly onSubmitEditing?: (text: string) => void;
   readonly onValueChange?: (value: string | number | boolean) => void;
-  readonly onScroll?: (offset: number) => void;
+  readonly onScroll?: (event: {
+    readonly nativeEvent: {
+      readonly contentOffset: { readonly x: number; readonly y: number };
+      readonly contentSize: { readonly width: number; readonly height: number };
+      readonly layoutMeasurement: { readonly width: number; readonly height: number };
+    };
+  }) => void;
   readonly onDismiss?: () => void;
   readonly onRefresh?: () => void;
 }
@@ -232,6 +256,27 @@ export interface NativeProps extends AccessibilityProps, NativeEventHandlers {
   readonly nativeID?: string;
   readonly key?: string;
   readonly style?: NativeStyle;
+  readonly numberOfLines?: number;
+  readonly ellipsizeMode?: "head" | "middle" | "tail" | "clip";
+  readonly pointerEvents?: "auto" | "none" | "box-none" | "box-only";
+  readonly hitSlop?:
+    | number
+    | {
+        readonly top?: number;
+        readonly bottom?: number;
+        readonly left?: number;
+        readonly right?: number;
+      };
+  readonly onLayout?: (event: {
+    readonly nativeEvent: {
+      readonly layout: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+    };
+  }) => void;
   readonly children?: ReactNode;
   readonly text?: string;
   readonly value?: string | number | boolean;

@@ -553,7 +553,19 @@ export class SevynApplicationRuntime {
       style: { ...target.props.style, scrollOffset: Math.max(0, offset) },
     };
     target.dirty = true;
-    target.props.onScroll?.(offset);
+    // Send RN-compatible scroll event shape.
+    const isHorizontal =
+      (target.props as { readonly horizontal?: boolean }).horizontal === true;
+    target.props.onScroll?.({
+      nativeEvent: {
+        contentOffset: {
+          x: isHorizontal ? Math.max(0, offset) : 0,
+          y: isHorizontal ? 0 : Math.max(0, offset),
+        },
+        contentSize: { width: 0, height: 0 },
+        layoutMeasurement: { width: 0, height: 0 },
+      },
+    });
     this.#commitSnapshot();
   }
 
