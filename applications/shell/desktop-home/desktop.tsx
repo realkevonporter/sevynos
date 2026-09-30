@@ -33,11 +33,7 @@ function WorkspaceAction({
       accessibilityLabel={label}
       accessibilityRole="button"
       onPress={onPress}
-      style={({ pressed }: { pressed: boolean }) => [
-        styles.action,
-        { left: x, top: y },
-        pressed && styles.actionPressed,
-      ]}
+      style={[styles.action, { left: x, top: y }]}
     >
       <Text style={styles.actionLabel}>{label}</Text>
     </Pressable>
@@ -64,11 +60,7 @@ function WorkspaceItem({
       accessibilityLabel={name}
       accessibilityRole="button"
       onPress={() => onPress?.(path)}
-      style={({ pressed }: { pressed: boolean }) => [
-        styles.item,
-        { left: x, top: y },
-        pressed && styles.itemPressed,
-      ]}
+      style={[styles.item, { left: x, top: y }]}
     >
       <View
         style={[styles.icon, kind === "directory" ? styles.folderIcon : styles.fileIcon]}
