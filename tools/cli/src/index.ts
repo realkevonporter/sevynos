@@ -786,7 +786,7 @@ function sevynRuntimeModules(): Plugin {
       // Handle react-native/Libraries/* deep imports by mapping to the main module.
       // Third-party libraries sometimes import from internal paths; we re-export
       // everything from the main react-native module.
-      builder.onResolve({ filter: /^react-native\// }, (args) => ({
+      builder.onResolve({ filter: /^react-native\// }, () => ({
         path: "react-native",
         namespace: "sevynos-runtime",
       }));
