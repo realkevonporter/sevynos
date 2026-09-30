@@ -172,10 +172,15 @@ function attachTextMeasure(
   const fontSize = cStyle.fontSize ?? sevynTokens.typography.body.size;
   const fontWeight = cStyle.fontWeight ?? sevynTokens.typography.body.weight;
   const lineHeight = cStyle.lineHeight ?? Math.round(fontSize * 1.4);
+  // numberOfLines is a prop, not a style.
+  const numberOfLines = (node.props as { numberOfLines?: number }).numberOfLines;
 
   nodeYoga.setMeasureFunc((width, widthMode, height, heightMode) => {
+    // If numberOfLines is 1, don't wrap - measure as single line.
+    // This prevents "F/il/e" vertical wrapping in menu bars and other single-line text.
+    const singleLine = numberOfLines === 1;
     const maxWidth =
-      widthMode === MeasureMode.Undefined || Number.isNaN(width)
+      singleLine || widthMode === MeasureMode.Undefined || Number.isNaN(width)
         ? Number.POSITIVE_INFINITY
         : width;
     const measured = measureNativeText(textContent, fontSize, maxWidth, {
