@@ -64,6 +64,13 @@ export class ShellComponentRenderer {
         runtime.update(createElement(component, props));
       }
       const snapshot: NativeRuntimeSnapshot = runtime.snapshot;
+      // If the component returned null (e.g. closed Launcher), it produces
+      // zero commands. Return undefined so the composer skips this surface
+      // entirely, instead of emitting a full-bounds opaque node that would
+      // cover the wallpaper.
+      if (snapshot.commands.length === 0) {
+        return undefined;
+      }
       return {
         kind: "desktop-shell-surface",
         order,
