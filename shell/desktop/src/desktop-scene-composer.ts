@@ -309,7 +309,7 @@ export class DesktopSceneComposer {
    */
   public dispatchShellPointer(
     applicationId: string,
-    type: "down" | "up" | "move",
+    type: "down" | "up" | "move" | "cancel",
     x: number,
     y: number,
   ): boolean {
