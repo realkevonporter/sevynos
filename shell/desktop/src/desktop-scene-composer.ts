@@ -518,7 +518,7 @@ export class DesktopSceneComposer {
       SystemApplicationId.Wallpaper,
       wallpaperInput,
       (display) => display.bounds,
-      () => 0,
+      () => -200,
       shellDisplays,
     );
     const statusBarInput = {
