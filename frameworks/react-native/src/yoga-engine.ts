@@ -11,6 +11,7 @@ import Yoga, {
 import type { NativeBounds, NativeHostNode, NativeStyle } from "./native-types.js";
 import { measureNativeText } from "./font-metrics.js";
 import { sevynTokens } from "./tokens.js";
+import { StyleSheet } from "./stylesheet.js";
 
 function extractTextContent(node: NativeHostNode): string {
   if (typeof node.props.text === "string") return node.props.text;
@@ -177,7 +178,7 @@ function attachTextMeasure(
   nodeYoga: ReturnType<typeof Yoga.Node.create>,
   node: NativeHostNode,
 ): void {
-  const cStyle = node.props.style ?? {};
+  const cStyle = StyleSheet.flatten(node.props.style);
   const textContent = extractTextContent(node);
   const fontSize = cStyle.fontSize ?? sevynTokens.typography.body.size;
   const fontWeight = cStyle.fontWeight ?? sevynTokens.typography.body.weight;
@@ -210,7 +211,7 @@ function populateChildren(
   for (let i = 0; i < children.length; i++) {
     const child = children[i];
     if (child === undefined) continue;
-    const cStyle = child.props.style ?? {};
+    const cStyle = StyleSheet.flatten(child.props.style);
     const childYoga = Yoga.Node.create();
     applyStylesToYogaNode(childYoga, cStyle, false);
 
@@ -272,7 +273,7 @@ export function computeYogaLayout(
   for (let i = 0; i < relativeChildren.length; i++) {
     const child = relativeChildren[i];
     if (child === undefined) continue;
-    const cStyle = child.props.style ?? {};
+    const cStyle = StyleSheet.flatten(child.props.style);
     const childYoga = Yoga.Node.create();
 
     applyStylesToYogaNode(childYoga, cStyle, isScroll);
