@@ -93,8 +93,8 @@ function DisplayDock({
       style={[
         styles.dock,
         {
-          left: dockBounds.x - display.bounds.x,
-          top: dockBounds.y - display.bounds.y,
+          left: dockBounds.x - display.taskbarBounds.x,
+          top: dockBounds.y - display.taskbarBounds.y,
           width: dockBounds.width,
           height: dockBounds.height,
           flexDirection: vertical ? "column" : "row",
@@ -307,7 +307,7 @@ function getFloatingDockBounds(
 const styles = StyleSheet.create({
   dock: {
     alignItems: "center",
-    backgroundColor: "#FF0000",
+    backgroundColor: SevynShellTheme.colors.dockBackground,
     borderColor: SevynShellTheme.colors.dockBorder,
     borderRadius: SevynShellTheme.radius.dock,
     borderWidth: 1,
