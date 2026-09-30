@@ -466,6 +466,34 @@ export class DesktopSceneComposer {
       );
     }
 
+    // Fallback: if no pinned or running apps, show default essentials so the
+    // dock is never empty and invisible.
+    if (dockApplications.length === 0) {
+      const defaultIds = [
+        "org.sevynos.app.files",
+        "org.sevynos.app.browser",
+        "org.sevynos.app.settings",
+        "org.sevynos.app.terminal",
+      ];
+      for (const appId of defaultIds) {
+        const def = this.#runtime.applications.catalog.find((d) => d.id === appId);
+        if (def !== undefined && !seenAppIds.has(appId)) {
+          seenAppIds.add(appId);
+          dockApplications.push(
+            Object.freeze({
+              applicationId: appId,
+              label: def.name,
+              focused: false,
+              minimized: false,
+              displayId: primary.id,
+              pinned: true,
+              running: false,
+            }),
+          );
+        }
+      }
+    }
+
     const { timeText, dateText } = getFormattedTimeAndDate();
 
     const activeNetwork = this.#networkSnapshot?.networks.find((n) => n.connected);
@@ -529,7 +557,7 @@ export class DesktopSceneComposer {
         SystemApplicationId.DesktopHome,
         workspaceInput,
         (display) => display.bounds,
-        () => 0.5,
+        () => -100,
         shellDisplays,
       );
     } else {
