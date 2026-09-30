@@ -10,6 +10,12 @@ export const StyleSheet = Object.freeze({
   create<T extends Record<string, NativeStyle>>(styles: T): T {
     return Object.freeze(styles);
   },
+  compose<T extends NativeStyle>(
+    style1: T | readonly (T | undefined | null | false)[] | undefined | null | false,
+    style2: T | readonly (T | undefined | null | false)[] | undefined | null | false,
+  ): NativeStyle {
+    return StyleSheet.flatten([style1, style2] as unknown as T);
+  },
   flatten<T extends NativeStyle>(
     styles: T | readonly (T | undefined | null | false)[] | undefined | null | false,
   ): NativeStyle {

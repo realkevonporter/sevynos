@@ -228,6 +228,8 @@ export interface NativeProps extends AccessibilityProps, NativeEventHandlers {
   readonly accessibilityRole?: AccessibilityProps["role"];
   readonly accessibilityLabel?: string;
   readonly id?: string;
+  readonly testID?: string;
+  readonly nativeID?: string;
   readonly key?: string;
   readonly style?: NativeStyle;
   readonly children?: ReactNode;

@@ -7,8 +7,10 @@ import {
   type ReactElement,
 } from "react";
 import {
+  FlatList,
   Image,
   ScrollView,
+  SectionList,
   Text,
   View,
   type NativeComponentProps,
@@ -718,6 +720,6 @@ export const Animated = {
   Text: createAnimatedComponent(Text),
   Image: createAnimatedComponent(Image),
   ScrollView: createAnimatedComponent(ScrollView),
-  FlatList: createAnimatedComponent(View),
-  SectionList: createAnimatedComponent(View),
+  FlatList: createAnimatedComponent(FlatList),
+  SectionList: createAnimatedComponent(SectionList),
 };

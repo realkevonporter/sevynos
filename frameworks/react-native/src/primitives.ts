@@ -15,6 +15,7 @@ import type {
   NativeBitmapSource,
   NativeElementType,
   NativeProps,
+  NativeStyle,
 } from "./native-types.js";
 import { getNativeAdapters } from "./native-adapter-contracts.js";
 
@@ -55,6 +56,10 @@ function element(type: NativeElementType, props: NativeComponentProps): ReactEle
       ...(flattenedStyle !== undefined ? { style: flattenedStyle } : {}),
       role: props.role ?? props.accessibilityRole,
       label: props.label ?? props.accessibilityLabel,
+      // Map testID to id for host test hooks.
+      ...(props.testID !== undefined && props.id === undefined
+        ? { id: props.testID }
+        : {}),
     },
     props.children,
   );
@@ -140,19 +145,14 @@ function ImageView(props: ImageProps): ReactElement {
       cancelled = true;
     };
   }, [selected, uri]);
-  const {
-    source: _source,
-    resizeMode: _resizeMode,
-    onLoad: _onLoad,
-    onError: _onError,
-    ...nativeProps
-  } = props;
+  const { source: _source, onLoad: _onLoad, onError: _onError, ...nativeProps } = props;
   void _source;
-  void _resizeMode;
   void _onLoad;
   void _onError;
   return NativeImage({
     ...nativeProps,
+    // Forward resizeMode to the host image element.
+    ...(props.resizeMode !== undefined ? { resizeMode: props.resizeMode } : {}),
     ...(bitmap === undefined ? {} : { source: bitmap }),
   });
 }
@@ -422,6 +422,8 @@ export interface FlatListProps<ItemT> extends NativeComponentProps {
   readonly ListHeaderComponent?: (() => ReactElement | null) | ReactElement | null;
   readonly ListFooterComponent?: (() => ReactElement | null) | ReactElement | null;
   readonly horizontal?: boolean;
+  readonly numColumns?: number;
+  readonly columnWrapperStyle?: NativeProps["style"];
   readonly initialNumToRender?: number;
   readonly initialScrollIndex?: number;
   readonly maxToRenderPerBatch?: number;
@@ -436,11 +438,67 @@ export interface FlatListProps<ItemT> extends NativeComponentProps {
 }
 
 export function FlatList<ItemT>(props: FlatListProps<ItemT>): ReactElement {
-  return createElement(VirtualizedList<ItemT>, {
-    ...props,
-    getItem: (data, index) => data[index] as ItemT,
-    getItemCount: (data) => data?.length ?? 0,
-  });
+  const numColumns = Math.max(1, Math.floor(props.numColumns ?? 1));
+  if (numColumns <= 1) {
+    return createElement(VirtualizedList<ItemT>, {
+      ...props,
+      getItem: (data, index) => data[index] as ItemT,
+      getItemCount: (data) => data?.length ?? 0,
+    });
+  }
+  // Multi-column: chunk data into rows, each row renders its items horizontally.
+  const data = props.data ?? [];
+  const rowCount = Math.ceil(data.length / numColumns);
+  const rows: { readonly items: readonly { item: ItemT; index: number }[] }[] = [];
+  for (let r = 0; r < rowCount; r++) {
+    const items: { item: ItemT; index: number }[] = [];
+    for (let c = 0; c < numColumns; c++) {
+      const index = r * numColumns + c;
+      if (index < data.length) {
+        items.push({ item: data[index] as ItemT, index });
+      }
+    }
+    rows.push({ items });
+  }
+  // Omit props that are overridden for the row-based list.
+  const {
+    data: _data,
+    renderItem: _renderItem,
+    keyExtractor: _keyExtractor,
+    getItemLayout: _getItemLayout,
+    ...rowListProps
+  } = props;
+  void _data;
+  void _renderItem;
+  void _keyExtractor;
+  void _getItemLayout;
+  return createElement(
+    VirtualizedList<{ readonly items: readonly { item: ItemT; index: number }[] }>,
+    {
+      ...rowListProps,
+      data: rows,
+      getItem: (d, i) =>
+        d[i] as { readonly items: readonly { item: ItemT; index: number }[] },
+      getItemCount: (d) => d?.length ?? 0,
+      keyExtractor: (row, rowIndex) => {
+        if (props.keyExtractor) {
+          const extractor = props.keyExtractor;
+          return row.items.map(({ item, index }) => extractor(item, index)).join(":");
+        }
+        return `row-${String(rowIndex)}`;
+      },
+      renderItem: ({ item: row }) => {
+        const rowStyle: Record<string, unknown> = { flexDirection: "row" };
+        if (props.columnWrapperStyle && typeof props.columnWrapperStyle === "object") {
+          Object.assign(rowStyle, props.columnWrapperStyle);
+        }
+        return element("view", {
+          style: rowStyle,
+          children: row.items.map(({ item, index }) => props.renderItem({ item, index })),
+        });
+      },
+    },
+  );
 }
 
 /**
