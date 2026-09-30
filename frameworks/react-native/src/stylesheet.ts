@@ -132,6 +132,10 @@ export const Platform = Object.freeze({
   select<T>(options: PlatformSelectOptions<T>): T | undefined {
     if ("sevynos" in options) return options.sevynos;
     if ("native" in options) return options.native;
+    // Third-party apps often only define ios/android. Fall back through
+    // mobile platforms so Platform.select({ios, android}) works on SevynOS.
+    if ("ios" in options) return options.ios;
+    if ("android" in options) return options.android;
     if ("linux" in options) return options.linux;
     return options.default;
   },
@@ -145,12 +149,36 @@ export interface AlertButton {
 
 export const Alert = Object.freeze({
   alert(title: string, message?: string, buttons?: readonly AlertButton[]): void {
-    if (typeof console !== "undefined") {
-      console.log(`[Alert] ${title}: ${message ?? ""}`);
-    }
-    const defaultButton = buttons?.[0];
-    if (defaultButton?.onPress) {
-      defaultButton.onPress();
+    // Do NOT auto-invoke buttons. If a native dialog adapter is available,
+    // use it; otherwise log and require explicit user action via the dialog.
+    const adapters = (globalThis as Record<string, unknown>)[
+      "__SEVYN_NATIVE_ADAPTERS__"
+    ] as
+      | {
+          dialog?: {
+            showAlert(
+              title: string,
+              message?: string,
+              buttons?: readonly { text?: string }[],
+            ): Promise<number>;
+          };
+        }
+      | undefined;
+    if (adapters?.dialog) {
+      void adapters.dialog
+        .showAlert(title, message, buttons)
+        .then((index) => {
+          buttons?.[index]?.onPress?.();
+        })
+        .catch(() => undefined);
+    } else {
+      // No native dialog: log prominently. Do not fire buttons without
+      // user interaction.
+      if (typeof console !== "undefined") {
+        console.warn(
+          `[Alert] ${title}: ${message ?? ""} (no native dialog; buttons not fired)`,
+        );
+      }
     }
   },
 });

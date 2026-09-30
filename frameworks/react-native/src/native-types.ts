@@ -205,6 +205,9 @@ export interface NativeEventHandlers {
   readonly onTouchEnd?: (event: NativeTouchEvent) => void;
   readonly onTouchCancel?: (event: NativeTouchEvent) => void;
   readonly onPress?: () => void;
+  readonly onPressIn?: () => void;
+  readonly onPressOut?: () => void;
+  readonly onLongPress?: () => void;
   readonly onFocus?: () => void;
   readonly onBlur?: () => void;
   readonly onKeyDown?: (event: NativeKeyboardEvent) => void;

@@ -22,11 +22,37 @@ export type NativeComponentProps = NativeProps & {
   readonly children?: ReactNode;
   readonly ref?: unknown;
 };
+
+/**
+ * Recursively flattens a style prop that may be an object, an array
+ * (possibly nested), or falsy. This ensures `style={[a, b]}` and
+ * `style={[a, [b, c]]}` are correctly merged before reaching Yoga,
+ * which cannot handle array styles.
+ */
+function flattenStyleRecursive(style: unknown): Record<string, unknown> | undefined {
+  if (!style) return undefined;
+  if (Array.isArray(style)) {
+    const result: Record<string, unknown> = {};
+    for (const item of style) {
+      const flattened = flattenStyleRecursive(item);
+      if (flattened) Object.assign(result, flattened);
+    }
+    return result;
+  }
+  if (typeof style === "object") {
+    return style as Record<string, unknown>;
+  }
+  return undefined;
+}
+
 function element(type: NativeElementType, props: NativeComponentProps): ReactElement {
+  const { style, ...rest } = props;
+  const flattenedStyle = flattenStyleRecursive(style);
   return createElement(
     type,
     {
-      ...props,
+      ...rest,
+      ...(flattenedStyle !== undefined ? { style: flattenedStyle } : {}),
       role: props.role ?? props.accessibilityRole,
       label: props.label ?? props.accessibilityLabel,
     },
@@ -165,11 +191,69 @@ export const Image = Object.assign(ImageView, {
   resolveAssetSource: (source: ImageSourcePropType | undefined) => source ?? null,
 });
 
-export const Pressable = (props: NativeComponentProps): ReactElement =>
-  element("button", {
-    ...props,
+export interface PressableState {
+  readonly pressed: boolean;
+}
+
+export type PressableStyleProp =
+  NativeProps["style"] | ((state: PressableState) => NativeProps["style"]);
+
+export interface PressableProps extends Omit<NativeComponentProps, "style" | "children"> {
+  readonly style?: PressableStyleProp;
+  readonly children?: ReactNode | ((state: PressableState) => ReactNode);
+  readonly onPressIn?: () => void;
+  readonly onPressOut?: () => void;
+  readonly onLongPress?: () => void;
+  readonly delayLongPress?: number;
+}
+
+function resolvePressableStyle(
+  style: PressableStyleProp | undefined,
+  state: PressableState,
+): NativeProps["style"] {
+  if (typeof style === "function") {
+    return style(state);
+  }
+  return style;
+}
+
+function resolvePressableChildren(
+  children: PressableProps["children"],
+  state: PressableState,
+): ReactNode {
+  if (typeof children === "function") {
+    return children(state);
+  }
+  return children;
+}
+
+export function Pressable(props: PressableProps): ReactElement {
+  const [pressed, setPressed] = useState(false);
+  const state: PressableState = { pressed };
+  const resolvedStyle = resolvePressableStyle(props.style, state);
+  // Omit style/children from restProps (they're resolved above).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { style: _style, children: _children, ...restProps } = props;
+
+  const handlePressIn = useCallback(() => {
+    setPressed(true);
+    props.onPressIn?.();
+  }, [props.onPressIn]);
+
+  const handlePressOut = useCallback(() => {
+    setPressed(false);
+    props.onPressOut?.();
+  }, [props.onPressOut]);
+
+  return element("button", {
+    ...restProps,
+    ...(resolvedStyle !== undefined ? { style: resolvedStyle } : {}),
+    onPressIn: handlePressIn,
+    onPressOut: handlePressOut,
     role: props.role ?? props.accessibilityRole ?? "button",
+    children: resolvePressableChildren(props.children, state),
   });
+}
 
 export const Button = (
   props: Omit<NativeComponentProps, "children" | "label"> & {
