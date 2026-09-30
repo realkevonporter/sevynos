@@ -11,6 +11,7 @@ import type {
 import type { NativeInteractionState, NativeRenderCommand } from "./surface.js";
 import { resolveSevynColors, sevynTokens, type SevynAppearance } from "./tokens.js";
 import { computeYogaLayout } from "./yoga-engine.js";
+import { StyleSheet } from "./stylesheet.js";
 import {
   measureNativeText,
   measureTextWidth,
@@ -419,8 +420,12 @@ function layoutChildren(
   const children = parent.children.filter(
     (child): child is NativeHostNode => !child.hidden && child.kind === "host",
   );
-  const relative = children.filter((child) => child.props.style?.position !== "absolute");
-  const absolute = children.filter((child) => child.props.style?.position === "absolute");
+  const relative = children.filter(
+    (child) => StyleSheet.flatten(child.props.style).position !== "absolute",
+  );
+  const absolute = children.filter(
+    (child) => StyleSheet.flatten(child.props.style).position === "absolute",
+  );
 
   // Compute layout with Meta's Yoga engine
   try {
