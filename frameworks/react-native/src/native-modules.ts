@@ -168,6 +168,27 @@ export const NativeModules = Object.freeze({
       viewConfigProvider ? viewConfigProvider() : undefined,
     hasViewManagerConfig: (_name?: string) => true,
     dispatchViewManagerCommand: () => undefined,
+    measure: (
+      _node: unknown,
+      callback: (
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        pageX: number,
+        pageY: number,
+      ) => void,
+    ): void => {
+      // Stub: actual measurement requires host layout info.
+      // Calls back with zeros; implement via native adapter when available.
+      callback(0, 0, 0, 0, 0, 0);
+    },
+    measureInWindow: (
+      _node: unknown,
+      callback: (x: number, y: number, width: number, height: number) => void,
+    ): void => {
+      callback(0, 0, 0, 0);
+    },
   }),
   LinkingManager: Object.freeze({ openURL: (url: string) => Promise.resolve(url) }),
   Platform,
@@ -178,11 +199,26 @@ export const NativeModules = Object.freeze({
     cancel: () => undefined,
   }),
   ShareModule: Object.freeze({
-    share: (content: { message?: string; title?: string }) =>
-      Promise.resolve({
+    share: (content: { message?: string; title?: string; url?: string }) => {
+      // Check for native share adapter; fall back to stub if unavailable.
+      const adapters = getNativeAdapters() as {
+        readonly share?: {
+          readonly share?: (content: {
+            message?: string;
+            title?: string;
+            url?: string;
+          }) => Promise<{ action: string; activityType?: string }>;
+        };
+      };
+      if (adapters.share?.share) {
+        return adapters.share.share(content);
+      }
+      // Stub: no native share UI available, resolve as shared.
+      return Promise.resolve({
         action: "sharedAction",
         activityType: content.title ?? "SevynOS",
-      }),
+      });
+    },
   }),
   StatusBarManager: Object.freeze({
     getHeight: () => Promise.resolve({ height: 24 }),

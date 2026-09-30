@@ -43,11 +43,19 @@ host["clearImmediate"] = (id: number) => {
 host["queueMicrotask"] = (callback: () => void) => Promise.resolve().then(callback);
 host["performance"] = Object.freeze({ now: () => Date.now() });
 host["console"] = Object.freeze({
-  log: () => undefined,
-  info: () => undefined,
-  warn: () => undefined,
+  log: (...values: unknown[]) => {
+    // Forward to host logger without crashing.
+    console.log("[app]", ...values);
+  },
+  info: (...values: unknown[]) => {
+    console.info("[app]", ...values);
+  },
+  warn: (...values: unknown[]) => {
+    console.warn("[app]", ...values);
+  },
   error: (...values: unknown[]) => {
-    throw new Error(values.map(String).join(" "));
+    // Log errors without throwing — console.error must not crash the app.
+    console.error("[app]", ...values);
   },
 });
 host["__SEVYN_MODULES__"] = Object.freeze({

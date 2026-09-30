@@ -104,7 +104,9 @@ describe("Sevyn React Native system framework", () => {
         },
       },
     ]);
-    expect(alerted).toBe(true);
+    // Without a native dialog adapter, Alert warns and does not auto-fire buttons.
+    // (The old auto-fire behavior was a correctness bug.)
+    expect(alerted).toBe(false);
 
     const styles = StyleSheet.create({
       card: {

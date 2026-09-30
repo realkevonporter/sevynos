@@ -27,6 +27,9 @@ export * from "./error-boundary.js";
 export * from "./expo-modules-core.js";
 export * from "./expo-compat.js";
 export * from "./community-compat.js";
+export * from "./safe-area-context.js";
+// Resolve SafeAreaView ambiguity: prefer the insets-aware version.
+export { SafeAreaView } from "./safe-area-context.js";
 
 // Explicit re-exports to resolve ambiguity with standard React Native modules
 export { Image, StatusBar } from "./primitives.js";

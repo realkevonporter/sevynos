@@ -240,10 +240,13 @@ export const PanResponder = Object.freeze({
     panHandlers: {
       onStartShouldSetResponder: config["onStartShouldSetPanResponder"],
       onMoveShouldSetResponder: config["onMoveShouldSetPanResponder"],
+      onStartShouldSetResponderCapture: config["onStartShouldSetPanResponderCapture"],
+      onMoveShouldSetResponderCapture: config["onMoveShouldSetPanResponderCapture"],
       onResponderGrant: config["onPanResponderGrant"],
       onResponderMove: config["onPanResponderMove"],
       onResponderRelease: config["onPanResponderRelease"],
       onResponderTerminate: config["onPanResponderTerminate"],
+      onResponderTerminationRequest: config["onPanResponderTerminationRequest"],
     },
   }),
 });

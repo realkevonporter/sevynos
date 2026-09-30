@@ -16,6 +16,13 @@ export const AppState = {
       listener(val);
     }
   },
+  /**
+   * Internal: called by the host to notify of app lifecycle transitions.
+   * e.g., when the app goes to background/foreground.
+   */
+  _setAppState(val: AppStateStatus): void {
+    AppState.currentState = val;
+  },
   addEventListener(
     type: "change" | "memoryWarning",
     handler: (state: AppStateStatus) => void,
@@ -79,6 +86,15 @@ export const Linking = {
         linkingListeners.delete(handler);
       },
     };
+  },
+  /**
+   * @deprecated Use addEventListener which returns a subscription.
+   */
+  removeEventListener(
+    _type: "url",
+    handler: (event: { readonly url: string }) => void,
+  ): void {
+    linkingListeners.delete(handler);
   },
 };
 
