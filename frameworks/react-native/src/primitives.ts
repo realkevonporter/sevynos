@@ -477,7 +477,7 @@ export const NativeScrollView = (props: ScrollViewProps): ReactElement => {
         const offset = props.horizontal ? (options?.x ?? 0) : (options?.y ?? 0);
         setImperativeOffset(Math.max(0, offset));
       },
-      scrollToEnd: (_options?: { animated?: boolean }) => {
+      scrollToEnd: () => {
         // Scroll to a large offset; the host clamps to content size.
         // We use a sentinel that the host recognizes as "end".
         setImperativeOffset(Number.MAX_SAFE_INTEGER);
