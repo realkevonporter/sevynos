@@ -199,10 +199,7 @@ export const NativeModules = Object.freeze({
     cancel: () => undefined,
   }),
   ShareModule: Object.freeze({
-    share: (
-      content: { message?: string; title?: string; url?: string },
-      _options?: { dialogTitle?: string },
-    ) => {
+    share: (content: { message?: string; title?: string; url?: string }) => {
       // Check for native share adapter; fall back to stub if unavailable.
       const adapters = getNativeAdapters() as {
         readonly share?: {

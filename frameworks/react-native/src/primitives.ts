@@ -54,18 +54,35 @@ function resolveLogicalProps(style: Record<string, unknown>): Record<string, unk
   const direction = style["direction"];
   // In RTL, start=end and left=right are swapped.
   const isRTL = direction === "rtl";
-  const result = { ...style };
+
+  const logicalProps = new Set([
+    "start",
+    "end",
+    "marginStart",
+    "marginEnd",
+    "paddingStart",
+    "paddingEnd",
+    "borderStartWidth",
+    "borderEndWidth",
+  ]);
+
+  // Build result without logical props (avoid dynamic delete).
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(style)) {
+    if (!logicalProps.has(key)) {
+      result[key] = value;
+    }
+  }
 
   // Helper to get logical value, preferring the logical prop over physical.
   const resolve = (logical: string, physicalLTR: string, physicalRTL: string): void => {
-    const value = result[logical];
+    const value = style[logical];
     if (value !== undefined) {
       const physical = isRTL ? physicalRTL : physicalLTR;
       // Only set if physical not already explicitly set (physical wins).
       if (result[physical] === undefined) {
         result[physical] = value;
       }
-      delete result[logical];
     }
   };
 
@@ -450,10 +467,21 @@ export interface ScrollViewProps extends NativeComponentProps {
 
 export const NativeScrollView = (props: ScrollViewProps): ReactElement => {
   const ref = (props as { ref?: unknown }).ref;
+  // Imperative scroll position state. When scrollTo/scrollToEnd is called,
+  // we update this state, which flows to the host via the scrollOffset style.
+  const [imperativeOffset, setImperativeOffset] = useState<number | null>(null);
+
   if (ref && typeof ref === "object" && "current" in ref) {
     ref.current = {
-      scrollTo: () => undefined,
-      scrollToEnd: () => undefined,
+      scrollTo: (options?: { x?: number; y?: number; animated?: boolean }) => {
+        const offset = props.horizontal ? (options?.x ?? 0) : (options?.y ?? 0);
+        setImperativeOffset(Math.max(0, offset));
+      },
+      scrollToEnd: (_options?: { animated?: boolean }) => {
+        // Scroll to a large offset; the host clamps to content size.
+        // We use a sentinel that the host recognizes as "end".
+        setImperativeOffset(Number.MAX_SAFE_INTEGER);
+      },
       flashScrollIndicators: () => undefined,
     };
   }
@@ -488,8 +516,17 @@ export const NativeScrollView = (props: ScrollViewProps): ReactElement => {
           style: contentContainerStyle,
           children: innerChildren,
         });
+  // Merge imperative scroll offset into style. The host watches scrollOffset.
+  const styleWithOffset =
+    imperativeOffset === null
+      ? restProps.style
+      : {
+          ...(typeof restProps.style === "object" ? restProps.style : {}),
+          scrollOffset: imperativeOffset,
+        };
   return element("scroll", {
     ...restProps,
+    ...(styleWithOffset !== undefined ? { style: styleWithOffset } : {}),
     ...(horizontal !== undefined ? { horizontal } : {}),
     ...(onScroll !== undefined ? { onScroll } : {}),
     ...(controlProps?.onRefresh === undefined

@@ -213,10 +213,13 @@ export interface NativeEventHandlers {
   readonly onContextMenu?: (event: NativePointerEvent) => void;
   readonly onStartShouldSetResponder?: (event: NativePointerEvent) => boolean;
   readonly onMoveShouldSetResponder?: (event: NativePointerEvent) => boolean;
+  readonly onStartShouldSetResponderCapture?: (event: NativePointerEvent) => boolean;
+  readonly onMoveShouldSetResponderCapture?: (event: NativePointerEvent) => boolean;
   readonly onResponderGrant?: (event: NativePointerEvent) => void;
   readonly onResponderMove?: (event: NativePointerEvent) => void;
   readonly onResponderRelease?: (event: NativePointerEvent) => void;
   readonly onResponderTerminate?: (event: NativePointerEvent) => void;
+  readonly onResponderTerminationRequest?: (event: NativePointerEvent) => boolean;
   readonly onWheel?: (event: NativeWheelEvent) => void;
   readonly onTouchStart?: (event: NativeTouchEvent) => void;
   readonly onTouchMove?: (event: NativeTouchEvent) => void;
@@ -283,6 +286,18 @@ export interface NativeProps extends AccessibilityProps, NativeEventHandlers {
   readonly defaultValue?: string | number | boolean;
   readonly placeholder?: string;
   readonly placeholderTextColor?: string;
+  readonly selectable?: boolean;
+  readonly onTextLayout?: (event: {
+    readonly nativeEvent: {
+      readonly lines: readonly {
+        readonly text: string;
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      }[];
+    };
+  }) => void;
   readonly multiline?: boolean;
   readonly secureTextEntry?: boolean;
   readonly editable?: boolean;
