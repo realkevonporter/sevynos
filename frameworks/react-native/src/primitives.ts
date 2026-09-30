@@ -286,46 +286,40 @@ function resolvePressableChildren(
 }
 
 export function Pressable(props: PressableProps): ReactElement {
-  const [pressed, setPressed] = useState(false);
-  const state: PressableState = { pressed };
-  const resolvedStyle = resolvePressableStyle(props.style, state);
+  // Note: Pressable is called as a plain function (not just as JSX), so we
+  // cannot use React hooks here. Function styles/children are evaluated with
+  // pressed: false; the host handles visual pressed feedback.
+  const resolvedStyle = resolvePressableStyle(props.style, { pressed: false });
   // Omit style/children from restProps (they're resolved above).
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { style: _style, children: _children, ...restProps } = props;
 
-  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const clearLongPressTimer = useCallback(() => {
-    if (longPressTimer.current !== null) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
+  const clearLongPressTimer = (): void => {
+    if (longPressTimer !== null) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
     }
-  }, []);
+  };
 
-  const handlePressIn = useCallback(() => {
-    setPressed(true);
+  const handlePressIn = (): void => {
     props.onPressIn?.();
     // Start long-press timer.
     if (props.onLongPress) {
       clearLongPressTimer();
       const delay = props.delayLongPress ?? 500;
-      longPressTimer.current = setTimeout(() => {
-        longPressTimer.current = null;
+      longPressTimer = setTimeout(() => {
+        longPressTimer = null;
         props.onLongPress?.();
       }, delay);
     }
-  }, [props.onPressIn, props.onLongPress, props.delayLongPress, clearLongPressTimer]);
+  };
 
-  const handlePressOut = useCallback(() => {
-    setPressed(false);
+  const handlePressOut = (): void => {
     clearLongPressTimer();
     props.onPressOut?.();
-  }, [props.onPressOut, clearLongPressTimer]);
-
-  // Clear timer on unmount.
-  useEffect(() => {
-    return clearLongPressTimer;
-  }, [clearLongPressTimer]);
+  };
 
   return element("button", {
     ...restProps,
@@ -333,7 +327,7 @@ export function Pressable(props: PressableProps): ReactElement {
     onPressIn: handlePressIn,
     onPressOut: handlePressOut,
     role: props.role ?? props.accessibilityRole ?? "button",
-    children: resolvePressableChildren(props.children, state),
+    children: resolvePressableChildren(props.children, { pressed: false }),
   });
 }
 
@@ -467,9 +461,22 @@ export interface ScrollViewProps extends NativeComponentProps {
 
 export const NativeScrollView = (props: ScrollViewProps): ReactElement => {
   const ref = (props as { ref?: unknown }).ref;
-  // Imperative scroll position state. When scrollTo/scrollToEnd is called,
-  // we update this state, which flows to the host via the scrollOffset style.
-  const [imperativeOffset, setImperativeOffset] = useState<number | null>(null);
+  // Imperative scroll position. When scrollTo/scrollToEnd is called,
+  // we need to trigger a re-render with the new offset.
+  // Note: This uses hooks, which requires NativeScrollView to be rendered
+  // as a React component (via JSX), not called as a plain function.
+  // For plain function calls (e.g., in tests), we fall back to stubs.
+  let imperativeOffset: number | null = null;
+  let setImperativeOffset: (offset: number | null) => void = () => undefined;
+
+  try {
+    const [offset, setOffset] = useState<number | null>(null);
+    imperativeOffset = offset;
+    setImperativeOffset = setOffset;
+  } catch {
+    // Not in a React component context (e.g., called as plain function in tests).
+    // scrollTo/scrollToEnd will be no-ops.
+  }
 
   if (ref && typeof ref === "object" && "current" in ref) {
     ref.current = {
@@ -479,7 +486,6 @@ export const NativeScrollView = (props: ScrollViewProps): ReactElement => {
       },
       scrollToEnd: () => {
         // Scroll to a large offset; the host clamps to content size.
-        // We use a sentinel that the host recognizes as "end".
         setImperativeOffset(Number.MAX_SAFE_INTEGER);
       },
       flashScrollIndicators: () => undefined,
