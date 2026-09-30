@@ -11,6 +11,7 @@ import type {
 import type { NativeInteractionState, NativeRenderCommand } from "./surface.js";
 import { resolveSevynColors, sevynTokens, type SevynAppearance } from "./tokens.js";
 import { computeYogaLayout } from "./yoga-engine.js";
+import { StyleSheet } from "./stylesheet.js";
 import {
   measureNativeText,
   measureTextWidth,
@@ -216,10 +217,11 @@ function layoutChild(
 ): void {
   if (child.hidden) return;
   if (child.kind === "raw-text") return;
+  const rawStyle = StyleSheet.flatten(child.props.style);
   const style =
     child.props.breakpoint !== undefined && bounds.width <= child.props.breakpoint.compact
-      ? { ...child.props.style, ...child.props.breakpoint.compactStyle }
-      : (child.props.style ?? {});
+      ? { ...rawStyle, ...child.props.breakpoint.compactStyle }
+      : rawStyle;
   const margin = resolveMargin(style);
   const padded = resolvePadding(style);
   const width = resolvedByParent
@@ -392,13 +394,14 @@ function intrinsicMainSize(
   grow: number,
 ): number | undefined {
   if (direction !== "row" || grow === 0) return undefined;
+  const childStyle = StyleSheet.flatten(child.props.style);
   if (
-    (child.props.style?.flexGrow !== undefined && child.props.style.flexGrow > 0) ||
-    (typeof child.props.style?.flex === "number" && child.props.style.flex > 0)
+    (childStyle.flexGrow !== undefined && childStyle.flexGrow > 0) ||
+    (typeof childStyle.flex === "number" && childStyle.flex > 0)
   ) {
     return undefined;
   }
-  if (child.props.style?.width !== undefined) return undefined;
+  if (childStyle.width !== undefined) return undefined;
   const label =
     child.props.label ??
     (child.type === "text" || child.props.role === "button" ? textOf(child) : undefined);
@@ -419,8 +422,12 @@ function layoutChildren(
   const children = parent.children.filter(
     (child): child is NativeHostNode => !child.hidden && child.kind === "host",
   );
-  const relative = children.filter((child) => child.props.style?.position !== "absolute");
-  const absolute = children.filter((child) => child.props.style?.position === "absolute");
+  const relative = children.filter(
+    (child) => StyleSheet.flatten(child.props.style).position !== "absolute",
+  );
+  const absolute = children.filter(
+    (child) => StyleSheet.flatten(child.props.style).position === "absolute",
+  );
 
   // Compute layout with Meta's Yoga engine
   try {
@@ -452,7 +459,7 @@ function layoutChildren(
   const gap = style.gap ?? 0;
   const mainAvailable = direction === "row" ? content.width : content.height;
   const grow = relative.reduce(
-    (total, child) => total + resolveFlexGrow(child.props.style ?? {}),
+    (total, child) => total + resolveFlexGrow(StyleSheet.flatten(child.props.style)),
     0,
   );
   const fixed =
@@ -460,7 +467,9 @@ function layoutChildren(
       (total, child) =>
         total +
         (dimension(
-          direction === "row" ? child.props.style?.width : child.props.style?.height,
+          direction === "row"
+            ? StyleSheet.flatten(child.props.style).width
+            : StyleSheet.flatten(child.props.style).height,
           mainAvailable,
         ) ??
           intrinsicMainSize(child, direction, grow) ??
@@ -472,10 +481,12 @@ function layoutChildren(
   relative.forEach((child, index) => {
     const requested =
       dimension(
-        direction === "row" ? child.props.style?.width : child.props.style?.height,
+        direction === "row"
+          ? StyleSheet.flatten(child.props.style).width
+          : StyleSheet.flatten(child.props.style).height,
         mainAvailable,
       ) ?? intrinsicMainSize(child, direction, grow);
-    const childGrow = resolveFlexGrow(child.props.style ?? {});
+    const childGrow = resolveFlexGrow(StyleSheet.flatten(child.props.style));
     const main =
       requested ??
       (grow > 0

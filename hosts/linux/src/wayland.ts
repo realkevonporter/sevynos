@@ -807,6 +807,11 @@ export async function startWaylandHost(
           case "desktop-shell-surface": {
             // React Native shell component: dispatch pointer-down to the RN runtime.
             // The component handles its own press actions via onPress handlers.
+            // Shell surfaces sit below windows in z-order. If the click lands
+            // inside a window's bounds, the window gets it, not the shell.
+            if (isPointInsideAnyWindow(latestScene, event.position.x, event.position.y)) {
+              break;
+            }
             const surface = shellControl as unknown as {
               readonly applicationId: string;
               readonly bounds: { readonly x: number; readonly y: number };
