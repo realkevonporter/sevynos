@@ -540,7 +540,7 @@ export class DesktopSceneComposer {
       SystemApplicationId.StatusBar,
       statusBarInput,
       (display) => display.bounds,
-      () => topContentOrder,
+      () => -50,
       shellDisplays,
     );
     const workspaceInput = {

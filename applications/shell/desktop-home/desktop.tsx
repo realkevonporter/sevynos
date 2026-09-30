@@ -73,7 +73,7 @@ function WorkspaceItem({
       <View
         style={[styles.icon, kind === "directory" ? styles.folderIcon : styles.fileIcon]}
       >
-        <Text style={styles.iconGlyph}>{kind === "directory" ? "[DIR]" : "[FILE]"}</Text>
+        <Text style={styles.iconGlyph}>{kind === "directory" ? "📁" : "📄"}</Text>
       </View>
       <Text numberOfLines={2} style={styles.itemLabel}>
         {name}
