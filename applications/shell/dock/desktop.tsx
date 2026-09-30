@@ -93,8 +93,8 @@ function DisplayDock({
       style={[
         styles.dock,
         {
-          left: dockBounds.x - display.bounds.x,
-          top: dockBounds.y - display.bounds.y,
+          left: dockBounds.x - display.taskbarBounds.x,
+          top: dockBounds.y - display.taskbarBounds.y,
           width: dockBounds.width,
           height: dockBounds.height,
           flexDirection: vertical ? "column" : "row",
