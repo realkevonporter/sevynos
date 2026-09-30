@@ -730,7 +730,7 @@ export async function createDesktopRuntime(
 
     windowController: windows,
 
-    ...(options.hitTestProbe === true ? { onEvent: createHitTestProbe(windows) } : {}),
+    onEvent: createHitTestProbe(windows),
   });
 
   const dragController = new WindowDragController({
