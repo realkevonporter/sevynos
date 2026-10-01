@@ -164,6 +164,7 @@ export function BrowserApplication({
   const [addressInput, setAddressInput] = useState<string>(
     initialUrl === "sevyn://start" ? "" : initialUrl,
   );
+  const [addressFocused, setAddressFocused] = useState(false);
   const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>(DEFAULT_BOOKMARKS);
   const [bookmarksLoaded, setBookmarksLoaded] = useState(false);
   const [history, setHistory] = useState<readonly HistoryEntry[]>([]);
@@ -658,7 +659,13 @@ export function BrowserApplication({
         </Pressable>
 
         {/* Omnibox Address / Search Input */}
-        <View style={styles.addressBar}>
+        <View
+          style={
+            addressFocused
+              ? { ...styles.addressBar, ...styles.addressBarFocused }
+              : styles.addressBar
+          }
+        >
           <Text style={styles.securityBadge}>
             {activeTab.url.startsWith("https://") ? "🔒" : "🌐"}
           </Text>
@@ -667,7 +674,14 @@ export function BrowserApplication({
             onSubmitEditing={() => {
               navigateTo(addressInput);
             }}
+            onFocus={() => {
+              setAddressFocused(true);
+            }}
+            onBlur={() => {
+              setAddressFocused(false);
+            }}
             placeholder="Search the web or enter address…"
+            placeholderTextColor="#5A6478"
             style={styles.addressInput}
             value={addressInput}
           />
@@ -1147,16 +1161,17 @@ export default BrowserApplication;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0F1115",
+    backgroundColor: "#0A0C10",
   },
   tabStrip: {
-    height: 38,
-    backgroundColor: "#161920",
+    height: 44,
+    backgroundColor: "#101318",
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 8,
+    paddingHorizontal: 12,
+    paddingTop: 6,
     borderBottomWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
+    borderColor: "rgba(255, 255, 255, 0.06)",
   },
   tabRow: {
     flex: 1,
@@ -1164,35 +1179,37 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   tab: {
-    height: 32,
+    height: 36,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 12,
-    marginRight: 4,
-    borderRadius: 8,
-    backgroundColor: "rgba(255, 255, 255, 0.04)",
-    maxWidth: 200,
+    paddingHorizontal: 14,
+    marginRight: 6,
+    borderRadius: 10,
+    backgroundColor: "rgba(255, 255, 255, 0.03)",
+    maxWidth: 220,
     gap: 8,
+    borderWidth: 1,
+    borderColor: "transparent",
   },
   tabActive: {
-    height: 32,
+    height: 36,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 12,
-    marginRight: 4,
-    borderRadius: 8,
-    backgroundColor: "#1F2430",
-    borderTopWidth: 2,
-    borderColor: "#D7AC57",
-    maxWidth: 200,
+    paddingHorizontal: 14,
+    marginRight: 6,
+    borderRadius: 10,
+    backgroundColor: "#1A1F2A",
+    borderWidth: 1,
+    borderColor: "rgba(215, 172, 87, 0.25)",
+    maxWidth: 220,
     gap: 8,
   },
   tabIcon: {
-    fontSize: 12,
+    fontSize: 13,
   },
   tabTitle: {
-    color: "#8E95A5",
-    fontSize: 12,
+    color: "#7A8394",
+    fontSize: 12.5,
     flex: 1,
     overflow: "hidden",
   },
@@ -1212,68 +1229,76 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   newTabButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.06)",
-    marginLeft: 4,
-  },
-  newTabText: {
-    color: "#D7AC57",
-    fontSize: 16,
-    fontWeight: "bold",
-  },
-  toolbar: {
-    height: 48,
-    backgroundColor: "#1A1D24",
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 12,
-    gap: 8,
-    borderBottomWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.06)",
-  },
-  navButton: {
     width: 32,
     height: 32,
     borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
+    backgroundColor: "rgba(215, 172, 87, 0.12)",
+    marginLeft: 6,
+    borderWidth: 1,
+    borderColor: "rgba(215, 172, 87, 0.2)",
+  },
+  newTabText: {
+    color: "#D7AC57",
+    fontSize: 18,
+    fontWeight: "600",
+  },
+  toolbar: {
+    height: 56,
+    backgroundColor: "#101318",
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 14,
+    gap: 10,
+    borderBottomWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.06)",
+  },
+  navButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.06)",
   },
   navButtonText: {
-    color: "#E2E8F0",
-    fontSize: 15,
+    color: "#E8ECF1",
+    fontSize: 16,
     fontWeight: "600",
   },
   navButtonTextDisabled: {
-    color: "#475569",
-    fontSize: 15,
+    color: "#3A4150",
+    fontSize: 16,
     fontWeight: "600",
   },
   addressBar: {
     flex: 1,
-    height: 34,
-    backgroundColor: "rgba(0, 0, 0, 0.35)",
-    borderRadius: 8,
+    height: 40,
+    backgroundColor: "#1A1F2A",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.12)",
+    borderColor: "rgba(255, 255, 255, 0.08)",
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 12,
-    gap: 8,
+    paddingHorizontal: 14,
+    gap: 10,
+  },
+  addressBarFocused: {
+    borderColor: "rgba(215, 172, 87, 0.5)",
+    backgroundColor: "#1E2432",
   },
   securityBadge: {
-    fontSize: 12,
+    fontSize: 13,
   },
   addressInput: {
     flex: 1,
     color: "#F8FAFC",
-    fontSize: 13,
+    fontSize: 14,
     paddingVertical: 0,
-    height: 32,
+    height: 38,
   },
   clearButton: {
     padding: 4,
@@ -1299,55 +1324,57 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   startPageScroll: {
-    padding: 32,
+    padding: 48,
   },
   startHeader: {
     alignItems: "center",
-    marginBottom: 24,
+    marginBottom: 36,
   },
   logoBadge: {
-    width: 56,
-    height: 56,
-    borderRadius: 16,
-    backgroundColor: "rgba(215, 172, 87, 0.15)",
-    borderWidth: 1,
-    borderColor: "#D7AC57",
+    width: 72,
+    height: 72,
+    borderRadius: 20,
+    backgroundColor: "rgba(215, 172, 87, 0.12)",
+    borderWidth: 1.5,
+    borderColor: "rgba(215, 172, 87, 0.4)",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 12,
+    marginBottom: 20,
   },
   logoText: {
-    fontSize: 26,
+    fontSize: 34,
   },
   startTitle: {
-    fontSize: 26,
+    fontSize: 32,
     fontWeight: "700",
-    color: "#F3F4F6",
-    marginBottom: 8,
+    color: "#F8FAFC",
+    marginBottom: 12,
   },
   startSubtitle: {
-    fontSize: 14,
-    color: "#9CA3AF",
+    fontSize: 15,
+    color: "#8A94A6",
     textAlign: "center",
-    maxWidth: 480,
+    maxWidth: 520,
   },
   searchCard: {
     flexDirection: "row",
     width: "100%",
-    maxWidth: 640,
+    maxWidth: 680,
     alignSelf: "center",
-    backgroundColor: "#1E222B",
-    borderRadius: 12,
+    backgroundColor: "#151A24",
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(215, 172, 87, 0.3)",
-    padding: 8,
-    marginBottom: 32,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    padding: 10,
+    paddingLeft: 20,
+    marginBottom: 40,
+    alignItems: "center",
   },
   heroSearchInput: {
     flex: 1,
-    paddingHorizontal: 16,
-    color: "#F3F4F6",
-    fontSize: 15,
+    paddingHorizontal: 12,
+    color: "#F8FAFC",
+    fontSize: 16,
     height: 44,
   },
   heroSearchButton: {
