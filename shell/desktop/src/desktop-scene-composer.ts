@@ -90,9 +90,6 @@ export class DesktopSceneComposer {
   readonly #getFrameExecutionCount: () => number;
   readonly #onServiceUpdate: (() => void) | undefined;
   readonly #shellRenderer: ShellComponentRenderer;
-  /** Optional diagnostic callback set by the host (not a constructor param to keep the signature stable). */
-  public onShellRender:
-    ((applicationId: string, nodeCount: number, bounds: string) => void) | undefined;
   #serviceUpdateTimer: ReturnType<typeof setTimeout> | undefined;
   #batterySnapshot: BatterySnapshot | undefined;
   #networkSnapshot: WirelessNetworkSnapshot | undefined;
@@ -285,12 +282,8 @@ export class DesktopSceneComposer {
     const component = this.#shellComponents.get(applicationId);
     if (component !== undefined) {
       const nodes: DesktopSceneNode[] = [];
-      let firstBounds = "none";
       for (const display of displays) {
         const bounds = getBounds(display);
-        if (firstBounds === "none") {
-          firstBounds = `${String(bounds.x)},${String(bounds.y)},${String(bounds.width)}x${String(bounds.height)}`;
-        }
         const node = this.#shellRenderer.render(
           applicationId,
           component,
@@ -300,11 +293,6 @@ export class DesktopSceneComposer {
           display.id,
         );
         if (node !== undefined) nodes.push(node);
-      }
-      // Diagnostic: report which shell components actually produce nodes.
-      // A component returning null (e.g. closed Launcher) produces zero nodes.
-      if (this.onShellRender !== undefined) {
-        this.onShellRender(applicationId, nodes.length, firstBounds);
       }
       return Object.freeze(nodes);
     }
@@ -321,7 +309,7 @@ export class DesktopSceneComposer {
    */
   public dispatchShellPointer(
     applicationId: string,
-    type: "down" | "up" | "move",
+    type: "down" | "up" | "move" | "cancel",
     x: number,
     y: number,
   ): boolean {
@@ -466,34 +454,6 @@ export class DesktopSceneComposer {
       );
     }
 
-    // Fallback: if no pinned or running apps, show default essentials so the
-    // dock is never empty and invisible.
-    if (dockApplications.length === 0) {
-      const defaultIds = [
-        "org.sevynos.app.files",
-        "org.sevynos.app.browser",
-        "org.sevynos.app.settings",
-        "org.sevynos.app.terminal",
-      ];
-      for (const appId of defaultIds) {
-        const def = this.#runtime.applications.catalog.find((d) => d.id === appId);
-        if (def !== undefined && !seenAppIds.has(appId)) {
-          seenAppIds.add(appId);
-          dockApplications.push(
-            Object.freeze({
-              applicationId: appId,
-              label: def.name,
-              focused: false,
-              minimized: false,
-              displayId: primary.id,
-              pinned: true,
-              running: false,
-            }),
-          );
-        }
-      }
-    }
-
     const { timeText, dateText } = getFormattedTimeAndDate();
 
     const activeNetwork = this.#networkSnapshot?.networks.find((n) => n.connected);
@@ -518,7 +478,7 @@ export class DesktopSceneComposer {
       SystemApplicationId.Wallpaper,
       wallpaperInput,
       (display) => display.bounds,
-      () => -200,
+      () => 0,
       shellDisplays,
     );
     const statusBarInput = {
@@ -540,7 +500,7 @@ export class DesktopSceneComposer {
       SystemApplicationId.StatusBar,
       statusBarInput,
       (display) => display.bounds,
-      () => -50,
+      () => topContentOrder,
       shellDisplays,
     );
     const workspaceInput = {
@@ -557,7 +517,7 @@ export class DesktopSceneComposer {
         SystemApplicationId.DesktopHome,
         workspaceInput,
         (display) => display.bounds,
-        () => -100,
+        () => 0.5,
         shellDisplays,
       );
     } else {

@@ -247,7 +247,9 @@ function MenuItem({
         pressed && styles.menuItemPressed,
       ]}
     >
-      <Text style={styles.menuLabel}>{label}</Text>
+      <Text numberOfLines={1} style={styles.menuLabel}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -327,6 +329,7 @@ const styles = StyleSheet.create({
   },
   menuItem: {
     borderRadius: 4,
+    flexShrink: 0,
     paddingHorizontal: 8,
     paddingVertical: 3,
   },

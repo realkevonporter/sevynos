@@ -12,6 +12,29 @@ import type {
 } from "@sevynos/react-native/internal";
 
 /**
+ * Resolve the Chromium executable, preferring the real binary over the
+ * Debian wrapper script (/usr/bin/chromium) which has a shell syntax bug
+ * (`[: -lt: unexpected operator` on line 9 when invoked with certain env).
+ */
+function resolveChromiumExecutable(): string {
+  // Real binaries, bypassing the wrapper.
+  const candidates = [
+    "/usr/lib/chromium/chromium",
+    "/usr/lib64/chromium/chromium",
+    "/opt/chromium/chromium",
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch {
+      // Ignore and try next.
+    }
+  }
+  // Fall back to the wrapper (or PATH lookup).
+  return "/usr/bin/chromium";
+}
+
+/**
  * Emit a marker to stdout and mirror to the serial console (if present),
  * matching the Genesis marker behavior in wayland.ts.
  */
@@ -91,7 +114,7 @@ export class ChromiumBrowserEngine implements SevynBrowserEngine {
 
   public constructor(options: ChromiumBrowserEngineOptions = {}) {
     this.#current = blankSnapshot(options.width ?? 878, options.height ?? 501);
-    this.#executable = options.executable ?? "/usr/bin/chromium";
+    this.#executable = options.executable ?? resolveChromiumExecutable();
     // No shared default profile: an engine without an explicit
     // userDataDirectory gets its own temp dir (see #requireConnection).
     // Two live Chromium processes can never share one profile directory —

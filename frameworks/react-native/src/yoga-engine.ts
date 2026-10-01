@@ -11,7 +11,6 @@ import Yoga, {
 import type { NativeBounds, NativeHostNode, NativeStyle } from "./native-types.js";
 import { measureNativeText } from "./font-metrics.js";
 import { sevynTokens } from "./tokens.js";
-import { StyleSheet } from "./stylesheet.js";
 
 function extractTextContent(node: NativeHostNode): string {
   if (typeof node.props.text === "string") return node.props.text;
@@ -134,16 +133,6 @@ function applyStylesToYogaNode(
   else if (style.alignSelf === "stretch") nodeYoga.setAlignSelf(Align.Stretch);
   else if (style.alignSelf === "baseline") nodeYoga.setAlignSelf(Align.Baseline);
   else if (style.alignSelf === "auto") nodeYoga.setAlignSelf(Align.Auto);
-
-  // Position: absolute children are positioned via left/top/right/bottom
-  // and excluded from flex layout by Yoga automatically.
-  if (style.position === "absolute") {
-    nodeYoga.setPositionType(Yoga.POSITION_TYPE_ABSOLUTE);
-    if (typeof style.left === "number") nodeYoga.setPosition(Edge.Left, style.left);
-    if (typeof style.top === "number") nodeYoga.setPosition(Edge.Top, style.top);
-    if (typeof style.right === "number") nodeYoga.setPosition(Edge.Right, style.right);
-    if (typeof style.bottom === "number") nodeYoga.setPosition(Edge.Bottom, style.bottom);
-  }
 }
 
 function resolveEdges(
@@ -178,15 +167,20 @@ function attachTextMeasure(
   nodeYoga: ReturnType<typeof Yoga.Node.create>,
   node: NativeHostNode,
 ): void {
-  const cStyle = StyleSheet.flatten(node.props.style);
+  const cStyle = node.props.style ?? {};
   const textContent = extractTextContent(node);
   const fontSize = cStyle.fontSize ?? sevynTokens.typography.body.size;
   const fontWeight = cStyle.fontWeight ?? sevynTokens.typography.body.weight;
   const lineHeight = cStyle.lineHeight ?? Math.round(fontSize * 1.4);
+  // numberOfLines is a prop, not a style.
+  const numberOfLines = (node.props as { numberOfLines?: number }).numberOfLines;
 
   nodeYoga.setMeasureFunc((width, widthMode, height, heightMode) => {
+    // If numberOfLines is 1, don't wrap - measure as single line.
+    // This prevents "F/il/e" vertical wrapping in menu bars and other single-line text.
+    const singleLine = numberOfLines === 1;
     const maxWidth =
-      widthMode === MeasureMode.Undefined || Number.isNaN(width)
+      singleLine || widthMode === MeasureMode.Undefined || Number.isNaN(width)
         ? Number.POSITIVE_INFINITY
         : width;
     const measured = measureNativeText(textContent, fontSize, maxWidth, {
@@ -211,7 +205,7 @@ function populateChildren(
   for (let i = 0; i < children.length; i++) {
     const child = children[i];
     if (child === undefined) continue;
-    const cStyle = StyleSheet.flatten(child.props.style);
+    const cStyle = child.props.style ?? {};
     const childYoga = Yoga.Node.create();
     applyStylesToYogaNode(childYoga, cStyle, false);
 
@@ -220,7 +214,8 @@ function populateChildren(
       attachTextMeasure(childYoga, child);
     } else {
       const subChildren = child.children.filter(
-        (c): c is NativeHostNode => !c.hidden && c.kind === "host",
+        (c): c is NativeHostNode =>
+          !c.hidden && c.kind === "host" && c.props.style?.position !== "absolute",
       );
       if (subChildren.length > 0) {
         populateChildren(childYoga, subChildren, depth + 1);
@@ -273,7 +268,7 @@ export function computeYogaLayout(
   for (let i = 0; i < relativeChildren.length; i++) {
     const child = relativeChildren[i];
     if (child === undefined) continue;
-    const cStyle = StyleSheet.flatten(child.props.style);
+    const cStyle = child.props.style ?? {};
     const childYoga = Yoga.Node.create();
 
     applyStylesToYogaNode(childYoga, cStyle, isScroll);
@@ -283,7 +278,8 @@ export function computeYogaLayout(
       attachTextMeasure(childYoga, child);
     } else {
       const subChildren = child.children.filter(
-        (c): c is NativeHostNode => !c.hidden && c.kind === "host",
+        (c): c is NativeHostNode =>
+          !c.hidden && c.kind === "host" && c.props.style?.position !== "absolute",
       );
       if (subChildren.length > 0) {
         populateChildren(childYoga, subChildren, 1);
