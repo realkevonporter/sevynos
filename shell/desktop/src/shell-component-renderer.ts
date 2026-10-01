@@ -93,7 +93,7 @@ export class ShellComponentRenderer {
    */
   public dispatchPointer(
     applicationId: string,
-    type: "down" | "up" | "move",
+    type: "down" | "up" | "move" | "cancel",
     x: number,
     y: number,
   ): boolean {

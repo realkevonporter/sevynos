@@ -541,14 +541,15 @@ export async function startWaylandHost(
     const { createShellComponentRegistry } =
       await import("@sevynos/desktop-shell/shell-component-registry");
     shellComponents = createShellComponentRegistry();
-    marker(`SEVYN_RN_SHELL_COMPONENTS_LOADED count=${String(shellComponents.size)}`);
+    console.log(
+      `[SevynOS] RN shell components loaded: ${String(shellComponents.size)} components`,
+    );
   } catch (error) {
     // Tests or environments without react-native: use legacy renderers.
-    marker(
-      `SEVYN_RN_SHELL_COMPONENTS_FAILED error=${error instanceof Error ? error.message : String(error)}`,
+    console.error(
+      `[SevynOS] Failed to load RN shell components, using legacy: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  let shellRenderLogged = false;
   const composer = new DesktopSceneComposer(
     runtime,
     undefined,
@@ -557,15 +558,6 @@ export async function startWaylandHost(
     },
     shellComponents,
   );
-  composer.onShellRender = (applicationId: string, nodeCount: number, bounds: string) => {
-    // Log only the first compose to identify which shell surfaces render
-    // vs return null, without spamming every frame.
-    if (!shellRenderLogged) {
-      marker(
-        `SEVYN_SHELL_RENDER id=${applicationId} nodes=${String(nodeCount)} bounds=${bounds}`,
-      );
-    }
-  };
   // Debug-gated frame pipeline instrumentation (Phase 1). When enabled,
   // the presenter records per-frame raster/damage/submit samples and a
   // 1/sec SEVYN_PROBE_FRAMES line reports rolling fps, frame intervals,
@@ -660,8 +652,6 @@ export async function startWaylandHost(
   const executor = new GenesisFrameExecutor<DesktopScene>({
     createRenderPlans: () => {
       latestScene = composer.compose(viewport);
-      // Stop shell render diagnostics after the first compose.
-      shellRenderLogged = true;
       latestSceneHasBlinkCommands = sceneHasBlinkCommands(latestScene);
       emitLayoutDiagnostics(latestScene);
       return planner.createRenderPlans(latestScene);
@@ -761,8 +751,33 @@ export async function startWaylandHost(
   };
   armBlinkTimer();
   let nativePointerState: NativePointerDispatchState = NO_NATIVE_POINTER_TARGET;
+  // Track which shell surface received pointer-down, so pointer-up can
+  // complete the press (the RN runtime fires onPress on pointer-up).
+  let pressedShellSurface:
+    | {
+        readonly applicationId: string;
+        readonly bounds: { readonly x: number; readonly y: number };
+      }
+    | undefined;
 
   const handlePointerEvent = (event: PointerInputEvent): void => {
+    // On pointer-up, complete any press that started on a shell surface.
+    // The RN runtime fires onPress when pointer-up matches the pointer-down target.
+    if (event.type === "pointer-up" || event.type === "pointer-cancel") {
+      if (pressedShellSurface !== undefined) {
+        const surface = pressedShellSurface;
+        pressedShellSurface = undefined;
+        const localX = event.position.x - surface.bounds.x;
+        const localY = event.position.y - surface.bounds.y;
+        composer.dispatchShellPointer(
+          surface.applicationId,
+          event.type === "pointer-up" ? "up" : "cancel",
+          localX,
+          localY,
+        );
+        // Don't return — let the event also flow to the generic handlers below.
+      }
+    }
     if (event.type === "pointer-down") {
       const shellControl = hitTestDesktopSceneControl(
         latestScene,
@@ -818,6 +833,11 @@ export async function startWaylandHost(
             };
             const localX = event.position.x - surface.bounds.x;
             const localY = event.position.y - surface.bounds.y;
+            // Remember this surface so pointer-up can complete the press.
+            pressedShellSurface = {
+              applicationId: surface.applicationId,
+              bounds: { x: surface.bounds.x, y: surface.bounds.y },
+            };
             composer.dispatchShellPointer(surface.applicationId, "down", localX, localY);
             return;
           }
