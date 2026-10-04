@@ -8,6 +8,7 @@ import {
 } from "./binary-frame-protocol.js";
 import type { LinuxHostMessage } from "./native-ipc-protocol.js";
 import type { NativeBridgeTransport } from "./wayland-bridge.js";
+import { OOM_SCORE_ADJ, setOomScoreAdj } from "./oom-score.js";
 
 export class NativeProcessBridgeTransport implements NativeBridgeTransport {
   readonly #child;
@@ -37,6 +38,18 @@ export class NativeProcessBridgeTransport implements NativeBridgeTransport {
       },
       stdio: ["pipe", "pipe", "pipe", "pipe"],
     });
+    // The bridge owns the display: protect it from the OOM killer so it dies
+    // after applications, not before them. Best-effort; startup continues if
+    // the write fails.
+    const bridgePid = this.#child.pid;
+    if (
+      bridgePid !== undefined &&
+      !setOomScoreAdj(bridgePid, OOM_SCORE_ADJ.SESSION_CRITICAL)
+    ) {
+      console.error(
+        `Genesis failed to protect the Wayland bridge (pid ${String(bridgePid)}) from the OOM killer.`,
+      );
+    }
     const frameStream = this.#child.stdio[3];
     if (frameStream === null || frameStream === undefined || !("write" in frameStream))
       throw new Error("The native bridge binary frame pipe was not created.");
