@@ -339,6 +339,51 @@ export async function startWaylandHost(
           timestamp,
         };
       },
+      playVideo: async (path: string, options?: { startSec?: number }) => {
+        const result = await nativeModules.request("camera.playVideo", {
+          path,
+          startSec: options?.startSec ?? 0,
+        });
+        if (typeof result !== "object" || result === null || Array.isArray(result))
+          return { width: 0, height: 0, durationSec: 0, fps: 0, available: false };
+        const info = result as Readonly<Record<string, StructuredValue>>;
+        return {
+          width: typeof info["width"] === "number" ? info["width"] : 0,
+          height: typeof info["height"] === "number" ? info["height"] : 0,
+          durationSec: typeof info["durationSec"] === "number" ? info["durationSec"] : 0,
+          fps: typeof info["fps"] === "number" ? info["fps"] : 0,
+          available: info["available"] !== false,
+        };
+      },
+      videoFrame: async () => {
+        const result = await nativeModules.request("camera.videoFrame", null);
+        if (typeof result !== "object" || result === null || Array.isArray(result))
+          return { width: 0, height: 0, available: false };
+        const frame = result as Readonly<Record<string, StructuredValue>>;
+        const width = typeof frame["width"] === "number" ? frame["width"] : 0;
+        const height = typeof frame["height"] === "number" ? frame["height"] : 0;
+        const frameIndex =
+          typeof frame["frameIndex"] === "number" ? frame["frameIndex"] : 0;
+        const ended = frame["ended"] === true;
+        const timestamp =
+          typeof frame["timestamp"] === "number" ? frame["timestamp"] : Date.now();
+        if (frame["available"] === false || typeof frame["path"] !== "string")
+          return { width, height, available: false, frameIndex, ended, timestamp };
+        const pixels = new Uint8Array(await readFile(frame["path"]));
+        if (pixels.byteLength !== width * height * 4)
+          return { width, height, available: false, frameIndex, ended, timestamp };
+        return {
+          width,
+          height,
+          pixels,
+          available: true,
+          path: frame["path"],
+          frameIndex,
+          ended,
+          timestamp,
+        };
+      },
+      stopVideo: () => nativeModules.request("camera.stopVideo", null),
     },
     microphone: {
       start: async (options) => {

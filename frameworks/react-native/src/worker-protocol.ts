@@ -80,6 +80,9 @@ export type WorkerServiceName =
   | "camera.recordStop"
   | "camera.preview"
   | "camera.readImage"
+  | "camera.playVideo"
+  | "camera.videoFrame"
+  | "camera.stopVideo"
   | "camera.status"
   | "camera.torch"
   | "battery.status"
@@ -424,6 +427,10 @@ export function isWorkerServiceName(value: string): value is WorkerServiceName {
     case "camera.recordStart":
     case "camera.recordStop":
     case "camera.preview":
+    case "camera.readImage":
+    case "camera.playVideo":
+    case "camera.videoFrame":
+    case "camera.stopVideo":
     case "camera.status":
     case "camera.torch":
     case "battery.status":

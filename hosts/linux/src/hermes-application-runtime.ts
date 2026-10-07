@@ -600,6 +600,56 @@ installNativeAdapters({
         return { width: 0, height: 0, available: false };
       }
     },
+    playVideo: async (path: string, options?: { startSec?: number }) => {
+      const result = await request("camera.playVideo", {
+        path,
+        startSec: options?.startSec ?? 0,
+      });
+      if (typeof result !== "object" || result === null || Array.isArray(result)) {
+        return { width: 0, height: 0, durationSec: 0, fps: 0, available: false };
+      }
+      const record = result as Record<string, StructuredValue>;
+      return {
+        width: typeof record["width"] === "number" ? record["width"] : 0,
+        height: typeof record["height"] === "number" ? record["height"] : 0,
+        durationSec:
+          typeof record["durationSec"] === "number" ? record["durationSec"] : 0,
+        fps: typeof record["fps"] === "number" ? record["fps"] : 0,
+        available: record["available"] !== false,
+      };
+    },
+    videoFrame: async () => {
+      const result = await request("camera.videoFrame", null);
+      if (typeof result !== "object" || result === null || Array.isArray(result)) {
+        return { width: 0, height: 0, available: false };
+      }
+      const record = result as Record<string, StructuredValue>;
+      const width = typeof record["width"] === "number" ? record["width"] : 0;
+      const height = typeof record["height"] === "number" ? record["height"] : 0;
+      const frameIndex =
+        typeof record["frameIndex"] === "number" ? record["frameIndex"] : 0;
+      const ended = record["ended"] === true;
+      if (record["available"] === false || typeof record["path"] !== "string") {
+        return { width, height, available: false, frameIndex, ended };
+      }
+      try {
+        const pixels = new Uint8Array(__sevynReadBinaryFile(record["path"]));
+        return {
+          width,
+          height,
+          pixels,
+          available: true,
+          path: record["path"],
+          frameIndex,
+          ended,
+          timestamp:
+            typeof record["timestamp"] === "number" ? record["timestamp"] : Date.now(),
+        };
+      } catch {
+        return { width, height, available: false, frameIndex, ended };
+      }
+    },
+    stopVideo: () => request("camera.stopVideo", null),
   },
   microphone: {
     start: async (options) => {

@@ -475,6 +475,24 @@ export interface CameraStatus {
   readonly formats?: readonly string[] | undefined;
 }
 
+export interface CameraVideoPlaybackInfo {
+  readonly width: number;
+  readonly height: number;
+  readonly durationSec: number;
+  readonly fps: number;
+  readonly available: boolean;
+  readonly message?: string | undefined;
+}
+
+export interface CameraVideoFrame extends CameraPreviewFrame {
+  readonly frameIndex?: number | undefined;
+  readonly ended?: boolean | undefined;
+}
+
+export interface CameraVideoPlayOptions {
+  readonly startSec?: number | undefined;
+}
+
 export interface CameraService {
   capture(options?: unknown): Promise<string | CameraCaptureResult>;
   recordStart?(options?: unknown): Promise<{ recording: boolean; path?: string }>;
@@ -482,6 +500,19 @@ export interface CameraService {
   preview?(): Promise<CameraPreviewFrame>;
   status?(): Promise<CameraStatus>;
   readImage?(path: string): Promise<CameraPreviewFrame>;
+  /**
+   * Starts decoding a recorded video file into frames. The native side pumps
+   * decoded RGBA frames (following the same file-based pattern as `preview`);
+   * call `videoFrame()` to fetch the latest frame and `stopVideo()` to end.
+   */
+  playVideo?(
+    path: string,
+    options?: CameraVideoPlayOptions,
+  ): Promise<CameraVideoPlaybackInfo>;
+  /** Returns the latest decoded video frame, or undefined when unsupported. */
+  videoFrame?(): Promise<CameraVideoFrame | undefined>;
+  /** Stops an in-progress `playVideo` decode session. */
+  stopVideo?(): Promise<void>;
 }
 
 export interface MediaTrack {

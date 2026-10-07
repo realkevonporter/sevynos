@@ -30,7 +30,13 @@ import {
 } from "@sevynos/input";
 
 import type { ApplicationLifecycleController } from "@sevynos/runtime";
-import { SevynRuntime } from "@sevynos/runtime";
+import {
+  ApplicationInstaller,
+  ApplicationPackageRegistry,
+  SevynRuntime,
+  type InstalledApplicationRecord,
+} from "@sevynos/runtime";
+import type { TerminalAppRecord } from "@sevynos/app-terminal";
 import type {
   SevynPowerService,
   SevynBrowserEngine,
@@ -861,6 +867,24 @@ export async function createDesktopRuntime(
     }
   }, 5000);
 
+  // Real application registry backing `sevyn install/uninstall/restore/list`.
+  // ApplicationInstaller persists to /var/lib/sevyn/apps/registry.json (with a
+  // ~/.sevyn/apps fallback when the system path is not writable).
+  const applicationPackages = new ApplicationPackageRegistry();
+  const applicationInstaller = new ApplicationInstaller({
+    packages: applicationPackages,
+  });
+  await applicationInstaller.init();
+
+  const toTerminalAppRecord = (record: InstalledApplicationRecord): TerminalAppRecord =>
+    Object.freeze({
+      id: record.id,
+      name: record.name,
+      version: record.version,
+      system: record.system,
+      permissions: record.permissions,
+    });
+
   surfaces.configureApplicationManagement({
     list: () =>
       applications.catalog.map((definition) => {
@@ -890,6 +914,30 @@ export async function createDesktopRuntime(
     terminate: async (applicationId) => {
       const running = applications.getByApplicationId(applicationId);
       if (running !== undefined) await applications.closeWindow(running.windowId);
+    },
+    listInstalledApps: async () => {
+      const records = await applicationInstaller.listInstalled();
+      return Object.freeze(records.map(toTerminalAppRecord));
+    },
+    installApp: async (target) => {
+      // Bundle paths (or anything ending in .sevyn/.sevynapp) install from
+      // the file; bare app ids resolve from the pristine bundle store.
+      const looksLikeBundlePath =
+        target.includes("/") || /\.(sevyn|sevynapp)$/i.test(target);
+      const record = looksLikeBundlePath
+        ? await applicationInstaller.install(target)
+        : await applicationInstaller.installFromPristine(target);
+      return toTerminalAppRecord(record);
+    },
+    uninstallApp: async (applicationId) => {
+      const running = applications.getByApplicationId(applicationId);
+      if (running !== undefined) await applications.closeWindow(running.windowId);
+      // ApplicationInstaller enforces protected-system-app rejection.
+      await applicationInstaller.uninstall(applicationId);
+    },
+    restoreApp: async (applicationId) => {
+      const record = await applicationInstaller.installFromPristine(applicationId);
+      return toTerminalAppRecord(record);
     },
   });
   surfaces.configureSettingsUpdate((key, value) => {

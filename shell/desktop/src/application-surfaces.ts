@@ -4,7 +4,7 @@ import type { KeyboardInputEvent, SevynInputEvent } from "@sevynos/input";
 import { BrowserApplication } from "@sevynos/app-browser";
 import { SettingsApplication } from "@sevynos/app-settings";
 import { FilesApplication } from "@sevynos/app-files";
-import { TerminalApplication } from "@sevynos/app-terminal";
+import { TerminalApplication, type TerminalAppRecord } from "@sevynos/app-terminal";
 import { SystemMonitorApplication } from "@sevynos/app-system-monitor";
 import { WelcomeApplication } from "@sevynos/app-welcome";
 import { CameraApplication } from "@sevynos/app-camera";
@@ -161,6 +161,26 @@ export interface ApplicationManagementController {
   list(): readonly AppManagerEntry[];
   launch(applicationId: string): Promise<void> | void;
   terminate(applicationId: string): Promise<void> | void;
+  /**
+   * Reads the installed-application catalog from the real application
+   * registry (ApplicationInstaller, backed by /var/lib/sevyn/apps/registry.json).
+   */
+  listInstalledApps(): Promise<readonly TerminalAppRecord[]>;
+  /**
+   * Installs a `.sevyn` bundle path (or an app id resolved from the pristine
+   * store) into the real application registry.
+   */
+  installApp(target: string): Promise<TerminalAppRecord>;
+  /**
+   * Terminates running sessions, then removes the app from the real
+   * application registry. Protected system apps are rejected by the registry.
+   */
+  uninstallApp(applicationId: string): Promise<void>;
+  /**
+   * Reinstalls a stock app from the pristine bundle store into the real
+   * application registry.
+   */
+  restoreApp(applicationId: string): Promise<TerminalAppRecord>;
 }
 
 export class ApplicationSurfaceRegistry {
@@ -789,6 +809,8 @@ export class ApplicationSurfaceRegistry {
       case "console":
         return createElement(TerminalApplication, {
           filesystem: this.#filesystem,
+          // Seed the terminal's catalog from the desktop's app list; the
+          // terminal re-syncs from the real registry on mount via onRefreshApps.
           installedApps: (this.#applicationManagement?.list() ?? []).map((entry) => ({
             id: entry.id,
             name: entry.name,
@@ -797,11 +819,17 @@ export class ApplicationSurfaceRegistry {
             system:
               entry.id === "org.sevynos.shell" || entry.id === "org.sevynos.terminal",
           })),
-          onInstallApp: (target: string) => Promise.resolve(`Installed ${target}`),
-          onUninstallApp: async (appId: string) => {
-            await this.#applicationManagement?.terminate(appId);
-          },
-          onRestoreApp: (appId: string) => Promise.resolve(`Restored ${appId}`),
+          onRefreshApps: () =>
+            this.#applicationManagement?.listInstalledApps() ?? Promise.resolve([]),
+          onInstallApp: (target: string) =>
+            this.#applicationManagement?.installApp(target) ??
+            Promise.reject(new Error("Application management is unavailable.")),
+          onUninstallApp: (appId: string) =>
+            this.#applicationManagement?.uninstallApp(appId) ??
+            Promise.reject(new Error("Application management is unavailable.")),
+          onRestoreApp: (appId: string) =>
+            this.#applicationManagement?.restoreApp(appId) ??
+            Promise.reject(new Error("Application management is unavailable.")),
         });
       case "settings":
         return createElement(SettingsApplication, {

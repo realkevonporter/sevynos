@@ -73,9 +73,11 @@ describe("TerminalApplication Component Rendering", () => {
     const onInstallApp = vi.fn().mockResolvedValue("Installed");
     const onUninstallApp = vi.fn().mockResolvedValue(undefined);
     const onRestoreApp = vi.fn().mockResolvedValue("Restored");
+    const onRefreshApps = vi.fn().mockResolvedValue([]);
 
     const element = createElement(TerminalApplication, {
       filesystem: mockFilesystem,
+      onRefreshApps,
       onInstallApp,
       onUninstallApp,
       onRestoreApp,
@@ -84,6 +86,7 @@ describe("TerminalApplication Component Rendering", () => {
     expect(element).toBeDefined();
     expect(element.type).toBe(TerminalApplication);
     expect(element.props.filesystem).toBe(mockFilesystem);
+    expect(element.props.onRefreshApps).toBe(onRefreshApps);
     expect(element.props.onInstallApp).toBe(onInstallApp);
     expect(element.props.onUninstallApp).toBe(onUninstallApp);
     expect(element.props.onRestoreApp).toBe(onRestoreApp);

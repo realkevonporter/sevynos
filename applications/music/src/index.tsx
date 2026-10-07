@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import {
   NativeModules,
   Pressable,
@@ -8,6 +8,7 @@ import {
   TextInput,
   View,
   sevynTokens,
+  useOptionalSevynApplicationSdk,
   type MediaPlaybackStatus,
   type MediaPlaylist,
   type MediaService,
@@ -36,84 +37,25 @@ export const musicManifest: SevynApplicationManifest = {
 export type MusicNavigationTab = "library" | "playlists" | "now-playing";
 export type MusicRepeatMode = "off" | "all" | "one";
 
-export const DEFAULT_TRACKS: readonly MediaTrack[] = Object.freeze([
-  {
-    id: "track-1",
-    title: "Genesis Horizon",
-    artist: "SevynOS Sound Team",
-    album: "Genesis",
-    durationSec: 28,
-    path: "/usr/share/sevyn/music/genesis-horizon.flac",
-    format: "flac",
-    year: 2026,
-    genre: "Ambient Electronic",
-  },
-  {
-    id: "track-2",
-    title: "Silicon Pulse",
-    artist: "SevynOS Sound Team",
-    album: "Genesis",
-    durationSec: 28,
-    path: "/usr/share/sevyn/music/silicon-pulse.mp3",
-    format: "mp3",
-    year: 2026,
-    genre: "Synthwave",
-  },
-  {
-    id: "track-3",
-    title: "Nebula Drift",
-    artist: "Kevon Porter",
-    album: "Constellations",
-    durationSec: 28,
-    path: "/usr/share/sevyn/music/nebula-drift.ogg",
-    format: "ogg",
-    year: 2026,
-    genre: "Deep Ambient",
-  },
-  {
-    id: "track-4",
-    title: "Digital Dawn",
-    artist: "Aura Laboratory",
-    album: "Signals",
-    durationSec: 28,
-    path: "/usr/share/sevyn/music/digital-dawn.wav",
-    format: "wav",
-    year: 2026,
-    genre: "Chillout",
-  },
-  {
-    id: "track-5",
-    title: "Midnight Terminal",
-    artist: "Sevyn Core",
-    album: "System Sounds",
-    durationSec: 28,
-    path: "/usr/share/sevyn/music/midnight-terminal.m4a",
-    format: "m4a",
-    year: 2026,
-    genre: "Lo-Fi",
-  },
-]);
-
-export const DEFAULT_PLAYLISTS: readonly MediaPlaylist[] = Object.freeze([
-  {
-    id: "playlist-favorites",
-    name: "Favorites",
-    trackIds: ["track-1", "track-3"],
-    createdAt: 1773000000000,
-  },
-  {
-    id: "playlist-focus",
-    name: "Focus & Flow",
-    trackIds: ["track-2", "track-4", "track-5"],
-    createdAt: 1773000000000,
-  },
-]);
-
 export function formatTime(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));
   const m = Math.floor(s / 60);
   const remainingS = s % 60;
   return `${String(m).padStart(2, "0")}:${String(remainingS).padStart(2, "0")}`;
+}
+
+const PLAYLISTS_STORAGE_KEY = "sevynos.music.playlists.v1";
+
+function isStoredPlaylist(value: unknown): value is MediaPlaylist {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record["id"] === "string" &&
+    typeof record["name"] === "string" &&
+    Array.isArray(record["trackIds"]) &&
+    (record["trackIds"] as readonly unknown[]).every((id) => typeof id === "string") &&
+    typeof record["createdAt"] === "number"
+  );
 }
 
 export interface MusicApplicationProps {
@@ -266,6 +208,42 @@ const styles = StyleSheet.create({
     borderRadius: sevynTokens.radius.xs,
     marginVertical: 2,
     backgroundColor: "transparent",
+  },
+  emptyState: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 48,
+    paddingVertical: 64,
+  },
+  emptyStateBadge: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "rgba(215, 172, 87, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(215, 172, 87, 0.3)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 20,
+  },
+  emptyStateBadgeText: {
+    fontSize: 30,
+    color: "#D7AC57",
+  },
+  emptyStateTitle: {
+    fontSize: sevynTokens.typography.title.size,
+    fontWeight: "600",
+    color: "#F4F4F6",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  emptyStateBody: {
+    fontSize: sevynTokens.typography.body.size,
+    color: "#858A94",
+    textAlign: "center",
+    lineHeight: 22,
+    marginBottom: 20,
   },
   trackRowActive: {
     backgroundColor: "rgba(215, 172, 87, 0.08)",
@@ -762,10 +740,10 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
   });
 
   const [activeTab, setActiveTab] = useState<MusicNavigationTab>("library");
-  const [tracks, setTracks] = useState<readonly MediaTrack[]>(DEFAULT_TRACKS);
-  const [playlists, setPlaylists] = useState<readonly MediaPlaylist[]>(DEFAULT_PLAYLISTS);
-  const [selectedPlaylistId, setSelectedPlaylistId] =
-    useState<string>("playlist-favorites");
+  // The library comes ONLY from the real Music-folder scan — never seeded.
+  const [tracks, setTracks] = useState<readonly MediaTrack[]>([]);
+  const [playlists, setPlaylists] = useState<readonly MediaPlaylist[]>([]);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string>("");
   const [currentTrackIndex, setCurrentTrackIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
@@ -778,7 +756,52 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
   const [scanStatus, setScanStatus] = useState<string | undefined>(undefined);
   const [playbackError, setPlaybackError] = useState<string | undefined>(undefined);
 
-  const currentTrack = tracks[currentTrackIndex] ?? tracks[0] ?? DEFAULT_TRACKS[0];
+  const currentTrack = tracks[currentTrackIndex] ?? tracks[0];
+
+  // Playlist persistence via the Sevyn application SDK storage (same convention
+  // as the Notes app). Degrades gracefully to in-memory playlists when no SDK
+  // provider is present.
+  const sdk = useOptionalSevynApplicationSdk();
+  const playlistsLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (sdk === undefined) {
+      playlistsLoadedRef.current = true;
+      return;
+    }
+    let active = true;
+    void sdk.storage
+      .get(PLAYLISTS_STORAGE_KEY)
+      .then((stored) => {
+        if (!active) return;
+        playlistsLoadedRef.current = true;
+        if (typeof stored !== "string" || stored.length === 0) return;
+        try {
+          const parsed: unknown = JSON.parse(stored);
+          if (!Array.isArray(parsed)) return;
+          const valid = parsed.filter(isStoredPlaylist);
+          setPlaylists(valid);
+          setSelectedPlaylistId((prev) =>
+            prev.length > 0 || valid.length === 0 ? prev : (valid[0]?.id ?? ""),
+          );
+        } catch {
+          // Corrupt payload: start with an empty playlist set.
+        }
+      })
+      .catch(() => {
+        if (active) playlistsLoadedRef.current = true;
+      });
+    return () => {
+      active = false;
+    };
+  }, [sdk]);
+
+  useEffect(() => {
+    if (sdk === undefined || !playlistsLoadedRef.current) return;
+    void sdk.storage.set(PLAYLISTS_STORAGE_KEY, JSON.stringify(playlists)).catch(() => {
+      // Persistence is best-effort; playlists remain in memory.
+    });
+  }, [sdk, playlists]);
 
   // Poll real playback status from the media service (replaces simulated timer).
   useEffect(() => {
@@ -1005,16 +1028,29 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
   }, []);
 
   const handleToggleFavorite = useCallback((trackId: string) => {
-    setPlaylists((prev) =>
-      prev.map((pl) => {
+    setPlaylists((prev) => {
+      const favorites = prev.find((pl) => pl.id === "playlist-favorites");
+      if (!favorites) {
+        // First favorite: create the Favorites playlist (no seeded playlists).
+        return [
+          ...prev,
+          {
+            id: "playlist-favorites",
+            name: "Favorites",
+            trackIds: [trackId],
+            createdAt: Date.now(),
+          },
+        ];
+      }
+      return prev.map((pl) => {
         if (pl.id !== "playlist-favorites") return pl;
         const exists = pl.trackIds.includes(trackId);
         const newTrackIds = exists
           ? pl.trackIds.filter((id) => id !== trackId)
           : [...pl.trackIds, trackId];
         return { ...pl, trackIds: newTrackIds };
-      }),
-    );
+      });
+    });
   }, []);
 
   const handleCreatePlaylist = useCallback(() => {
@@ -1029,30 +1065,58 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
     setSelectedPlaylistId(newPl.id);
   }, [playlists.length, currentTrack]);
 
-  const handleScanLibrary = useCallback(async () => {
-    setScanStatus("Scanning your Music folder...");
-    const scan =
-      props.media?.scan?.bind(props.media) ?? NativeModules.HardwareModules.media.scan;
-    try {
-      const found = (await scan("/var/lib/sevynos/user/Music")) as readonly MediaTrack[];
-      if (found.length > 0) {
-        setTracks((prev) => {
-          const existingIds = new Set(prev.map((t) => t.path));
-          const fresh = found.filter((t) => !existingIds.has(t.path));
-          return [...prev, ...fresh];
-        });
-        setScanStatus(`Discovered ${String(found.length)} new track(s).`);
-      } else {
-        setScanStatus("Scan complete. No new audio files found.");
+  const runLibraryScan = useCallback(
+    async (mode: "replace" | "merge") => {
+      setScanStatus("Scanning your Music folder...");
+      const scan =
+        props.media?.scan?.bind(props.media) ?? NativeModules.HardwareModules.media.scan;
+      try {
+        const found = (await scan(
+          "/var/lib/sevynos/user/Music",
+        )) as readonly MediaTrack[];
+        if (found.length > 0) {
+          if (mode === "replace") {
+            setTracks(found);
+            setCurrentTrackIndex(0);
+            setScanStatus(
+              `Library loaded: ${String(found.length)} track(s) from your Music folder.`,
+            );
+          } else {
+            setTracks((prev) => {
+              const existingPaths = new Set(prev.map((t) => t.path));
+              const fresh = found.filter((t) => !existingPaths.has(t.path));
+              return [...prev, ...fresh];
+            });
+            setScanStatus(`Discovered ${String(found.length)} new track(s).`);
+          }
+        } else if (mode === "replace") {
+          setTracks([]);
+          setScanStatus("Scan complete. No audio files found in your Music folder.");
+        } else {
+          setScanStatus("Scan complete. No new audio files found.");
+        }
+      } catch (error: unknown) {
+        setScanStatus(
+          error instanceof Error
+            ? `Library scan unavailable: ${error.message}`
+            : "Library scan unavailable.",
+        );
       }
-    } catch (error: unknown) {
-      setScanStatus(
-        error instanceof Error
-          ? `Library scan unavailable: ${error.message}`
-          : "Library scan unavailable.",
-      );
-    }
-  }, [props.media]);
+    },
+    [props.media],
+  );
+
+  const handleScanLibrary = useCallback(() => {
+    void runLibraryScan("merge");
+  }, [runLibraryScan]);
+
+  // Load the real library on mount — the library comes only from the scan.
+  const autoScannedRef = useRef(false);
+  useEffect(() => {
+    if (permissionState !== "granted" || autoScannedRef.current) return;
+    autoScannedRef.current = true;
+    void runLibraryScan("replace");
+  }, [permissionState, runLibraryScan]);
 
   const handleGrantPermission = useCallback(async () => {
     if (props.permissions) {
@@ -1067,7 +1131,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
     return (
       <View style={styles.root}>
         <View style={styles.permissionPromptCard}>
-          <Text style={styles.permissionIcon}>🎵</Text>
+          <Text style={styles.permissionIcon}>♪</Text>
           <Text style={styles.permissionTitle}>Music Access Request</Text>
           <Text style={styles.permissionDescription}>
             SevynOS Music requires access to the system media subsystem to play local
@@ -1100,7 +1164,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
     return (
       <View style={styles.root}>
         <View style={styles.permissionPromptCard}>
-          <Text style={styles.permissionIcon}>🔒</Text>
+          <Text style={styles.permissionIcon}>!</Text>
           <Text style={styles.permissionTitle}>Media Permission Denied</Text>
           <Text style={styles.permissionDescription}>
             Media playback capability was denied for the Music application. You can
@@ -1216,7 +1280,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
           <Pressable
             style={styles.scanButton}
             onPress={() => {
-              void handleScanLibrary();
+              handleScanLibrary();
             }}
           >
             <Text style={styles.scanButtonText}>Scan Folder</Text>
@@ -1261,82 +1325,110 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
               <Text style={StyleSheet.flatten([styles.tableHeaderCell, { width: 70 }])} />
             </View>
 
-            {filteredTracks.map((t, idx) => {
-              const isActive = isPlaying && currentTrack?.id === t.id;
-              const isFav = favoritesPlaylist?.trackIds.includes(t.id) ?? false;
-              return (
-                <View
-                  key={t.id}
-                  style={StyleSheet.flatten([
-                    styles.trackRow,
-                    isActive ? styles.trackRowActive : undefined,
-                  ])}
-                >
-                  <Text
+            {filteredTracks.length === 0 ? (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyStateBadge}>
+                  <Text style={styles.emptyStateBadgeText}>♪</Text>
+                </View>
+                <Text style={styles.emptyStateTitle}>
+                  {tracks.length === 0
+                    ? "Your library is empty"
+                    : "No songs match your search"}
+                </Text>
+                <Text style={styles.emptyStateBody}>
+                  {tracks.length === 0
+                    ? "Add audio files (MP3, OGG, FLAC, WAV, M4A) to your Music folder, then scan it into your library."
+                    : "Try a different search term, or clear the search box to see every song."}
+                </Text>
+                {tracks.length === 0 && (
+                  <Pressable
+                    style={styles.scanButton}
+                    onPress={() => {
+                      handleScanLibrary();
+                    }}
+                  >
+                    <Text style={styles.scanButtonText}>Scan Folder</Text>
+                  </Pressable>
+                )}
+              </View>
+            ) : (
+              filteredTracks.map((t, idx) => {
+                const isActive = isPlaying && currentTrack?.id === t.id;
+                const isFav = favoritesPlaylist?.trackIds.includes(t.id) ?? false;
+                return (
+                  <View
+                    key={t.id}
                     style={StyleSheet.flatten([
-                      styles.trackIndexText,
-                      isActive ? { color: "#D7AC57" } : undefined,
+                      styles.trackRow,
+                      isActive ? styles.trackRowActive : undefined,
                     ])}
                   >
-                    {isActive ? "▶" : String(idx + 1)}
-                  </Text>
-                  <View style={styles.trackTitleCol}>
                     <Text
                       style={StyleSheet.flatten([
-                        styles.trackTitleText,
-                        isActive ? styles.trackTitleTextActive : undefined,
+                        styles.trackIndexText,
+                        isActive ? { color: "#D7AC57" } : undefined,
                       ])}
                     >
-                      {t.title}
+                      {isActive ? "▶" : String(idx + 1)}
                     </Text>
-                    <Text style={styles.trackArtistText}>{t.artist}</Text>
-                  </View>
-                  <View style={styles.trackAlbumCol}>
-                    <Text style={styles.trackAlbumText}>{t.album ?? "—"}</Text>
-                  </View>
-                  <View style={styles.trackFormatCol}>
-                    <View style={styles.formatBadge}>
-                      <Text style={styles.formatBadgeText}>{t.format}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.trackDurationCol}>
-                    <Text style={styles.trackDurationText}>
-                      {formatTime(t.durationSec)}
-                    </Text>
-                  </View>
-                  <View style={styles.trackActionCol}>
-                    <Pressable
-                      style={StyleSheet.flatten([
-                        styles.favIconBtn,
-                        isFav ? styles.favIconBtnActive : undefined,
-                      ])}
-                      onPress={() => {
-                        handleToggleFavorite(t.id);
-                      }}
-                    >
+                    <View style={styles.trackTitleCol}>
                       <Text
                         style={StyleSheet.flatten([
-                          styles.favIconBtnText,
-                          isFav ? styles.favIconBtnTextActive : undefined,
+                          styles.trackTitleText,
+                          isActive ? styles.trackTitleTextActive : undefined,
                         ])}
                       >
-                        {isFav ? "♥" : "♡"}
+                        {t.title}
                       </Text>
-                    </Pressable>
-                    <Pressable
-                      style={styles.playIconBtn}
-                      onPress={() => {
-                        void handlePlayTrack(t, idx);
-                      }}
-                    >
-                      <Text style={styles.playIconBtnText}>
-                        {isActive && !isPaused ? "⏸" : "▶"}
+                      <Text style={styles.trackArtistText}>{t.artist}</Text>
+                    </View>
+                    <View style={styles.trackAlbumCol}>
+                      <Text style={styles.trackAlbumText}>{t.album ?? "—"}</Text>
+                    </View>
+                    <View style={styles.trackFormatCol}>
+                      <View style={styles.formatBadge}>
+                        <Text style={styles.formatBadgeText}>{t.format}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.trackDurationCol}>
+                      <Text style={styles.trackDurationText}>
+                        {formatTime(t.durationSec)}
                       </Text>
-                    </Pressable>
+                    </View>
+                    <View style={styles.trackActionCol}>
+                      <Pressable
+                        style={StyleSheet.flatten([
+                          styles.favIconBtn,
+                          isFav ? styles.favIconBtnActive : undefined,
+                        ])}
+                        onPress={() => {
+                          handleToggleFavorite(t.id);
+                        }}
+                      >
+                        <Text
+                          style={StyleSheet.flatten([
+                            styles.favIconBtnText,
+                            isFav ? styles.favIconBtnTextActive : undefined,
+                          ])}
+                        >
+                          {isFav ? "♥" : "♡"}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={styles.playIconBtn}
+                        onPress={() => {
+                          void handlePlayTrack(t, idx);
+                        }}
+                      >
+                        <Text style={styles.playIconBtnText}>
+                          {isActive && !isPaused ? "⏸" : "▶"}
+                        </Text>
+                      </Pressable>
+                    </View>
                   </View>
-                </View>
-              );
-            })}
+                );
+              })
+            )}
           </ScrollView>
         )}
 
@@ -1385,55 +1477,76 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
             </View>
 
             <View style={styles.playlistMain}>
-              <View style={styles.sectionHeadingRow}>
-                <Text style={styles.sectionHeading}>
-                  {selectedPlaylist?.name ?? "Playlist"}
-                </Text>
-                <Text style={styles.sectionSubtext}>
-                  {String(selectedPlaylistTracks.length)} song(s)
-                </Text>
-              </View>
+              {selectedPlaylist === undefined ? (
+                <View style={styles.emptyState}>
+                  <View style={styles.emptyStateBadge}>
+                    <Text style={styles.emptyStateBadgeText}>♪</Text>
+                  </View>
+                  <Text style={styles.emptyStateTitle}>No playlists yet</Text>
+                  <Text style={styles.emptyStateBody}>
+                    Create your first playlist to organize the songs in your library.
+                    Playlists are saved on this device.
+                  </Text>
+                  <Pressable
+                    style={styles.newPlaylistCard}
+                    onPress={() => {
+                      handleCreatePlaylist();
+                    }}
+                  >
+                    <Text style={styles.newPlaylistBtnText}>+ New Playlist</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <>
+                  <View style={styles.sectionHeadingRow}>
+                    <Text style={styles.sectionHeading}>{selectedPlaylist.name}</Text>
+                    <Text style={styles.sectionSubtext}>
+                      {String(selectedPlaylistTracks.length)} song(s)
+                    </Text>
+                  </View>
 
-              <ScrollView>
-                {selectedPlaylistTracks.map((t, idx) => {
-                  const isActive = isPlaying && currentTrack?.id === t.id;
-                  return (
-                    <View
-                      key={t.id}
-                      style={StyleSheet.flatten([
-                        styles.trackRow,
-                        isActive ? styles.trackRowActive : undefined,
-                      ])}
-                    >
-                      <Text style={styles.trackIndexText}>{String(idx + 1)}</Text>
-                      <View style={styles.trackTitleCol}>
-                        <Text style={styles.trackTitleText}>{t.title}</Text>
-                        <Text style={styles.trackArtistText}>{t.artist}</Text>
-                      </View>
-                      <View style={styles.trackFormatCol}>
-                        <View style={styles.formatBadge}>
-                          <Text style={styles.formatBadgeText}>{t.format}</Text>
-                        </View>
-                      </View>
-                      <View style={styles.trackDurationCol}>
-                        <Text style={styles.trackDurationText}>
-                          {formatTime(t.durationSec)}
-                        </Text>
-                      </View>
-                      <View style={styles.trackActionCol}>
-                        <Pressable
-                          style={styles.playIconBtn}
-                          onPress={() => {
-                            void handlePlayTrack(t, idx);
-                          }}
+                  <ScrollView>
+                    {selectedPlaylistTracks.map((t, idx) => {
+                      const isActive = isPlaying && currentTrack?.id === t.id;
+                      return (
+                        <View
+                          key={t.id}
+                          style={StyleSheet.flatten([
+                            styles.trackRow,
+                            isActive ? styles.trackRowActive : undefined,
+                          ])}
                         >
-                          <Text style={styles.playIconBtnText}>▶</Text>
-                        </Pressable>
-                      </View>
-                    </View>
-                  );
-                })}
-              </ScrollView>
+                          <Text style={styles.trackIndexText}>{String(idx + 1)}</Text>
+                          <View style={styles.trackTitleCol}>
+                            <Text style={styles.trackTitleText}>{t.title}</Text>
+                            <Text style={styles.trackArtistText}>{t.artist}</Text>
+                          </View>
+                          <View style={styles.trackFormatCol}>
+                            <View style={styles.formatBadge}>
+                              <Text style={styles.formatBadgeText}>{t.format}</Text>
+                            </View>
+                          </View>
+                          <View style={styles.trackDurationCol}>
+                            <Text style={styles.trackDurationText}>
+                              {formatTime(t.durationSec)}
+                            </Text>
+                          </View>
+                          <View style={styles.trackActionCol}>
+                            <Pressable
+                              style={styles.playIconBtn}
+                              onPress={() => {
+                                void handlePlayTrack(t, idx);
+                              }}
+                            >
+                              <Text style={styles.playIconBtnText}>▶</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                </>
+              )}
             </View>
           </View>
         )}
@@ -1582,7 +1695,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
                     repeatMode !== "off" ? { color: "#D7AC57" } : undefined,
                   ])}
                 >
-                  {repeatMode === "one" ? "🔂" : "🔁"}
+                  {repeatMode === "one" ? "↻ 1" : "↻"}
                 </Text>
               </Pressable>
             </View>
@@ -1591,7 +1704,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
             <View style={styles.volumeRow}>
               <Pressable onPress={() => void handleToggleMute()}>
                 <Text style={styles.volumeIcon}>
-                  {isMuted || volume === 0 ? "🔇" : "🔊"}
+                  {isMuted || volume === 0 ? "✕" : "♪"}
                 </Text>
               </Pressable>
               <Pressable

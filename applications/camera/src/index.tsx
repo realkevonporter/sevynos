@@ -12,6 +12,9 @@ import {
   type CameraRecordResult,
   type CameraService,
   type CameraStatus,
+  type CameraVideoPlaybackInfo,
+  type MediaService,
+  type MediaTrack,
   type SevynApplicationManifest,
   type SevynFileSystem,
 } from "@sevynos/react-native";
@@ -53,6 +56,7 @@ export interface CameraItem {
 
 export interface CameraApplicationProps {
   readonly camera?: CameraService | undefined;
+  readonly media?: MediaService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
   readonly permissions?:
     | {
@@ -100,6 +104,15 @@ function resolveCamera(propsCamera?: CameraService): CameraService {
       }),
     recordStart: () => Promise.reject(new Error("No camera hardware detected.")),
     recordStop: () => Promise.reject(new Error("No camera hardware detected.")),
+    playVideo: () =>
+      Promise.reject(new Error("Video playback is not available on this device.")),
+    videoFrame: () =>
+      Promise.resolve({
+        width: 0,
+        height: 0,
+        available: false,
+      }),
+    stopVideo: () => Promise.resolve(),
   };
 }
 
@@ -592,6 +605,95 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: "#8b949e",
   },
+  videoErrorBadge: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.4)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  videoErrorBadgeText: {
+    fontSize: 24,
+    color: "#EF4444",
+    fontWeight: "700",
+  },
+  videoProgressRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  videoTimeText: {
+    fontSize: 12,
+    color: "#8b949e",
+    width: 44,
+    textAlign: "center",
+  },
+  videoProgressTrack: {
+    flex: 1,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    overflow: "hidden",
+  },
+  videoProgressFill: {
+    height: 6,
+    backgroundColor: "#D7AC57",
+  },
+  videoTransportRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 16,
+  },
+  videoTransportBtn: {
+    minWidth: 64,
+    height: 40,
+    borderRadius: 8,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  videoTransportBtnText: {
+    fontSize: 14,
+    color: "#f0f2f8",
+    fontWeight: "600",
+  },
+  videoTransportBtnPrimary: {
+    minWidth: 96,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "#D7AC57",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  videoTransportBtnPrimaryText: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#090b11",
+  },
+  videoReplayBtn: {
+    alignSelf: "center",
+    paddingHorizontal: 20,
+    height: 40,
+    borderRadius: 8,
+    backgroundColor: "rgba(215, 172, 87, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(215, 172, 87, 0.4)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  videoReplayBtnText: {
+    fontSize: 14,
+    color: "#D7AC57",
+    fontWeight: "600",
+  },
   scrubberTrack: {
     width: 360,
     height: 6,
@@ -659,8 +761,335 @@ const styles = StyleSheet.create({
   },
 });
 
+export interface VideoPlayerProps {
+  readonly item: CameraItem;
+  readonly camera: CameraService;
+  readonly media: MediaService | undefined;
+  readonly onClose: () => void;
+}
+
+const VIDEO_FRAME_POLL_MS = 100;
+const VIDEO_POSITION_POLL_MS = 250;
+
+/** Awaits an optional native call, swallowing rejections and undefined. */
+async function ignoreRejection(promise: Promise<unknown> | undefined): Promise<void> {
+  try {
+    await promise;
+  } catch {
+    // Best-effort teardown/audio calls must never break playback state.
+  }
+}
+
+/**
+ * Real video playback for recorded videos. Video frames are decoded natively
+ * (ffmpeg, via `camera.playVideo`/`camera.videoFrame`/`camera.stopVideo`) and
+ * rendered through the same RGBA bitmap path as the camera preview; the audio
+ * track plays through the media service.
+ */
+export function VideoPlayer({
+  item,
+  camera,
+  media,
+  onClose,
+}: VideoPlayerProps): JSX.Element {
+  const [info, setInfo] = useState<CameraVideoPlaybackInfo | undefined>(undefined);
+  const [frame, setFrame] = useState<CameraBitmapSource | undefined>(undefined);
+  const [playing, setPlaying] = useState<boolean>(false);
+  const [positionSec, setPositionSec] = useState<number>(0);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const [ended, setEnded] = useState<boolean>(false);
+
+  const sessionSeqRef = useRef(0);
+  const lastFrameIndexRef = useRef(-1);
+  const timingRef = useRef({ startPositionSec: 0, startWallMs: 0 });
+  const durationSec = info?.durationSec ?? 0;
+
+  const startPlayback = useCallback(
+    async (fromSec: number): Promise<void> => {
+      const mySession = sessionSeqRef.current + 1;
+      sessionSeqRef.current = mySession;
+      setError(undefined);
+      setEnded(false);
+      lastFrameIndexRef.current = -1;
+      try {
+        if (!camera.playVideo) {
+          throw new Error("Video playback is not supported on this device.");
+        }
+        await ignoreRejection(camera.stopVideo?.());
+        const playback = await camera.playVideo(item.path, { startSec: fromSec });
+        if (mySession !== sessionSeqRef.current) {
+          await ignoreRejection(camera.stopVideo?.());
+          return;
+        }
+        if (!playback.available) {
+          throw new Error("This video could not be decoded for playback.");
+        }
+        setInfo(playback);
+        timingRef.current = { startPositionSec: fromSec, startWallMs: Date.now() };
+        setPositionSec(fromSec);
+        setPlaying(true);
+        if (media !== undefined) {
+          try {
+            const track: MediaTrack = {
+              id: item.id,
+              title: item.id,
+              artist: "Camera",
+              durationSec:
+                playback.durationSec > 0
+                  ? playback.durationSec
+                  : Math.max(1, Math.round((item.durationMs ?? 0) / 1000)),
+              path: item.path,
+              format: "mp4",
+            };
+            await media.play({ path: item.path, track });
+            if (mySession !== sessionSeqRef.current) {
+              await ignoreRejection(media.stop());
+              return;
+            }
+            if (fromSec > 0.5) {
+              await ignoreRejection(media.seek(fromSec));
+            }
+          } catch {
+            // Audio is best-effort; video continues without sound.
+          }
+        }
+      } catch (err) {
+        if (mySession !== sessionSeqRef.current) return;
+        setPlaying(false);
+        setError(err instanceof Error ? err.message : "Video playback failed.");
+      }
+    },
+    [camera, item.id, item.path, item.durationMs, media],
+  );
+
+  // Start playback when the player opens; tear down on unmount.
+  useEffect(() => {
+    void startPlayback(0);
+    return () => {
+      sessionSeqRef.current += 1;
+      void ignoreRejection(camera.stopVideo?.());
+      void ignoreRejection(media?.stop());
+    };
+  }, []);
+
+  // Poll decoded frames while playing.
+  useEffect(() => {
+    if (!playing) return;
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const videoFrame = await camera.videoFrame?.();
+          if (!videoFrame) return;
+          if (videoFrame.ended === true) {
+            const mySession = sessionSeqRef.current + 1;
+            sessionSeqRef.current = mySession;
+            setPlaying(false);
+            setEnded(true);
+            setPositionSec(durationSec > 0 ? durationSec : positionSec);
+            await ignoreRejection(camera.stopVideo?.());
+            await ignoreRejection(media?.stop());
+            return;
+          }
+          const frameIndex = videoFrame.frameIndex ?? 0;
+          if (
+            videoFrame.available !== false &&
+            videoFrame.pixels &&
+            frameIndex !== lastFrameIndexRef.current
+          ) {
+            lastFrameIndexRef.current = frameIndex;
+            setFrame({
+              width: videoFrame.width,
+              height: videoFrame.height,
+              pixels: videoFrame.pixels,
+            });
+          }
+        } catch {
+          // Transient frame fetch failure; the next poll retries.
+        }
+      })();
+    }, VIDEO_FRAME_POLL_MS);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [playing, camera, media, durationSec, positionSec]);
+
+  // Track playback position while playing.
+  useEffect(() => {
+    if (!playing) return;
+    const timer = setInterval(() => {
+      const { startPositionSec, startWallMs } = timingRef.current;
+      setPositionSec(startPositionSec + (Date.now() - startWallMs) / 1000);
+    }, VIDEO_POSITION_POLL_MS);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [playing]);
+
+  const togglePlayPause = useCallback(() => {
+    if (playing) {
+      const { startPositionSec, startWallMs } = timingRef.current;
+      const frozen = startPositionSec + (Date.now() - startWallMs) / 1000;
+      sessionSeqRef.current += 1;
+      setPlaying(false);
+      setPositionSec(frozen);
+      timingRef.current = { startPositionSec: frozen, startWallMs: Date.now() };
+      void ignoreRejection(camera.stopVideo?.());
+      void ignoreRejection(media?.pause());
+    } else if (!ended) {
+      const { startPositionSec } = timingRef.current;
+      void (async () => {
+        try {
+          if (!camera.playVideo) {
+            throw new Error("Video playback is not supported on this device.");
+          }
+          const mySession = sessionSeqRef.current + 1;
+          sessionSeqRef.current = mySession;
+          const playback = await camera.playVideo(item.path, {
+            startSec: startPositionSec,
+          });
+          if (mySession !== sessionSeqRef.current) {
+            await ignoreRejection(camera.stopVideo?.());
+            return;
+          }
+          if (playback.available) {
+            timingRef.current = {
+              startPositionSec,
+              startWallMs: Date.now(),
+            };
+            setPlaying(true);
+            await ignoreRejection(media?.resume());
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Could not resume playback.");
+        }
+      })();
+    }
+  }, [playing, ended, camera, media, item.path]);
+
+  const seekBy = useCallback(
+    (deltaSec: number) => {
+      const target = Math.max(
+        0,
+        Math.min(
+          durationSec > 0 ? durationSec : Number.POSITIVE_INFINITY,
+          positionSec + deltaSec,
+        ),
+      );
+      void startPlayback(target);
+    },
+    [durationSec, positionSec, startPlayback],
+  );
+
+  const progressPct =
+    durationSec > 0 ? Math.min(100, Math.max(0, (positionSec / durationSec) * 100)) : 0;
+  // Keep the rounded number inside the template so the literal type stays `${number}%`
+  // (String() here would widen it to `${string}%` and fail typecheck).
+  // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- intentional number in template for the `${number}%` width type
+  const progressWidth: `${number}%` = `${Math.round(progressPct)}%`;
+
+  return (
+    <View style={styles.videoPlayerContainer}>
+      {frame !== undefined ? (
+        <NativeImage
+          key={`video-playback-${item.id}`}
+          style={styles.photoViewerImage}
+          source={frame}
+        />
+      ) : error !== undefined ? (
+        <View style={styles.videoCanvas}>
+          <View style={styles.videoErrorBadge}>
+            <Text style={styles.videoErrorBadgeText}>!</Text>
+          </View>
+          <Text style={styles.videoCanvasState}>{error}</Text>
+        </View>
+      ) : (
+        <View style={styles.videoCanvas}>
+          <Text style={styles.videoCanvasState}>Loading video…</Text>
+        </View>
+      )}
+
+      <View style={styles.videoProgressRow}>
+        <Text style={styles.videoTimeText}>
+          {formatDuration(Math.floor(positionSec))}
+        </Text>
+        <View style={styles.videoProgressTrack}>
+          <View
+            style={StyleSheet.flatten([
+              styles.videoProgressFill,
+              { width: progressWidth },
+            ])}
+          />
+        </View>
+        <Text style={styles.videoTimeText}>
+          {formatDuration(Math.floor(durationSec))}
+        </Text>
+      </View>
+
+      <View style={styles.videoTransportRow}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Back 10 seconds"
+          style={styles.videoTransportBtn}
+          onPress={() => {
+            seekBy(-10);
+          }}
+        >
+          <Text style={styles.videoTransportBtnText}>-10s</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={playing ? "Pause video" : "Play video"}
+          style={styles.videoTransportBtnPrimary}
+          onPress={togglePlayPause}
+        >
+          <Text style={styles.videoTransportBtnPrimaryText}>
+            {playing ? "Pause" : "Play"}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Forward 10 seconds"
+          style={styles.videoTransportBtn}
+          onPress={() => {
+            seekBy(10);
+          }}
+        >
+          <Text style={styles.videoTransportBtnText}>+10s</Text>
+        </Pressable>
+      </View>
+
+      {ended && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Replay video"
+          style={styles.videoReplayBtn}
+          onPress={() => {
+            void startPlayback(0);
+          }}
+        >
+          <Text style={styles.videoReplayBtnText}>Replay</Text>
+        </Pressable>
+      )}
+
+      {error !== undefined && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close video player"
+          style={styles.videoReplayBtn}
+          onPress={onClose}
+        >
+          <Text style={styles.videoReplayBtnText}>Close</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
 export function CameraApplication(props: CameraApplicationProps): JSX.Element {
   const camera = resolveCamera(props.camera);
+  const media: MediaService | undefined =
+    props.media ??
+    (NativeModules.HardwareModules.media as unknown as MediaService | undefined);
   const [permissionGranted, setPermissionGranted] = useState<boolean>(
     () => props.initialPermissionGranted ?? props.permissions?.has("camera") ?? true,
   );
@@ -726,9 +1155,10 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
   const [photoLoadError, setPhotoLoadError] = useState<string | undefined>(undefined);
 
   // Load the real JPEG when a photo is selected in the viewer.
-  // For videos, load the first frame as a thumbnail.
+  // Videos render through the VideoPlayer (native frame decode); the viewer
+  // only needs a thumbnail for photos.
   useEffect(() => {
-    if (selectedCapture?.type !== "photo" && selectedCapture?.type !== "video") {
+    if (selectedCapture?.type !== "photo") {
       setPhotoBitmap(undefined);
       setPhotoLoadError(undefined);
       return;
@@ -1326,36 +1756,15 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
 
             <View style={styles.viewerBody}>
               {selectedCapture.type === "video" ? (
-                <View style={styles.videoPlayerContainer}>
-                  {photoBitmap !== undefined ? (
-                    <NativeImage
-                      key={`video-thumb-${selectedCapture.id}`}
-                      style={styles.photoViewerImage}
-                      source={photoBitmap}
-                    />
-                  ) : photoLoadError !== undefined ? (
-                    <View style={styles.videoCanvas}>
-                      <Text style={styles.videoCanvasIcon}>⚠️</Text>
-                      <Text style={styles.videoCanvasState}>{photoLoadError}</Text>
-                    </View>
-                  ) : (
-                    <View style={styles.videoCanvas}>
-                      <Text style={styles.videoCanvasIcon}>🎬</Text>
-                      <Text style={styles.videoCanvasState}>Loading thumbnail…</Text>
-                    </View>
-                  )}
-                  <Text style={styles.videoCanvasTimer}>
-                    {formatDuration(
-                      Math.max(
-                        1,
-                        Math.round((selectedCapture.durationMs ?? 5000) / 1000),
-                      ),
-                    )}{" "}
-                    video • Full playback coming soon
-                  </Text>
-
-                  {/* Video info — full playback coming soon */}
-                </View>
+                <VideoPlayer
+                  key={`video-player-${selectedCapture.id}`}
+                  item={selectedCapture}
+                  camera={camera}
+                  media={media}
+                  onClose={() => {
+                    setSelectedCapture(undefined);
+                  }}
+                />
               ) : (
                 <View style={styles.photoViewerContainer}>
                   {photoBitmap !== undefined ? (

@@ -1,4 +1,4 @@
-import { useCallback, useState, type JSX } from "react";
+import { useCallback, useEffect, useState, type JSX } from "react";
 import {
   ScrollView,
   StyleSheet,
@@ -197,6 +197,13 @@ export const LINUX_ESCAPE_COMMANDS: ReadonlySet<string> = new Set([
 export interface TerminalApplicationProps {
   readonly filesystem?: SevynFileSystem | undefined;
   readonly installedApps?: readonly TerminalAppRecord[] | undefined;
+  /**
+   * Reloads the installed-application catalog from the real application
+   * registry (ApplicationInstaller). The host provides this; when present the
+   * terminal treats the registry as the source of truth and only keeps its
+   * local `apps` state as a cache.
+   */
+  readonly onRefreshApps?: (() => Promise<readonly TerminalAppRecord[]>) | undefined;
   readonly onInstallApp?:
     ((bundleOrId: string) => Promise<string | TerminalAppRecord>) | undefined;
   readonly onUninstallApp?: ((appId: string) => Promise<void>) | undefined;
@@ -232,6 +239,7 @@ function nextLineId(prefix: string): string {
 export function TerminalApplication({
   filesystem,
   installedApps: initialInstalledApps,
+  onRefreshApps,
   onInstallApp,
   onUninstallApp,
   onRestoreApp,
@@ -239,11 +247,40 @@ export function TerminalApplication({
   const [lines, setLines] = useState<readonly TerminalLine[]>(INITIAL_BANNER);
   const [inputCommand, setInputCommand] = useState<string>("");
   const [currentDir, setCurrentDir] = useState<string>("/var/lib/sevynos");
+  // Local cache of the installed-application catalog. The real source of truth
+  // is the host's application registry; this cache is seeded from props and
+  // re-synced from `onRefreshApps` whenever the host provides it.
   const [apps, setApps] = useState<readonly TerminalAppRecord[]>(
     initialInstalledApps ?? DEFAULT_TERMINAL_APPS,
   );
   const [history, setHistory] = useState<readonly string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
+
+  // On mount, replace the seeded catalog with the real registry contents when
+  // the host exposes it. Without a host (standalone/dev) the seed remains.
+  useEffect(() => {
+    if (!onRefreshApps) return;
+    let active = true;
+    void onRefreshApps()
+      .then((records) => {
+        if (active) setApps(records);
+      })
+      .catch(() => {
+        // Keep the seeded catalog; registry errors surface on mutation.
+      });
+    return () => {
+      active = false;
+    };
+  }, [onRefreshApps]);
+
+  const syncAppsFromRegistry = useCallback(async (): Promise<
+    readonly TerminalAppRecord[]
+  > => {
+    if (!onRefreshApps) return apps;
+    const records = await onRefreshApps();
+    setApps(records);
+    return records;
+  }, [apps, onRefreshApps]);
 
   const executeCommand = useCallback(
     async (cmdText: string) => {
@@ -497,69 +534,71 @@ export function TerminalApplication({
               break;
             }
 
-            // Check pristine catalog first
-            const pristine = PRISTINE_PACKAGES.get(target);
-            if (pristine) {
-              if (onInstallApp) {
-                try {
-                  await onInstallApp(target);
-                } catch (e) {
-                  outputLines = [
-                    {
-                      id: nextLineId("err"),
-                      text: `Install failed: ${e instanceof Error ? e.message : String(e)}`,
-                      type: "error",
-                    },
-                  ];
-                  break;
-                }
-              }
-              setApps((prev) => [...prev, pristine]);
+            if (!onInstallApp) {
               outputLines = [
                 {
-                  id: nextLineId("out"),
-                  text: `✓ Successfully installed ${pristine.name} (${pristine.id} v${pristine.version}) [protected: ${pristine.system ? "true" : "false"}]`,
-                  type: "success",
+                  id: nextLineId("err"),
+                  text:
+                    "Install failed: the host does not expose application installation.\n" +
+                    "Installs go through the SevynOS application registry (ApplicationInstaller).",
+                  type: "error",
                 },
               ];
               break;
             }
 
-            // External bundle install simulation
-            const bundleName =
-              target
-                .split("/")
-                .pop()
-                ?.replace(/\.(sevyn|sevynapp)$/, "") ?? target;
-            const newRecord: TerminalAppRecord = {
-              id: target.includes(".") ? target : `org.sevynos.${target.toLowerCase()}`,
-              name: bundleName.charAt(0).toUpperCase() + bundleName.slice(1),
-              version: "1.0.0",
-              system: false,
-              permissions: ["filesystem:user"],
-              description: `Sideloaded package from ${target}`,
-            };
-
-            if (onInstallApp) {
-              try {
-                await onInstallApp(target);
-              } catch (e) {
-                outputLines = [
-                  {
-                    id: nextLineId("err"),
-                    text: `Install failed: ${e instanceof Error ? e.message : String(e)}`,
-                    type: "error",
-                  },
-                ];
-                break;
+            // Real install through the host's application registry. The host
+            // resolves bundle paths via ApplicationInstaller.install() and app
+            // ids via the pristine store (ApplicationInstaller.installFromPristine()).
+            let installedRecord: TerminalAppRecord | undefined;
+            try {
+              const result = await onInstallApp(target);
+              if (typeof result !== "string") {
+                installedRecord = result;
               }
+            } catch (e) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text: `Install failed: ${e instanceof Error ? e.message : String(e)}`,
+                  type: "error",
+                },
+              ];
+              break;
             }
 
-            setApps((prev) => [...prev, newRecord]);
+            let records: readonly TerminalAppRecord[];
+            try {
+              records = await syncAppsFromRegistry();
+            } catch (e) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text: `Install may have succeeded but the registry could not be re-read: ${e instanceof Error ? e.message : String(e)}`,
+                  type: "error",
+                },
+              ];
+              break;
+            }
+
+            const resolved =
+              installedRecord ??
+              records.find((a) => a.id === target || target.endsWith(`/${a.id}.sevyn`));
+            if (!resolved) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text: `Install completed but '${target}' was not found in the application registry afterwards.`,
+                  type: "error",
+                },
+              ];
+              break;
+            }
+
             outputLines = [
               {
                 id: nextLineId("out"),
-                text: `✓ Successfully installed ${newRecord.name} (${newRecord.id} v${newRecord.version}) [deletable]`,
+                text: `Successfully installed ${resolved.name} (${resolved.id} v${resolved.version}) [protected: ${resolved.system === true ? "true" : "false"}]`,
                 type: "success",
               },
             ];
@@ -604,22 +643,38 @@ export function TerminalApplication({
               break;
             }
 
-            if (onUninstallApp) {
-              try {
-                await onUninstallApp(targetId);
-              } catch (e) {
-                outputLines = [
-                  {
-                    id: nextLineId("err"),
-                    text: `Uninstall failed: ${e instanceof Error ? e.message : String(e)}`,
-                    type: "error",
-                  },
-                ];
-                break;
-              }
+            if (!onUninstallApp) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text:
+                    "Uninstall failed: the host does not expose application uninstallation.\n" +
+                    "Uninstalls go through the SevynOS application registry (ApplicationInstaller).",
+                  type: "error",
+                },
+              ];
+              break;
             }
 
-            setApps((prev) => prev.filter((a) => a.id !== targetId));
+            try {
+              await onUninstallApp(targetId);
+            } catch (e) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text: `Uninstall failed: ${e instanceof Error ? e.message : String(e)}`,
+                  type: "error",
+                },
+              ];
+              break;
+            }
+
+            // The registry is the source of truth; re-read it after the mutation.
+            try {
+              await syncAppsFromRegistry();
+            } catch {
+              setApps((prev) => prev.filter((a) => a.id !== targetId));
+            }
             outputLines = [
               {
                 id: nextLineId("out"),
@@ -648,12 +703,13 @@ export function TerminalApplication({
               break;
             }
 
-            const pristine = PRISTINE_PACKAGES.get(targetId);
-            if (!pristine) {
+            if (!onRestoreApp) {
               outputLines = [
                 {
                   id: nextLineId("err"),
-                  text: `Pristine package '${targetId}' not found in /usr/share/sevyn/pristine/.`,
+                  text:
+                    "Restore failed: the host does not expose pristine restores.\n" +
+                    "Restores go through the SevynOS application registry (ApplicationInstaller).",
                   type: "error",
                 },
               ];
@@ -664,33 +720,61 @@ export function TerminalApplication({
               outputLines = [
                 {
                   id: nextLineId("out"),
-                  text: `Application '${pristine.name}' (${pristine.id}) is already active. Reinstalling pristine binary...`,
+                  text: `Application '${targetId}' is already active. Reinstalling pristine binary...`,
                   type: "info",
                 },
               ];
             }
 
-            if (onRestoreApp) {
-              try {
-                await onRestoreApp(targetId);
-              } catch (e) {
-                outputLines = [
-                  {
-                    id: nextLineId("err"),
-                    text: `Restore failed: ${e instanceof Error ? e.message : String(e)}`,
-                    type: "error",
-                  },
-                ];
-                break;
+            // Real restore through the host's registry (installFromPristine).
+            let restoredRecord: TerminalAppRecord | undefined;
+            try {
+              const result = await onRestoreApp(targetId);
+              if (typeof result !== "string") {
+                restoredRecord = result;
               }
+            } catch (e) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text: `Restore failed: ${e instanceof Error ? e.message : String(e)}`,
+                  type: "error",
+                },
+              ];
+              break;
             }
 
-            setApps((prev) => [...prev.filter((a) => a.id !== targetId), pristine]);
+            let records: readonly TerminalAppRecord[];
+            try {
+              records = await syncAppsFromRegistry();
+            } catch (e) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text: `Restore may have succeeded but the registry could not be re-read: ${e instanceof Error ? e.message : String(e)}`,
+                  type: "error",
+                },
+              ];
+              break;
+            }
+
+            const resolved = restoredRecord ?? records.find((a) => a.id === targetId);
+            if (!resolved) {
+              outputLines = [
+                {
+                  id: nextLineId("err"),
+                  text: `Restore completed but '${targetId}' was not found in the application registry afterwards.`,
+                  type: "error",
+                },
+              ];
+              break;
+            }
+
             outputLines = [
               ...outputLines,
               {
                 id: nextLineId("out"),
-                text: `✓ Successfully restored ${pristine.name} (${pristine.id} v${pristine.version}) from pristine storage.`,
+                text: `Successfully restored ${resolved.name} (${resolved.id} v${resolved.version}) from pristine storage.`,
                 type: "success",
               },
             ];
@@ -710,8 +794,7 @@ export function TerminalApplication({
               break;
             }
 
-            const app =
-              apps.find((a) => a.id === targetId) ?? PRISTINE_PACKAGES.get(targetId);
+            const app = apps.find((a) => a.id === targetId);
             if (!app) {
               outputLines = [
                 {
@@ -768,17 +851,19 @@ export function TerminalApplication({
               },
               {
                 id: nextLineId("out"),
-                text: `  • Installed Applications: ${String(apps.length)} apps in catalog`,
+                text: `  • Installed Applications: ${String(apps.length)} apps in the registry`,
                 type: "output",
               },
               {
                 id: nextLineId("out"),
-                text: `  • Protected System Apps: ${String(apps.filter((a) => a.system).length)} (shell, terminal)`,
+                text: `  • Protected System Apps: ${String(apps.filter((a) => a.system).length)} (uninstall blocked by the registry)`,
                 type: "output",
               },
               {
                 id: nextLineId("out"),
-                text: "  • Note: Full system diagnostics require the host installer service.",
+                text: onRefreshApps
+                  ? "  • Registry: connected (install/uninstall/restore mutate /var/lib/sevyn/apps/registry.json)"
+                  : "  • Registry: not connected — showing the seeded catalog; mutations are unavailable.",
                 type: "output",
               },
             ];
@@ -1028,7 +1113,16 @@ export function TerminalApplication({
       setLines((prev) => [...prev, inputLine, ...outputLines]);
       setInputCommand("");
     },
-    [currentDir, filesystem, apps, onInstallApp, onUninstallApp, onRestoreApp],
+    [
+      currentDir,
+      filesystem,
+      apps,
+      onRefreshApps,
+      onInstallApp,
+      onUninstallApp,
+      onRestoreApp,
+      syncAppsFromRegistry,
+    ],
   );
 
   return (
