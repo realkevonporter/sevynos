@@ -982,7 +982,10 @@ export function VideoPlayer({
 
   const progressPct =
     durationSec > 0 ? Math.min(100, Math.max(0, (positionSec / durationSec) * 100)) : 0;
-  const progressWidth: `${number}%` = `${String(Math.round(progressPct))}%`;
+  // Keep the rounded number inside the template so the literal type stays `${number}%`
+  // (String() here would widen it to `${string}%` and fail typecheck).
+  // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- intentional number in template for the `${number}%` width type
+  const progressWidth: `${number}%` = `${Math.round(progressPct)}%`;
 
   return (
     <View style={styles.videoPlayerContainer}>
