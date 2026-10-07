@@ -29,6 +29,7 @@ SEVYN_ESP_MB=512        # 512 MiB EFI System Partition
 SQUASHFS_PATH="/live/filesystem.squashfs"
 INSTALLED_INIT="/usr/local/lib/sevynos/installed-init"
 CHROOT_SCRIPT="/usr/local/bin/sevyn-installer-chroot"
+GRUB_CFG_LIB="/usr/local/lib/sevyn-grub-cfg-lib.sh"
 ACCOUNTS_SCRIPT="/usr/local/lib/sevyn-installer-accounts.mjs"
 PARTITION_PLAN_SCRIPT="/usr/local/lib/sevyn-installer-partition-plan.mjs"
 NODE_BIN="/usr/local/bin/node"
@@ -849,16 +850,24 @@ EOF
   gauge 88 "Installing kernel..."
   kernel_source=""
   initramfs_source=""
+  recovery_source=""
   for candidate in /boot/vmlinuz /run/live/medium/boot/vmlinuz /lib/live/mount/medium/boot/vmlinuz; do
     if [ -f "$candidate" ]; then kernel_source="$candidate"; break; fi
   done
   for candidate in /boot/initramfs.cpio.gz /run/live/medium/boot/initramfs.cpio.gz /lib/live/mount/medium/boot/initramfs.cpio.gz; do
     if [ -f "$candidate" ]; then initramfs_source="$candidate"; break; fi
   done
+  for candidate in /boot/recovery-initramfs.cpio.gz /run/live/medium/boot/recovery-initramfs.cpio.gz /lib/live/mount/medium/boot/recovery-initramfs.cpio.gz; do
+    if [ -f "$candidate" ]; then recovery_source="$candidate"; break; fi
+  done
   [ -n "$kernel_source" ] || { stop_gauge; fail "Cannot locate the installation kernel on the live media."; }
   [ -n "$initramfs_source" ] || { stop_gauge; fail "Failed to install the initramfs on the live media."; }
+  [ -n "$recovery_source" ] || { stop_gauge; fail "Cannot locate the recovery initramfs on the live media."; }
   cp "$kernel_source" "$target/boot/vmlinuz" || { stop_gauge; fail "Failed to install the kernel."; }
   cp "$initramfs_source" "$target/boot/initramfs.cpio.gz" || { stop_gauge; fail "Failed to install the initramfs."; }
+  # The recovery environment ships with the OS image and is deployed by the
+  # chroot step (GRUB entry + ESP staging), keeping it in sync with the OS.
+  cp "$recovery_source" "$target/boot/recovery-initramfs.cpio.gz" || { stop_gauge; fail "Failed to install the recovery initramfs."; }
 
   # Write the chroot configuration (no password — that travels via env).
   # printf (not a heredoc) so values containing $ or backticks stay literal.
@@ -880,6 +889,8 @@ EOF
   if [ -f "$CHROOT_SCRIPT" ]; then
     cp "$CHROOT_SCRIPT" "$target/tmp/sevyn-chroot-setup"
     cp "$ACCOUNTS_SCRIPT" "$target/tmp/sevyn-installer-accounts.mjs"
+    [ -f "$GRUB_CFG_LIB" ] || { stop_gauge; fail "Required installer helper is missing: $GRUB_CFG_LIB"; }
+    cp "$GRUB_CFG_LIB" "$target/tmp/sevyn-grub-cfg-lib.sh"
     chmod 0755 "$target/tmp/sevyn-chroot-setup"
 
     # Bind-mount essential filesystems for chroot
@@ -903,7 +914,7 @@ EOF
     umount "$target/dev/pts" 2>/dev/null || true
     umount "$target/dev" 2>/dev/null || true
     rm -f "$target/tmp/sevyn-chroot-setup" "$target/tmp/sevyn-installer-accounts.mjs" \
-      "$target/tmp/sevyn-install-config"
+      "$target/tmp/sevyn-grub-cfg-lib.sh" "$target/tmp/sevyn-install-config"
   fi
 
   # Cleanup

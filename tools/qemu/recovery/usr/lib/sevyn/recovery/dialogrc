@@ -1,0 +1,11 @@
+# SevynOS recovery dialog theme — matches the installer palette.
+screen_color = (WHITE,BLACK,OFF)
+dialog_color = (WHITE,BLACK,OFF)
+title_color = (BLACK,CYAN,ON)
+border_color = (CYAN,BLACK,ON)
+button_active_color = (BLACK,CYAN,ON)
+button_inactive_color = (WHITE,BLACK,OFF)
+item_selected_color = (BLACK,CYAN,ON)
+tag_color = (CYAN,BLACK,ON)
+inputbox_border_color = (CYAN,BLACK,ON)
+gauge_color = (BLACK,CYAN,ON)

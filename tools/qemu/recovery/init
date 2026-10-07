@@ -1,0 +1,69 @@
+#!/bin/busybox sh
+# SevynOS Recovery — initramfs /init (runs as PID 1).
+#
+# Boots the recovery environment WITHOUT mounting the main rootfs: the
+# kernel is given no root=, and this script only mounts kernel pseudo
+# filesystems plus tmpfs scratch space. The installed system is mounted
+# later, and only by the specific recovery operation the user chooses.
+#
+# Menu-driven only. There is intentionally no shell prompt here and no
+# debug-shell escape hatch: the SevynOS product rule (no Linux shell/TTY
+# for users) holds in recovery too.
+set -eu
+export PATH=/usr/bin:/bin:/sbin:/usr/sbin
+/bin/busybox --install -s /bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm /tmp /run /mnt/sevyn-root /mnt/sevyn-media
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+
+# Magic SysRq stays disabled in recovery (appliance security posture,
+# same as the installed system).
+echo 0 > /proc/sys/kernel/sysrq 2>/dev/null || true
+
+# Storage + input drivers so recovery can find the root partition,
+# install media, and USB keyboards. Everything is best-effort: missing
+# modules only narrow what recovery can reach, never abort the boot.
+for mod in ext4 mbcache jbd2 vfat fat nls_cp437 nls_iso8859-1 isofs \
+  virtio_blk virtio_pci virtio_ring virtio nvme nvme_core ahci libahci libata \
+  sd_mod sr_mod cdrom usb_storage uas xhci_pci xhci_hcd ehci_pci ehci_hcd \
+  uhci_hcd usb_common usbcore hid hid_generic usbhid mmc_core mmc_block \
+  sdhci sdhci_pci; do
+  modprobe "$mod" 2>/dev/null || true
+done
+
+# Give the kernel a moment to enumerate disks before the menu scans them.
+for _wait in $(seq 1 20); do
+  if ls /dev/sd* /dev/hd* /dev/vd* /dev/nvme*n* /dev/mmcblk* >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+
+RECOVERY_LOG=/tmp/sevyn-recovery.log
+: > "$RECOVERY_LOG"
+log() {
+  echo "[sevyn-recovery] $*" >> "$RECOVERY_LOG"
+  echo "[sevyn-recovery] $*" > /dev/ttyS0 2>/dev/null || true
+}
+
+export TERM=linux
+export TERMINFO=/usr/share/terminfo
+export DIALOGRC=/usr/lib/sevyn/recovery/dialogrc
+export SEVYN_RECOVERY_BASE=/usr/lib/sevyn/recovery
+
+log "SEVYN_RECOVERY_BOOTED version=$(cat /usr/lib/sevyn/recovery/VERSION 2>/dev/null || echo unknown)"
+log "SEVYN_RECOVERY_CMDLINE: $(cat /proc/cmdline 2>/dev/null || true)"
+
+/usr/lib/sevyn/recovery/recovery-menu.sh < /dev/console > /dev/console 2>&1
+rc=$?
+log "SEVYN_RECOVERY_MENU_EXITED rc=$rc"
+sync
+sleep 2
+# The menu only returns after Reboot / Power off was chosen and confirmed;
+# default to power off so the machine never sits at a dead prompt.
+poweroff -f

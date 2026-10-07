@@ -20,6 +20,24 @@ If the graphical desktop fails to start due to GPU driver incompatibility or dis
 3. **Select Diagnostic Logging Mode**:
    - If troubleshooting kernel devices or early hardware initialization, select **"Start SevynOS Live (diagnostic logging)"** to enable verbose boot reporting directly on screen.
 
+### The SevynOS Recovery environment
+
+On installed systems the GRUB menu also offers **"SevynOS Recovery"** —
+a self-contained repair environment that boots without the installed
+system (on UEFI machines it loads from the ESP, so even a destroyed root
+partition cannot stop it). It is menu-driven and never drops to a shell.
+From it you can:
+
+- **Roll back to the previous OS update** (restores the pre-update system
+  snapshot; your files and accounts are kept),
+- **Reinstall SevynOS from install media** (pristine system files; your
+  files are kept),
+- **Factory reset** (erase all user data, keep the OS),
+- **Check disks for errors**, **view system logs**, and reboot/power off.
+
+See `docs/recovery.md` for the full design, the rollback contract, and
+the exact semantics of each operation.
+
 ---
 
 ## 2. In-Session System Diagnostics: `sevyn doctor`
