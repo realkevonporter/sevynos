@@ -17,6 +17,7 @@ describe("application icon mapping", () => {
     expect(iconGlyphForManifestIcon("icons/notes.svg")).toBe("app-notes");
     expect(iconGlyphForManifestIcon("icons/settings.svg")).toBe("app-settings");
     expect(iconGlyphForManifestIcon("icons/sevyn-code.svg")).toBe("app-sevyn-code");
+    expect(iconGlyphForManifestIcon("icons/store.svg")).toBe("app-store");
     expect(iconGlyphForManifestIcon("icons/system-monitor.svg")).toBe(
       "app-system-monitor",
     );
@@ -33,6 +34,9 @@ describe("application icon mapping", () => {
   it("resolves brand tile colors with accent and shell fallbacks", () => {
     expect(tileColorForApplication("org.sevynos.browser", undefined, "#000000")).toBe(
       "#1D9BF0",
+    );
+    expect(tileColorForApplication("org.sevynos.store", undefined, "#000000")).toBe(
+      "#6869EE",
     );
     expect(tileColorForApplication("org.sevynos.unknown", "#123456", "#000000")).toBe(
       "#123456",

@@ -55,6 +55,7 @@ describe("SevynIcon", () => {
       "app-notes",
       "app-settings",
       "app-sevyn-code",
+      "app-store",
       "app-system-monitor",
       "app-terminal",
       "app-text-editor",

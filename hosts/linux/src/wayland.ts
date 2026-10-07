@@ -78,6 +78,7 @@ import { protectCurrentProcessFromOomKiller } from "./oom-score.js";
 import { LinuxSystemService } from "./linux-system-service.js";
 import { LinuxProcessService } from "./linux-process-service.js";
 import { LinuxFileSystem } from "./linux-file-system.js";
+import { FileArchiveService } from "@sevynos/file-archives";
 import { ChromiumBrowserEngine } from "./chromium-browser-engine.js";
 import { LinuxSevynCodeService } from "./linux-sevyn-code-service.js";
 import { HermesLinuxProcessApplicationExecutor } from "./linux-process-application-executor.js";
@@ -134,6 +135,16 @@ export interface WaylandHostOptions {
 // startWaylandHost (adapter install) and the main entry (lid watch wiring)
 // share one instance. The constructor performs no I/O.
 const powerService = new LinuxPowerService();
+
+/**
+ * Where Chromium puts finished downloads when no explicit downloadDirectory
+ * is configured (mirrors ChromiumBrowserEngine's default). The desktop
+ * shell resolves browser download actions against the same directory.
+ */
+function defaultBrowserDownloadDirectory(): string | undefined {
+  const stateDirectory = process.env["SEVYN_STATE_DIRECTORY"];
+  return stateDirectory === undefined ? undefined : join(stateDirectory, "Downloads");
+}
 
 export async function startWaylandHost(
   transport: NativeBridgeTransport,
@@ -599,6 +610,22 @@ export async function startWaylandHost(
   if (options.update !== undefined) {
     runtime.surfaces.configureUpdateService(options.update);
     marker("SEVYN_GENESIS_UPDATE_SERVICE_READY");
+  }
+  // Phase 2 integration: the Files app's archive Extract UI stays hidden
+  // unless a backend is injected. Root it at the user-data directory — the
+  // same root the Files app's filesystem sees.
+  if (filesystem instanceof LinuxFileSystem) {
+    runtime.surfaces.configureArchiveService(
+      new FileArchiveService({ rootDirectory: filesystem.rootDirectory }),
+    );
+  }
+  // Phase 2 integration: the browser's Open / Show in Files / Install
+  // download actions resolve downloadDirectory/filename. Keep the shell's
+  // directory in sync with the Chromium engine default
+  // (SEVYN_STATE_DIRECTORY/Downloads).
+  const browserDownloadDirectory = defaultBrowserDownloadDirectory();
+  if (browserDownloadDirectory !== undefined) {
+    runtime.surfaces.configureBrowserDownloadDirectory(browserDownloadDirectory);
   }
   // Fresh boot starts with a clean desktop (no auto-launched apps).
   // resetToDefaults() is reserved for explicit user-initiated reset
@@ -1852,6 +1879,10 @@ if (
           ? {}
           : {
               userDataDirectory: join(browserStateDirectory, "browser-profile"),
+              // Explicit so the shell's download actions resolve the exact
+              // directory Chromium writes to (see
+              // configureBrowserDownloadDirectory).
+              downloadDirectory: join(browserStateDirectory, "Downloads"),
             },
       );
     },
@@ -1893,9 +1924,27 @@ if (
     if (stopping) return;
     stopping = true;
     await sevynCodeService.stop().catch(() => undefined);
+    // The desktop runs as an unprivileged user, so it cannot reboot(2)
+    // directly. Write the reboot marker the same way `sevyn system power
+    // restart` does; installed-init reboots when the marker is present after
+    // the desktop exits, and powers off otherwise. Refuse to shut down when
+    // the marker cannot be written so a restart never silently degrades to
+    // a poweroff.
+    const fs = await import("node:fs/promises");
+    try {
+      await fs.mkdir("/run/sevynos", { recursive: true });
+      await fs.writeFile("/run/sevynos/reboot-requested", "", "utf8");
+    } catch (error) {
+      stopping = false;
+      throw new Error(
+        `Could not request reboot: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     await host.shutdown();
-    const { exec } = await import("child_process");
-    exec("reboot");
+    console.log("SEVYN_GENESIS_CONTROLLED_SHUTDOWN_COMPLETE");
+    process.exitCode = 0;
   };
   requestLock = () => {
     // Emit lock event to stdout that shell can listen for

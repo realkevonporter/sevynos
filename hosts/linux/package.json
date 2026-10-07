@@ -23,6 +23,7 @@
     "@expo/vector-icons": "workspace:*",
     "@sevynos/core-applications": "workspace:*",
     "@sevynos/desktop-shell": "workspace:*",
+    "@sevynos/file-archives": "workspace:*",
     "@sevynos/app-calculator": "workspace:*",
     "@sevynos/app-notes": "workspace:*",
     "@sevynos/app-text-editor": "workspace:*",

@@ -1086,6 +1086,21 @@ export class CanvasGenesisRenderer implements GenesisRenderer<DesktopScene> {
         context.moveTo(cx + width * 0.06, y + height * 0.2);
         context.lineTo(cx - width * 0.06, y + height * 0.8);
         break;
+      case "app-store":
+        // Shopping-bag glyph: line-art rendition of applications/store/icons/store.svg.
+        context.moveTo(x + width * 0.19, y + height * 0.4);
+        context.lineTo(x + width * 0.25, y + height * 0.23);
+        context.lineTo(x + width * 0.75, y + height * 0.23);
+        context.lineTo(x + width * 0.81, y + height * 0.4);
+        context.moveTo(x + width * 0.19, y + height * 0.4);
+        context.lineTo(x + width * 0.81, y + height * 0.4);
+        context.lineTo(x + width * 0.76, y + height * 0.81);
+        context.lineTo(x + width * 0.24, y + height * 0.81);
+        context.closePath();
+        context.moveTo(x + width * 0.38, y + height * 0.52);
+        context.lineTo(x + width * 0.44, y + height * 0.65);
+        context.lineTo(x + width * 0.6, y + height * 0.48);
+        break;
       case "app-system-monitor":
         context.roundRect(
           x + width * 0.14,

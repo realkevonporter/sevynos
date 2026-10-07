@@ -29,6 +29,7 @@ export type DesktopApplicationKind =
   | "browser"
   | "text-editor"
   | "app-manager"
+  | "store"
   | "notes"
   | "ide"
   | "camera"
@@ -166,6 +167,14 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       kind: "app-manager",
       title: "App Manager",
       layout: windowLayout(780, 560, 600, 400),
+    }),
+    Object.freeze({
+      id: "org.sevynos.store",
+      name: "Software",
+      kind: "store",
+      icon: "icons/store.svg",
+      title: "Software",
+      layout: windowLayout(900, 640, 680, 440),
     }),
     Object.freeze({
       id: "org.sevynos.notes",
@@ -665,6 +674,9 @@ export class DesktopApplicationCoordinator {
         return;
       case "app-manager":
         this.#surfaces.createAppManager(windowId);
+        return;
+      case "store":
+        this.#surfaces.createStore(windowId);
         return;
       case "notes":
         this.#surfaces.createNotes(windowId);
