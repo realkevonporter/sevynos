@@ -30,6 +30,7 @@ import { DisplayRenderPlanner, GenesisFrameExecutor } from "@sevynos/graphics";
 import { createWheelInputEvent, type PointerInputEvent } from "@sevynos/input";
 import {
   loadTrustedUpdateKeys,
+  markSessionReady,
   OsUpdateService,
   resolveCurrentVersion,
   type TrustedUpdateKey,
@@ -130,6 +131,13 @@ export interface WaylandHostOptions {
    * check/download/install.
    */
   readonly update?: OsUpdateService | undefined;
+  /**
+   * Host state directory (SEVYN_STATE_DIRECTORY). When provided, the first
+   * presented compositor frame writes the boot-health session-ready
+   * marker and resets the boot-attempt counter, telling the next boot's
+   * init that this boot reached a healthy desktop.
+   */
+  readonly stateDirectory?: string | undefined;
 }
 
 // Phase 2 (c): lid-close sleep + battery charge limits. Module-level so both
@@ -909,6 +917,15 @@ export async function startWaylandHost(
     if (!firstFramePresented) {
       firstFramePresented = true;
       marker("SEVYN_GENESIS_FIRST_COMPOSITOR_FRAME_PRESENTED");
+      // Boot health: the desktop is up. Persist the session-ready marker
+      // and reset the boot-attempt counter so the next boot's init knows
+      // this boot was healthy. Best-effort — a failure here must never
+      // break the session.
+      if (options.stateDirectory !== undefined) {
+        markSessionReady(options.stateDirectory).catch((error: unknown) => {
+          console.error("Failed to write the session-ready marker:", error);
+        });
+      }
     }
     if (message.traceId !== undefined) {
       const started = traceStarted.get(message.traceId);
@@ -1887,6 +1904,7 @@ if (
     system: new LinuxSystemService(),
     filesystem: new LinuxFileSystem(),
     update: updateService,
+    stateDirectory,
     createBrowserEngine: () => {
       // The browser keeps a persistent profile; every other engine
       // (Sevyn Code, webviews) gets an isolated temp profile so two

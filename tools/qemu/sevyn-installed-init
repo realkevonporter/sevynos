@@ -21,6 +21,21 @@ log_marker() {
   fi
 }
 
+# ─── Boot health tracking & automatic rollback ────────────────────────
+# Counts consecutive boots that never reach a healthy desktop. Genesis
+# writes updates/session-ready on the first presented compositor frame;
+# if the marker is absent for SEVYN_MAX_FAILED_BOOTS (3) consecutive
+# boots, init restores the backup rootfs slot (see
+# tools/qemu/sevyn-boot-health.sh). The restore path uses only the
+# backup slot, the counter, and busybox tooling — never the new
+# (possibly broken) rootfs. Runs before the pending-update check so a
+# boot-failure spiral rolls back instead of applying yet another
+# untested payload on top.
+: "${SEVYN_BOOT_HEALTH_LIB:=/usr/local/lib/sevynos/boot-health}"
+# shellcheck disable=SC1090
+. "$SEVYN_BOOT_HEALTH_LIB"
+sevyn_boot_health_check
+
 # ─── Pending OS update ────────────────────────────────────────────────
 # If the OS update service staged a new rootfs (pending.json), apply it now —
 # before anything else runs from the old tree. The applier verifies, backs

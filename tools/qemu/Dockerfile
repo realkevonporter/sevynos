@@ -86,6 +86,7 @@ COPY tools/qemu/installer-accounts.mjs /usr/local/lib/sevyn-installer-accounts.m
 COPY tools/qemu/installer-partition-plan.mjs /usr/local/lib/sevyn-installer-partition-plan.mjs
 COPY tools/qemu/sevyn-installed-init /usr/local/lib/sevynos/installed-init
 COPY tools/qemu/sevyn-apply-update.sh /usr/local/lib/sevynos/apply-update
+COPY tools/qemu/sevyn-boot-health.sh /usr/local/lib/sevynos/boot-health
 COPY tools/qemu/sevyn-installer.desktop /usr/share/applications/sevyn-installer.desktop
 COPY tools/qemu/acpi-power-button /etc/acpi/events/sevyn-power-button
 COPY tools/qemu/usb-automount.rules /etc/udev/rules.d/99-sevyn-usb-automount.rules

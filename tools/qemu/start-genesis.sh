@@ -92,6 +92,16 @@ if [ "$(id -u)" -eq 0 ] && [ -z "${SEVYN_SESSION_DROPPED:-}" ]; then
       log_marker "SEVYN_SESSION_USER=$session_user"
       # Hand over everything the session writes as root, before dropping.
       chown -R "$session_uid:$session_gid" "$runtime_dir" /var/lib/sevyn 2>/dev/null || true
+      # The OS update bookkeeping dir must be writable by the session
+      # user: the update service stages pending.json here and Genesis
+      # writes the boot-health session-ready marker. Only the directory
+      # itself is handed over (not recursive): root-created files inside
+      # (boot-attempt counter, backup slot) keep root ownership, and the
+      # backup slot's integrity is pinned by a sha256 in the root-only
+      # update-trust dir, so a compromised session cannot plant an
+      # unverified rollback payload.
+      mkdir -p /var/lib/sevynos/updates
+      chown "$session_uid:$session_gid" /var/lib/sevynos/updates 2>/dev/null || true
       touch /var/log/weston.log /var/log/genesis.log /tmp/genesis.log 2>/dev/null || true
       chown "$session_uid:$session_gid" /var/log/weston.log /var/log/genesis.log /tmp/genesis.log 2>/dev/null || true
       export SEVYN_SESSION_DROPPED=1
