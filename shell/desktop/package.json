@@ -27,6 +27,7 @@
     "clean": "rm -rf dist coverage *.tsbuildinfo"
   },
   "dependencies": {
+    "@sevynos/accounts": "workspace:*",
     "@sevynos/app-browser": "workspace:*",
     "@sevynos/app-calculator": "workspace:*",
     "@sevynos/app-camera": "workspace:*",

@@ -1,4 +1,4 @@
-import type { DesktopRuntime } from "./desktop-runtime.js";
+import type { DesktopRuntime, LockedKeyEvent } from "./desktop-runtime.js";
 import type {
   AudioSnapshot,
   BatterySnapshot,
@@ -7,6 +7,7 @@ import type {
 } from "@sevynos/react-native/internal";
 import { SystemApplicationId } from "@sevynos/system-applications";
 import { renderDesktopWorkspace } from "@sevynos/system-applications/desktop";
+import type { DesktopLockScreenProps } from "@sevynos/system-applications/desktop/lock-screen";
 import type {
   DesktopDockRenderInput,
   DesktopLauncherRenderInput,
@@ -15,7 +16,6 @@ import type {
   DesktopStatusBarRenderInput,
   DesktopWallpaperRenderInput,
   DesktopWindowSwitcherRenderInput,
-  DesktopLockScreenRenderInput,
 } from "@sevynos/system-applications/desktop";
 import type {
   DesktopScene,
@@ -120,6 +120,15 @@ export class DesktopSceneComposer {
         void this.#refreshDesktopEntries();
       }),
     );
+    // Route physical-keyboard input to the lock-screen shell component while
+    // the session is locked, so the password field is typeable. Without this
+    // the lock screen would be pointer-only (and the old Enter-to-unlock
+    // bypass had to go).
+    runtime.setLockedKeyboardHandler((event: LockedKeyEvent) => {
+      if (this.#runtime.applications.isLocked) {
+        this.dispatchShellKeyboard(SystemApplicationId.LockScreen, event);
+      }
+    });
 
     if (runtime.battery !== undefined) {
       void runtime.battery
@@ -195,7 +204,23 @@ export class DesktopSceneComposer {
     }, 16);
   }
 
+  /**
+   * Dispatch a keyboard event to a React Native shell component.
+   * Returns true if the event was handled.
+   */
+  public dispatchShellKeyboard(applicationId: string, event: LockedKeyEvent): boolean {
+    return this.#shellRenderer.dispatchKeyboard(applicationId, event.type, {
+      key: event.key,
+      code: event.code,
+      shift: event.shift,
+      alt: event.alt,
+      control: event.control,
+      meta: event.meta,
+    });
+  }
+
   public dispose(): void {
+    this.#runtime.setLockedKeyboardHandler(undefined);
     if (this.#serviceUpdateTimer !== undefined) {
       clearTimeout(this.#serviceUpdateTimer);
       this.#serviceUpdateTimer = undefined;
@@ -595,13 +620,34 @@ export class DesktopSceneComposer {
           ],
         )
       : [];
-    const lockScreenInput = {
+    const session = this.#runtime.session;
+    const loginMode = session.loginRequired;
+    const sessionUser = session.currentUser;
+    const lockScreenInput: DesktopLockScreenProps = {
       displayBounds: primary.bounds,
       locked: true,
       order: topContentOrder + 100,
       timeText,
       dateText,
-    } satisfies DesktopLockScreenRenderInput;
+      username:
+        sessionUser !== undefined && sessionUser.fullName.length > 0
+          ? sessionUser.fullName
+          : (sessionUser?.username ?? "User"),
+      loginMode,
+      accounts: loginMode ? session.loginUsers() : undefined,
+      allowGuest: loginMode,
+      onUnlock: async (password) => {
+        const result = await session.verifyUnlock(password);
+        if (result.ok) {
+          this.#runtime.applications.unlock();
+        }
+        return result;
+      },
+      onLogin: (username, password) => session.login(username, password),
+      onGuestLogin: () => {
+        void session.startGuestSession();
+      },
+    };
     const lockScreenNodes = this.#runtime.applications.isLocked
       ? this.#renderShellApplication(
           SystemApplicationId.LockScreen,

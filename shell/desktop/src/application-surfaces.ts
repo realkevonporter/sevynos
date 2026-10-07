@@ -10,7 +10,10 @@ import { WelcomeApplication } from "@sevynos/app-welcome";
 import { SetupWizardApplication } from "@sevynos/app-setup-wizard";
 import { CameraApplication } from "@sevynos/app-camera";
 import { MusicApplication } from "@sevynos/app-music";
+import type { AccountService } from "@sevynos/accounts";
 import type { DiagnosticEntry } from "./runtime-diagnostics.js";
+import { UserScopedFileSystem } from "./user-scoped-file-system.js";
+import type { DesktopSessionManager } from "./desktop-session.js";
 import {
   InMemoryFileSystem,
   SevynApplicationRuntime,
@@ -227,6 +230,9 @@ export class ApplicationSurfaceRegistry {
   #applicationManagement: ApplicationManagementController | undefined;
   #onUpdateSetting: ((key: string, value: unknown) => void) | undefined;
   #updateService: OsUpdateService | undefined;
+  #accountsService: AccountService | undefined;
+  #sessionManager: DesktopSessionManager | undefined;
+  readonly #scopedFilesystems = new Map<string, UserScopedFileSystem>();
 
   public constructor(
     onChange: ApplicationSurfaceListener,
@@ -662,8 +668,42 @@ export class ApplicationSurfaceRegistry {
     return this.#workerSnapshots;
   }
 
+  /**
+   * Supplies the accounts service after construction. Powers the setup
+   * wizard's "create your account" step; without it the step is skipped.
+   */
+  public configureAccountsService(accounts: AccountService): void {
+    this.#accountsService = accounts;
+    this.#onChange();
+  }
+
+  /**
+   * Supplies the desktop session manager after construction. Scopes the
+   * application filesystem to the current user's home directory; without it
+   * (or with no accounts configured) applications see the shared filesystem.
+   */
+  public configureSessionManager(session: DesktopSessionManager): void {
+    this.#sessionManager = session;
+    this.#onChange();
+  }
+
+  /**
+   * The filesystem applications see. When a user session is active and
+   * accounts are configured, every path is rooted at the user's home
+   * directory (`users/<username>` under the host user-data root); otherwise
+   * the shared filesystem is exposed unchanged (legacy live session).
+   */
   public get filesystem(): SevynFileSystem {
-    return this.#filesystem;
+    const user = this.#sessionManager?.currentUser;
+    if (user === undefined || this.#sessionManager?.hasAccounts() !== true) {
+      return this.#filesystem;
+    }
+    let scoped = this.#scopedFilesystems.get(user.username);
+    if (scoped === undefined) {
+      scoped = new UserScopedFileSystem(this.#filesystem, `users/${user.username}`);
+      this.#scopedFilesystems.set(user.username, scoped);
+    }
+    return scoped;
   }
 
   public get battery(): SevynBatteryService {
@@ -868,13 +908,14 @@ export class ApplicationSurfaceRegistry {
         return createElement(SetupWizardApplication, {
           time: this.#time,
           network: this.#network,
+          accounts: this.#accountsService,
           onComplete: () => this.#onSetupWizardComplete?.(),
         });
       case "installer":
         return createCoreSystemApplication({ kind: "installer" });
       case "console":
         return createElement(TerminalApplication, {
-          filesystem: this.#filesystem,
+          filesystem: this.filesystem,
           // Seed the terminal's catalog from the desktop's app list; the
           // terminal re-syncs from the real registry on mount via onRefreshApps.
           installedApps: (this.#applicationManagement?.list() ?? []).map((entry) => ({
@@ -929,7 +970,7 @@ export class ApplicationSurfaceRegistry {
         return createCoreSystemApplication({ kind: "gallery" });
       case "files":
         return createElement(FilesApplication, {
-          filesystem: this.#filesystem,
+          filesystem: this.filesystem,
           storage: this.#storage,
           notifications: this.#notifications,
         });
@@ -939,7 +980,7 @@ export class ApplicationSurfaceRegistry {
         });
       case "music":
         return createElement(MusicApplication, {
-          filesystem: this.#filesystem,
+          filesystem: this.filesystem,
         });
       case "browser": {
         const engine = this.#browserEngine(windowId);
@@ -967,7 +1008,7 @@ export class ApplicationSurfaceRegistry {
       case "text-editor":
         return createCoreSystemApplication({
           kind: "text-editor",
-          filesystem: this.#filesystem,
+          filesystem: this.filesystem,
           notifications: this.#notifications,
         });
       case "app-manager":
@@ -986,7 +1027,7 @@ export class ApplicationSurfaceRegistry {
       case "notes":
         return createCoreSystemApplication({
           kind: "notes",
-          filesystem: this.#filesystem,
+          filesystem: this.filesystem,
           notifications: this.#notifications,
         });
       case "calculator":

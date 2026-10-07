@@ -1,5 +1,13 @@
 export { createDesktopRuntime, type DesktopRuntime } from "./desktop-runtime.js";
 export { DesktopSceneComposer } from "./desktop-scene-composer.js";
+export {
+  DesktopSessionManager,
+  GUEST_USERNAME,
+  type DesktopSessionCallbacks,
+  type SessionUser,
+  type UnlockAttemptResult,
+} from "./desktop-session.js";
+export { UserScopedFileSystem } from "./user-scoped-file-system.js";
 export type {
   DesktopScene,
   DesktopViewport,

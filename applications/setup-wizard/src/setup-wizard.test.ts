@@ -19,6 +19,7 @@ import {
   SETUP_WIZARD_STEPS,
   setupWizardStepIndex,
   SetupWizardApplication,
+  validateAccountForm,
 } from "./index.js";
 
 /**
@@ -120,17 +121,25 @@ describe("setupWizardManifest", () => {
 });
 
 describe("setup wizard step machine", () => {
-  it("orders steps welcome -> timezone -> wifi -> finish", () => {
-    expect([...SETUP_WIZARD_STEPS]).toEqual(["welcome", "timezone", "wifi", "finish"]);
+  it("orders steps welcome -> account -> timezone -> wifi -> finish", () => {
+    expect([...SETUP_WIZARD_STEPS]).toEqual([
+      "welcome",
+      "account",
+      "timezone",
+      "wifi",
+      "finish",
+    ]);
   });
 
   it("advances and retreats one step at a time", () => {
-    expect(nextSetupWizardStep("welcome")).toBe("timezone");
+    expect(nextSetupWizardStep("welcome")).toBe("account");
+    expect(nextSetupWizardStep("account")).toBe("timezone");
     expect(nextSetupWizardStep("timezone")).toBe("wifi");
     expect(nextSetupWizardStep("wifi")).toBe("finish");
     expect(previousSetupWizardStep("finish")).toBe("wifi");
     expect(previousSetupWizardStep("wifi")).toBe("timezone");
-    expect(previousSetupWizardStep("timezone")).toBe("welcome");
+    expect(previousSetupWizardStep("timezone")).toBe("account");
+    expect(previousSetupWizardStep("account")).toBe("welcome");
   });
 
   it("clamps at the ends of the flow", () => {
@@ -205,6 +214,17 @@ describe("SetupWizardApplication", () => {
       .join("\n");
   }
 
+  function pressFirstControl(runtime: SevynApplicationRuntime): void {
+    const controls = runtime.snapshot.commands.filter((cmd) => cmd.kind === "control");
+    const button = controls[0] as {
+      bounds: { x: number; y: number; width: number; height: number };
+    };
+    const cx = button.bounds.x + button.bounds.width / 2;
+    const cy = button.bounds.y + button.bounds.height / 2;
+    runtime.dispatchPointer("down", { x: cx, y: cy, pointerId: 1, button: 0 });
+    runtime.dispatchPointer("up", { x: cx, y: cy, pointerId: 1, button: 0 });
+  }
+
   // The runtime applies press-driven re-renders asynchronously; under CI load a
   // fixed short sleep is not enough to observe the next step. Poll instead.
   async function waitForText(
@@ -226,7 +246,7 @@ describe("SetupWizardApplication", () => {
     const text = textContent(runtime);
     expect(text).toContain("Welcome to SevynOS");
     expect(text).toContain("Begin setup");
-    expect(text).toContain("Step 1 of 4");
+    expect(text).toContain("Step 1 of 5");
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
@@ -235,7 +255,7 @@ describe("SetupWizardApplication", () => {
     expectNoEmoji(textContent(runtime));
   });
 
-  it("advances to the timezone step when the Begin setup control is pressed", async () => {
+  it("advances to the account step when the Begin setup control is pressed", async () => {
     const { runtime } = mountWizard();
     // The welcome step renders exactly one interactive control.
     const controls = runtime.snapshot.commands.filter((cmd) => cmd.kind === "control");
@@ -247,9 +267,9 @@ describe("SetupWizardApplication", () => {
     const cy = button.bounds.y + button.bounds.height / 2;
     runtime.dispatchPointer("down", { x: cx, y: cy, pointerId: 1, button: 0 });
     runtime.dispatchPointer("up", { x: cx, y: cy, pointerId: 1, button: 0 });
-    const text = await waitForText(runtime, "Choose your timezone");
-    expect(text).toContain("Choose your timezone");
-    expect(text).toContain("Step 2 of 4");
+    const text = await waitForText(runtime, "Create your account");
+    expect(text).toContain("Create your account");
+    expect(text).toContain("Step 2 of 5");
   });
 
   it("works without services (degraded, skippable)", () => {
@@ -260,6 +280,69 @@ describe("SetupWizardApplication", () => {
     runtime.mount(createElement(SetupWizardApplication, {}));
     expect(textContent(runtime)).toContain("Welcome to SevynOS");
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("skips account creation gracefully when the account service is missing", async () => {
+    const { runtime } = mountWizard();
+    pressFirstControl(runtime);
+    const text = await waitForText(runtime, "Create your account");
+    expect(text).toContain("The account service is unavailable");
+    expect(text).toContain("Continue →");
+  });
+
+  it("detects an existing account and skips creation", async () => {
+    const accounts = {
+      listUsers: () => Promise.resolve([{ username: "kevon" }]),
+      createUser: () => Promise.resolve({ username: "kevon" }),
+    };
+    const { runtime } = mountWizard({ accounts });
+    pressFirstControl(runtime);
+    const text = await waitForText(runtime, "already exists");
+    expect(text).toContain("An account (kevon) already exists on this system");
+  });
+
+  it("renders the account form when no accounts exist yet", async () => {
+    const accounts = {
+      listUsers: () => Promise.resolve([]),
+      createUser: () => Promise.resolve({ username: "newuser" }),
+    };
+    const { runtime } = mountWizard({ accounts });
+    pressFirstControl(runtime);
+    const text = await waitForText(runtime, "Confirm password");
+    expect(text).toContain("Username");
+    expect(text).toContain("Confirm password");
+  });
+});
+
+describe("validateAccountForm", () => {
+  const valid = {
+    fullName: "Kevon",
+    username: "kevon",
+    password: "correct horse battery staple",
+    confirmPassword: "correct horse battery staple",
+  };
+
+  it("accepts a well-formed account", () => {
+    expect(validateAccountForm(valid)).toEqual([]);
+  });
+
+  it("rejects blank, malformed, and overlong usernames", () => {
+    expect(validateAccountForm({ ...valid, username: "" })[0]).toContain("username");
+    expect(validateAccountForm({ ...valid, username: "Bad Name" })[0]).toContain(
+      "lowercase",
+    );
+    expect(validateAccountForm({ ...valid, username: "a".repeat(33) })[0]).toContain(
+      "32",
+    );
+  });
+
+  it("rejects short passwords and mismatched confirmation", () => {
+    expect(
+      validateAccountForm({ ...valid, password: "short", confirmPassword: "short" })[0],
+    ).toContain("8 characters");
+    expect(validateAccountForm({ ...valid, confirmPassword: "different" })[0]).toContain(
+      "do not match",
+    );
   });
 });
 

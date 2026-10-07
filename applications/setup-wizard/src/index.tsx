@@ -40,12 +40,33 @@ export const setupWizardManifest: SevynApplicationManifest = {
   instanceMode: "single",
 };
 
-export type SetupWizardStep = "welcome" | "timezone" | "wifi" | "finish";
+export type SetupWizardStep = "welcome" | "account" | "timezone" | "wifi" | "finish";
 
 export interface SetupWizardApplicationProps {
   readonly time?: SevynTimeService | undefined;
   readonly network?: SevynWirelessNetworkService | undefined;
+  /**
+   * Account backend (the @sevynos/accounts AccountService, passed
+   * structurally so the app stays decoupled from the service package).
+   * When undefined the account step degrades to an informational skip.
+   */
+  readonly accounts?: SetupWizardAccountService | undefined;
   readonly onComplete?: (() => void) | undefined;
+}
+
+/**
+ * Structural subset of the accounts service used by the wizard's
+ * "create your account" step.
+ */
+export interface SetupWizardAccountService {
+  listUsers():
+    | Promise<readonly { readonly username: string }[]>
+    | readonly { readonly username: string }[];
+  createUser(input: {
+    readonly username: string;
+    readonly password: string;
+    readonly fullName?: string | undefined;
+  }): Promise<{ readonly username: string }>;
 }
 
 /**
@@ -54,6 +75,7 @@ export interface SetupWizardApplicationProps {
  */
 export const SETUP_WIZARD_STEPS: readonly SetupWizardStep[] = Object.freeze([
   "welcome",
+  "account",
   "timezone",
   "wifi",
   "finish",
@@ -71,6 +93,37 @@ export function previousSetupWizardStep(step: SetupWizardStep): SetupWizardStep 
 
 export function setupWizardStepIndex(step: SetupWizardStep): number {
   return SETUP_WIZARD_STEPS.indexOf(step);
+}
+
+export interface AccountFormInput {
+  readonly fullName: string;
+  readonly username: string;
+  readonly password: string;
+  readonly confirmPassword: string;
+}
+
+/**
+ * Client-side validation for the "create your account" step. Mirrors the
+ * @sevynos/accounts rules (the service remains authoritative and its errors
+ * are surfaced on submit). Pure and unit-testable.
+ */
+export function validateAccountForm(input: AccountFormInput): readonly string[] {
+  const errors: string[] = [];
+  const username = input.username.trim();
+  if (username.length === 0) {
+    errors.push("Enter a username.");
+  } else if (username.length > 32) {
+    errors.push("Usernames are at most 32 characters.");
+  } else if (!/^[a-z_][a-z0-9_-]*$/.test(username)) {
+    errors.push("Use lowercase letters, digits, _ or -, starting with a letter or _.");
+  }
+  if (input.password.length < 8) {
+    errors.push("Passwords need at least 8 characters.");
+  }
+  if (input.confirmPassword !== input.password) {
+    errors.push("The passwords do not match.");
+  }
+  return Object.freeze(errors);
 }
 
 /**
@@ -166,6 +219,7 @@ function securityLabel(network: WizardWirelessNetwork): string {
 export function SetupWizardApplication({
   time,
   network,
+  accounts,
   onComplete,
 }: SetupWizardApplicationProps): JSX.Element {
   const [step, setStep] = useState<SetupWizardStep>("welcome");
@@ -179,6 +233,16 @@ export function SetupWizardApplication({
   const [wifiError, setWifiError] = useState<string | undefined>(undefined);
   const [selectedSsid, setSelectedSsid] = useState<string | undefined>(undefined);
   const [wifiPassword, setWifiPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [accountUsername, setAccountUsername] = useState("");
+  const [accountPassword, setAccountPassword] = useState("");
+  const [accountConfirmPassword, setAccountConfirmPassword] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountErrors, setAccountErrors] = useState<readonly string[]>([]);
+  const [existingUsernames, setExistingUsernames] = useState<
+    readonly string[] | undefined
+  >(undefined);
+  const [createdUsername, setCreatedUsername] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     if (!time) return;
@@ -215,6 +279,59 @@ export function SetupWizardApplication({
       cancelled = true;
     };
   }, [step, network]);
+
+  // When the account step is reached, check whether an account already
+  // exists (e.g. created by the installer) so the step can skip creation.
+  useEffect(() => {
+    if (step !== "account" || !accounts) return;
+    let cancelled = false;
+    void Promise.resolve(accounts.listUsers())
+      .then((users) => {
+        if (!cancelled) setExistingUsernames(users.map((user) => user.username));
+      })
+      .catch(() => {
+        if (!cancelled) setExistingUsernames([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step, accounts]);
+
+  const createAccount = (): void => {
+    if (!accounts || accountBusy) return;
+    const validation = validateAccountForm({
+      fullName,
+      username: accountUsername,
+      password: accountPassword,
+      confirmPassword: accountConfirmPassword,
+    });
+    if (validation.length > 0) {
+      setAccountErrors(validation);
+      return;
+    }
+    setAccountBusy(true);
+    setAccountErrors([]);
+    void accounts
+      .createUser({
+        username: accountUsername.trim(),
+        password: accountPassword,
+        fullName: fullName.trim().length > 0 ? fullName.trim() : undefined,
+      })
+      .then((user) => {
+        setCreatedUsername(user.username);
+        setAccountPassword("");
+        setAccountConfirmPassword("");
+        setStep(nextSetupWizardStep(step));
+      })
+      .catch((error: unknown) => {
+        setAccountErrors([
+          error instanceof Error ? error.message : "Could not create the account.",
+        ]);
+      })
+      .finally(() => {
+        setAccountBusy(false);
+      });
+  };
 
   const filteredTimezones = useMemo(() => {
     const query = timezoneQuery.trim().toLowerCase();
@@ -297,8 +414,8 @@ export function SetupWizardApplication({
         <View style={styles.body}>
           <Text style={styles.title}>Welcome to SevynOS</Text>
           <Text style={styles.paragraph}>
-            This short setup gets your system ready: choose your timezone so the clock is
-            correct, connect to Wi-Fi, and you are done.
+            This short setup gets your system ready: create your user account, choose your
+            timezone so the clock is correct, connect to Wi-Fi, and you are done.
           </Text>
           <Text style={styles.paragraph}>
             Your choices are applied to the real system immediately and saved, so this
@@ -314,6 +431,138 @@ export function SetupWizardApplication({
           >
             <Text style={styles.primaryButtonText}>Begin setup →</Text>
           </Pressable>
+        </View>
+      )}
+
+      {step === "account" && (
+        <View style={styles.body}>
+          <Text style={styles.title}>Create your account</Text>
+          {accounts === undefined ? (
+            <>
+              <Text style={styles.warning}>
+                The account service is unavailable — your account cannot be created here.
+                You can continue without one.
+              </Text>
+              <View style={styles.footerRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back"
+                  onPress={() => {
+                    setStep(previousSetupWizardStep(step));
+                  }}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>← Back</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue without an account"
+                  onPress={() => {
+                    setStep(nextSetupWizardStep(step));
+                  }}
+                  style={styles.primaryButton}
+                >
+                  <Text style={styles.primaryButtonText}>Continue →</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : existingUsernames === undefined ? (
+            <Text style={styles.paragraph}>Checking for existing accounts…</Text>
+          ) : existingUsernames.length > 0 ? (
+            <>
+              <Text style={styles.paragraph}>
+                An account ({existingUsernames.join(", ")}) already exists on this system
+                — there is nothing more to do here.
+              </Text>
+              <View style={styles.footerRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back"
+                  onPress={() => {
+                    setStep(previousSetupWizardStep(step));
+                  }}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>← Back</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Continue"
+                  onPress={() => {
+                    setStep(nextSetupWizardStep(step));
+                  }}
+                  style={styles.primaryButton}
+                >
+                  <Text style={styles.primaryButtonText}>Continue →</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={styles.paragraph}>
+                This account protects your files and settings. You will use it to log in
+                to SevynOS.
+              </Text>
+              <TextInput
+                accessibilityLabel="Full name"
+                value={fullName}
+                onChangeText={setFullName}
+                placeholder="Full name (optional)"
+                style={styles.input}
+              />
+              <TextInput
+                accessibilityLabel="Username"
+                value={accountUsername}
+                onChangeText={setAccountUsername}
+                placeholder="Username"
+                style={styles.input}
+              />
+              <TextInput
+                accessibilityLabel="Password"
+                value={accountPassword}
+                onChangeText={setAccountPassword}
+                placeholder="Password (at least 8 characters)"
+                secureTextEntry
+                style={styles.input}
+              />
+              <TextInput
+                accessibilityLabel="Confirm password"
+                value={accountConfirmPassword}
+                onChangeText={setAccountConfirmPassword}
+                placeholder="Confirm password"
+                secureTextEntry
+                style={styles.input}
+              />
+              {accountErrors.map((message) => (
+                <Text key={message} style={styles.error}>
+                  {message}
+                </Text>
+              ))}
+              <View style={styles.footerRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back"
+                  onPress={() => {
+                    setStep(previousSetupWizardStep(step));
+                  }}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>← Back</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Create account and continue"
+                  disabled={accountBusy}
+                  onPress={createAccount}
+                  style={styles.primaryButton}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {accountBusy ? "Creating…" : "Create account →"}
+                  </Text>
+                </Pressable>
+              </View>
+            </>
+          )}
         </View>
       )}
 
@@ -515,6 +764,9 @@ export function SetupWizardApplication({
       {step === "finish" && (
         <View style={styles.body}>
           <Text style={styles.title}>You are all set</Text>
+          {createdUsername !== undefined && (
+            <Text style={styles.paragraph}>Account: {createdUsername}</Text>
+          )}
           <Text style={styles.paragraph}>Timezone: {timeState?.timezone ?? "UTC"}</Text>
           <Text style={styles.paragraph}>
             Wi-Fi:{" "}
