@@ -3,6 +3,7 @@
  */
 import { useEffect, useState, type JSX } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { SevynIcon } from "@sevynos/react-native";
 import { SevynShellTheme } from "../theme.js";
 import type { DesktopShellDisplay, DesktopStatusBarRenderInput } from "../desktop.js";
 
@@ -162,8 +163,11 @@ function DisplayMenuBar({
             }
             style={styles.volumeGroup}
           >
-            <View style={styles.speakerBody} />
-            <Text style={styles.volumeGlyph}>{audioMuted === true ? "✕" : "♪"}</Text>
+            <SevynIcon
+              name={audioMuted === true ? "x" : "volume"}
+              size={12}
+              color={SevynShellTheme.colors.secondary}
+            />
           </View>
         ) : null}
         <View
@@ -353,16 +357,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     flexDirection: "row",
     gap: 3,
-  },
-  speakerBody: {
-    backgroundColor: SevynShellTheme.colors.secondary,
-    borderRadius: 1,
-    height: 6,
-    width: 4,
-  },
-  volumeGlyph: {
-    color: SevynShellTheme.colors.secondary,
-    fontSize: 12,
   },
   signalBars: {
     alignItems: "flex-end",

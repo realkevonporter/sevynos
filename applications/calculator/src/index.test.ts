@@ -76,3 +76,11 @@ describe("standalone Calculator application", () => {
     expect(isValidElement(createCalculatorApplicationElement(sdk))).toBe(true);
   });
 });
+
+describe("application icon asset", () => {
+  it("ships the manifest-declared icon file", async () => {
+    const { existsSync } = await import("node:fs");
+    const iconUrl = new URL(`../${calculatorManifest.icon}`, import.meta.url);
+    expect(existsSync(iconUrl)).toBe(true);
+  });
+});

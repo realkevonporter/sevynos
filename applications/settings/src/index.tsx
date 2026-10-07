@@ -2,10 +2,12 @@ import { useEffect, useState, type JSX } from "react";
 import {
   Pressable,
   ScrollView,
+  SevynIcon,
   StyleSheet,
   Text,
   TextInput,
   View,
+  type SevynIconName,
   type SevynAudioService,
   type SevynBatteryService,
   type SevynPowerService,
@@ -604,7 +606,7 @@ export function SettingsApplication({
         <ScrollView style={styles.navList}>
           <SidebarItem
             active={activeCategory === "appearance"}
-            icon="🎨"
+            icon="appearance"
             label="Appearance"
             onPress={() => {
               setActiveCategory("appearance");
@@ -612,7 +614,7 @@ export function SettingsApplication({
           />
           <SidebarItem
             active={activeCategory === "network"}
-            icon="📶"
+            icon="wifi"
             label="Network & Wi-Fi"
             onPress={() => {
               setActiveCategory("network");
@@ -620,7 +622,7 @@ export function SettingsApplication({
           />
           <SidebarItem
             active={activeCategory === "sound"}
-            icon="🔊"
+            icon="volume"
             label="Sound & Audio"
             onPress={() => {
               setActiveCategory("sound");
@@ -628,7 +630,7 @@ export function SettingsApplication({
           />
           <SidebarItem
             active={activeCategory === "battery"}
-            icon="🔋"
+            icon="battery"
             label="Power & Battery"
             onPress={() => {
               setActiveCategory("battery");
@@ -636,7 +638,7 @@ export function SettingsApplication({
           />
           <SidebarItem
             active={activeCategory === "datetime"}
-            icon="🕐"
+            icon="clock"
             label="Date & Time"
             onPress={() => {
               setActiveCategory("datetime");
@@ -644,7 +646,7 @@ export function SettingsApplication({
           />
           <SidebarItem
             active={activeCategory === "applications"}
-            icon="📦"
+            icon="package"
             label="Applications"
             onPress={() => {
               setActiveCategory("applications");
@@ -652,7 +654,7 @@ export function SettingsApplication({
           />
           <SidebarItem
             active={activeCategory === "shortcuts"}
-            icon="⌨️"
+            icon="keyboard"
             label="Keyboard Shortcuts"
             onPress={() => {
               setActiveCategory("shortcuts");
@@ -660,7 +662,7 @@ export function SettingsApplication({
           />
           <SidebarItem
             active={activeCategory === "about"}
-            icon="ℹ️"
+            icon="info"
             label="About SevynOS"
             onPress={() => {
               setActiveCategory("about");
@@ -734,7 +736,7 @@ export function SettingsApplication({
                       }}
                     >
                       {selectedAccent === accent.value && (
-                        <Text style={styles.checkMark}>✓</Text>
+                        <SevynIcon name="check" size={16} color="#000000" />
                       )}
                     </Pressable>
                   ))}
@@ -1204,7 +1206,8 @@ export function SettingsApplication({
                     <View style={styles.appActions}>
                       {app.system ? (
                         <View style={styles.lockedBadge}>
-                          <Text style={styles.lockedBadgeText}>🔒 Protected</Text>
+                          <SevynIcon name="lock" size={11} color="#9CA3AF" />
+                          <Text style={styles.lockedBadgeText}>Protected</Text>
                         </View>
                       ) : (
                         <Pressable
@@ -1379,7 +1382,7 @@ function SidebarItem({
   onPress,
 }: {
   active: boolean;
-  icon: string;
+  icon: SevynIconName;
   label: string;
   onPress: () => void;
 }) {
@@ -1388,7 +1391,7 @@ function SidebarItem({
       onPress={onPress}
       style={active ? styles.sidebarItemActive : styles.sidebarItem}
     >
-      <Text style={styles.sidebarItemIcon}>{icon}</Text>
+      <SevynIcon name={icon} size={16} color={active ? "#FFFFFF" : "#9AA3B2"} />
       <Text style={active ? styles.sidebarItemLabelActive : styles.sidebarItemLabel}>
         {label}
       </Text>
@@ -1859,6 +1862,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 6,
     backgroundColor: "rgba(255, 255, 255, 0.05)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
   },
   lockedBadgeText: {
     fontSize: 11,

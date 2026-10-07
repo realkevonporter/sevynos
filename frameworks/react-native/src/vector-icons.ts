@@ -1,5 +1,35 @@
 import { createElement, type ReactElement } from "react";
 import { NativeIcon, type NativeComponentProps } from "./primitives.js";
+import type { SevynIconName } from "./surface.js";
+
+export type { SevynIconName };
+
+export interface SevynIconProps {
+  readonly name: SevynIconName;
+  readonly size?: number;
+  readonly color?: string;
+  readonly style?: unknown;
+}
+
+/**
+ * Emoji-free vector glyph rendered by the Genesis renderers from the shared
+ * SevynIconName set (see surface.ts). Use this instead of emoji for
+ * iconography — the OS font stack has no emoji glyphs.
+ */
+export function SevynIcon(props: SevynIconProps): ReactElement {
+  return createElement(NativeIcon, {
+    icon: props.name,
+    role: "image",
+    style: [
+      {
+        width: props.size ?? 24,
+        height: props.size ?? 24,
+        color: props.color ?? "#FFFFFF",
+      },
+      props.style,
+    ],
+  } as unknown as NativeComponentProps);
+}
 
 export interface IconProps {
   readonly name: string;

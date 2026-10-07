@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="System Monitor">
+  <defs>
+    <linearGradient id="sevyn-icon-system-monitor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" rx="5.5" fill="url(#sevyn-icon-system-monitor)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="4" y="4" width="16" height="16" rx="2.5"/>
+    <path d="M7 13.5h2.5l1.5-4 2 6.5 1.5-2.5H17"/>
+  </g>
+</svg>

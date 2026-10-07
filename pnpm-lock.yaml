@@ -251,6 +251,9 @@ importers:
 
   applications/shell:
     dependencies:
+      '@sevynos/react-native':
+        specifier: workspace:*
+        version: link:../../frameworks/react-native
       '@sevynos/shell-core':
         specifier: workspace:*
         version: link:../../shell/core

@@ -4,6 +4,7 @@ import {
   NativeModules,
   Pressable,
   ScrollView,
+  SevynIcon,
   StyleSheet,
   Text,
   View,
@@ -1379,7 +1380,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
         <View style={styles.permissionCenter}>
           <View style={styles.permissionCard}>
             <View style={styles.permissionIconBadge}>
-              <Text style={styles.permissionIconText}>📷</Text>
+              <SevynIcon name="app-camera" size={32} color="#F9FAFB" />
             </View>
             <Text style={styles.permissionTitle}>Camera Access Required</Text>
             <Text style={styles.permissionBody}>
@@ -1418,7 +1419,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
       <View style={styles.container}>
         <View style={styles.permissionCenter}>
           <View style={styles.emptyCard}>
-            <Text style={styles.emptyIcon}>🔒</Text>
+            <SevynIcon name="lock" size={32} color="#9CA3AF" />
             <Text style={styles.emptyTitle}>Camera Permission Denied</Text>
             <Text style={styles.emptyBody}>
               Access to the camera was denied. You can re-enable camera permissions in
@@ -1465,7 +1466,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
       <View style={styles.container}>
         <View style={styles.permissionCenter}>
           <View style={styles.emptyCard}>
-            <Text style={styles.emptyIcon}>📷</Text>
+            <SevynIcon name="app-camera" size={32} color="#9CA3AF" />
             <Text style={styles.emptyTitle}>No Camera Detected</Text>
             <Text style={styles.emptyBody}>
               {hardwareStatus.message ??
@@ -1568,7 +1569,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
           />
         ) : (
           <View style={styles.viewfinderSimulated}>
-            <Text style={styles.simulatedGlyph}>📷</Text>
+            <SevynIcon name="app-camera" size={44} color="#6B7280" />
             <Text style={styles.simulatedText}>SevynOS Live Viewfinder Active</Text>
             <Text style={styles.simulatedSubtext}>
               {mode === "photo"
@@ -1605,16 +1606,18 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
         >
           {captures.length > 0 ? (
             <View style={styles.galleryPreviewThumb}>
-              <Text style={styles.galleryThumbIcon}>
-                {captures[0]?.type === "video" ? "🎬" : "🖼️"}
-              </Text>
+              <SevynIcon
+                name={captures[0]?.type === "video" ? "film" : "image"}
+                size={22}
+                color="#9CA3AF"
+              />
               <View style={styles.galleryCountBadge}>
                 <Text style={styles.galleryCountText}>{captures.length}</Text>
               </View>
             </View>
           ) : (
             <View style={styles.galleryEmptyThumb}>
-              <Text style={styles.galleryThumbIcon}>🖼️</Text>
+              <SevynIcon name="image" size={22} color="#9CA3AF" />
             </View>
           )}
         </Pressable>
@@ -1678,7 +1681,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
                   setGalleryOpen(false);
                 }}
               >
-                <Text style={styles.closeButtonText}>✕</Text>
+                <SevynIcon name="x" size={14} color="#E5E7EB" />
               </Pressable>
             </View>
 
@@ -1701,9 +1704,11 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
                     }}
                   >
                     <View style={styles.galleryItemIconContainer}>
-                      <Text style={styles.galleryItemIcon}>
-                        {item.type === "video" ? "🎬" : "🖼️"}
-                      </Text>
+                      <SevynIcon
+                        name={item.type === "video" ? "film" : "image"}
+                        size={20}
+                        color="#9CA3AF"
+                      />
                     </View>
                     <View style={styles.galleryItemMeta}>
                       <Text style={styles.galleryItemTitle}>
@@ -1724,7 +1729,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
                         handleDeleteCapture(item.id);
                       }}
                     >
-                      <Text style={styles.deleteButtonText}>🗑️</Text>
+                      <SevynIcon name="trash" size={14} color="#F87171" />
                     </Pressable>
                   </Pressable>
                 ))}
@@ -1750,7 +1755,7 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
                   setSelectedCapture(undefined);
                 }}
               >
-                <Text style={styles.closeButtonText}>✕</Text>
+                <SevynIcon name="x" size={14} color="#E5E7EB" />
               </Pressable>
             </View>
 
@@ -1775,12 +1780,12 @@ export function CameraApplication(props: CameraApplicationProps): JSX.Element {
                     />
                   ) : photoLoadError !== undefined ? (
                     <View style={styles.photoCanvas}>
-                      <Text style={styles.photoCanvasIcon}>⚠️</Text>
+                      <SevynIcon name="warning" size={40} color="#F59E0B" />
                       <Text style={styles.photoCanvasText}>{photoLoadError}</Text>
                     </View>
                   ) : (
                     <View style={styles.photoCanvas}>
-                      <Text style={styles.photoCanvasIcon}>🖼️</Text>
+                      <SevynIcon name="image" size={40} color="#6B7280" />
                       <Text style={styles.photoCanvasText}>Loading photo…</Text>
                     </View>
                   )}

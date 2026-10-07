@@ -7,6 +7,7 @@ import {
   View,
   type DimensionValue,
 } from "react-native";
+import { SevynIcon, type SevynIconName } from "@sevynos/react-native";
 import { SevynShellTheme } from "../theme.js";
 
 export interface QuickSettingsApplicationProps {
@@ -139,10 +140,14 @@ export function QuickSettingsApplication({
                   ]}
                 />
               </View>
-              <Text style={styles.batteryText}>
-                {batteryCharging ? "⚡ " : ""}
-                {Math.round(clampLevel(batteryPercent / 100) * 100)}%
-              </Text>
+              <View style={styles.batteryTextRow}>
+                {batteryCharging ? (
+                  <SevynIcon name="zap" size={12} color={SevynShellTheme.colors.gold} />
+                ) : null}
+                <Text style={styles.batteryText}>
+                  {Math.round(clampLevel(batteryPercent / 100) * 100)}%
+                </Text>
+              </View>
             </View>
             <Pressable
               accessibilityLabel="Close quick settings"
@@ -176,7 +181,7 @@ export function QuickSettingsApplication({
             <QuickSettingTile
               active={resolvedWifi && !resolvedAirplane}
               disabled={resolvedAirplane}
-              glyph="⌁"
+              glyph="wifi"
               label="Wi-Fi"
               onPress={() => {
                 updateToggle(
@@ -198,7 +203,7 @@ export function QuickSettingsApplication({
             <QuickSettingTile
               active={resolvedBluetooth && !resolvedAirplane}
               disabled={resolvedAirplane}
-              glyph="ᛒ"
+              glyph="bluetooth"
               label="Bluetooth"
               onPress={() => {
                 updateToggle(
@@ -215,7 +220,7 @@ export function QuickSettingsApplication({
             />
             <QuickSettingTile
               active={resolvedAirplane}
-              glyph="✈"
+              glyph="airplane"
               label="Airplane"
               onPress={() => {
                 updateToggle(
@@ -230,7 +235,7 @@ export function QuickSettingsApplication({
             />
             <QuickSettingTile
               active={resolvedFocus}
-              glyph="◐"
+              glyph="moon"
               label="Focus"
               onPress={() => {
                 updateToggle(
@@ -246,7 +251,7 @@ export function QuickSettingsApplication({
           </View>
 
           <LevelControl
-            glyph="☀"
+            glyph="brightness"
             label="Brightness"
             level={resolvedBrightness}
             onDecrease={() => {
@@ -271,7 +276,7 @@ export function QuickSettingsApplication({
             }}
           />
           <LevelControl
-            glyph={resolvedVolume === 0 ? "×" : "♪"}
+            glyph={resolvedVolume === 0 ? "x" : "volume"}
             label="Volume"
             level={resolvedVolume}
             onDecrease={() => {
@@ -309,7 +314,7 @@ export function QuickSettingsApplication({
               }}
               style={({ pressed }) => [styles.footerButton, pressed && styles.pressed]}
             >
-              <Text style={styles.footerGlyph}>◇</Text>
+              <SevynIcon name="lock" size={13} color={SevynShellTheme.colors.gold} />
               <Text style={styles.footerText}>Lock</Text>
             </Pressable>
             <Pressable
@@ -318,7 +323,7 @@ export function QuickSettingsApplication({
               onPress={onOpenSettings}
               style={({ pressed }) => [styles.footerButton, pressed && styles.pressed]}
             >
-              <Text style={styles.footerGlyph}>⚙</Text>
+              <SevynIcon name="gear" size={13} color={SevynShellTheme.colors.gold} />
               <Text style={styles.footerText}>Settings</Text>
             </Pressable>
           </View>
@@ -338,7 +343,7 @@ function QuickSettingTile({
 }: {
   readonly active: boolean;
   readonly disabled?: boolean;
-  readonly glyph: string;
+  readonly glyph: SevynIconName;
   readonly label: string;
   readonly onPress: () => void;
   readonly subtitle: string;
@@ -358,9 +363,11 @@ function QuickSettingTile({
       ]}
     >
       <View style={[styles.tileGlyph, active && styles.tileGlyphActive]}>
-        <Text style={[styles.tileGlyphText, active && styles.tileGlyphTextActive]}>
-          {glyph}
-        </Text>
+        <SevynIcon
+          name={glyph}
+          size={18}
+          color={active ? "#FFFFFF" : SevynShellTheme.colors.secondary}
+        />
       </View>
       <Text style={styles.tileLabel}>{label}</Text>
       <Text numberOfLines={1} style={styles.tileSubtitle}>
@@ -377,7 +384,7 @@ function LevelControl({
   onDecrease,
   onIncrease,
 }: {
-  readonly glyph: string;
+  readonly glyph: SevynIconName;
   readonly label: string;
   readonly level: number;
   readonly onDecrease: () => void;
@@ -391,7 +398,9 @@ function LevelControl({
       style={styles.levelCard}
     >
       <View style={styles.levelHeader}>
-        <Text style={styles.levelGlyph}>{glyph}</Text>
+        <View style={styles.levelGlyph}>
+          <SevynIcon name={glyph} size={16} color={SevynShellTheme.colors.gold} />
+        </View>
         <Text style={styles.levelLabel}>{label}</Text>
         <Text style={styles.levelValue}>{percentage}%</Text>
       </View>
@@ -536,6 +545,12 @@ const styles = StyleSheet.create({
     backgroundColor: SevynShellTheme.colors.success,
     borderRadius: 1,
     height: "100%",
+  },
+  batteryTextRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 4,
+    justifyContent: "center",
   },
   batteryText: {
     color: SevynShellTheme.colors.secondary,

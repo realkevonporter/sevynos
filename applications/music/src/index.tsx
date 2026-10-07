@@ -3,6 +3,7 @@ import {
   NativeModules,
   Pressable,
   ScrollView,
+  SevynIcon,
   StyleSheet,
   Text,
   TextInput,
@@ -1131,7 +1132,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
     return (
       <View style={styles.root}>
         <View style={styles.permissionPromptCard}>
-          <Text style={styles.permissionIcon}>♪</Text>
+          <SevynIcon name="music-note" size={48} color="#D7AC57" />
           <Text style={styles.permissionTitle}>Music Access Request</Text>
           <Text style={styles.permissionDescription}>
             SevynOS Music requires access to the system media subsystem to play local
@@ -1328,7 +1329,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
             {filteredTracks.length === 0 ? (
               <View style={styles.emptyState}>
                 <View style={styles.emptyStateBadge}>
-                  <Text style={styles.emptyStateBadgeText}>♪</Text>
+                  <SevynIcon name="music-note" size={30} color="#D7AC57" />
                 </View>
                 <Text style={styles.emptyStateTitle}>
                   {tracks.length === 0
@@ -1405,14 +1406,11 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
                           handleToggleFavorite(t.id);
                         }}
                       >
-                        <Text
-                          style={StyleSheet.flatten([
-                            styles.favIconBtnText,
-                            isFav ? styles.favIconBtnTextActive : undefined,
-                          ])}
-                        >
-                          {isFav ? "♥" : "♡"}
-                        </Text>
+                        <SevynIcon
+                          name="heart"
+                          size={14}
+                          color={isFav ? "#D77598" : "#858A94"}
+                        />
                       </Pressable>
                       <Pressable
                         style={styles.playIconBtn}
@@ -1480,7 +1478,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
               {selectedPlaylist === undefined ? (
                 <View style={styles.emptyState}>
                   <View style={styles.emptyStateBadge}>
-                    <Text style={styles.emptyStateBadgeText}>♪</Text>
+                    <SevynIcon name="music-note" size={30} color="#D7AC57" />
                   </View>
                   <Text style={styles.emptyStateTitle}>No playlists yet</Text>
                   <Text style={styles.emptyStateBody}>
@@ -1703,9 +1701,11 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
             {/* Volume row */}
             <View style={styles.volumeRow}>
               <Pressable onPress={() => void handleToggleMute()}>
-                <Text style={styles.volumeIcon}>
-                  {isMuted || volume === 0 ? "✕" : "♪"}
-                </Text>
+                <SevynIcon
+                  name={isMuted || volume === 0 ? "x" : "volume"}
+                  size={14}
+                  color="#858A94"
+                />
               </Pressable>
               <Pressable
                 style={styles.volumeTrack}
@@ -1733,7 +1733,7 @@ export function MusicApplication(props: MusicApplicationProps): JSX.Element {
         <View style={styles.miniPlayer}>
           <View style={styles.miniPlayerLeft}>
             <View style={styles.miniAlbumArt}>
-              <Text style={styles.miniAlbumArtIcon}>♪</Text>
+              <SevynIcon name="music-note" size={16} color="#D7AC57" />
             </View>
             <View style={styles.miniTrackInfo}>
               <Text style={styles.miniTrackTitle}>{currentTrack.title}</Text>

@@ -25,12 +25,20 @@ export interface DesktopShellApplicationSummary {
   readonly displayId: string;
   readonly pinned?: boolean | undefined;
   readonly running?: boolean | undefined;
+  /**
+   * Manifest icon path (SevynApplicationManifest.icon, e.g.
+   * "icons/browser.svg"). Rendered by ApplicationIcon as the app's custom
+   * vector glyph; when absent the letter tile is used.
+   */
+  readonly icon?: string | undefined;
 }
 
 export interface DesktopShellCatalogEntry {
   readonly applicationId: string;
   readonly label: string;
   readonly running: boolean;
+  /** Manifest icon path, see DesktopShellApplicationSummary.icon. */
+  readonly icon?: string | undefined;
 }
 
 export interface DesktopWallpaperRenderInput {
@@ -747,7 +755,7 @@ function applicationIconLabel(label: string): string {
   if (lower.includes("console") || lower.includes("terminal")) return ">_";
   if (lower.includes("browser") || lower.includes("web")) return "WB";
   if (lower.includes("file")) return "FL";
-  if (lower.includes("setting")) return "⚙";
+  if (lower.includes("setting")) return "ST";
   if (lower.includes("monitor")) return "SM";
   if (lower.includes("note")) return "NT";
   if (lower.includes("gallery")) return "UI";

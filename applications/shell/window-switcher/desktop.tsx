@@ -3,6 +3,7 @@
  */
 import type { JSX } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { ApplicationIcon } from "../mobile-home/mobile.js";
 import { SevynShellTheme } from "../theme.js";
 import type {
   DesktopShellApplicationSummary,
@@ -18,25 +19,7 @@ const ITEM_WIDTH = 140;
 const ITEM_HEIGHT = 140;
 const ITEM_GAP = SevynShellTheme.spacing.md;
 const MAX_COLUMNS = 6;
-
-function switcherIconLabel(label: string): string {
-  const lower = label.toLocaleLowerCase();
-  if (lower.includes("studio") || lower.includes("ide")) return "</>";
-  if (lower.includes("console") || lower.includes("terminal")) return ">_";
-  if (lower.includes("browser") || lower.includes("web")) return "WB";
-  if (lower.includes("file")) return "FL";
-  if (lower.includes("setting")) return "⚙";
-  if (lower.includes("monitor")) return "SM";
-  if (lower.includes("note")) return "NT";
-  if (lower.includes("gallery")) return "UI";
-  const words = label.trim().split(/\s+/u).filter(Boolean);
-  return (
-    words
-      .slice(0, 2)
-      .map((word) => word.slice(0, 1).toLocaleUpperCase())
-      .join("") || "•"
-  );
-}
+const SWITCHER_ICON_SIZE = 64;
 
 interface SwitcherEntryProps {
   readonly application: DesktopShellApplicationSummary;
@@ -66,8 +49,18 @@ function SwitcherEntry({
         pressed && styles.entryPressed,
       ]}
     >
-      <View style={[styles.icon, selected && styles.iconSelected]}>
-        <Text style={styles.iconLabel}>{switcherIconLabel(application.label)}</Text>
+      <View style={styles.iconWrap}>
+        <ApplicationIcon
+          application={{
+            id: application.applicationId,
+            name: application.label,
+            ...(application.running === undefined
+              ? {}
+              : { running: application.running }),
+            ...(application.icon === undefined ? {} : { icon: application.icon }),
+          }}
+          size={SWITCHER_ICON_SIZE}
+        />
       </View>
       <Text
         numberOfLines={1}
@@ -193,24 +186,10 @@ const styles = StyleSheet.create({
     opacity: 0.7,
     transform: [{ scale: 0.96 }],
   },
-  icon: {
+  iconWrap: {
     alignItems: "center",
-    backgroundColor: SevynShellTheme.colors.elevatedSurface,
-    borderColor: SevynShellTheme.colors.border,
-    borderRadius: SevynShellTheme.radius.squircle,
-    borderWidth: 1,
-    height: 64,
     justifyContent: "center",
     marginBottom: SevynShellTheme.spacing.sm,
-    width: 64,
-  },
-  iconSelected: {
-    borderColor: SevynShellTheme.colors.accentGlow,
-  },
-  iconLabel: {
-    color: SevynShellTheme.colors.secondary,
-    fontSize: 22,
-    fontWeight: "600",
   },
   entryLabel: {
     color: SevynShellTheme.colors.secondary,

@@ -23,6 +23,24 @@ import type {
   NativeRuntimeSnapshot,
 } from "@sevynos/react-native/internal";
 
+function starPath(
+  context: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  outerR: number,
+  innerR: number,
+): void {
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rad = i % 2 === 0 ? outerR : innerR;
+    const px = cx + Math.cos(a) * rad;
+    const py = cy + Math.sin(a) * rad;
+    if (i === 0) context.moveTo(px, py);
+    else context.lineTo(px, py);
+  }
+  context.closePath();
+}
+
 export class CanvasGenesisRenderer implements GenesisRenderer<DesktopScene> {
   readonly #canvas: HTMLCanvasElement;
 
@@ -912,12 +930,13 @@ export class CanvasGenesisRenderer implements GenesisRenderer<DesktopScene> {
     context.save();
     context.strokeStyle = command.color;
     context.fillStyle = command.color;
-    context.lineWidth = 1.6;
+    context.lineWidth = Math.max(1.6, Math.min(width, height) * 0.075);
     context.lineCap = "round";
     context.lineJoin = "round";
     context.beginPath();
     const cx = x + width / 2;
     const cy = y + height / 2;
+    const r = Math.min(width, height) * 0.36;
     switch (command.icon) {
       case "appearance":
         context.arc(cx, cy, Math.min(width, height) * 0.34, -Math.PI / 2, Math.PI / 2);
@@ -967,6 +986,532 @@ export class CanvasGenesisRenderer implements GenesisRenderer<DesktopScene> {
       case "gallery":
       case "search":
         context.arc(cx, cy, Math.min(width, height) * 0.3, 0, Math.PI * 2);
+        break;
+      // --- SevynOS application icons: monochrome line-art renditions of the
+      // per-app SVG sets (applications/<app>/icons/<app>.svg). Drawn in the
+      // icon color on the app's brand tile by ApplicationIcon.
+      case "app-browser":
+        context.arc(cx, cy, r, 0, Math.PI * 2);
+        context.moveTo(cx + r * 0.45, cy - r);
+        context.ellipse(cx, cy, r * 0.45, r, 0, 0, Math.PI * 2);
+        context.moveTo(cx - r * 0.94, cy - r * 0.42);
+        context.lineTo(cx + r * 0.94, cy - r * 0.42);
+        context.moveTo(cx - r * 0.94, cy + r * 0.42);
+        context.lineTo(cx + r * 0.94, cy + r * 0.42);
+        break;
+      case "app-calculator":
+        context.roundRect(
+          x + width * 0.3,
+          y + height * 0.12,
+          width * 0.4,
+          height * 0.76,
+          2.5,
+        );
+        context.moveTo(x + width * 0.3, y + height * 0.34);
+        context.lineTo(x + width * 0.7, y + height * 0.34);
+        for (const row of [0.48, 0.62, 0.76]) {
+          for (const col of [0.4, 0.5, 0.6]) {
+            context.moveTo(x + width * col, y + height * row);
+            context.lineTo(x + width * col + 0.6, y + height * row);
+          }
+        }
+        break;
+      case "app-camera":
+        context.moveTo(cx - width * 0.12, y + height * 0.32);
+        context.lineTo(cx - width * 0.08, y + height * 0.22);
+        context.lineTo(cx + width * 0.08, y + height * 0.22);
+        context.lineTo(cx + width * 0.12, y + height * 0.32);
+        context.roundRect(
+          x + width * 0.12,
+          y + height * 0.32,
+          width * 0.76,
+          height * 0.46,
+          3,
+        );
+        context.moveTo(cx + r * 0.62, cy + r * 0.16);
+        context.arc(cx, cy + r * 0.16, r * 0.42, 0, Math.PI * 2);
+        break;
+      case "app-files":
+        context.moveTo(x + width * 0.16, y + height * 0.4);
+        context.lineTo(x + width * 0.16, y + height * 0.28);
+        context.lineTo(x + width * 0.36, y + height * 0.28);
+        context.lineTo(x + width * 0.44, y + height * 0.4);
+        context.moveTo(x + width * 0.16, y + height * 0.4);
+        context.lineTo(x + width * 0.84, y + height * 0.4);
+        context.lineTo(x + width * 0.84, y + height * 0.74);
+        context.lineTo(x + width * 0.16, y + height * 0.74);
+        context.closePath();
+        break;
+      case "app-music":
+        context.moveTo(cx - width * 0.08, cy + height * 0.22);
+        context.lineTo(cx - width * 0.08, y + height * 0.2);
+        context.lineTo(cx + width * 0.2, y + height * 0.14);
+        context.lineTo(cx + width * 0.2, cy + height * 0.16);
+        context.moveTo(cx - width * 0.08 + r * 0.34, cy + height * 0.22);
+        context.arc(cx - width * 0.08, cy + height * 0.22, r * 0.34, 0, Math.PI * 2);
+        context.moveTo(cx + width * 0.2 + r * 0.34, cy + height * 0.16);
+        context.arc(cx + width * 0.2, cy + height * 0.16, r * 0.34, 0, Math.PI * 2);
+        break;
+      case "app-notes":
+        context.moveTo(x + width * 0.28, y + height * 0.14);
+        context.lineTo(x + width * 0.56, y + height * 0.14);
+        context.lineTo(x + width * 0.72, y + height * 0.3);
+        context.lineTo(x + width * 0.72, y + height * 0.86);
+        context.lineTo(x + width * 0.28, y + height * 0.86);
+        context.closePath();
+        context.moveTo(x + width * 0.56, y + height * 0.14);
+        context.lineTo(x + width * 0.56, y + height * 0.3);
+        context.lineTo(x + width * 0.72, y + height * 0.3);
+        context.moveTo(x + width * 0.38, cy + height * 0.02);
+        context.lineTo(x + width * 0.62, cy + height * 0.02);
+        context.moveTo(x + width * 0.38, cy + height * 0.16);
+        context.lineTo(x + width * 0.56, cy + height * 0.16);
+        break;
+      case "app-settings":
+      case "gear":
+        context.arc(cx, cy, r * 0.42, 0, Math.PI * 2);
+        for (let i = 0; i < 8; i++) {
+          const a = (i * Math.PI) / 4;
+          context.moveTo(cx + Math.cos(a) * r * 0.62, cy + Math.sin(a) * r * 0.62);
+          context.lineTo(cx + Math.cos(a) * r * 0.92, cy + Math.sin(a) * r * 0.92);
+        }
+        break;
+      case "app-sevyn-code":
+        context.moveTo(cx - width * 0.1, cy - height * 0.14);
+        context.lineTo(cx - width * 0.26, cy);
+        context.lineTo(cx - width * 0.1, cy + height * 0.14);
+        context.moveTo(cx + width * 0.1, cy - height * 0.14);
+        context.lineTo(cx + width * 0.26, cy);
+        context.lineTo(cx + width * 0.1, cy + height * 0.14);
+        context.moveTo(cx + width * 0.06, y + height * 0.2);
+        context.lineTo(cx - width * 0.06, y + height * 0.8);
+        break;
+      case "app-system-monitor":
+        context.roundRect(
+          x + width * 0.14,
+          y + height * 0.14,
+          width * 0.72,
+          height * 0.72,
+          3,
+        );
+        context.moveTo(x + width * 0.26, cy + height * 0.08);
+        context.lineTo(x + width * 0.37, cy + height * 0.08);
+        context.lineTo(x + width * 0.44, cy - height * 0.12);
+        context.lineTo(x + width * 0.54, cy + height * 0.18);
+        context.lineTo(x + width * 0.6, cy + height * 0.02);
+        context.lineTo(x + width * 0.72, cy + height * 0.02);
+        break;
+      case "app-terminal":
+        context.roundRect(
+          x + width * 0.14,
+          y + height * 0.14,
+          width * 0.72,
+          height * 0.72,
+          3,
+        );
+        context.moveTo(cx - width * 0.16, cy - height * 0.08);
+        context.lineTo(cx - width * 0.05, cy + height * 0.01);
+        context.lineTo(cx - width * 0.16, cy + height * 0.1);
+        context.moveTo(cx + width * 0.02, cy + height * 0.16);
+        context.lineTo(cx + width * 0.16, cy + height * 0.16);
+        break;
+      case "app-text-editor":
+        context.moveTo(x + width * 0.28, y + height * 0.12);
+        context.lineTo(x + width * 0.52, y + height * 0.12);
+        context.lineTo(x + width * 0.7, y + height * 0.3);
+        context.lineTo(x + width * 0.7, y + height * 0.86);
+        context.lineTo(x + width * 0.28, y + height * 0.86);
+        context.closePath();
+        context.moveTo(x + width * 0.52, y + height * 0.12);
+        context.lineTo(x + width * 0.52, y + height * 0.3);
+        context.lineTo(x + width * 0.7, y + height * 0.3);
+        context.moveTo(x + width * 0.38, cy + height * 0.04);
+        context.lineTo(x + width * 0.6, cy + height * 0.04);
+        context.moveTo(x + width * 0.38, cy + height * 0.18);
+        context.lineTo(x + width * 0.54, cy + height * 0.18);
+        break;
+      case "app-welcome":
+        context.arc(cx, cy + height * 0.08, r * 0.52, Math.PI, Math.PI * 2);
+        context.moveTo(x + width * 0.16, cy + height * 0.08);
+        context.lineTo(x + width * 0.84, cy + height * 0.08);
+        context.moveTo(cx, y + height * 0.12);
+        context.lineTo(cx, y + height * 0.24);
+        context.moveTo(cx - r * 0.62, y + height * 0.26);
+        context.lineTo(cx - r * 0.42, y + height * 0.36);
+        context.moveTo(cx + r * 0.62, y + height * 0.26);
+        context.lineTo(cx + r * 0.42, y + height * 0.36);
+        context.moveTo(cx - width * 0.14, cy + height * 0.26);
+        context.lineTo(cx + width * 0.14, cy + height * 0.26);
+        break;
+      // --- Generic UI glyphs (emoji-free iconography for apps and shell).
+      case "home":
+        context.moveTo(cx, y + height * 0.18);
+        context.lineTo(x + width * 0.82, cy - height * 0.04);
+        context.lineTo(x + width * 0.82, y + height * 0.8);
+        context.lineTo(x + width * 0.62, y + height * 0.8);
+        context.lineTo(x + width * 0.62, cy + height * 0.12);
+        context.lineTo(x + width * 0.38, cy + height * 0.12);
+        context.lineTo(x + width * 0.38, y + height * 0.8);
+        context.lineTo(x + width * 0.18, y + height * 0.8);
+        context.lineTo(x + width * 0.18, cy - height * 0.04);
+        context.closePath();
+        break;
+      case "monitor":
+        context.roundRect(
+          x + width * 0.14,
+          y + height * 0.18,
+          width * 0.72,
+          height * 0.5,
+          2.5,
+        );
+        context.moveTo(cx - width * 0.12, y + height * 0.82);
+        context.lineTo(cx + width * 0.12, y + height * 0.82);
+        context.moveTo(cx, y + height * 0.68);
+        context.lineTo(cx, y + height * 0.82);
+        break;
+      case "file-text":
+        context.moveTo(x + width * 0.3, y + height * 0.14);
+        context.lineTo(x + width * 0.7, y + height * 0.14);
+        context.lineTo(x + width * 0.7, y + height * 0.86);
+        context.lineTo(x + width * 0.3, y + height * 0.86);
+        context.closePath();
+        for (const row of [0.34, 0.48, 0.62]) {
+          context.moveTo(x + width * 0.4, y + height * row);
+          context.lineTo(x + width * 0.6, y + height * row);
+        }
+        break;
+      case "download":
+        context.moveTo(cx, y + height * 0.18);
+        context.lineTo(cx, cy + height * 0.08);
+        context.moveTo(cx - width * 0.12, cy - height * 0.02);
+        context.lineTo(cx, cy + height * 0.08);
+        context.lineTo(cx + width * 0.12, cy - height * 0.02);
+        context.moveTo(x + width * 0.22, y + height * 0.62);
+        context.lineTo(x + width * 0.22, y + height * 0.8);
+        context.lineTo(x + width * 0.78, y + height * 0.8);
+        context.lineTo(x + width * 0.78, y + height * 0.62);
+        break;
+      case "image":
+        context.roundRect(
+          x + width * 0.16,
+          y + height * 0.22,
+          width * 0.68,
+          height * 0.56,
+          2.5,
+        );
+        context.moveTo(cx - width * 0.14 + r * 0.2, cy - height * 0.1);
+        context.arc(cx - width * 0.14, cy - height * 0.1, r * 0.2, 0, Math.PI * 2);
+        context.moveTo(x + width * 0.16, y + height * 0.66);
+        context.lineTo(x + width * 0.4, y + height * 0.46);
+        context.lineTo(x + width * 0.54, y + height * 0.58);
+        context.lineTo(x + width * 0.64, y + height * 0.48);
+        context.lineTo(x + width * 0.84, y + height * 0.66);
+        break;
+      case "music-note":
+        context.moveTo(cx + width * 0.1, y + height * 0.18);
+        context.lineTo(cx + width * 0.1, cy + height * 0.18);
+        context.moveTo(cx + width * 0.1 + r * 0.36, cy + height * 0.18);
+        context.arc(cx + width * 0.1, cy + height * 0.18, r * 0.36, 0, Math.PI * 2);
+        break;
+      case "film":
+        context.roundRect(
+          x + width * 0.16,
+          y + height * 0.2,
+          width * 0.68,
+          height * 0.6,
+          2.5,
+        );
+        for (const row of [0.32, 0.68]) {
+          for (const col of [0.28, 0.5, 0.72]) {
+            context.moveTo(x + width * col, y + height * row);
+            context.lineTo(x + width * col + 1.2, y + height * row);
+          }
+        }
+        break;
+      case "trash":
+        context.moveTo(x + width * 0.3, y + height * 0.24);
+        context.lineTo(x + width * 0.7, y + height * 0.24);
+        context.moveTo(cx, y + height * 0.24);
+        context.lineTo(cx, y + height * 0.16);
+        context.moveTo(x + width * 0.36, y + height * 0.24);
+        context.lineTo(x + width * 0.32, y + height * 0.8);
+        context.lineTo(x + width * 0.68, y + height * 0.8);
+        context.lineTo(x + width * 0.64, y + height * 0.24);
+        context.moveTo(cx - width * 0.07, y + height * 0.4);
+        context.lineTo(cx - width * 0.09, y + height * 0.68);
+        context.moveTo(cx + width * 0.07, y + height * 0.4);
+        context.lineTo(cx + width * 0.09, y + height * 0.68);
+        break;
+      case "folder":
+        context.moveTo(x + width * 0.16, y + height * 0.38);
+        context.lineTo(x + width * 0.16, y + height * 0.28);
+        context.lineTo(x + width * 0.4, y + height * 0.28);
+        context.lineTo(x + width * 0.46, y + height * 0.38);
+        context.lineTo(x + width * 0.84, y + height * 0.38);
+        context.lineTo(x + width * 0.84, y + height * 0.72);
+        context.lineTo(x + width * 0.16, y + height * 0.72);
+        context.closePath();
+        break;
+      case "globe":
+        context.arc(cx, cy, r, 0, Math.PI * 2);
+        context.moveTo(cx + r * 0.5, cy - r);
+        context.ellipse(cx, cy, r * 0.5, r, 0, 0, Math.PI * 2);
+        context.moveTo(cx - r * 0.87, cy);
+        context.lineTo(cx + r * 0.87, cy);
+        break;
+      case "book":
+        context.moveTo(cx, y + height * 0.2);
+        context.lineTo(x + width * 0.28, y + height * 0.16);
+        context.lineTo(x + width * 0.28, y + height * 0.8);
+        context.lineTo(cx, y + height * 0.84);
+        context.lineTo(x + width * 0.72, y + height * 0.8);
+        context.lineTo(x + width * 0.72, y + height * 0.16);
+        context.lineTo(cx, y + height * 0.2);
+        context.moveTo(cx, y + height * 0.2);
+        context.lineTo(cx, y + height * 0.84);
+        break;
+      case "star":
+        starPath(context, cx, cy, r * 0.95, r * 0.42);
+        break;
+      case "wifi":
+        context.moveTo(cx - r * 0.28, cy + r * 0.42);
+        context.arc(cx, cy + r * 0.42, r * 0.28, Math.PI * 1.25, Math.PI * 1.75);
+        context.moveTo(cx - r * 0.62, cy + r * 0.42);
+        context.arc(cx, cy + r * 0.42, r * 0.62, Math.PI * 1.25, Math.PI * 1.75);
+        context.moveTo(cx - r * 0.95, cy + r * 0.42);
+        context.arc(cx, cy + r * 0.42, r * 0.95, Math.PI * 1.25, Math.PI * 1.75);
+        context.beginPath();
+        context.arc(cx, cy + r * 0.42, r * 0.12, 0, Math.PI * 2);
+        context.fill();
+        context.beginPath();
+        break;
+      case "volume":
+        context.moveTo(x + width * 0.24, cy - height * 0.08);
+        context.lineTo(x + width * 0.4, cy - height * 0.08);
+        context.lineTo(x + width * 0.54, y + height * 0.24);
+        context.lineTo(x + width * 0.54, y + height * 0.76);
+        context.lineTo(x + width * 0.4, cy + height * 0.08);
+        context.lineTo(x + width * 0.24, cy + height * 0.08);
+        context.closePath();
+        context.moveTo(x + width * 0.62, cy - height * 0.14);
+        context.arc(cx + width * 0.08, cy, r * 0.5, -Math.PI / 3, Math.PI / 3);
+        context.moveTo(x + width * 0.62, cy - height * 0.26);
+        context.arc(cx + width * 0.08, cy, r * 0.85, -Math.PI / 3, Math.PI / 3);
+        break;
+      case "battery":
+        context.roundRect(
+          x + width * 0.14,
+          cy - height * 0.18,
+          width * 0.66,
+          height * 0.36,
+          2.5,
+        );
+        context.moveTo(x + width * 0.84, cy - height * 0.08);
+        context.lineTo(x + width * 0.88, cy - height * 0.08);
+        context.lineTo(x + width * 0.88, cy + height * 0.08);
+        context.lineTo(x + width * 0.84, cy + height * 0.08);
+        break;
+      case "clock":
+        context.arc(cx, cy, r * 0.9, 0, Math.PI * 2);
+        context.moveTo(cx, cy);
+        context.lineTo(cx, cy - r * 0.5);
+        context.moveTo(cx, cy);
+        context.lineTo(cx + r * 0.36, cy + r * 0.14);
+        break;
+      case "package":
+        context.moveTo(cx, y + height * 0.18);
+        context.lineTo(x + width * 0.8, cy - height * 0.02);
+        context.lineTo(x + width * 0.8, y + height * 0.72);
+        context.lineTo(cx, y + height * 0.84);
+        context.lineTo(x + width * 0.2, y + height * 0.72);
+        context.lineTo(x + width * 0.2, cy - height * 0.02);
+        context.closePath();
+        context.moveTo(x + width * 0.2, cy - height * 0.02);
+        context.lineTo(cx, cy + height * 0.08);
+        context.lineTo(x + width * 0.8, cy - height * 0.02);
+        context.moveTo(cx, cy + height * 0.08);
+        context.lineTo(cx, y + height * 0.84);
+        break;
+      case "keyboard":
+        context.roundRect(
+          x + width * 0.14,
+          cy - height * 0.2,
+          width * 0.72,
+          height * 0.4,
+          2.5,
+        );
+        for (const row of [-0.08, 0.06]) {
+          for (const col of [-0.2, -0.07, 0.07, 0.2]) {
+            context.moveTo(cx + width * col, cy + height * row);
+            context.lineTo(cx + width * col + 1.2, cy + height * row);
+          }
+        }
+        context.moveTo(cx - width * 0.16, cy + height * 0.14);
+        context.lineTo(cx + width * 0.16, cy + height * 0.14);
+        break;
+      case "info":
+        context.arc(cx, cy, r * 0.9, 0, Math.PI * 2);
+        context.moveTo(cx, cy - r * 0.1);
+        context.lineTo(cx, cy + r * 0.5);
+        context.beginPath();
+        context.arc(cx, cy - r * 0.38, r * 0.1, 0, Math.PI * 2);
+        context.fill();
+        context.beginPath();
+        break;
+      case "check":
+        context.moveTo(x + width * 0.24, cy + height * 0.02);
+        context.lineTo(cx - width * 0.02, cy + height * 0.22);
+        context.lineTo(x + width * 0.78, y + height * 0.26);
+        break;
+      case "warning":
+        context.moveTo(cx, y + height * 0.18);
+        context.lineTo(x + width * 0.84, y + height * 0.78);
+        context.lineTo(x + width * 0.16, y + height * 0.78);
+        context.closePath();
+        context.moveTo(cx, cy - height * 0.04);
+        context.lineTo(cx, cy + height * 0.18);
+        context.beginPath();
+        context.arc(cx, cy + height * 0.34, r * 0.09, 0, Math.PI * 2);
+        context.fill();
+        context.beginPath();
+        break;
+      case "lock":
+        context.moveTo(x + width * 0.32, cy + height * 0.02);
+        context.lineTo(x + width * 0.32, cy - height * 0.1);
+        context.arc(cx, cy - height * 0.1, width * 0.18, Math.PI, Math.PI * 2);
+        context.lineTo(x + width * 0.68, cy + height * 0.02);
+        context.roundRect(
+          x + width * 0.28,
+          cy - height * 0.02,
+          width * 0.44,
+          height * 0.4,
+          2.5,
+        );
+        break;
+      case "heart":
+        context.moveTo(cx, y + height * 0.78);
+        context.bezierCurveTo(
+          x + width * 0.1,
+          cy + height * 0.1,
+          cx - width * 0.28,
+          y + height * 0.28,
+          cx - width * 0.28,
+          cy - height * 0.06,
+        );
+        context.bezierCurveTo(
+          cx - width * 0.28,
+          cy - height * 0.24,
+          cx - width * 0.06,
+          cy - height * 0.24,
+          cx,
+          cy - height * 0.06,
+        );
+        context.bezierCurveTo(
+          cx + width * 0.06,
+          cy - height * 0.24,
+          cx + width * 0.28,
+          cy - height * 0.24,
+          cx + width * 0.28,
+          cy - height * 0.06,
+        );
+        context.bezierCurveTo(
+          cx + width * 0.28,
+          y + height * 0.28,
+          x + width * 0.9,
+          cy + height * 0.1,
+          cx,
+          y + height * 0.78,
+        );
+        break;
+      case "airplane":
+        context.moveTo(x + width * 0.16, cy + height * 0.1);
+        context.lineTo(x + width * 0.84, y + height * 0.18);
+        context.lineTo(cx + width * 0.02, cy + height * 0.22);
+        context.lineTo(x + width * 0.42, cy + height * 0.04);
+        context.closePath();
+        break;
+      case "brightness":
+        context.arc(cx, cy, r * 0.4, 0, Math.PI * 2);
+        for (let i = 0; i < 8; i++) {
+          const a = (i * Math.PI) / 4;
+          context.moveTo(cx + Math.cos(a) * r * 0.6, cy + Math.sin(a) * r * 0.6);
+          context.lineTo(cx + Math.cos(a) * r * 0.92, cy + Math.sin(a) * r * 0.92);
+        }
+        break;
+      case "zap":
+        context.moveTo(cx + width * 0.08, y + height * 0.14);
+        context.lineTo(cx - width * 0.16, cy + height * 0.1);
+        context.lineTo(cx - width * 0.02, cy + height * 0.1);
+        context.lineTo(cx - width * 0.08, y + height * 0.86);
+        context.lineTo(cx + width * 0.16, cy - height * 0.1);
+        context.lineTo(cx + width * 0.02, cy - height * 0.1);
+        context.closePath();
+        break;
+      case "hard-drive":
+        context.roundRect(
+          x + width * 0.14,
+          cy - height * 0.22,
+          width * 0.72,
+          height * 0.44,
+          2.5,
+        );
+        context.beginPath();
+        context.arc(x + width * 0.26, cy, r * 0.08, 0, Math.PI * 2);
+        context.fill();
+        context.beginPath();
+        context.moveTo(x + width * 0.4, cy);
+        context.lineTo(x + width * 0.76, cy);
+        break;
+      case "menu":
+        for (const row of [0.32, 0.5, 0.68]) {
+          context.moveTo(x + width * 0.24, y + height * row);
+          context.lineTo(x + width * 0.76, y + height * row);
+        }
+        break;
+      case "grid":
+        for (const row of [0.26, 0.54]) {
+          for (const col of [0.26, 0.54]) {
+            context.rect(x + width * col, y + height * row, width * 0.2, height * 0.2);
+          }
+        }
+        break;
+      case "edit":
+        context.moveTo(x + width * 0.3, y + height * 0.7);
+        context.lineTo(x + width * 0.58, y + height * 0.28);
+        context.lineTo(x + width * 0.68, y + height * 0.18);
+        context.lineTo(x + width * 0.74, y + height * 0.24);
+        context.lineTo(x + width * 0.64, y + height * 0.34);
+        context.lineTo(x + width * 0.36, y + height * 0.76);
+        context.lineTo(x + width * 0.24, y + height * 0.78);
+        context.closePath();
+        break;
+      case "x":
+        context.moveTo(x + width * 0.28, y + height * 0.28);
+        context.lineTo(x + width * 0.72, y + height * 0.72);
+        context.moveTo(x + width * 0.72, y + height * 0.28);
+        context.lineTo(x + width * 0.28, y + height * 0.72);
+        break;
+      case "refresh":
+        context.arc(cx, cy, r * 0.85, -Math.PI * 0.35, Math.PI * 1.15);
+        context.moveTo(cx + r * 0.95, cy - r * 0.42);
+        context.lineTo(cx + r * 0.42, cy - r * 0.62);
+        context.lineTo(cx + r * 0.72, cy - r * 0.05);
+        break;
+      case "moon": {
+        const mr = r * 0.72;
+        context.arc(cx, cy, mr, 0.9, Math.PI * 2 - 0.9);
+        context.arc(cx + mr * 0.5, cy, mr * 0.79, 1.42, Math.PI * 2 - 1.42);
+        break;
+      }
+      case "bluetooth":
+        context.moveTo(cx, y + height * 0.16);
+        context.lineTo(cx, y + height * 0.84);
+        context.moveTo(cx - width * 0.24, cy - height * 0.24);
+        context.lineTo(cx + width * 0.24, cy);
+        context.lineTo(cx - width * 0.24, cy + height * 0.24);
+        context.moveTo(cx, y + height * 0.16);
+        context.lineTo(cx + width * 0.24, cy);
+        context.lineTo(cx, y + height * 0.84);
         break;
     }
     context.stroke();

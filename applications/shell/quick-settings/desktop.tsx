@@ -10,6 +10,7 @@ import {
   View,
   type DimensionValue,
 } from "react-native";
+import { SevynIcon, type SevynIconName } from "@sevynos/react-native";
 import { SevynShellTheme } from "../theme.js";
 
 export interface DesktopQuickSettingsProps {
@@ -168,7 +169,7 @@ export function DesktopQuickSettings({
             <ControlTile
               active={resolvedWifi && !resolvedAirplane}
               disabled={resolvedAirplane}
-              glyph="⌁"
+              glyph="wifi"
               label="Wi-Fi"
               onPress={() => {
                 updateToggle(
@@ -190,7 +191,7 @@ export function DesktopQuickSettings({
             <ControlTile
               active={resolvedBluetooth && !resolvedAirplane}
               disabled={resolvedAirplane}
-              glyph="ᛒ"
+              glyph="bluetooth"
               label="Bluetooth"
               onPress={() => {
                 updateToggle(
@@ -207,7 +208,7 @@ export function DesktopQuickSettings({
             />
             <ControlTile
               active={resolvedAirplane}
-              glyph="✈"
+              glyph="airplane"
               label="Airplane"
               onPress={() => {
                 updateToggle(
@@ -222,7 +223,7 @@ export function DesktopQuickSettings({
             />
             <ControlTile
               active={resolvedFocus}
-              glyph="◐"
+              glyph="moon"
               label="Focus"
               onPress={() => {
                 updateToggle(
@@ -238,7 +239,7 @@ export function DesktopQuickSettings({
           </View>
 
           <LevelSlider
-            glyph="☀"
+            glyph="brightness"
             label="Brightness"
             level={resolvedBrightness}
             onDecrease={() => {
@@ -263,7 +264,7 @@ export function DesktopQuickSettings({
             }}
           />
           <LevelSlider
-            glyph={resolvedMuted || resolvedVolume === 0 ? "×" : "♪"}
+            glyph={resolvedMuted || resolvedVolume === 0 ? "x" : "volume"}
             label="Volume"
             level={resolvedMuted ? 0 : resolvedVolume}
             onDecrease={() => {
@@ -324,10 +325,12 @@ export function DesktopQuickSettings({
             <View style={styles.batteryShell}>
               <View style={[styles.batteryFill, { width: batteryFillWidth }]} />
             </View>
-            <Text style={styles.batteryText}>
-              {batteryCharging ? "⚡ " : ""}
-              {Math.round(batteryLevel * 100)}%
-            </Text>
+            <View style={styles.batteryTextRow}>
+              {batteryCharging ? (
+                <SevynIcon name="zap" size={12} color={SevynShellTheme.colors.gold} />
+              ) : null}
+              <Text style={styles.batteryText}>{Math.round(batteryLevel * 100)}%</Text>
+            </View>
             <Text style={styles.batteryLabel}>
               {batteryCharging ? "Charging" : "Battery"}
             </Text>
@@ -346,7 +349,7 @@ export function DesktopQuickSettings({
               }}
               style={({ pressed }) => [styles.footerButton, pressed && styles.pressed]}
             >
-              <Text style={styles.footerGlyph}>◇</Text>
+              <SevynIcon name="lock" size={13} color={SevynShellTheme.colors.gold} />
               <Text style={styles.footerText}>Lock</Text>
             </Pressable>
             <Pressable
@@ -355,7 +358,7 @@ export function DesktopQuickSettings({
               onPress={onOpenSettings}
               style={({ pressed }) => [styles.footerButton, pressed && styles.pressed]}
             >
-              <Text style={styles.footerGlyph}>⚙</Text>
+              <SevynIcon name="gear" size={13} color={SevynShellTheme.colors.gold} />
               <Text style={styles.footerText}>Settings</Text>
             </Pressable>
           </View>
@@ -375,7 +378,7 @@ function ControlTile({
 }: {
   readonly active: boolean;
   readonly disabled?: boolean;
-  readonly glyph: string;
+  readonly glyph: SevynIconName;
   readonly label: string;
   readonly onPress: () => void;
   readonly subtitle: string;
@@ -395,9 +398,11 @@ function ControlTile({
       ]}
     >
       <View style={[styles.tileGlyph, active && styles.tileGlyphActive]}>
-        <Text style={[styles.tileGlyphText, active && styles.tileGlyphTextActive]}>
-          {glyph}
-        </Text>
+        <SevynIcon
+          name={glyph}
+          size={16}
+          color={active ? "#FFFFFF" : SevynShellTheme.colors.secondary}
+        />
       </View>
       <Text style={styles.tileLabel}>{label}</Text>
       <Text numberOfLines={1} style={styles.tileSubtitle}>
@@ -415,7 +420,7 @@ function LevelSlider({
   onIncrease,
   onToggleMute,
 }: {
-  readonly glyph: string;
+  readonly glyph: SevynIconName;
   readonly label: string;
   readonly level: number;
   readonly onDecrease: () => void;
@@ -431,7 +436,9 @@ function LevelSlider({
     >
       <View style={styles.levelHeader}>
         {onToggleMute === undefined ? (
-          <Text style={styles.levelGlyph}>{glyph}</Text>
+          <View style={styles.levelGlyph}>
+            <SevynIcon name={glyph} size={15} color={SevynShellTheme.colors.gold} />
+          </View>
         ) : (
           <Pressable
             accessibilityLabel={
@@ -443,7 +450,9 @@ function LevelSlider({
             onPress={onToggleMute}
             style={({ pressed }) => [styles.levelGlyphButton, pressed && styles.pressed]}
           >
-            <Text style={styles.levelGlyph}>{glyph}</Text>
+            <View style={styles.levelGlyph}>
+              <SevynIcon name={glyph} size={15} color={SevynShellTheme.colors.gold} />
+            </View>
           </Pressable>
         )}
         <Text style={styles.levelLabel}>{label}</Text>
@@ -699,6 +708,12 @@ const styles = StyleSheet.create({
     backgroundColor: SevynShellTheme.colors.success,
     borderRadius: 1,
     height: "100%",
+  },
+  batteryTextRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 4,
+    justifyContent: "center",
   },
   batteryText: {
     color: SevynShellTheme.colors.secondary,

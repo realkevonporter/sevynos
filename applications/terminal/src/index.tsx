@@ -678,7 +678,7 @@ export function TerminalApplication({
             outputLines = [
               {
                 id: nextLineId("out"),
-                text: `✓ Successfully uninstalled ${targetApp.name} (${targetApp.id})`,
+                text: `Successfully uninstalled ${targetApp.name} (${targetApp.id})`,
                 type: "success",
               },
               {

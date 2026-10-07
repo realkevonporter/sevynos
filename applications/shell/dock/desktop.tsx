@@ -195,6 +195,7 @@ function DockIcon({
     id: application.applicationId,
     name: application.label,
     running,
+    ...(application.icon === undefined ? {} : { icon: application.icon }),
   };
 
   return (

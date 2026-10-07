@@ -123,3 +123,11 @@ describe("MusicApplication Component", () => {
     expect(element.props.permissions).toBe(permissions);
   });
 });
+
+describe("application icon asset", () => {
+  it("ships the manifest-declared icon file", async () => {
+    const { existsSync } = await import("node:fs");
+    const iconUrl = new URL(`../${musicManifest.icon}`, import.meta.url);
+    expect(existsSync(iconUrl)).toBe(true);
+  });
+});

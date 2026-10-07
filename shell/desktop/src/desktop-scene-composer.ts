@@ -432,6 +432,7 @@ export class DesktopSceneComposer {
             : primary.id,
           pinned: true,
           running: running !== undefined,
+          icon: running?.definition.icon ?? def?.icon,
         }),
       );
     }
@@ -450,6 +451,7 @@ export class DesktopSceneComposer {
           displayId: this.#runtime.environment.getDisplayForBounds(window.bounds).id,
           pinned: false,
           running: true,
+          icon: running.definition.icon,
         }),
       );
     }
@@ -551,6 +553,7 @@ export class DesktopSceneComposer {
           label: definition.name,
           running:
             this.#runtime.applications.getByApplicationId(definition.id) !== undefined,
+          icon: definition.icon,
         }),
       ),
       order: topContentOrder + 1,

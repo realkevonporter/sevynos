@@ -141,6 +141,9 @@ export function SevynOSShell(): JSX.Element {
         running: windows.some(
           (window) => window.applicationId === application.manifest.id,
         ),
+        ...(application.manifest.icon === undefined
+          ? {}
+          : { icon: application.manifest.icon }),
       })),
     [applications, windows],
   );
