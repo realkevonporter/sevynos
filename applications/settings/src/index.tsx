@@ -65,6 +65,67 @@ export interface InstalledAppInfo {
   readonly icon?: string | undefined;
 }
 
+/**
+ * Structural view of the microphone / per-app mixer methods that the Linux
+ * host audio service exposes beyond the portable SevynAudioService interface.
+ * Feature-detected with asExtendedAudio() so Settings keeps working against
+ * hosts that only implement output volume.
+ */
+export interface AudioInputDeviceInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly isDefault: boolean;
+  readonly volume: number;
+  readonly muted: boolean;
+}
+
+export interface AudioInputSnapshotInfo {
+  readonly available: boolean;
+  readonly devices: readonly AudioInputDeviceInfo[];
+  readonly defaultDeviceId: string;
+  readonly volume: number;
+  readonly muted: boolean;
+}
+
+export interface AudioPlaybackStreamInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly applicationName: string;
+  readonly volume: number;
+  readonly muted: boolean;
+}
+
+export interface ExtendedAudioService extends SevynAudioService {
+  inputSnapshot(): Promise<AudioInputSnapshotInfo>;
+  setInputVolume(volume: number, deviceId?: string): Promise<AudioInputSnapshotInfo>;
+  setInputMuted(muted: boolean, deviceId?: string): Promise<AudioInputSnapshotInfo>;
+  setDefaultInputDevice(deviceId: string): Promise<AudioInputSnapshotInfo>;
+  listPlaybackStreams(): Promise<readonly AudioPlaybackStreamInfo[]>;
+  setStreamVolume(
+    streamId: string,
+    volume: number,
+  ): Promise<readonly AudioPlaybackStreamInfo[]>;
+  setStreamMuted(
+    streamId: string,
+    muted: boolean,
+  ): Promise<readonly AudioPlaybackStreamInfo[]>;
+  recordInput(
+    path: string,
+    options?: { readonly seconds?: number },
+  ): Promise<{ readonly path: string; readonly seconds: number }>;
+}
+
+export function asExtendedAudio(
+  audio: SevynAudioService | undefined,
+): ExtendedAudioService | undefined {
+  if (audio === undefined) return undefined;
+  const candidate = audio as Partial<ExtendedAudioService>;
+  return typeof candidate.inputSnapshot === "function" &&
+    typeof candidate.listPlaybackStreams === "function"
+    ? (audio as ExtendedAudioService)
+    : undefined;
+}
+
 export const DEFAULT_INSTALLED_APPS: readonly InstalledAppInfo[] = [
   {
     id: "org.sevynos.shell",
@@ -832,6 +893,23 @@ export function SettingsApplication({
     // Intentionally keyed on category only: pane data loads on first visit.
   }, [activeCategory]);
 
+  // Microphone + per-app mixer state (populated when the host audio service
+  // exposes the extended input/mixer methods; otherwise stays empty).
+  const extendedAudio = asExtendedAudio(audio);
+  const [inputAvailable, setInputAvailable] = useState(false);
+  const [inputDevices, setInputDevices] = useState<readonly AudioInputDeviceInfo[]>([]);
+  const [inputVolume, setInputVolume] = useState(0);
+  const [inputMuted, setInputMuted] = useState(false);
+  const [defaultInputId, setDefaultInputId] = useState("");
+  const [mixerStreams, setMixerStreams] = useState<readonly AudioPlaybackStreamInfo[]>(
+    [],
+  );
+  const [soundError, setSoundError] = useState<string | null>(null);
+  const [micTestState, setMicTestState] = useState<
+    "idle" | "recording" | "done" | "error"
+  >("idle");
+  const [micTestMessage, setMicTestMessage] = useState<string | null>(null);
+
   const handleIdleLockChange = (minutes: number) => {
     setIdleLockTimeout(minutes);
     onUpdateSetting?.("idleLockTimeoutMinutes", minutes);
@@ -1113,6 +1191,156 @@ export function SettingsApplication({
       });
     }
   };
+
+  const refreshInputSnapshot = (service: ExtendedAudioService) => {
+    void service
+      .inputSnapshot()
+      .then((snap) => {
+        setInputAvailable(snap.available);
+        setInputDevices(snap.devices);
+        setInputVolume(snap.volume);
+        setInputMuted(snap.muted);
+        setDefaultInputId(snap.defaultDeviceId);
+        setSoundError(null);
+      })
+      .catch((error: unknown) => {
+        setSoundError(error instanceof Error ? error.message : "Microphone unavailable.");
+      });
+  };
+
+  const refreshMixerStreams = (service: ExtendedAudioService) => {
+    void service
+      .listPlaybackStreams()
+      .then((streams) => {
+        setMixerStreams(streams);
+        setSoundError(null);
+      })
+      .catch((error: unknown) => {
+        setSoundError(error instanceof Error ? error.message : "Mixer unavailable.");
+      });
+  };
+
+  const handleInputVolumeChange = (newVol: number) => {
+    if (!extendedAudio) return;
+    const clamped = Math.max(0, Math.min(100, newVol));
+    setInputVolume(clamped);
+    void extendedAudio
+      .setInputVolume(clamped)
+      .then((snap) => {
+        setInputVolume(snap.volume);
+        setInputMuted(snap.muted);
+        setSoundError(null);
+      })
+      .catch((error: unknown) => {
+        setSoundError(
+          error instanceof Error ? error.message : "Could not set input volume.",
+        );
+      });
+  };
+
+  const toggleInputMute = () => {
+    if (!extendedAudio) return;
+    const nextMuted = !inputMuted;
+    setInputMuted(nextMuted);
+    void extendedAudio
+      .setInputMuted(nextMuted)
+      .then((snap) => {
+        setInputMuted(snap.muted);
+        setSoundError(null);
+      })
+      .catch((error: unknown) => {
+        setSoundError(
+          error instanceof Error ? error.message : "Could not mute the microphone.",
+        );
+      });
+  };
+
+  const handleDefaultInputSelect = (deviceId: string) => {
+    if (!extendedAudio) return;
+    void extendedAudio
+      .setDefaultInputDevice(deviceId)
+      .then((snap) => {
+        setDefaultInputId(snap.defaultDeviceId);
+        setInputDevices(snap.devices);
+        setInputVolume(snap.volume);
+        setInputMuted(snap.muted);
+        setSoundError(null);
+      })
+      .catch((error: unknown) => {
+        setSoundError(
+          error instanceof Error ? error.message : "Could not select the input device.",
+        );
+      });
+  };
+
+  const handleStreamVolumeChange = (streamId: string, newVol: number) => {
+    if (!extendedAudio) return;
+    const clamped = Math.max(0, Math.min(100, newVol));
+    setMixerStreams((streams) =>
+      streams.map((s) => (s.id === streamId ? { ...s, volume: clamped } : s)),
+    );
+    void extendedAudio
+      .setStreamVolume(streamId, clamped)
+      .then((streams) => {
+        setMixerStreams(streams);
+        setSoundError(null);
+      })
+      .catch((error: unknown) => {
+        setSoundError(
+          error instanceof Error ? error.message : "Could not set stream volume.",
+        );
+        refreshMixerStreams(extendedAudio);
+      });
+  };
+
+  const toggleStreamMute = (streamId: string, muted: boolean) => {
+    if (!extendedAudio) return;
+    const nextMuted = !muted;
+    setMixerStreams((streams) =>
+      streams.map((s) => (s.id === streamId ? { ...s, muted: nextMuted } : s)),
+    );
+    void extendedAudio
+      .setStreamMuted(streamId, nextMuted)
+      .then((streams) => {
+        setMixerStreams(streams);
+        setSoundError(null);
+      })
+      .catch((error: unknown) => {
+        setSoundError(
+          error instanceof Error ? error.message : "Could not mute the stream.",
+        );
+        refreshMixerStreams(extendedAudio);
+      });
+  };
+
+  const handleMicTest = () => {
+    if (!extendedAudio || micTestState === "recording") return;
+    setMicTestState("recording");
+    setMicTestMessage("Recording 3 seconds…");
+    void extendedAudio
+      .recordInput("/tmp/sevyn-mic-test.wav", { seconds: 3 })
+      .then((recording) => {
+        setMicTestState("done");
+        setMicTestMessage(
+          `Captured ${String(recording.seconds)}s sample to ${recording.path}`,
+        );
+      })
+      .catch((error: unknown) => {
+        setMicTestState("error");
+        setMicTestMessage(
+          error instanceof Error ? error.message : "Microphone test failed.",
+        );
+      });
+  };
+
+  // Load microphone + mixer state when the Sound pane is opened.
+  useEffect(() => {
+    if (activeCategory !== "sound") return;
+    const service = asExtendedAudio(audio);
+    if (!service) return;
+    refreshInputSnapshot(service);
+    refreshMixerStreams(service);
+  }, [activeCategory, audio]);
 
   return (
     <View
@@ -1973,6 +2201,194 @@ export function SettingsApplication({
                   </Pressable>
                 </View>
               </View>
+
+              {extendedAudio && (
+                <View style={styles.card}>
+                  <View style={styles.rowBetween}>
+                    <View>
+                      <Text style={styles.cardTitle}>Microphone</Text>
+                      <Text style={styles.cardDesc}>
+                        {inputAvailable
+                          ? `${String(inputDevices.length)} input${inputDevices.length === 1 ? "" : "s"} detected`
+                          : "No microphone input detected on this system."}
+                      </Text>
+                    </View>
+                    {inputAvailable && (
+                      <Text style={styles.settingValue}>{inputVolume}%</Text>
+                    )}
+                  </View>
+
+                  {inputAvailable && (
+                    <>
+                      {inputDevices.map((device) => (
+                        <Pressable
+                          key={device.id}
+                          onPress={() => {
+                            handleDefaultInputSelect(device.id);
+                          }}
+                          style={styles.rowBetween}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Use ${device.name} as the microphone${device.id === defaultInputId ? " (currently selected)" : ""}`}
+                        >
+                          <View>
+                            <Text style={styles.cardTitle}>{device.name}</Text>
+                            <Text style={styles.cardDesc}>
+                              {device.id === defaultInputId
+                                ? "Default input"
+                                : "Select as default"}
+                              {device.muted ? " · muted" : ""}
+                            </Text>
+                          </View>
+                          <View
+                            style={
+                              device.id === defaultInputId
+                                ? styles.radioSelected
+                                : styles.radio
+                            }
+                          />
+                        </Pressable>
+                      ))}
+
+                      <View style={styles.volumeControls}>
+                        <Pressable
+                          onPress={() => {
+                            handleInputVolumeChange(inputVolume - 10);
+                          }}
+                          style={styles.volumeStepButton}
+                          accessibilityLabel="Decrease input volume"
+                        >
+                          <Text style={styles.stepButtonText}>-</Text>
+                        </Pressable>
+                        <View style={styles.volumeBar}>
+                          <View
+                            style={{ ...styles.volumeFill, width: inputVolume * 2 }}
+                          />
+                        </View>
+                        <Pressable
+                          onPress={() => {
+                            handleInputVolumeChange(inputVolume + 10);
+                          }}
+                          style={styles.volumeStepButton}
+                          accessibilityLabel="Increase input volume"
+                        >
+                          <Text style={styles.stepButtonText}>+</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={toggleInputMute}
+                          style={inputMuted ? styles.muteButtonActive : styles.muteButton}
+                        >
+                          <Text style={styles.muteButtonText}>
+                            {inputMuted ? "Unmute" : "Mute"}
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <View style={styles.rowBetween}>
+                        <View>
+                          <Text style={styles.cardTitle}>Microphone test</Text>
+                          <Text style={styles.cardDesc}>
+                            {micTestMessage ?? "Record a 3-second sample."}
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={handleMicTest}
+                          style={
+                            micTestState === "recording"
+                              ? styles.muteButtonActive
+                              : styles.muteButton
+                          }
+                          disabled={micTestState === "recording"}
+                        >
+                          <Text style={styles.muteButtonText}>
+                            {micTestState === "recording" ? "Recording…" : "Test"}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </>
+                  )}
+                </View>
+              )}
+
+              {extendedAudio && (
+                <View style={styles.card}>
+                  <View style={styles.rowBetween}>
+                    <View>
+                      <Text style={styles.cardTitle}>Application Mixer</Text>
+                      <Text style={styles.cardDesc}>
+                        Per-application playback volume.
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => {
+                        refreshMixerStreams(extendedAudio);
+                      }}
+                      style={styles.muteButton}
+                      accessibilityLabel="Refresh application mixer"
+                    >
+                      <Text style={styles.muteButtonText}>Refresh</Text>
+                    </Pressable>
+                  </View>
+
+                  {mixerStreams.length === 0 ? (
+                    <Text style={styles.cardDesc}>
+                      No application audio streams right now. Per-app mixing requires
+                      PipeWire or PulseAudio — ALSA mixes in hardware.
+                    </Text>
+                  ) : (
+                    mixerStreams.map((stream) => (
+                      <View key={stream.id} style={styles.mixerRow}>
+                        <View style={styles.mixerLabel}>
+                          <Text style={styles.cardTitle} numberOfLines={1}>
+                            {stream.applicationName}
+                          </Text>
+                          <Text style={styles.cardDesc} numberOfLines={1}>
+                            {stream.name} · {stream.volume}%
+                            {stream.muted ? " · muted" : ""}
+                          </Text>
+                        </View>
+                        <View style={styles.mixerControls}>
+                          <Pressable
+                            onPress={() => {
+                              handleStreamVolumeChange(stream.id, stream.volume - 10);
+                            }}
+                            style={styles.volumeStepButton}
+                            accessibilityLabel={`Lower volume for ${stream.applicationName}`}
+                          >
+                            <Text style={styles.stepButtonText}>-</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => {
+                              handleStreamVolumeChange(stream.id, stream.volume + 10);
+                            }}
+                            style={styles.volumeStepButton}
+                            accessibilityLabel={`Raise volume for ${stream.applicationName}`}
+                          >
+                            <Text style={styles.stepButtonText}>+</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => {
+                              toggleStreamMute(stream.id, stream.muted);
+                            }}
+                            style={
+                              stream.muted ? styles.muteButtonActive : styles.muteButton
+                            }
+                          >
+                            <Text style={styles.muteButtonText}>
+                              {stream.muted ? "Unmute" : "Mute"}
+                            </Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    ))
+                  )}
+                </View>
+              )}
+
+              {soundError && (
+                <View style={styles.card}>
+                  <Text style={styles.cardDesc}>Sound error: {soundError}</Text>
+                </View>
+              )}
             </View>
           )}
 
@@ -3292,5 +3708,37 @@ const styles = StyleSheet.create({
     color: "#9CA3AF",
     fontSize: 13,
     textAlign: "center",
+  },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: "rgba(255, 255, 255, 0.25)",
+  },
+  radioSelected: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: "#D7AC57",
+    backgroundColor: "rgba(215, 172, 87, 0.35)",
+  },
+  mixerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.06)",
+  },
+  mixerLabel: {
+    flex: 1,
+    marginRight: 12,
+  },
+  mixerControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
 });
