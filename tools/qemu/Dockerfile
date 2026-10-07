@@ -99,6 +99,11 @@ COPY tools/qemu/build/trusted-update-keys.json /etc/sevynos/trusted-update-keys.
 COPY tools/qemu/build-image.sh /usr/local/bin/build-sevyn-image
 COPY tools/qemu/build-recovery-image.sh /usr/local/bin/build-sevyn-recovery-image
 COPY tools/qemu/grub-cfg-lib.sh /usr/local/lib/sevyn-grub-cfg-lib.sh
+COPY tools/qemu/kernel-lifecycle-lib.sh /usr/local/lib/sevyn-kernel-lifecycle-lib.sh
+# Secure Boot helper (Phase 3 C2): the installer expects it at this path
+# (sevyn-installer.sh copies it into the target for MOK setup), and the
+# kernel updater's §7 hook invokes its `sign` subcommand when present.
+COPY tools/qemu/sevyn-secure-boot.sh /usr/local/lib/sevyn-secure-boot.sh
 COPY tools/qemu/recovery /usr/local/src/sevyn-recovery
 COPY tools/qemu/sevyn-studio-builder.mjs /usr/local/bin/sevyn-studio-build
 RUN mkdir -p /usr/local/share/sevynos && ln -s /opt/sevynos/studio-tools/node_modules/esbuild/bin/esbuild /usr/local/lib/sevynos/esbuild && python3 /usr/local/lib/sevynos/build-font-atlas.py /usr/local/share/sevynos/font-atlas.json && \
@@ -108,7 +113,7 @@ RUN mkdir -p /usr/local/share/sevynos && ln -s /opt/sevynos/studio-tools/node_mo
     ffmpeg -nostdin -loglevel error -i /tmp/sevyn-demo-audio/nebula-drift.wav /usr/share/sevyn/music/nebula-drift.ogg && \
     cp /tmp/sevyn-demo-audio/digital-dawn.wav /usr/share/sevyn/music/digital-dawn.wav && \
     ffmpeg -nostdin -loglevel error -i /tmp/sevyn-demo-audio/midnight-terminal.wav /usr/share/sevyn/music/midnight-terminal.m4a && rm -rf /tmp/sevyn-demo-audio && \
-    mkdir -p /etc/udhcpc && cp /usr/share/udhcpc/default.script /etc/udhcpc/default.script && chmod 0755 /init /usr/local/bin/start-genesis /usr/local/bin/request-genesis-shutdown /usr/local/bin/sevyn-installer /usr/local/bin/sevyn-installer-chroot /usr/local/bin/sevyn-studio-build /usr/local/lib/sevynos/installed-init /usr/local/lib/sevynos/apply-update /usr/local/lib/sevynos/hermesc /usr/local/lib/sevynos/esbuild /usr/local/bin/smoke-wayland /usr/local/bin/build-sevyn-image /usr/local/bin/build-sevyn-recovery-image /usr/local/bin/sevyn-usb-mount /usr/local/bin/sevyn-usb-unmount /usr/share/udhcpc/default.script /etc/udhcpc/default.script && /usr/local/bin/build-sevyn-image && \
+    mkdir -p /etc/udhcpc && cp /usr/share/udhcpc/default.script /etc/udhcpc/default.script && chmod 0755 /init /usr/local/bin/start-genesis /usr/local/bin/request-genesis-shutdown /usr/local/bin/sevyn-installer /usr/local/bin/sevyn-installer-chroot /usr/local/bin/sevyn-studio-build /usr/local/lib/sevyn-secure-boot.sh /usr/local/lib/sevynos/installed-init /usr/local/lib/sevynos/apply-update /usr/local/lib/sevynos/hermesc /usr/local/lib/sevynos/esbuild /usr/local/bin/smoke-wayland /usr/local/bin/build-sevyn-image /usr/local/bin/build-sevyn-recovery-image /usr/local/bin/sevyn-usb-mount /usr/local/bin/sevyn-usb-unmount /usr/share/udhcpc/default.script /etc/udhcpc/default.script && /usr/local/bin/build-sevyn-image && \
     printf 'VERSION_ID=%s\n' "$SEVYN_OS_VERSION" > /etc/sevynos-release
 
 FROM debian:bookworm-slim AS boot-media

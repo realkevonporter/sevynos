@@ -166,6 +166,42 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
     process.env["SEVYN_UPDATE_ARTIFACT_URL"] ??
     stableArtifactUrl ??
     `https://github.com/realkevonporter/sevynos/releases/download/nightly/rootfs.squashfs`;
+  // Kernel lifecycle pair (Phase 3 B3): when the build produced a kernel
+  // and initramfs next to the rootfs, publish them as feed artifacts so
+  // the on-device updater can install them as versioned /boot files.
+  // The artifact URL mirrors the rootfs one (same release assets dir).
+  const artifactUrlFor = (fileName) => artifactUrl.replace(/[^/]*$/, fileName);
+  const artifacts = [
+    {
+      kind: "rootfs-squashfs",
+      url: artifactUrl,
+      sha256: rootfsHash.digest("hex"),
+      sizeBytes: rootfsStat.size,
+    },
+  ];
+  for (const [kind, fileName] of [
+    ["vmlinuz", "vmlinuz"],
+    ["initramfs", "initramfs.cpio.gz"],
+  ]) {
+    const artifactPath = resolve(output, fileName);
+    try {
+      await access(artifactPath);
+    } catch {
+      continue;
+    }
+    const artifactStat = await stat(artifactPath);
+    const artifactHash = createHash("sha256");
+    for await (const chunk of createReadStream(artifactPath)) {
+      artifactHash.update(chunk);
+    }
+    artifacts.push({
+      kind,
+      url: artifactUrlFor(fileName),
+      sha256: artifactHash.digest("hex"),
+      sizeBytes: artifactStat.size,
+    });
+    console.log(`Update feed: including ${kind} artifact (${fileName}).`);
+  }
   const feedPath = resolve(output, "updates.json");
   await writeFile(
     feedPath,
@@ -178,14 +214,7 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
           releaseInfo.channel === "stable"
             ? `SevynOS ${osVersion} stable release.`
             : `SevynOS nightly ${osVersion}.`,
-        artifacts: [
-          {
-            kind: "rootfs-squashfs",
-            url: artifactUrl,
-            sha256: rootfsHash.digest("hex"),
-            sizeBytes: rootfsStat.size,
-          },
-        ],
+        artifacts,
       },
       null,
       2,

@@ -89,7 +89,27 @@ Update) shows the last event: version / reason / date, via
 - `SEVYN_ROLLBACK_ABORTED reason=snapshot-verification-failed`
 - `SEVYN_ROLLBACK_UNAVAILABLE reason=no-verified-snapshot`
 - `SEVYN_ROLLBACK_FAILED reason=extraction-failed`
+- `SEVYN_ROLLBACK_FAILED reason=kernel-flip-failed` — the rootfs was
+  restored but the kernel pair could not flip back (Phase 3 B3 pairing);
+  the counter is NOT reset, so the next boot retries the rollback
 - `SEVYN_ROLLBACK_CLEARED_PENDING_UPDATE`
+- `SEVYN_KERNEL_ROLLBACK_SKIP` / `SEVYN_KERNEL_ROLLBACK_FLIP` /
+  `SEVYN_KERNEL_ROLLBACK_DONE` — kernel pair flip progress (Phase 3 B3;
+  SKIP when the update was rootfs-only)
+
+## Kernel pairing (Phase 3 B3)
+
+The snapshot excludes `boot/*`, so restoring the rootfs alone would leave
+the NEW kernel booting against the OLD modules — a bricked combination.
+The applier therefore records the pre-update kernel pair in
+`previous/kernels.json` before extracting, and `sevyn_rollback_restore`
+flips the kernel back together with the rootfs
+(`tools/qemu/kernel-lifecycle-lib.sh` → `sevyn_kernel_rollback_flip`):
+grub.cfg is regenerated with the previous pair as the default entry (the
+failed kernel becomes the "previous kernel" fallback), the ESP staging
+and the `/boot` recovery image are refreshed from the previous pair, and
+`updates/kernels.json` swaps current/previous. Full design:
+`docs/kernel-lifecycle.md`.
 
 ## Manual QEMU verification (acceptance run)
 

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseUpdateFeed, selectRootfsArtifact } from "./update-feed.js";
+import {
+  parseUpdateFeed,
+  selectKernelArtifacts,
+  selectRootfsArtifact,
+} from "./update-feed.js";
 
 const SHA = "a".repeat(64);
 
@@ -129,5 +133,81 @@ describe("parseUpdateFeed", () => {
 
   it("rejects an unknown channel", () => {
     expect(() => parseUpdateFeed(feed({ channel: "beta" }))).toThrow('"channel"');
+  });
+
+  it("parses vmlinuz/initramfs kernel artifacts", () => {
+    const manifest = parseUpdateFeed(
+      feed({
+        artifacts: [
+          {
+            kind: "rootfs-squashfs",
+            url: "https://example.com/rootfs.squashfs",
+            sha256: SHA,
+            sizeBytes: 123456,
+          },
+          {
+            kind: "vmlinuz",
+            url: "https://example.com/vmlinuz",
+            sha256: "c".repeat(64),
+            sizeBytes: 12345,
+          },
+          {
+            kind: "initramfs",
+            url: "https://example.com/initramfs.cpio.gz",
+            sha256: "d".repeat(64),
+            sizeBytes: 23456,
+          },
+        ],
+      }),
+    );
+    const kernel = selectKernelArtifacts(manifest);
+    expect(kernel?.vmlinuz.url).toContain("vmlinuz");
+    expect(kernel?.vmlinuz.sha256).toBe("c".repeat(64));
+    expect(kernel?.initramfs.sizeBytes).toBe(23456);
+  });
+
+  it("returns undefined kernel artifacts when the feed ships no kernel", () => {
+    expect(selectKernelArtifacts(parseUpdateFeed(feed()))).toBeUndefined();
+  });
+
+  it("rejects a half kernel pair loudly", () => {
+    const onlyVmlinuz = parseUpdateFeed(
+      feed({
+        artifacts: [
+          {
+            kind: "rootfs-squashfs",
+            url: "https://example.com/rootfs.squashfs",
+            sha256: SHA,
+            sizeBytes: 1,
+          },
+          {
+            kind: "vmlinuz",
+            url: "https://example.com/vmlinuz",
+            sha256: SHA,
+            sizeBytes: 1,
+          },
+        ],
+      }),
+    );
+    expect(() => selectKernelArtifacts(onlyVmlinuz)).toThrow("initramfs");
+    const onlyInitramfs = parseUpdateFeed(
+      feed({
+        artifacts: [
+          {
+            kind: "rootfs-squashfs",
+            url: "https://example.com/rootfs.squashfs",
+            sha256: SHA,
+            sizeBytes: 1,
+          },
+          {
+            kind: "initramfs",
+            url: "https://example.com/initramfs.cpio.gz",
+            sha256: SHA,
+            sizeBytes: 1,
+          },
+        ],
+      }),
+    );
+    expect(() => selectKernelArtifacts(onlyInitramfs)).toThrow("vmlinuz");
   });
 });

@@ -49,6 +49,26 @@ main() {
 
   rdialog --title "Roll Back Update" --infobox "Restoring the pre-update system files...\nThis may take several minutes." 5 58
   if restore_image_over_root "$_root/var/lib/sevynos/updates/previous/rootfs.squashfs" "$_root"; then
+    # Kernel pairing (Phase 3 B3): the restored snapshot carries the OLD
+    # kernel modules, so the kernel pair flips with it. Opportunistic:
+    # recovery images predating the kernel updater lack
+    # kernel-lifecycle-lib.sh and skip the flip (their updates were
+    # rootfs-only anyway).
+    _klib="$SEVYN_RECOVERY_BASE/kernel-lifecycle-lib.sh"
+    if [ -f "$_klib" ]; then
+      # shellcheck disable=SC1090
+      . "$_klib"
+      # In the recovery environment the GRUB lib lives next to this
+      # script, not at the installed-system path.
+      SEVYN_GRUB_CFG_LIB="$SEVYN_RECOVERY_BASE/grub-cfg-lib.sh"
+      export SEVYN_GRUB_CFG_LIB
+      if ! sevyn_kernel_rollback_flip "$_root"; then
+        rdialog --title "Roll Back Update" \
+          --msgbox "The system files were restored, but the kernel pair\ncould not be flipped back (see the recovery log).\n\nDo NOT reboot yet — the kernel and its modules are\nmismatched. Note the log contents and retry." 12 64
+        unmount_root
+        return 1
+      fi
+    fi
     sync
     unmount_root
     rdialog --title "Roll Back Update" \
