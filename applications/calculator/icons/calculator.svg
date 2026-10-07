@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Calculator">
+  <defs>
+    <linearGradient id="sevyn-icon-calculator" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBBF24"/>
+      <stop offset="1" stop-color="#D97706"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" rx="5.5" fill="url(#sevyn-icon-calculator)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="6.5" y="3.5" width="11" height="17" rx="2"/>
+    <line x1="6.5" y1="8" x2="17.5" y2="8"/>
+    <line x1="9.5" y1="12" x2="9.6" y2="12"/>
+    <line x1="12" y1="12" x2="12.1" y2="12"/>
+    <line x1="14.5" y1="12" x2="14.6" y2="12"/>
+    <line x1="9.5" y1="15.5" x2="9.6" y2="15.5"/>
+    <line x1="12" y1="15.5" x2="12.1" y2="15.5"/>
+    <line x1="14.5" y1="15.5" x2="14.6" y2="15.5"/>
+  </g>
+</svg>

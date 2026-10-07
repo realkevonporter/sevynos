@@ -18,4 +18,11 @@ export interface ApplicationManifest {
   readonly permissions?: readonly string[] | undefined;
   readonly signature?: string | undefined;
   readonly system?: boolean | undefined;
+
+  /**
+   * Package-relative icon path (e.g. "icons/browser.svg"), matching
+   * SevynApplicationManifest.icon in the TypeScript SDK. Rendered by
+   * ApplicationIcon as the app's custom vector glyph.
+   */
+  readonly icon?: string | undefined;
 }

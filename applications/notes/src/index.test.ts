@@ -17,3 +17,11 @@ describe("third-party Notes application", () => {
     expect(applicationPackage.manifest.instanceMode).toBe("multiple");
   });
 });
+
+describe("application icon asset", () => {
+  it("ships the manifest-declared icon file", async () => {
+    const { existsSync } = await import("node:fs");
+    const iconUrl = new URL(`../${notesManifest.icon}`, import.meta.url);
+    expect(existsSync(iconUrl)).toBe(true);
+  });
+});

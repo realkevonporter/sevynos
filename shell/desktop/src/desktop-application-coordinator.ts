@@ -41,6 +41,11 @@ export interface DesktopApplicationDefinition {
   readonly kind: DesktopApplicationKind;
   readonly title: string;
   readonly layout: DesktopWindowLayoutPreferences;
+  /**
+   * Manifest icon path (e.g. "icons/browser.svg"). Rendered by
+   * ApplicationIcon as the app's custom vector glyph.
+   */
+  readonly icon?: string | undefined;
 }
 
 export interface RunningDesktopApplication {
@@ -64,6 +69,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.welcome",
       name: "Welcome",
       kind: "welcome",
+      icon: "icons/welcome.svg",
       title: "Welcome to SevynOS",
       layout: windowLayout(620, 420, 480, 320),
     }),
@@ -71,6 +77,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.console",
       name: "Genesis Console",
       kind: "console",
+      icon: "icons/terminal.svg",
       title: "Genesis Console",
       layout: windowLayout(620, 420, 440, 280),
     }),
@@ -78,6 +85,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.system-monitor",
       name: "System Monitor",
       kind: "system-monitor",
+      icon: "icons/system-monitor.svg",
       title: "System Monitor",
       layout: windowLayout(560, 390, 480, 320),
     }),
@@ -85,6 +93,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.settings",
       name: "Settings",
       kind: "settings",
+      icon: "icons/settings.svg",
       title: "Desktop Settings",
       layout: windowLayout(820, 640, 640, 420),
     }),
@@ -99,6 +108,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.files",
       name: "Files",
       kind: "files",
+      icon: "icons/files.svg",
       title: "Files",
       layout: windowLayout(760, 560, 600, 400),
     }),
@@ -106,6 +116,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.camera",
       name: "Camera",
       kind: "camera",
+      icon: "icons/camera.svg",
       title: "Camera",
       layout: windowLayout(800, 580, 640, 480),
     }),
@@ -113,6 +124,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.browser",
       name: "Browser",
       kind: "browser",
+      icon: "icons/browser.svg",
       title: "SevynOS Browser",
       layout: windowLayout(900, 640, 680, 440),
     }),
@@ -120,6 +132,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.ide",
       name: "Sevyn Code",
       kind: "ide",
+      icon: "icons/sevyn-code.svg",
       title: "Sevyn Code · IDE",
       layout: windowLayout(1040, 700, 720, 480),
     }),
@@ -127,6 +140,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.text-editor",
       name: "Text Editor",
       kind: "text-editor",
+      icon: "icons/text-editor.svg",
       title: "Text Editor",
       layout: windowLayout(860, 620, 640, 420),
     }),
@@ -141,6 +155,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.notes",
       name: "Notes",
       kind: "notes",
+      icon: "icons/notes.svg",
       title: "Notes",
       layout: windowLayout(760, 540, 600, 400),
     }),
@@ -148,6 +163,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.music",
       name: "Music",
       kind: "music",
+      icon: "icons/music.svg",
       title: "Music",
       layout: windowLayout(840, 600, 640, 440),
     }),
@@ -155,6 +171,7 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       id: "org.sevynos.calculator",
       name: "Calculator",
       kind: "calculator",
+      icon: "icons/calculator.svg",
       title: "Calculator",
       layout: windowLayout(400, 640, 320, 480),
     }),
@@ -307,6 +324,7 @@ export class DesktopApplicationCoordinator {
           minimized: window.state === "minimized",
           displayId: this.#environment.getDisplayForBounds(window.bounds).id,
           running: true,
+          icon: running.definition.icon,
         }),
       );
     }
@@ -425,6 +443,7 @@ export class DesktopApplicationCoordinator {
       id,
       name,
       kind: "notes",
+      icon: "icons/notes.svg",
       title: name,
       layout: windowLayout(760, 540, 600, 400),
     });

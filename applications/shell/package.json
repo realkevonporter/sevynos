@@ -71,6 +71,7 @@
     "clean": "rm -rf dist coverage *.tsbuildinfo"
   },
   "dependencies": {
+    "@sevynos/react-native": "workspace:*",
     "@sevynos/shell-core": "workspace:*",
     "react": "^19.2.8",
     "react-native": "0.85.3"

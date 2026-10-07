@@ -10,6 +10,11 @@ import {
   View,
 } from "react-native";
 import { SevynShellTheme } from "../theme.js";
+import {
+  iconGlyphForManifestIcon,
+  ShellGlyph,
+  tileColorForApplication,
+} from "./application-icons.js";
 
 export interface MobileApplicationSummary {
   readonly id: string;
@@ -17,6 +22,13 @@ export interface MobileApplicationSummary {
   readonly subtitle?: string;
   readonly accent?: string;
   readonly running?: boolean;
+  /**
+   * Manifest icon path (SevynApplicationManifest.icon, e.g.
+   * "icons/browser.svg"). ApplicationIcon renders the matching vector glyph
+   * from the app's custom SVG icon set; when absent it falls back to the
+   * letter tile.
+   */
+  readonly icon?: string | undefined;
 }
 
 export interface MobileHomeApplicationProps {
@@ -230,6 +242,29 @@ export function ApplicationIcon({
   application,
   size,
 }: ApplicationIconProps): JSX.Element {
+  const tileColor = tileColorForApplication(
+    application.id,
+    application.accent ?? colorForApplication(application.id),
+    SevynShellTheme.colors.accent,
+  );
+  const tileStyle = {
+    backgroundColor: tileColor,
+    borderRadius: Math.round(size * 0.27),
+    height: size,
+    width: size,
+  };
+  const glyph = iconGlyphForManifestIcon(application.icon);
+  if (glyph !== undefined) {
+    const glyphSize = Math.round(size * 0.62);
+    return (
+      <View style={[styles.icon, tileStyle]}>
+        <View style={styles.iconLight} />
+        <View style={styles.iconGlyphWrap}>
+          <ShellGlyph name={glyph} size={glyphSize} />
+        </View>
+      </View>
+    );
+  }
   const accent = application.accent ?? colorForApplication(application.id);
   const fontSize = Math.max(15, Math.round(size * 0.32));
   return (
@@ -485,6 +520,12 @@ const styles = StyleSheet.create({
     position: "absolute",
     right: "-18%",
     width: "74%",
+  },
+  iconGlyphWrap: {
+    alignItems: "center",
+    height: "100%",
+    justifyContent: "center",
+    width: "100%",
   },
   iconText: {
     color: "#FFFFFF",

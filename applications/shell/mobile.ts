@@ -14,6 +14,11 @@ export {
   type MobileLauncherApplicationProps,
 } from "./mobile-home/mobile.js";
 export {
+  iconGlyphForManifestIcon,
+  ShellGlyph,
+  tileColorForApplication,
+} from "./mobile-home/application-icons.js";
+export {
   MobileStatusBarApplication,
   type MobileStatusBarApplicationProps,
 } from "./status-bar/mobile.js";

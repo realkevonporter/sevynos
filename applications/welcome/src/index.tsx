@@ -2,10 +2,12 @@ import { type JSX } from "react";
 import {
   Pressable,
   ScrollView,
+  SevynIcon,
   StyleSheet,
   Text,
   View,
   type SevynApplicationManifest,
+  type SevynIconName,
 } from "@sevynos/react-native";
 
 export const welcomeManifest: SevynApplicationManifest = {
@@ -29,32 +31,38 @@ export interface WelcomeApplicationProps {
   readonly onLaunch?: ((applicationId: string) => void) | undefined;
 }
 
-const APPS = [
+const APPS: readonly {
+  readonly id: string;
+  readonly title: string;
+  readonly icon: SevynIconName;
+  readonly desc: string;
+  readonly color: string;
+}[] = [
   {
     id: "org.sevynos.browser",
     title: "Browser",
-    icon: "🌐",
+    icon: "app-browser",
     desc: "Browse offline docs & web",
     color: "#38BDF8",
   },
   {
     id: "org.sevynos.settings",
     title: "Settings",
-    icon: "⚙️",
+    icon: "app-settings",
     desc: "Themes, displays & audio",
     color: "#D7AC57",
   },
   {
     id: "org.sevynos.files",
     title: "Files",
-    icon: "📁",
+    icon: "app-files",
     desc: "Documents & storage",
     color: "#F472B6",
   },
   {
     id: "org.sevynos.terminal",
     title: "Terminal",
-    icon: "💻",
+    icon: "app-terminal",
     desc: "Genesis command console",
     color: "#34D399",
   },
@@ -72,7 +80,7 @@ export function WelcomeApplication({ onLaunch }: WelcomeApplicationProps): JSX.E
         <View style={styles.hero}>
           <View style={styles.heroHeaderRow}>
             <View style={styles.logoBadge}>
-              <Text style={styles.logoIcon}>⚡</Text>
+              <SevynIcon name="zap" size={18} color="#E6C47A" />
             </View>
             <View style={styles.heroTextContainer}>
               <Text style={styles.heroTitle}>Welcome to SevynOS</Text>
@@ -93,7 +101,7 @@ export function WelcomeApplication({ onLaunch }: WelcomeApplicationProps): JSX.E
               style={styles.card}
             >
               <View style={styles.cardHeader}>
-                <Text style={styles.cardIcon}>{app.icon}</Text>
+                <SevynIcon name={app.icon} size={16} color={app.color} />
                 <Text style={styles.cardTitle}>{app.title}</Text>
               </View>
               <Text style={styles.cardDesc}>{app.desc}</Text>
@@ -160,9 +168,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  logoIcon: {
-    fontSize: 18,
-  },
   heroTitle: {
     fontSize: 16,
     fontWeight: "700",
@@ -198,9 +203,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-  },
-  cardIcon: {
-    fontSize: 14,
   },
   cardTitle: {
     fontSize: 12,

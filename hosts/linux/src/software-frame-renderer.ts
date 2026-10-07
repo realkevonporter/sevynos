@@ -1016,6 +1016,66 @@ function drawNativeSurface(
   raster.restoreClipDepth(initialClipDepth);
 }
 
+function polyline(
+  raster: SoftwareRaster,
+  points: readonly (readonly [number, number])[],
+  color: Rgba,
+  thickness = 1,
+): void {
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    if (prev === undefined || curr === undefined) continue;
+    raster.drawLine(prev[0], prev[1], curr[0], curr[1], color, thickness);
+  }
+}
+
+function arcPoints(
+  cx: number,
+  cy: number,
+  radius: number,
+  startAngle: number,
+  endAngle: number,
+  segments = 24,
+): [number, number][] {
+  const points: [number, number][] = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = startAngle + ((endAngle - startAngle) * i) / segments;
+    points.push([cx + Math.cos(a) * radius, cy + Math.sin(a) * radius]);
+  }
+  return points;
+}
+
+function ellipsePoints(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  segments = 32,
+): [number, number][] {
+  const points: [number, number][] = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    points.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]);
+  }
+  return points;
+}
+
+function starPoints(
+  cx: number,
+  cy: number,
+  outerR: number,
+  innerR: number,
+): [number, number][] {
+  const points: [number, number][] = [];
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rad = i % 2 === 0 ? outerR : innerR;
+    points.push([cx + Math.cos(a) * rad, cy + Math.sin(a) * rad]);
+  }
+  return points;
+}
+
 function drawNativeIcon(
   raster: SoftwareRaster,
   command: NativeIconCommand,
@@ -1025,6 +1085,8 @@ function drawNativeIcon(
   const color = withAlpha(parseColor(command.color), opacity);
   const cx = x + width / 2;
   const cy = y + height / 2;
+  const r = Math.min(width, height) * 0.36;
+  const t = Math.max(1.5, Math.min(width, height) * 0.075);
   switch (command.icon) {
     case "appearance":
       raster.fillCircle(cx, cy, Math.min(width, height) * 0.34, color);
@@ -1093,6 +1155,995 @@ function drawNativeIcon(
     case "search":
       raster.strokeCircle(cx - 2, cy - 2, Math.min(width, height) * 0.27, color, 2);
       raster.drawLine(cx + 2, cy + 2, x + width - 2, y + height - 2, color, 2);
+      break;
+    // --- SevynOS application icons: software-raster renditions of the
+    // per-app SVG sets (applications/<app>/icons/<app>.svg), mirroring the
+    // canvas-genesis-renderer glyphs. Drawn in the icon color on the app's
+    // brand tile by ApplicationIcon.
+    case "app-browser":
+      raster.strokeCircle(cx, cy, r, color, t);
+      polyline(raster, ellipsePoints(cx, cy, r * 0.45, r), color, t);
+      raster.drawLine(
+        cx - r * 0.94,
+        cy - r * 0.42,
+        cx + r * 0.94,
+        cy - r * 0.42,
+        color,
+        t,
+      );
+      raster.drawLine(
+        cx - r * 0.94,
+        cy + r * 0.42,
+        cx + r * 0.94,
+        cy + r * 0.42,
+        color,
+        t,
+      );
+      break;
+    case "app-calculator":
+      raster.roundedRect(
+        {
+          x: x + width * 0.3,
+          y: y + height * 0.12,
+          width: width * 0.4,
+          height: height * 0.76,
+        },
+        2.5,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.3,
+        y + height * 0.34,
+        x + width * 0.7,
+        y + height * 0.34,
+        color,
+        t,
+      );
+      for (const row of [0.48, 0.62, 0.76]) {
+        for (const col of [0.4, 0.5, 0.6]) {
+          raster.drawLine(
+            x + width * col,
+            y + height * row,
+            x + width * col + 0.6,
+            y + height * row,
+            color,
+            t,
+          );
+        }
+      }
+      break;
+    case "app-camera":
+      polyline(
+        raster,
+        [
+          [cx - width * 0.12, y + height * 0.32],
+          [cx - width * 0.08, y + height * 0.22],
+          [cx + width * 0.08, y + height * 0.22],
+          [cx + width * 0.12, y + height * 0.32],
+        ],
+        color,
+        t,
+      );
+      raster.roundedRect(
+        {
+          x: x + width * 0.12,
+          y: y + height * 0.32,
+          width: width * 0.76,
+          height: height * 0.46,
+        },
+        3,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      raster.strokeCircle(cx, cy + r * 0.16, r * 0.42, color, t);
+      break;
+    case "app-files":
+      polyline(
+        raster,
+        [
+          [x + width * 0.16, y + height * 0.4],
+          [x + width * 0.16, y + height * 0.28],
+          [x + width * 0.36, y + height * 0.28],
+          [x + width * 0.44, y + height * 0.4],
+          [x + width * 0.84, y + height * 0.4],
+          [x + width * 0.84, y + height * 0.74],
+          [x + width * 0.16, y + height * 0.74],
+          [x + width * 0.16, y + height * 0.4],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "app-music":
+      polyline(
+        raster,
+        [
+          [cx - width * 0.08, cy + height * 0.22],
+          [cx - width * 0.08, y + height * 0.2],
+          [cx + width * 0.2, y + height * 0.14],
+          [cx + width * 0.2, cy + height * 0.16],
+        ],
+        color,
+        t,
+      );
+      raster.strokeCircle(cx - width * 0.08, cy + height * 0.22, r * 0.34, color, t);
+      raster.strokeCircle(cx + width * 0.2, cy + height * 0.16, r * 0.34, color, t);
+      break;
+    case "app-notes":
+      polyline(
+        raster,
+        [
+          [x + width * 0.28, y + height * 0.14],
+          [x + width * 0.56, y + height * 0.14],
+          [x + width * 0.72, y + height * 0.3],
+          [x + width * 0.72, y + height * 0.86],
+          [x + width * 0.28, y + height * 0.86],
+          [x + width * 0.28, y + height * 0.14],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.56, y + height * 0.14],
+          [x + width * 0.56, y + height * 0.3],
+          [x + width * 0.72, y + height * 0.3],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.38,
+        cy + height * 0.02,
+        x + width * 0.62,
+        cy + height * 0.02,
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.38,
+        cy + height * 0.16,
+        x + width * 0.56,
+        cy + height * 0.16,
+        color,
+        t,
+      );
+      break;
+    case "app-settings":
+    case "gear":
+      raster.strokeCircle(cx, cy, r * 0.42, color, t);
+      for (let i = 0; i < 8; i++) {
+        const a = (i * Math.PI) / 4;
+        raster.drawLine(
+          cx + Math.cos(a) * r * 0.62,
+          cy + Math.sin(a) * r * 0.62,
+          cx + Math.cos(a) * r * 0.92,
+          cy + Math.sin(a) * r * 0.92,
+          color,
+          t,
+        );
+      }
+      break;
+    case "app-sevyn-code":
+      polyline(
+        raster,
+        [
+          [cx - width * 0.1, cy - height * 0.14],
+          [cx - width * 0.26, cy],
+          [cx - width * 0.1, cy + height * 0.14],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [cx + width * 0.1, cy - height * 0.14],
+          [cx + width * 0.26, cy],
+          [cx + width * 0.1, cy + height * 0.14],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(
+        cx + width * 0.06,
+        y + height * 0.2,
+        cx - width * 0.06,
+        y + height * 0.8,
+        color,
+        t,
+      );
+      break;
+    case "app-system-monitor":
+      raster.roundedRect(
+        {
+          x: x + width * 0.14,
+          y: y + height * 0.14,
+          width: width * 0.72,
+          height: height * 0.72,
+        },
+        3,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.26, cy + height * 0.08],
+          [x + width * 0.37, cy + height * 0.08],
+          [x + width * 0.44, cy - height * 0.12],
+          [x + width * 0.54, cy + height * 0.18],
+          [x + width * 0.6, cy + height * 0.02],
+          [x + width * 0.72, cy + height * 0.02],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "app-terminal":
+      raster.roundedRect(
+        {
+          x: x + width * 0.14,
+          y: y + height * 0.14,
+          width: width * 0.72,
+          height: height * 0.72,
+        },
+        3,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [cx - width * 0.16, cy - height * 0.08],
+          [cx - width * 0.05, cy + height * 0.01],
+          [cx - width * 0.16, cy + height * 0.1],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(
+        cx + width * 0.02,
+        cy + height * 0.16,
+        cx + width * 0.16,
+        cy + height * 0.16,
+        color,
+        t,
+      );
+      break;
+    case "app-text-editor":
+      polyline(
+        raster,
+        [
+          [x + width * 0.28, y + height * 0.12],
+          [x + width * 0.52, y + height * 0.12],
+          [x + width * 0.7, y + height * 0.3],
+          [x + width * 0.7, y + height * 0.86],
+          [x + width * 0.28, y + height * 0.86],
+          [x + width * 0.28, y + height * 0.12],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.52, y + height * 0.12],
+          [x + width * 0.52, y + height * 0.3],
+          [x + width * 0.7, y + height * 0.3],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.38,
+        cy + height * 0.04,
+        x + width * 0.6,
+        cy + height * 0.04,
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.38,
+        cy + height * 0.18,
+        x + width * 0.54,
+        cy + height * 0.18,
+        color,
+        t,
+      );
+      break;
+    case "app-welcome":
+      polyline(
+        raster,
+        arcPoints(cx, cy + height * 0.08, r * 0.52, Math.PI, Math.PI * 2),
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.16,
+        cy + height * 0.08,
+        x + width * 0.84,
+        cy + height * 0.08,
+        color,
+        t,
+      );
+      raster.drawLine(cx, y + height * 0.12, cx, y + height * 0.24, color, t);
+      raster.drawLine(
+        cx - r * 0.62,
+        y + height * 0.26,
+        cx - r * 0.42,
+        y + height * 0.36,
+        color,
+        t,
+      );
+      raster.drawLine(
+        cx + r * 0.62,
+        y + height * 0.26,
+        cx + r * 0.42,
+        y + height * 0.36,
+        color,
+        t,
+      );
+      raster.drawLine(
+        cx - width * 0.14,
+        cy + height * 0.26,
+        cx + width * 0.14,
+        cy + height * 0.26,
+        color,
+        t,
+      );
+      break;
+    // --- Generic UI glyphs (emoji-free iconography for apps and shell).
+    case "home":
+      polyline(
+        raster,
+        [
+          [cx, y + height * 0.18],
+          [x + width * 0.82, cy - height * 0.04],
+          [x + width * 0.82, y + height * 0.8],
+          [x + width * 0.62, y + height * 0.8],
+          [x + width * 0.62, cy + height * 0.12],
+          [x + width * 0.38, cy + height * 0.12],
+          [x + width * 0.38, y + height * 0.8],
+          [x + width * 0.18, y + height * 0.8],
+          [x + width * 0.18, cy - height * 0.04],
+          [cx, y + height * 0.18],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "monitor":
+      raster.strokeRect(
+        {
+          x: x + width * 0.14,
+          y: y + height * 0.18,
+          width: width * 0.72,
+          height: height * 0.5,
+        },
+        color,
+        t,
+      );
+      raster.drawLine(cx, y + height * 0.68, cx, y + height * 0.82, color, t);
+      raster.drawLine(
+        cx - width * 0.12,
+        y + height * 0.82,
+        cx + width * 0.12,
+        y + height * 0.82,
+        color,
+        t,
+      );
+      break;
+    case "file-text":
+      raster.strokeRect(
+        {
+          x: x + width * 0.3,
+          y: y + height * 0.14,
+          width: width * 0.4,
+          height: height * 0.72,
+        },
+        color,
+        t,
+      );
+      for (const row of [0.34, 0.48, 0.62]) {
+        raster.drawLine(
+          x + width * 0.4,
+          y + height * row,
+          x + width * 0.6,
+          y + height * row,
+          color,
+          t,
+        );
+      }
+      break;
+    case "download":
+      polyline(
+        raster,
+        [
+          [cx, y + height * 0.18],
+          [cx, cy + height * 0.08],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [cx - width * 0.12, cy - height * 0.02],
+          [cx, cy + height * 0.08],
+          [cx + width * 0.12, cy - height * 0.02],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.22, y + height * 0.62],
+          [x + width * 0.22, y + height * 0.8],
+          [x + width * 0.78, y + height * 0.8],
+          [x + width * 0.78, y + height * 0.62],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "image":
+      raster.strokeRect(
+        {
+          x: x + width * 0.16,
+          y: y + height * 0.22,
+          width: width * 0.68,
+          height: height * 0.56,
+        },
+        color,
+        t,
+      );
+      raster.fillCircle(cx - width * 0.14, cy - height * 0.1, r * 0.14, color);
+      polyline(
+        raster,
+        [
+          [x + width * 0.16, y + height * 0.66],
+          [x + width * 0.4, y + height * 0.46],
+          [x + width * 0.54, y + height * 0.58],
+          [x + width * 0.64, y + height * 0.48],
+          [x + width * 0.84, y + height * 0.66],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "music-note":
+      raster.drawLine(
+        cx + width * 0.1,
+        y + height * 0.18,
+        cx + width * 0.1,
+        cy + height * 0.18,
+        color,
+        t,
+      );
+      raster.strokeCircle(cx + width * 0.1, cy + height * 0.18, r * 0.36, color, t);
+      break;
+    case "film":
+      raster.strokeRect(
+        {
+          x: x + width * 0.16,
+          y: y + height * 0.2,
+          width: width * 0.68,
+          height: height * 0.6,
+        },
+        color,
+        t,
+      );
+      for (const row of [0.32, 0.68]) {
+        for (const col of [0.28, 0.5, 0.72]) {
+          raster.drawLine(
+            x + width * col,
+            y + height * row,
+            x + width * col + 1.2,
+            y + height * row,
+            color,
+            t,
+          );
+        }
+      }
+      break;
+    case "trash":
+      raster.drawLine(
+        x + width * 0.3,
+        y + height * 0.24,
+        x + width * 0.7,
+        y + height * 0.24,
+        color,
+        t,
+      );
+      raster.drawLine(cx, y + height * 0.16, cx, y + height * 0.24, color, t);
+      raster.fillPolygon(
+        [
+          [x + width * 0.36, y + height * 0.24],
+          [x + width * 0.32, y + height * 0.8],
+          [x + width * 0.68, y + height * 0.8],
+          [x + width * 0.64, y + height * 0.24],
+        ],
+        withAlpha(color, 0.25),
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.36, y + height * 0.24],
+          [x + width * 0.32, y + height * 0.8],
+          [x + width * 0.68, y + height * 0.8],
+          [x + width * 0.64, y + height * 0.24],
+          [x + width * 0.36, y + height * 0.24],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(
+        cx - width * 0.07,
+        y + height * 0.4,
+        cx - width * 0.09,
+        y + height * 0.68,
+        color,
+        t,
+      );
+      raster.drawLine(
+        cx + width * 0.07,
+        y + height * 0.4,
+        cx + width * 0.09,
+        y + height * 0.68,
+        color,
+        t,
+      );
+      break;
+    case "folder":
+      polyline(
+        raster,
+        [
+          [x + width * 0.16, y + height * 0.38],
+          [x + width * 0.16, y + height * 0.28],
+          [x + width * 0.4, y + height * 0.28],
+          [x + width * 0.46, y + height * 0.38],
+          [x + width * 0.84, y + height * 0.38],
+          [x + width * 0.84, y + height * 0.72],
+          [x + width * 0.16, y + height * 0.72],
+          [x + width * 0.16, y + height * 0.38],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "globe":
+      raster.strokeCircle(cx, cy, r, color, t);
+      polyline(raster, ellipsePoints(cx, cy, r * 0.5, r), color, t);
+      raster.drawLine(cx - r * 0.87, cy, cx + r * 0.87, cy, color, t);
+      break;
+    case "book":
+      polyline(
+        raster,
+        [
+          [x + width * 0.28, y + height * 0.16],
+          [cx, y + height * 0.2],
+          [x + width * 0.72, y + height * 0.16],
+          [x + width * 0.72, y + height * 0.8],
+          [cx, y + height * 0.84],
+          [x + width * 0.28, y + height * 0.8],
+          [x + width * 0.28, y + height * 0.16],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(cx, y + height * 0.2, cx, y + height * 0.84, color, t);
+      break;
+    case "star": {
+      const starPts = starPoints(cx, cy, r * 0.95, r * 0.42);
+      const starFirst = starPts[0];
+      if (starFirst !== undefined) polyline(raster, [...starPts, starFirst], color, t);
+      break;
+    }
+    case "wifi": {
+      const wy = cy + r * 0.42;
+      for (const rad of [r * 0.28, r * 0.62, r * 0.95]) {
+        polyline(
+          raster,
+          arcPoints(cx, wy, rad, Math.PI * 1.25, Math.PI * 1.75),
+          color,
+          t,
+        );
+      }
+      raster.fillCircle(cx, wy, r * 0.12, color);
+      break;
+    }
+    case "volume":
+      raster.fillPolygon(
+        [
+          [x + width * 0.24, cy - height * 0.08],
+          [x + width * 0.4, cy - height * 0.08],
+          [x + width * 0.54, y + height * 0.24],
+          [x + width * 0.54, y + height * 0.76],
+          [x + width * 0.4, cy + height * 0.08],
+          [x + width * 0.24, cy + height * 0.08],
+        ],
+        color,
+      );
+      polyline(
+        raster,
+        arcPoints(cx + width * 0.08, cy, r * 0.5, -Math.PI / 3, Math.PI / 3),
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        arcPoints(cx + width * 0.08, cy, r * 0.85, -Math.PI / 3, Math.PI / 3),
+        color,
+        t,
+      );
+      break;
+    case "battery":
+      raster.roundedRect(
+        {
+          x: x + width * 0.14,
+          y: cy - height * 0.18,
+          width: width * 0.66,
+          height: height * 0.36,
+        },
+        2.5,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.84,
+        cy - height * 0.08,
+        x + width * 0.88,
+        cy - height * 0.08,
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.88,
+        cy - height * 0.08,
+        x + width * 0.88,
+        cy + height * 0.08,
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.88,
+        cy + height * 0.08,
+        x + width * 0.84,
+        cy + height * 0.08,
+        color,
+        t,
+      );
+      break;
+    case "clock":
+      raster.strokeCircle(cx, cy, r * 0.9, color, t);
+      raster.drawLine(cx, cy, cx, cy - r * 0.5, color, t);
+      raster.drawLine(cx, cy, cx + r * 0.36, cy + r * 0.14, color, t);
+      break;
+    case "package":
+      polyline(
+        raster,
+        [
+          [cx, y + height * 0.18],
+          [x + width * 0.8, cy - height * 0.02],
+          [x + width * 0.8, y + height * 0.72],
+          [cx, y + height * 0.84],
+          [x + width * 0.2, y + height * 0.72],
+          [x + width * 0.2, cy - height * 0.02],
+          [cx, y + height * 0.18],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.2, cy - height * 0.02],
+          [cx, cy + height * 0.08],
+          [x + width * 0.8, cy - height * 0.02],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(cx, cy + height * 0.08, cx, y + height * 0.84, color, t);
+      break;
+    case "keyboard":
+      raster.roundedRect(
+        {
+          x: x + width * 0.14,
+          y: cy - height * 0.2,
+          width: width * 0.72,
+          height: height * 0.4,
+        },
+        2.5,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      for (const row of [-0.08, 0.06]) {
+        for (const col of [-0.2, -0.07, 0.07, 0.2]) {
+          raster.drawLine(
+            cx + width * col,
+            cy + height * row,
+            cx + width * col + 1.2,
+            cy + height * row,
+            color,
+            t,
+          );
+        }
+      }
+      raster.drawLine(
+        cx - width * 0.16,
+        cy + height * 0.14,
+        cx + width * 0.16,
+        cy + height * 0.14,
+        color,
+        t,
+      );
+      break;
+    case "info":
+      raster.strokeCircle(cx, cy, r * 0.9, color, t);
+      raster.drawLine(cx, cy - r * 0.1, cx, cy + r * 0.5, color, t);
+      raster.fillCircle(cx, cy - r * 0.38, r * 0.1, color);
+      break;
+    case "check":
+      polyline(
+        raster,
+        [
+          [x + width * 0.24, cy + height * 0.02],
+          [cx - width * 0.02, cy + height * 0.22],
+          [x + width * 0.78, y + height * 0.26],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "warning":
+      polyline(
+        raster,
+        [
+          [cx, y + height * 0.18],
+          [x + width * 0.84, y + height * 0.78],
+          [x + width * 0.16, y + height * 0.78],
+          [cx, y + height * 0.18],
+        ],
+        color,
+        t,
+      );
+      raster.drawLine(cx, cy - height * 0.04, cx, cy + height * 0.18, color, t);
+      raster.fillCircle(cx, cy + height * 0.34, r * 0.09, color);
+      break;
+    case "lock":
+      polyline(
+        raster,
+        arcPoints(cx, cy - height * 0.1, width * 0.18, Math.PI, Math.PI * 2),
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.32,
+        cy - height * 0.1,
+        x + width * 0.32,
+        cy + height * 0.02,
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.68,
+        cy - height * 0.1,
+        x + width * 0.68,
+        cy + height * 0.02,
+        color,
+        t,
+      );
+      raster.roundedRect(
+        {
+          x: x + width * 0.28,
+          y: cy - height * 0.02,
+          width: width * 0.44,
+          height: height * 0.4,
+        },
+        2.5,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      break;
+    case "heart": {
+      const hr = r * 0.34;
+      raster.fillCircle(cx - hr * 0.95, cy - hr * 0.35, hr, color);
+      raster.fillCircle(cx + hr * 0.95, cy - hr * 0.35, hr, color);
+      raster.fillPolygon(
+        [
+          [cx - hr * 1.85, cy - hr * 0.05],
+          [cx + hr * 1.85, cy - hr * 0.05],
+          [cx, cy + hr * 1.75],
+        ],
+        color,
+      );
+      break;
+    }
+    case "airplane":
+      raster.fillPolygon(
+        [
+          [x + width * 0.16, cy + height * 0.1],
+          [x + width * 0.84, y + height * 0.18],
+          [cx + width * 0.02, cy + height * 0.22],
+          [x + width * 0.42, cy + height * 0.04],
+        ],
+        color,
+      );
+      break;
+    case "brightness":
+      raster.strokeCircle(cx, cy, r * 0.4, color, t);
+      for (let i = 0; i < 8; i++) {
+        const a = (i * Math.PI) / 4;
+        raster.drawLine(
+          cx + Math.cos(a) * r * 0.6,
+          cy + Math.sin(a) * r * 0.6,
+          cx + Math.cos(a) * r * 0.92,
+          cy + Math.sin(a) * r * 0.92,
+          color,
+          t,
+        );
+      }
+      break;
+    case "zap":
+      raster.fillPolygon(
+        [
+          [cx + width * 0.08, y + height * 0.14],
+          [cx - width * 0.16, cy + height * 0.1],
+          [cx - width * 0.02, cy + height * 0.1],
+          [cx - width * 0.08, y + height * 0.86],
+          [cx + width * 0.16, cy - height * 0.1],
+          [cx + width * 0.02, cy - height * 0.1],
+        ],
+        color,
+      );
+      break;
+    case "hard-drive":
+      raster.roundedRect(
+        {
+          x: x + width * 0.14,
+          y: cy - height * 0.22,
+          width: width * 0.72,
+          height: height * 0.44,
+        },
+        2.5,
+        withAlpha(color, 0),
+        color,
+        undefined,
+        t,
+      );
+      raster.fillCircle(x + width * 0.26, cy, r * 0.08, color);
+      raster.drawLine(x + width * 0.4, cy, x + width * 0.76, cy, color, t);
+      break;
+    case "menu":
+      for (const row of [0.32, 0.5, 0.68]) {
+        raster.drawLine(
+          x + width * 0.24,
+          y + height * row,
+          x + width * 0.76,
+          y + height * row,
+          color,
+          t,
+        );
+      }
+      break;
+    case "grid":
+      for (const row of [0.26, 0.54]) {
+        for (const col of [0.26, 0.54]) {
+          raster.strokeRect(
+            {
+              x: x + width * col,
+              y: y + height * row,
+              width: width * 0.2,
+              height: height * 0.2,
+            },
+            color,
+            t,
+          );
+        }
+      }
+      break;
+    case "edit":
+      raster.fillPolygon(
+        [
+          [x + width * 0.3, y + height * 0.7],
+          [x + width * 0.58, y + height * 0.28],
+          [x + width * 0.68, y + height * 0.18],
+          [x + width * 0.74, y + height * 0.24],
+          [x + width * 0.64, y + height * 0.34],
+          [x + width * 0.36, y + height * 0.76],
+          [x + width * 0.24, y + height * 0.78],
+        ],
+        color,
+      );
+      break;
+    case "x":
+      raster.drawLine(
+        x + width * 0.28,
+        y + height * 0.28,
+        x + width * 0.72,
+        y + height * 0.72,
+        color,
+        t,
+      );
+      raster.drawLine(
+        x + width * 0.72,
+        y + height * 0.28,
+        x + width * 0.28,
+        y + height * 0.72,
+        color,
+        t,
+      );
+      break;
+    case "refresh":
+      polyline(
+        raster,
+        arcPoints(cx, cy, r * 0.85, -Math.PI * 0.35, Math.PI * 1.15),
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [cx + r * 0.95, cy - r * 0.42],
+          [cx + r * 0.42, cy - r * 0.62],
+          [cx + r * 0.72, cy - r * 0.05],
+        ],
+        color,
+        t,
+      );
+      break;
+    case "moon": {
+      const mr = r * 0.72;
+      polyline(raster, arcPoints(cx, cy, mr, 0.9, Math.PI * 2 - 0.9), color, t);
+      polyline(
+        raster,
+        arcPoints(cx + mr * 0.5, cy, mr * 0.79, 1.42, Math.PI * 2 - 1.42),
+        color,
+        t,
+      );
+      break;
+    }
+    case "bluetooth":
+      raster.drawLine(cx, y + height * 0.16, cx, y + height * 0.84, color, t);
+      polyline(
+        raster,
+        [
+          [cx - width * 0.24, cy - height * 0.24],
+          [cx + width * 0.24, cy],
+          [cx - width * 0.24, cy + height * 0.24],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [cx, y + height * 0.16],
+          [cx + width * 0.24, cy],
+          [cx, y + height * 0.84],
+        ],
+        color,
+        t,
+      );
       break;
     default:
       drawVectorIcon(raster, command.icon, command.bounds, color);
@@ -1395,7 +2446,7 @@ function resolveAppIconVisuals(label: string): {
     return {
       gradientStart: "#64748B",
       gradientEnd: "#334155",
-      symbol: "⚙",
+      symbol: "ST",
       icon: "gear",
     };
   }

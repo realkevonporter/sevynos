@@ -99,6 +99,7 @@ export function DesktopLauncher(input: DesktopLauncherRenderInput): JSX.Element 
                 id: entry.applicationId,
                 name: entry.label,
                 running: entry.running,
+                ...(entry.icon === undefined ? {} : { icon: entry.icon }),
               }}
               size={SevynShellTheme.launcher.iconSize}
             />

@@ -949,28 +949,28 @@ export function FilesApplication(props: {
         children: [
           heading("files.title", "Files"),
           label("files.locations", "LOCATIONS"),
-          button("files.loc.root", "📁 / (Root)", () => {
+          button("files.loc.root", "/ (Root)", () => {
             setPath("/");
           }),
-          button("files.loc.desktop", "💻 Desktop", () => {
+          button("files.loc.desktop", "Desktop", () => {
             setPath("/Desktop");
           }),
-          button("files.loc.docs", "📄 Documents", () => {
+          button("files.loc.docs", "Documents", () => {
             setPath("/Documents");
           }),
-          button("files.loc.downloads", "📥 Downloads", () => {
+          button("files.loc.downloads", "Downloads", () => {
             setPath("/Downloads");
           }),
-          button("files.loc.pics", "🎨 Pictures", () => {
+          button("files.loc.pics", "Pictures", () => {
             setPath("/Pictures");
           }),
-          button("files.loc.music", "🎵 Music", () => {
+          button("files.loc.music", "Music", () => {
             setPath("/Music");
           }),
-          button("files.loc.videos", "🎬 Videos", () => {
+          button("files.loc.videos", "Videos", () => {
             setPath("/Videos");
           }),
-          button("files.loc.trash", "🗑 Trash", () => {
+          button("files.loc.trash", "Trash", () => {
             setPath("/.Trash");
           }),
           View({
@@ -1036,7 +1036,7 @@ export function FilesApplication(props: {
                   ]
                 : []),
               ...(selected && !inTrash && props.filesystem.moveToTrash
-                ? [button("files.delete", "🗑 Trash", deleteSelected)]
+                ? [button("files.delete", "Trash", deleteSelected)]
                 : []),
             ],
           }),
@@ -1100,7 +1100,7 @@ export function FilesApplication(props: {
                       },
                       children: NativeText({
                         id: `file.${entry.path}.label`,
-                        text: `${entry.kind === "directory" ? "📁" : isImage(entry.name) ? "🖼" : "📄"} ${entry.name}${entry.kind === "file" ? ` (${String(entry.size)}B)` : ""}`,
+                        text: `${entry.name}${entry.kind === "file" ? ` (${String(entry.size)}B)` : ""}`,
                         style: {
                           color: selected === entry.path ? "#D7AC57" : "#F0F6FC",
                           fontSize: 13,
@@ -1129,7 +1129,7 @@ export function FilesApplication(props: {
                     NativeText({
                       key: "p-icon",
                       id: "files.preview.icon",
-                      text: "🖼",
+                      text: "[image]",
                       style: { fontSize: 24, width: 32 },
                     }),
                     View({
@@ -1175,10 +1175,10 @@ export function FilesApplication(props: {
                       id: "files.inspector.type",
                       text:
                         selectedEntry.kind === "directory"
-                          ? "📁 Folder"
+                          ? "Folder"
                           : isImage(selectedEntry.name)
-                            ? "🖼 Picture"
-                            : "📄 Document",
+                            ? "Picture"
+                            : "Document",
                       style: { fontSize: 12, color: "#D7AC57", fontWeight: 700 },
                     }),
                     NativeText({

@@ -7,8 +7,10 @@ import {
   Text,
   TextInput,
   View,
+  SevynIcon,
   useOptionalSevynApplicationSdk,
   type BrowserEngineSnapshot,
+  type SevynIconName,
   type SevynBrowserEngine,
   type SevynApplicationManifest,
 } from "@sevynos/react-native";
@@ -110,19 +112,19 @@ export const DOCS_SECTIONS: readonly DocsSection[] = [
   },
 ];
 
-export const DEFAULT_BOOKMARKS = [
-  { title: "DuckDuckGo", url: "https://duckduckgo.com", icon: "🦆" },
-  { title: "React Native", url: "https://reactnative.dev", icon: "⚛️" },
-  { title: "Sevyn Docs", url: "sevyn://docs", icon: "📖" },
-  { title: "GitHub", url: "https://github.com", icon: "🐙" },
-  { title: "Wikipedia", url: "https://en.wikipedia.org", icon: "🌐" },
-  { title: "Hacker News", url: "https://news.ycombinator.com", icon: "📰" },
+export const DEFAULT_BOOKMARKS: readonly Bookmark[] = [
+  { title: "DuckDuckGo", url: "https://duckduckgo.com", icon: "search" },
+  { title: "React Native", url: "https://reactnative.dev", icon: "globe" },
+  { title: "Sevyn Docs", url: "sevyn://docs", icon: "book" },
+  { title: "GitHub", url: "https://github.com", icon: "star" },
+  { title: "Wikipedia", url: "https://en.wikipedia.org", icon: "globe" },
+  { title: "Hacker News", url: "https://news.ycombinator.com", icon: "zap" },
 ];
 
 interface Bookmark {
   readonly title: string;
   readonly url: string;
-  readonly icon: string;
+  readonly icon: SevynIconName;
 }
 
 interface HistoryEntry {
@@ -474,7 +476,7 @@ export function BrowserApplication({
         {
           title: activeTab.title || activeTab.url,
           url: activeTab.url,
-          icon: "⭐",
+          icon: "star",
         },
       ];
     });
@@ -552,9 +554,11 @@ export function BrowserApplication({
                 }}
                 style={isActive ? styles.tabActive : styles.tab}
               >
-                <Text style={styles.tabIcon}>
-                  {tab.url === "sevyn://start" ? "🏠" : "🌐"}
-                </Text>
+                <SevynIcon
+                  name={tab.url === "sevyn://start" ? "home" : "globe"}
+                  size={12}
+                  color="#8E95A5"
+                />
                 <Text style={isActive ? styles.tabTitleActive : styles.tabTitle}>
                   {tab.title}
                 </Text>
@@ -606,15 +610,15 @@ export function BrowserApplication({
         </Pressable>
 
         <Pressable onPress={handleReload} style={styles.navButton}>
-          <Text style={styles.navButtonText}>↻</Text>
+          <SevynIcon name="refresh" size={15} color="#E2E8F0" />
         </Pressable>
 
         <Pressable onPress={handleHome} style={styles.navButton}>
-          <Text style={styles.navButtonText}>⌂</Text>
+          <SevynIcon name="home" size={15} color="#E2E8F0" />
         </Pressable>
 
         <Pressable onPress={toggleBookmark} style={styles.navButton}>
-          <Text style={styles.navButtonText}>{isBookmarked ? "★" : "☆"}</Text>
+          <SevynIcon name="star" size={15} color={isBookmarked ? "#FBBF24" : "#E2E8F0"} />
         </Pressable>
 
         <Pressable
@@ -623,12 +627,14 @@ export function BrowserApplication({
           }}
           style={styles.navButton}
         >
-          <Text style={styles.navButtonText}>
-            ⤓
-            {(engineSnapshot?.downloads?.length ?? 0) > 0
-              ? ` ${String(engineSnapshot?.downloads?.length ?? 0)}`
-              : ""}
-          </Text>
+          <View style={styles.navButtonGlyphRow}>
+            <SevynIcon name="download" size={15} color="#E2E8F0" />
+            {(engineSnapshot?.downloads?.length ?? 0) > 0 ? (
+              <Text style={styles.navButtonText}>
+                {` ${String(engineSnapshot?.downloads?.length ?? 0)}`}
+              </Text>
+            ) : null}
+          </View>
         </Pressable>
 
         {currentZoom !== 1 && (
@@ -645,7 +651,7 @@ export function BrowserApplication({
           }}
           style={styles.navButton}
         >
-          <Text style={styles.navButtonText}>🕐</Text>
+          <SevynIcon name="clock" size={15} color="#E2E8F0" />
         </Pressable>
 
         <Pressable
@@ -654,14 +660,16 @@ export function BrowserApplication({
           }}
           style={styles.navButton}
         >
-          <Text style={styles.navButtonText}>📑</Text>
+          <SevynIcon name="book" size={15} color="#E2E8F0" />
         </Pressable>
 
         {/* Omnibox Address / Search Input */}
         <View style={styles.addressBar}>
-          <Text style={styles.securityBadge}>
-            {activeTab.url.startsWith("https://") ? "🔒" : "🌐"}
-          </Text>
+          <SevynIcon
+            name={activeTab.url.startsWith("https://") ? "lock" : "globe"}
+            size={12}
+            color="#8E95A5"
+          />
           <TextInput
             onChangeText={setAddressInput}
             onSubmitEditing={() => {
@@ -678,7 +686,7 @@ export function BrowserApplication({
               }}
               style={styles.clearButton}
             >
-              <Text style={styles.clearButtonText}>✕</Text>
+              <SevynIcon name="x" size={11} color="#64748B" />
             </Pressable>
           )}
         </View>
@@ -700,7 +708,7 @@ export function BrowserApplication({
             {/* Start Page Header */}
             <View style={styles.startHeader}>
               <View style={styles.logoBadge}>
-                <Text style={styles.logoText}>⚡</Text>
+                <SevynIcon name="zap" size={26} color="#E6C47A" />
               </View>
               <Text style={styles.startTitle}>SevynOS Browser</Text>
               <Text style={styles.startSubtitle}>
@@ -740,7 +748,7 @@ export function BrowserApplication({
                   }}
                   style={styles.bookmarkCard}
                 >
-                  <Text style={styles.bookmarkIcon}>{bookmark.icon}</Text>
+                  <SevynIcon name={bookmark.icon} size={22} color="#E2E8F0" />
                   <Text style={styles.bookmarkTitle}>{bookmark.title}</Text>
                   <Text style={styles.bookmarkUrl}>{bookmark.url}</Text>
                 </Pressable>
@@ -761,7 +769,7 @@ export function BrowserApplication({
           <ScrollView style={styles.startPageScroll}>
             <View style={styles.startHeader}>
               <View style={styles.logoBadge}>
-                <Text style={styles.logoText}>📖</Text>
+                <SevynIcon name="book" size={26} color="#E6C47A" />
               </View>
               <Text style={styles.startTitle}>SevynOS Documentation</Text>
               <Text style={styles.startSubtitle}>
@@ -788,7 +796,7 @@ export function BrowserApplication({
           <ScrollView style={styles.startPageScroll}>
             <View style={styles.startHeader}>
               <View style={styles.logoBadge}>
-                <Text style={styles.logoText}>ℹ️</Text>
+                <Text style={styles.logoText}>ℹ</Text>
               </View>
               <Text style={styles.startTitle}>{activeTab.title}</Text>
               <Text style={styles.startSubtitle}>{activeTab.url}</Text>
@@ -801,7 +809,7 @@ export function BrowserApplication({
           </ScrollView>
         ) : !engine ? (
           <View style={styles.errorContainer}>
-            <Text style={styles.errorIcon}>⚠️</Text>
+            <SevynIcon name="warning" size={48} color="#F59E0B" />
             <Text style={styles.errorTitle}>Browser Engine Unavailable</Text>
             <Text style={styles.errorDescription}>
               The standards-based web browser engine is not connected or could not start
@@ -813,7 +821,7 @@ export function BrowserApplication({
           </View>
         ) : activeTab.error ? (
           <View style={styles.errorContainer}>
-            <Text style={styles.errorIcon}>⚠️</Text>
+            <SevynIcon name="warning" size={48} color="#F59E0B" />
             <Text style={styles.errorTitle}>Unable to connect to website</Text>
             <Text style={styles.errorDescription}>{activeTab.error}</Text>
             <View style={styles.errorActions}>
@@ -1015,7 +1023,7 @@ export function BrowserApplication({
               }}
               style={styles.findButton}
             >
-              <Text style={styles.findButtonText}>✕</Text>
+              <SevynIcon name="x" size={14} color="#E2E8F0" />
             </Pressable>
           </View>
         )}
@@ -1029,7 +1037,7 @@ export function BrowserApplication({
                   setDownloadsVisible(false);
                 }}
               >
-                <Text style={styles.findButtonText}>✕</Text>
+                <SevynIcon name="x" size={14} color="#E2E8F0" />
               </Pressable>
             </View>
             {(engineSnapshot?.downloads ?? []).length === 0 ? (
@@ -1064,7 +1072,7 @@ export function BrowserApplication({
                   setHistoryVisible(false);
                 }}
               >
-                <Text style={styles.findButtonText}>✕</Text>
+                <SevynIcon name="x" size={14} color="#E2E8F0" />
               </Pressable>
             </View>
             <Pressable
@@ -1106,7 +1114,7 @@ export function BrowserApplication({
                   setBookmarksVisible(false);
                 }}
               >
-                <Text style={styles.findButtonText}>✕</Text>
+                <SevynIcon name="x" size={14} color="#E2E8F0" />
               </Pressable>
             </View>
             <ScrollView style={styles.panelScroll}>
@@ -1119,9 +1127,10 @@ export function BrowserApplication({
                     }}
                     style={styles.bookmarkInfo}
                   >
-                    <Text style={styles.downloadFilename}>
-                      {bookmark.icon} {bookmark.title}
-                    </Text>
+                    <View style={styles.bookmarkTitleRow}>
+                      <SevynIcon name={bookmark.icon} size={14} color="#E2E8F0" />
+                      <Text style={styles.downloadFilename}>{bookmark.title}</Text>
+                    </View>
                     <Text style={styles.downloadStatus}>{bookmark.url}</Text>
                   </Pressable>
                   <Pressable
@@ -1130,7 +1139,7 @@ export function BrowserApplication({
                     }}
                     style={styles.bookmarkDelete}
                   >
-                    <Text style={styles.bookmarkDeleteText}>✕</Text>
+                    <SevynIcon name="x" size={14} color="#E2E8F0" />
                   </Pressable>
                 </View>
               ))}
@@ -1390,9 +1399,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 4,
   },
-  bookmarkIcon: {
-    fontSize: 22,
-    marginBottom: 4,
+  bookmarkTitleRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  navButtonGlyphRow: {
+    alignItems: "center",
+    flexDirection: "row",
   },
   bookmarkTitle: {
     fontSize: 13,

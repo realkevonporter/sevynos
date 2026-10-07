@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState, type JSX } from "react";
 import {
   Pressable,
   ScrollView,
+  SevynIcon,
   StyleSheet,
   Text,
   TextInput,
   View,
+  type SevynIconName,
   type FileSystemEntry,
   type SevynFileSystem,
   type SystemNotificationService,
@@ -41,30 +43,30 @@ export interface FilesApplicationProps {
 interface QuickFolder {
   readonly name: string;
   readonly path: string;
-  readonly icon: string;
+  readonly icon: SevynIconName;
 }
 
 const QUICK_LOCATIONS: readonly QuickFolder[] = [
-  { name: "Home", path: "/", icon: "🏠" },
-  { name: "Desktop", path: "/Desktop", icon: "🖥️" },
-  { name: "Documents", path: "/Documents", icon: "📄" },
-  { name: "Downloads", path: "/Downloads", icon: "📥" },
-  { name: "Pictures", path: "/Pictures", icon: "🖼️" },
-  { name: "Music", path: "/Music", icon: "🎵" },
-  { name: "Videos", path: "/Videos", icon: "🎬" },
-  { name: "Trash", path: "/.Trash", icon: "🗑️" },
+  { name: "Home", path: "/", icon: "home" },
+  { name: "Desktop", path: "/Desktop", icon: "monitor" },
+  { name: "Documents", path: "/Documents", icon: "file-text" },
+  { name: "Downloads", path: "/Downloads", icon: "download" },
+  { name: "Pictures", path: "/Pictures", icon: "image" },
+  { name: "Music", path: "/Music", icon: "music-note" },
+  { name: "Videos", path: "/Videos", icon: "film" },
+  { name: "Trash", path: "/.Trash", icon: "trash" },
 ];
 
-function getFileIcon(name: string, kind: "file" | "directory"): string {
-  if (kind === "directory") return "📁";
+function getFileIcon(name: string, kind: "file" | "directory"): SevynIconName {
+  if (kind === "directory") return "folder";
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (["png", "jpg", "jpeg", "svg", "bmp", "webp"].includes(ext)) return "🖼️";
-  if (["mp3", "wav", "flac", "ogg"].includes(ext)) return "🎵";
-  if (["mp4", "mkv", "webm", "mov"].includes(ext)) return "🎬";
+  if (["png", "jpg", "jpeg", "svg", "bmp", "webp"].includes(ext)) return "image";
+  if (["mp3", "wav", "flac", "ogg"].includes(ext)) return "music-note";
+  if (["mp4", "mkv", "webm", "mov"].includes(ext)) return "film";
   if (["ts", "tsx", "js", "json", "py", "rs", "cpp", "c", "sh"].includes(ext))
-    return "⚙️";
-  if (["txt", "md", "log"].includes(ext)) return "📝";
-  return "📄";
+    return "gear";
+  if (["txt", "md", "log"].includes(ext)) return "file-text";
+  return "file-text";
 }
 
 export function FilesApplication({
@@ -360,7 +362,7 @@ export function FilesApplication({
                 onPress={() => void navigateTo(loc.path)}
                 style={isActive ? styles.locationItemActive : styles.locationItem}
               >
-                <Text style={styles.locationIcon}>{loc.icon}</Text>
+                <SevynIcon name={loc.icon} size={15} color="#C7CDD8" />
                 <Text style={isActive ? styles.locationNameActive : styles.locationName}>
                   {loc.name}
                 </Text>
@@ -383,7 +385,7 @@ export function FilesApplication({
                       onPress={() => void navigateTo(volume.mountPoint)}
                       style={isActive ? styles.locationItemActive : styles.locationItem}
                     >
-                      <Text style={styles.locationIcon}>💾</Text>
+                      <SevynIcon name="hard-drive" size={15} color="#C7CDD8" />
                       <Text
                         style={isActive ? styles.locationNameActive : styles.locationName}
                       >
@@ -502,9 +504,11 @@ export function FilesApplication({
             }}
             style={styles.actionButton}
           >
-            <Text style={styles.actionButtonText}>
-              {viewMode === "grid" ? "☰" : "⊞"}
-            </Text>
+            <SevynIcon
+              name={viewMode === "grid" ? "menu" : "grid"}
+              size={12}
+              color="#F3F4F6"
+            />
           </Pressable>
 
           {/* File operations - only show when an item is selected */}
@@ -516,7 +520,7 @@ export function FilesApplication({
                 onPress={startRename}
                 style={styles.actionButton}
               >
-                <Text style={styles.actionButtonText}>✏️</Text>
+                <SevynIcon name="edit" size={12} color="#F3F4F6" />
               </Pressable>
               <Pressable
                 accessibilityRole="button"
@@ -524,7 +528,7 @@ export function FilesApplication({
                 onPress={() => void handleDelete()}
                 style={styles.actionButton}
               >
-                <Text style={styles.actionButtonText}>🗑️</Text>
+                <SevynIcon name="trash" size={12} color="#F3F4F6" />
               </Pressable>
             </>
           )}
@@ -539,7 +543,10 @@ export function FilesApplication({
                   onPress={() => void handleRestore()}
                   style={styles.actionButton}
                 >
-                  <Text style={styles.actionButtonText}>↩️ Restore</Text>
+                  <View style={styles.actionButtonGlyphRow}>
+                    <SevynIcon name="refresh" size={12} color="#F3F4F6" />
+                    <Text style={styles.actionButtonText}>Restore</Text>
+                  </View>
                 </Pressable>
               )}
               <Pressable
@@ -549,7 +556,7 @@ export function FilesApplication({
                 style={styles.actionButton}
               >
                 <Text style={styles.actionButtonText}>
-                  {confirmEmptyTrash ? "⚠️ Confirm" : "Empty"}
+                  {confirmEmptyTrash ? "Confirm" : "Empty"}
                 </Text>
               </Pressable>
             </>
@@ -621,7 +628,7 @@ export function FilesApplication({
         <ScrollView style={styles.contentScroll}>
           {visibleEntries.length === 0 ? (
             <View style={styles.emptyState}>
-              <Text style={styles.emptyIcon}>📂</Text>
+              <SevynIcon name="folder" size={44} color="#5B6472" />
               <Text style={styles.emptyText}>
                 {searchQuery.trim() === ""
                   ? "This folder is empty"
@@ -642,9 +649,11 @@ export function FilesApplication({
                     }}
                     style={isSelected ? styles.gridCardSelected : styles.gridCard}
                   >
-                    <Text style={styles.gridIcon}>
-                      {getFileIcon(entry.name, entry.kind)}
-                    </Text>
+                    <SevynIcon
+                      name={getFileIcon(entry.name, entry.kind)}
+                      size={28}
+                      color="#C7CDD8"
+                    />
                     <Text style={styles.gridName}>{entry.name}</Text>
                   </Pressable>
                 );
@@ -664,9 +673,11 @@ export function FilesApplication({
                     }}
                     style={isSelected ? styles.listItemSelected : styles.listItem}
                   >
-                    <Text style={styles.listIcon}>
-                      {getFileIcon(entry.name, entry.kind)}
-                    </Text>
+                    <SevynIcon
+                      name={getFileIcon(entry.name, entry.kind)}
+                      size={16}
+                      color="#C7CDD8"
+                    />
                     <Text style={styles.listName}>{entry.name}</Text>
                     <Text style={styles.listKind}>
                       {entry.kind === "directory" ? "Folder" : "File"}
@@ -854,6 +865,11 @@ const styles = StyleSheet.create({
     color: "#F3F4F6",
     fontSize: 12,
     fontWeight: "600",
+  },
+  actionButtonGlyphRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 6,
   },
   newFolderBar: {
     flexDirection: "row",

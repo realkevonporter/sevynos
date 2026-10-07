@@ -33,3 +33,36 @@ describe("@sevynos/react-native vector icons", () => {
     expect((el.props as { readonly icon: string }).icon).toBe("custom");
   });
 });
+
+describe("SevynIcon", () => {
+  it("creates a NativeIcon element for a SevynIconName", async () => {
+    const { SevynIcon } = await import("./vector-icons.js");
+    const el = SevynIcon({ name: "app-browser", size: 32, color: "#FFFFFF" });
+    expect(el).toBeDefined();
+    expect((el.props as { readonly icon: string }).icon).toBe("app-browser");
+    const style = (el.props as { readonly style: readonly unknown[] }).style;
+    expect(style[0]).toMatchObject({ width: 32, height: 32, color: "#FFFFFF" });
+  });
+
+  it("covers every application icon glyph name", async () => {
+    const { SevynIcon } = await import("./vector-icons.js");
+    const names = [
+      "app-browser",
+      "app-calculator",
+      "app-camera",
+      "app-files",
+      "app-music",
+      "app-notes",
+      "app-settings",
+      "app-sevyn-code",
+      "app-system-monitor",
+      "app-terminal",
+      "app-text-editor",
+      "app-welcome",
+    ] as const;
+    for (const name of names) {
+      const el = SevynIcon({ name });
+      expect((el.props as { readonly icon: string }).icon).toBe(name);
+    }
+  });
+});
