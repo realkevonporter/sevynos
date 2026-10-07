@@ -24,6 +24,13 @@ import {
   type EngineDownload,
 } from "./download-manager.js";
 
+/**
+ * Re-exported for host/shell wiring: the desktop surface registry implements
+ * the browser's download host props (`onOpenDownload`, `onRevealDownload`,
+ * `onInstallDownload`) against these.
+ */
+export { isInstallableDownload, type EngineDownload } from "./download-manager.js";
+
 interface BrowserPointerEvent {
   readonly x: number;
   readonly y: number;

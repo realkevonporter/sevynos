@@ -34,9 +34,13 @@ import {
   ApplicationInstaller,
   ApplicationPackageRegistry,
   SevynRuntime,
+  extractSevynBundle,
+  isOfficialSevynSignature,
   type InstalledApplicationRecord,
 } from "@sevynos/runtime";
 import type { TerminalAppRecord } from "@sevynos/app-terminal";
+import type { BundlePreview, InstalledAppInfo } from "@sevynos/app-store";
+import type { AppCatalogEntry } from "@sevynos/os-update";
 import type {
   SevynPowerService,
   SevynBrowserEngine,
@@ -79,6 +83,8 @@ import { WindowAnimationController } from "./window-animation-controller.js";
 import { DesktopSessionManager } from "./desktop-session.js";
 import { AccountService, FileAccountStore } from "@sevynos/accounts";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 
 export interface DesktopRuntime {
   readonly windows: GenesisWindowManager;
@@ -1003,6 +1009,18 @@ export async function createDesktopRuntime(
       permissions: record.permissions,
     });
 
+  // The store's InstalledAppInfo is the terminal record plus the signature
+  // badge the sideload dialog renders.
+  const toInstalledAppInfo = (record: InstalledApplicationRecord): InstalledAppInfo =>
+    Object.freeze({
+      id: record.id,
+      name: record.name,
+      version: record.version,
+      system: record.system,
+      permissions: record.permissions,
+      signatureStatus: record.signatureStatus,
+    });
+
   surfaces.configureApplicationManagement({
     list: () =>
       applications.catalog.map((definition) => {
@@ -1056,6 +1074,45 @@ export async function createDesktopRuntime(
     restoreApp: async (applicationId) => {
       const record = await applicationInstaller.installFromPristine(applicationId);
       return toTerminalAppRecord(record);
+    },
+    inspectBundle: async (bundlePath) => {
+      // Pre-install review for the store's sideload dialog: extract the
+      // bundle manifest via the runtime extractor. Signature status mirrors
+      // the installer's classification, minus the install-time rejection of
+      // mis-signed system apps (the install itself still enforces that).
+      const bytes = await readFile(bundlePath);
+      const extracted = extractSevynBundle(bytes);
+      const manifest = extracted.manifest;
+      const signature = manifest.signature;
+      const signatureStatus: BundlePreview["signatureStatus"] = isOfficialSevynSignature(
+        signature,
+      )
+        ? "official"
+        : signature === undefined
+          ? "unsigned"
+          : "self-signed";
+      return Object.freeze({
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        permissions: manifest.permissions ?? Object.freeze([]),
+        signatureStatus,
+      });
+    },
+    installCatalogEntry: async (entry: AppCatalogEntry) => {
+      // Catalog install: fetch the bundle, verify its sha256 against the
+      // catalog entry, then install through the real application registry.
+      const response = await fetch(entry.bundleUrl);
+      if (!response.ok)
+        throw new Error(
+          `Catalog download failed: HTTP ${String(response.status)} ${entry.bundleUrl}.`,
+        );
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      if (digest !== entry.sha256.toLowerCase())
+        throw new Error("Catalog bundle failed its integrity check (sha256 mismatch).");
+      const record = await applicationInstaller.install(bytes, { source: "bundle" });
+      return toInstalledAppInfo(record);
     },
   });
   surfaces.configureSettingsUpdate((key, value) => {

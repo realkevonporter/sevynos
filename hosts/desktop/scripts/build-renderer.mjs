@@ -30,6 +30,13 @@ export const chmod = async () => {};
 export const randomBytes = () => { throw new Error("node:crypto is unavailable in this bundle"); };
 export const scrypt = (password, salt, keylen, options, callback) => { callback(new Error("node:crypto is unavailable in this bundle")); };
 export const timingSafeEqual = () => { throw new Error("node:crypto is unavailable in this bundle"); };
+// @sevynos/os-update + @sevynos/app-store (Phase 2 store wiring). The
+// renderer bundle never downloads or installs app bundles, so these fail
+// closed if reached there; the Linux host uses the real builtins.
+export const createHash = () => { throw new Error("node:crypto is unavailable in this bundle"); };
+export const rename = async () => { throw new Error("node:fs/promises is unavailable in this bundle"); };
+export const createWriteStream = () => { throw new Error("node:fs is unavailable in this bundle"); };
+export const once = async () => { throw new Error("node:events is unavailable in this bundle"); };
 export default {};
 `,
       loader: "js",

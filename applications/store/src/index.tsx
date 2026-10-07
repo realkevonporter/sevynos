@@ -32,6 +32,13 @@ import {
   type InstalledAppInfo,
 } from "./store-model.js";
 
+/**
+ * Re-exported for host/shell wiring: the desktop surface registry implements
+ * the store's injected host props (`onInspectBundle`, `onInstallCatalogEntry`)
+ * against these types.
+ */
+export type { BundlePreview, InstalledAppInfo } from "./store-model.js";
+
 export const storeManifest: SevynApplicationManifest = {
   manifestVersion: 1,
   id: "org.sevynos.store",

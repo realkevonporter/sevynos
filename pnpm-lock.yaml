@@ -556,6 +556,9 @@ importers:
       '@sevynos/desktop-shell':
         specifier: workspace:*
         version: link:../../shell/desktop
+      '@sevynos/file-archives':
+        specifier: workspace:*
+        version: link:../../services/files
       '@sevynos/graphics':
         specifier: workspace:*
         version: link:../../graphics/core
@@ -748,6 +751,9 @@ importers:
       '@sevynos/app-setup-wizard':
         specifier: workspace:*
         version: link:../../applications/setup-wizard
+      '@sevynos/app-store':
+        specifier: workspace:*
+        version: link:../../applications/store
       '@sevynos/app-system-monitor':
         specifier: workspace:*
         version: link:../../applications/system-monitor
@@ -763,6 +769,9 @@ importers:
       '@sevynos/core-applications':
         specifier: workspace:*
         version: link:../../applications/core
+      '@sevynos/file-archives':
+        specifier: workspace:*
+        version: link:../../services/files
       '@sevynos/graphics':
         specifier: workspace:*
         version: link:../../graphics/core

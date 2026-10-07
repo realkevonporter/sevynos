@@ -1360,6 +1360,42 @@ function drawNativeIcon(
         t,
       );
       break;
+    case "app-store":
+      // Shopping-bag glyph: line-art rendition of applications/store/icons/store.svg.
+      polyline(
+        raster,
+        [
+          [x + width * 0.19, y + height * 0.4],
+          [x + width * 0.25, y + height * 0.23],
+          [x + width * 0.75, y + height * 0.23],
+          [x + width * 0.81, y + height * 0.4],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.19, y + height * 0.4],
+          [x + width * 0.81, y + height * 0.4],
+          [x + width * 0.76, y + height * 0.81],
+          [x + width * 0.24, y + height * 0.81],
+          [x + width * 0.19, y + height * 0.4],
+        ],
+        color,
+        t,
+      );
+      polyline(
+        raster,
+        [
+          [x + width * 0.38, y + height * 0.52],
+          [x + width * 0.44, y + height * 0.65],
+          [x + width * 0.6, y + height * 0.48],
+        ],
+        color,
+        t,
+      );
+      break;
     case "app-system-monitor":
       raster.roundedRect(
         {

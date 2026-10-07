@@ -1,9 +1,21 @@
 import { createElement } from "react";
+import { join } from "node:path";
 import type { GenesisWindowId } from "@sevynos/graphics";
 import type { KeyboardInputEvent, SevynInputEvent } from "@sevynos/input";
-import { BrowserApplication } from "@sevynos/app-browser";
+import {
+  BrowserApplication,
+  isInstallableDownload,
+  type EngineDownload,
+} from "@sevynos/app-browser";
 import { SettingsApplication } from "@sevynos/app-settings";
 import { FilesApplication } from "@sevynos/app-files";
+import {
+  StoreApplication,
+  type BundlePreview,
+  type InstalledAppInfo,
+} from "@sevynos/app-store";
+import type { AppCatalogEntry } from "@sevynos/os-update";
+import type { SevynArchiveService } from "@sevynos/file-archives";
 import { TerminalApplication, type TerminalAppRecord } from "@sevynos/app-terminal";
 import { SystemMonitorApplication } from "@sevynos/app-system-monitor";
 import { WelcomeApplication } from "@sevynos/app-welcome";
@@ -138,6 +150,10 @@ export interface AppManagerApplicationSurface {
   readonly kind: "app-manager";
   readonly heading: string;
 }
+export interface StoreApplicationSurface {
+  readonly kind: "store";
+  readonly heading: string;
+}
 export interface NotesApplicationSurface {
   readonly kind: "notes";
   readonly heading: string;
@@ -165,6 +181,7 @@ export type DesktopApplicationSurface =
   | BrowserApplicationSurface
   | TextEditorApplicationSurface
   | AppManagerApplicationSurface
+  | StoreApplicationSurface
   | NotesApplicationSurface
   | CalculatorApplicationSurface
   | IdeApplicationSurface;
@@ -195,6 +212,18 @@ export interface ApplicationManagementController {
    * application registry.
    */
   restoreApp(applicationId: string): Promise<TerminalAppRecord>;
+  /**
+   * Reads a `.sevyn` bundle from a host-OS path and returns its manifest
+   * preview for pre-install review. Powers the store's sideload dialog;
+   * the store sandbox cannot unzip bundles itself.
+   */
+  inspectBundle(bundlePath: string): Promise<BundlePreview>;
+  /**
+   * Downloads a catalog entry's bundle, verifies its sha256 against the
+   * catalog entry, then installs it through the real application registry.
+   * Powers the store's catalog Install buttons.
+   */
+  installCatalogEntry(entry: AppCatalogEntry): Promise<InstalledAppInfo>;
 }
 
 export class ApplicationSurfaceRegistry {
@@ -232,6 +261,8 @@ export class ApplicationSurfaceRegistry {
   #updateService: OsUpdateService | undefined;
   #accountsService: AccountService | undefined;
   #sessionManager: DesktopSessionManager | undefined;
+  #archiveService: SevynArchiveService | undefined;
+  #browserDownloadDirectory: string | undefined;
   readonly #scopedFilesystems = new Map<string, UserScopedFileSystem>();
 
   public constructor(
@@ -322,6 +353,26 @@ export class ApplicationSurfaceRegistry {
    */
   public configureUpdateService(update: OsUpdateService): void {
     this.#updateService = update;
+    this.#onChange();
+  }
+
+  /**
+   * Supplies the archive backend after construction. Powers the Files app's
+   * Extract UI; without it the app shows no archive UI at all.
+   */
+  public configureArchiveService(archive: SevynArchiveService): void {
+    this.#archiveService = archive;
+    this.#onChange();
+  }
+
+  /**
+   * Supplies the browser's download directory after construction. The
+   * browser's Open / Show in Files / Install download actions resolve
+   * `downloadDirectory/filename`; without it the actions report the
+   * download as unavailable instead of guessing a path.
+   */
+  public configureBrowserDownloadDirectory(directory: string): void {
+    this.#browserDownloadDirectory = directory;
     this.#onChange();
   }
 
@@ -471,6 +522,15 @@ export class ApplicationSurfaceRegistry {
     const surface: AppManagerApplicationSurface = Object.freeze({
       kind: "app-manager",
       heading: "App Manager",
+    });
+    this.#set(windowId, surface);
+    return surface;
+  }
+
+  public createStore(windowId: GenesisWindowId): StoreApplicationSurface {
+    const surface: StoreApplicationSurface = Object.freeze({
+      kind: "store",
+      heading: "Software",
     });
     this.#set(windowId, surface);
     return surface;
@@ -973,6 +1033,11 @@ export class ApplicationSurfaceRegistry {
           filesystem: this.filesystem,
           storage: this.#storage,
           notifications: this.#notifications,
+          // The Extract UI only appears when a backend is injected; the
+          // linux host supplies it via configureArchiveService.
+          ...(this.#archiveService === undefined
+            ? {}
+            : { archiveService: this.#archiveService }),
         });
       case "camera":
         return createElement(CameraApplication, {
@@ -987,6 +1052,14 @@ export class ApplicationSurfaceRegistry {
         return createElement(BrowserApplication, {
           ...(engine === undefined ? {} : { engine }),
           createEngine: () => this.#createBrowserEngine?.(),
+          onOpenDownload: (download: EngineDownload) => {
+            this.#openBrowserDownload(download);
+          },
+          onRevealDownload: () => {
+            this.#revealBrowserDownload();
+          },
+          onInstallDownload: (download: EngineDownload) =>
+            this.#installBrowserDownload(download),
         });
       }
       case "ide": {
@@ -1024,6 +1097,38 @@ export class ApplicationSurfaceRegistry {
                   this.#applicationManagement?.terminate(applicationId),
               }),
         });
+      case "store": {
+        // The store's power prop requires restart(); only pass power through
+        // when the host actually implements power controls.
+        const restart = this.#power.available
+          ? this.#power.restart?.bind(this.#power)
+          : undefined;
+        return createElement(StoreApplication, {
+          filesystem: this.filesystem,
+          // Seed the store's catalog from the desktop's app list; the store
+          // re-syncs from the real registry on mount via onRefreshApps.
+          installedApps: (this.#applicationManagement?.list() ?? []).map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            version: entry.version,
+            permissions: entry.permissions,
+            system:
+              entry.id === "org.sevynos.shell" || entry.id === "org.sevynos.terminal",
+          })),
+          onRefreshApps: () =>
+            this.#applicationManagement?.listInstalledApps() ?? Promise.resolve([]),
+          onInstallApp: (bundlePath: string) => this.#installStoreBundle(bundlePath),
+          onUninstallApp: (appId: string) =>
+            this.#applicationManagement?.uninstallApp(appId) ??
+            Promise.reject(new Error("Application management is unavailable.")),
+          onInspectBundle: (bundlePath: string) => this.#inspectStoreBundle(bundlePath),
+          onInstallCatalogEntry: (entry: AppCatalogEntry) =>
+            this.#applicationManagement?.installCatalogEntry(entry) ??
+            Promise.reject(new Error("Application management is unavailable.")),
+          update: this.#updateService,
+          ...(restart === undefined ? {} : { power: { restart } }),
+        });
+      }
       case "notes":
         return createCoreSystemApplication({
           kind: "notes",
@@ -1052,6 +1157,110 @@ export class ApplicationSurfaceRegistry {
     const created = this.#createSevynCodeEngine?.();
     if (created !== undefined) this.#sevynCodeEngines.set(windowId, created);
     return created;
+  }
+
+  /**
+   * Resolves an app-visible virtual path (e.g. "/Downloads/app.sevyn" from
+   * the store's sideload picker) to the host-OS path the installer reads.
+   * Mirrors the `filesystem` getter's user scoping. Returns undefined when
+   * the underlying filesystem does not expose a host root (e.g. the
+   * in-memory filesystem used in host tests); callers report the bundle as
+   * unavailable instead of guessing.
+   */
+  #hostPathForVirtualPath(virtualPath: string): string | undefined {
+    const root = (this.#filesystem as { readonly rootDirectory?: unknown }).rootDirectory;
+    if (typeof root !== "string" || root.length === 0) return undefined;
+    const segments = virtualPath.split("/").filter((segment) => segment.length > 0);
+    if (segments.some((segment) => segment === "..")) return undefined;
+    const session = this.#sessionManager;
+    const user = session?.currentUser;
+    if (user === undefined || session?.hasAccounts() !== true)
+      return join(root, ...segments);
+    const username = user.username;
+    if (username.length === 0 || username.includes("/") || username.includes(".."))
+      return undefined;
+    return join(root, "users", username, ...segments);
+  }
+
+  /**
+   * Installs a `.sevyn` bundle chosen in the store's sideload picker. The
+   * picker returns an app-scoped virtual path, resolved to a host path
+   * first; the install itself goes through the real application registry
+   * (the same code path as `sevyn install`).
+   */
+  async #installStoreBundle(virtualPath: string): Promise<InstalledAppInfo> {
+    const controller = this.#applicationManagement;
+    if (controller === undefined)
+      throw new Error("Application management is unavailable.");
+    const hostPath = this.#hostPathForVirtualPath(virtualPath);
+    if (hostPath === undefined)
+      throw new Error(`Cannot resolve bundle path "${virtualPath}" on this host.`);
+    return controller.installApp(hostPath);
+  }
+
+  /**
+   * Pre-install bundle review for the store's sideload dialog: resolves the
+   * virtual path and extracts the bundle manifest via the runtime extractor.
+   */
+  #inspectStoreBundle(virtualPath: string): Promise<BundlePreview> {
+    const controller = this.#applicationManagement;
+    if (controller === undefined)
+      return Promise.reject(new Error("Application management is unavailable."));
+    const hostPath = this.#hostPathForVirtualPath(virtualPath);
+    if (hostPath === undefined)
+      return Promise.reject(
+        new Error(`Cannot resolve bundle path "${virtualPath}" on this host.`),
+      );
+    return controller.inspectBundle(hostPath);
+  }
+
+  /**
+   * Resolves a finished browser download to its on-disk path from the
+   * configured download directory and the download's filename. Returns
+   * undefined when no download directory is configured or the filename is
+   * unsafe; callers treat that as "unavailable" rather than guessing.
+   */
+  #browserDownloadPath(download: EngineDownload): string | undefined {
+    const directory = this.#browserDownloadDirectory;
+    if (directory === undefined) return undefined;
+    const filename = download.filename;
+    if (
+      filename.length === 0 ||
+      filename.includes("/") ||
+      filename.includes("\\") ||
+      filename === "." ||
+      filename === ".."
+    )
+      return undefined;
+    return join(directory, filename);
+  }
+
+  #openBrowserDownload(download: EngineDownload): void {
+    // Installing is the meaningful "open" for a `.sevyn` bundle on SevynOS.
+    // No file-association architecture exists for other downloads, so the
+    // file manager is the honest fallback.
+    if (isInstallableDownload(download)) {
+      void this.#installBrowserDownload(download);
+      return;
+    }
+    void this.#applicationManagement?.launch("org.sevynos.files");
+  }
+
+  #revealBrowserDownload(): void {
+    // Deep-linking Files to the download's folder needs navigate-files
+    // plumbing; launching the file manager is the minimal honest reveal.
+    void this.#applicationManagement?.launch("org.sevynos.files");
+  }
+
+  #installBrowserDownload(download: EngineDownload): Promise<unknown> {
+    const path = this.#browserDownloadPath(download);
+    if (path === undefined || !isInstallableDownload(download))
+      return Promise.reject(new Error("This download is not an installable app bundle."));
+    // Same install path as the store's sideload flow.
+    return (
+      this.#applicationManagement?.installApp(path) ??
+      Promise.reject(new Error("Application management is unavailable."))
+    );
   }
 }
 
