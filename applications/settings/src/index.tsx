@@ -13,6 +13,7 @@ import {
   type SevynTimeService,
   type TimeSyncState,
   type SevynWirelessNetworkService,
+  type SavedWirelessNetwork,
   type WirelessNetworkSnapshot,
   type SevynApplicationManifest,
 } from "@sevynos/react-native";
@@ -328,6 +329,7 @@ export function SettingsApplication({
   const [wifiPassword, setWifiPassword] = useState<string>("");
   const [wifiBusy, setWifiBusy] = useState<boolean>(false);
   const [wifiError, setWifiError] = useState<string | null>(null);
+  const [savedNetworks, setSavedNetworks] = useState<readonly SavedWirelessNetwork[]>([]);
   const [batteryPercent, setBatteryPercent] = useState<number>(85);
   const [isCharging, setIsCharging] = useState<boolean>(true);
   const [timeState, setTimeState] = useState<TimeSyncState>({
@@ -398,6 +400,19 @@ export function SettingsApplication({
       });
   };
 
+  const canManageSavedNetworks =
+    network !== undefined &&
+    typeof network.savedNetworks === "function" &&
+    typeof network.forgetNetwork === "function";
+
+  const loadSavedNetworks = () => {
+    if (network === undefined || typeof network.savedNetworks !== "function") return;
+    void network
+      .savedNetworks()
+      .then(setSavedNetworks)
+      .catch(() => undefined);
+  };
+
   useEffect(() => {
     if (!network) return undefined;
     let active = true;
@@ -418,6 +433,7 @@ export function SettingsApplication({
         });
     };
     refresh();
+    loadSavedNetworks();
     void network.scan().catch(() => undefined);
     const unsubscribe = network.subscribe(refresh);
     return () => {
@@ -477,6 +493,7 @@ export function SettingsApplication({
       .connect(ssid, pwd)
       .then((snap) => {
         setWifiSnapshot(snap);
+        loadSavedNetworks();
         if (snap.state === "connected") {
           setSelectedSsid(null);
           setWifiPassword("");
@@ -498,9 +515,30 @@ export function SettingsApplication({
       .disconnect()
       .then((snap) => {
         setWifiSnapshot(snap);
+        loadSavedNetworks();
       })
       .catch((err: unknown) => {
         setWifiError(err instanceof Error ? err.message : "Disconnect failed.");
+      })
+      .finally(() => {
+        setWifiBusy(false);
+      });
+  };
+
+  const handleForgetNetwork = (networkId: string) => {
+    const service = network;
+    if (!service || typeof service.forgetNetwork !== "function" || wifiBusy) return;
+    setWifiBusy(true);
+    setWifiError(null);
+    void service
+      .forgetNetwork(networkId)
+      .then((list) => {
+        setSavedNetworks(list);
+      })
+      .catch((err: unknown) => {
+        setWifiError(
+          err instanceof Error ? err.message : "Could not forget this network.",
+        );
       })
       .finally(() => {
         setWifiBusy(false);
@@ -753,7 +791,7 @@ export function SettingsApplication({
 
               {wifiError && (
                 <View style={styles.wifiErrorBanner}>
-                  <Text style={styles.wifiErrorText}>⚠ {wifiError}</Text>
+                  <Text style={styles.wifiErrorText}>{wifiError}</Text>
                 </View>
               )}
 
@@ -822,9 +860,7 @@ export function SettingsApplication({
                     return (
                       <View key={net.ssid} style={styles.networkItemCard}>
                         <View style={styles.networkRow}>
-                          <Text style={styles.networkIcon}>
-                            {net.signal >= 75 ? "📶" : net.signal >= 40 ? "🛜" : "📡"}
-                          </Text>
+                          <WifiSignalBars signal={net.signal} />
                           <View style={styles.networkInfo}>
                             <Text style={styles.networkName}>{net.ssid}</Text>
                             <Text style={styles.networkStatus}>
@@ -832,7 +868,9 @@ export function SettingsApplication({
                                 ? `Connected (${wifiSnapshot.ipAddress ?? "Active"}) • ${net.security.toUpperCase()}`
                                 : isConnecting
                                   ? "Connecting..."
-                                  : `${net.security === "open" ? "Open Network" : "Secure (" + net.security.toUpperCase() + ")"} • ${String(net.signal)}%`}
+                                  : !net.supported
+                                    ? "Enterprise (802.1X) - not supported in this version"
+                                    : `${net.security === "open" ? "Open Network" : "Secure (" + net.security.toUpperCase() + ")"} • ${String(net.signal)}%`}
                             </Text>
                           </View>
                           {isConnected ? (
@@ -849,6 +887,10 @@ export function SettingsApplication({
                                   Disconnect
                                 </Text>
                               </Pressable>
+                            </View>
+                          ) : !net.supported ? (
+                            <View style={styles.unsupportedRow}>
+                              <Text style={styles.unsupportedBadge}>Not supported</Text>
                             </View>
                           ) : (
                             <Pressable
@@ -872,7 +914,7 @@ export function SettingsApplication({
                           )}
                         </View>
 
-                        {isSelected && !isConnected && (
+                        {isSelected && !isConnected && net.supported && (
                           <View style={styles.passwordRow}>
                             <TextInput
                               accessibilityLabel="Wi-Fi Password"
@@ -913,6 +955,43 @@ export function SettingsApplication({
                   })
                 )}
               </View>
+
+              {canManageSavedNetworks && (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Saved Networks</Text>
+                  <Text style={styles.cardDesc}>
+                    SevynOS reconnects to these networks automatically at boot.
+                  </Text>
+                  {savedNetworks.length === 0 ? (
+                    <View style={styles.emptyNetworks}>
+                      <Text style={styles.emptyNetworksText}>
+                        No saved networks yet. Join a network to save it here.
+                      </Text>
+                    </View>
+                  ) : (
+                    savedNetworks.map((saved) => (
+                      <View key={saved.networkId} style={styles.savedNetworkRow}>
+                        <Text style={styles.networkName}>{saved.ssid}</Text>
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Forget ${saved.ssid}`}
+                          disabled={wifiBusy}
+                          onPress={() => {
+                            handleForgetNetwork(saved.networkId);
+                          }}
+                          style={
+                            wifiBusy
+                              ? { ...styles.forgetButton, ...styles.buttonDisabled }
+                              : styles.forgetButton
+                          }
+                        >
+                          <Text style={styles.forgetButtonText}>Forget</Text>
+                        </Pressable>
+                      </View>
+                    ))
+                  )}
+                </View>
+              )}
             </View>
           )}
 
@@ -1258,6 +1337,27 @@ export function SettingsApplication({
   );
 }
 
+function WifiSignalBars({ signal }: { signal: number }): JSX.Element {
+  const filled = signal >= 75 ? 4 : signal >= 50 ? 3 : signal >= 25 ? 2 : 1;
+  return (
+    <View
+      style={styles.signalBars}
+      accessibilityLabel={`Signal strength ${String(signal)} percent`}
+    >
+      {[0, 1, 2, 3].map((index) => (
+        <View
+          key={`signal-bar-${String(index)}`}
+          style={{
+            ...styles.signalBar,
+            height: 6 + index * 5,
+            ...(index < filled ? styles.signalBarOn : styles.signalBarOff),
+          }}
+        />
+      ))}
+    </View>
+  );
+}
+
 function SidebarItem({
   active,
   icon,
@@ -1479,8 +1579,61 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.05)",
     gap: 12,
   },
-  networkIcon: {
-    fontSize: 18,
+  signalBars: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 2,
+    marginRight: 4,
+    height: 24,
+    paddingTop: 4,
+  },
+  signalBar: {
+    width: 4,
+    borderRadius: 1,
+  },
+  signalBarOn: {
+    backgroundColor: "#D7AC57",
+  },
+  signalBarOff: {
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
+  },
+  unsupportedRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  unsupportedBadge: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#9CA3AF",
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.12)",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+    overflow: "hidden",
+  },
+  savedNetworkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.05)",
+    gap: 12,
+  },
+  forgetButton: {
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.3)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  forgetButtonText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#EF4444",
   },
   networkInfo: {
     flex: 1,

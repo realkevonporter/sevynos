@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   LinuxWirelessNetworkService,
   parseNetworkId,
+  parseSavedNetworks,
   parseScanResults,
   type LinuxCommandExecutor,
   type LinuxCommandRequest,
@@ -208,6 +209,184 @@ describe("LinuxWirelessNetworkService", () => {
           request.arguments.includes("remove_network") && request.arguments.includes("5"),
       ),
     ).toBe(true);
+  });
+
+  it("parses saved network listings", () => {
+    expect(
+      parseSavedNetworks(
+        [
+          "network id / ssid / bssid / flags",
+          "0\tSevyn Home\tany\t[CURRENT]",
+          "1\tCoffee Shop\tany\t",
+          "",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        networkId: "0",
+        ssid: "Sevyn Home",
+        bssid: "any",
+        flags: "[CURRENT]",
+      }),
+      expect.objectContaining({ networkId: "1", ssid: "Coffee Shop" }),
+    ]);
+    expect(parseSavedNetworks("network id / ssid / bssid / flags\n")).toEqual([]);
+  });
+
+  it("lists and forgets saved networks", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    const listOutput = [
+      "network id / ssid / bssid / flags",
+      "0\tSevyn Home\tany\t[CURRENT]",
+      "1\tCoffee Shop\tany\t",
+    ].join("\n");
+    const execute: LinuxCommandExecutor = (request) => {
+      requests.push(request);
+      if (request.arguments[4] === "list_networks")
+        return Promise.resolve({ stdout: listOutput, stderr: "" });
+      return Promise.resolve({ stdout: "OK\n", stderr: "" });
+    };
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve(["wlan0"]),
+      execute,
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    const saved = await service.savedNetworks();
+    expect(saved).toEqual([
+      expect.objectContaining({ networkId: "0", ssid: "Sevyn Home" }),
+      expect.objectContaining({ networkId: "1", ssid: "Coffee Shop" }),
+    ]);
+    expect(requests.some((request) => request.arguments.includes("list_networks"))).toBe(
+      true,
+    );
+
+    await service.forgetNetwork("1");
+    expect(
+      requests.some(
+        (request) =>
+          request.arguments.includes("remove_network") && request.arguments.includes("1"),
+      ),
+    ).toBe(true);
+    expect(requests.some((request) => request.arguments.includes("save_config"))).toBe(
+      true,
+    );
+    await expect(service.forgetNetwork("bogus")).rejects.toThrow();
+  });
+
+  it("reconnects to the strongest in-range saved network", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    let connected = false;
+    const listOutput = [
+      "network id / ssid / bssid / flags",
+      "0\tSevyn Home\tany\t",
+      "1\tCoffee Shop\tany\t",
+    ].join("\n");
+    const execute: LinuxCommandExecutor = (request) => {
+      requests.push(request);
+      if (request.executable.endsWith("udhcpc"))
+        return Promise.resolve({ stdout: "lease acquired", stderr: "" });
+      const operation = request.arguments[4];
+      if (operation === "status")
+        return Promise.resolve({
+          stdout: connected
+            ? "wpa_state=COMPLETED\nssid=Sevyn Home\n"
+            : "wpa_state=DISCONNECTED\n",
+          stderr: "",
+        });
+      if (operation === "list_networks")
+        return Promise.resolve({ stdout: listOutput, stderr: "" });
+      if (operation === "scan_results")
+        return Promise.resolve({ stdout: scanOutput, stderr: "" });
+      if (operation === "select_network") connected = true;
+      return Promise.resolve({ stdout: "OK\n", stderr: "" });
+    };
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve(["wlan0"]),
+      execute,
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    await expect(service.reconnectToSavedNetwork()).resolves.toBe(true);
+    // Sevyn Home scans stronger (-42 dBm) than Coffee Shop (-68 dBm).
+    expect(
+      requests.some(
+        (request) =>
+          request.arguments.includes("select_network") && request.arguments.includes("0"),
+      ),
+    ).toBe(true);
+    expect(requests.some((request) => request.executable.endsWith("udhcpc"))).toBe(true);
+  });
+
+  it("skips reconnect when no saved network is in range", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    const execute: LinuxCommandExecutor = (request) => {
+      requests.push(request);
+      const operation = request.arguments[4];
+      if (operation === "status")
+        return Promise.resolve({ stdout: "wpa_state=DISCONNECTED\n", stderr: "" });
+      if (operation === "list_networks")
+        return Promise.resolve({
+          stdout: "network id / ssid / bssid / flags\n0\tFar Away\tany\t\n",
+          stderr: "",
+        });
+      if (operation === "scan_results")
+        return Promise.resolve({ stdout: scanOutput, stderr: "" });
+      return Promise.resolve({ stdout: "OK\n", stderr: "" });
+    };
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve(["wlan0"]),
+      execute,
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    await expect(service.reconnectToSavedNetwork()).resolves.toBe(false);
+    expect(requests.some((request) => request.arguments.includes("select_network"))).toBe(
+      false,
+    );
+  });
+
+  it("treats an already-associated interface as reconnected", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    const execute: LinuxCommandExecutor = (request) => {
+      requests.push(request);
+      if (request.executable.endsWith("udhcpc"))
+        return Promise.resolve({ stdout: "lease acquired", stderr: "" });
+      if (request.arguments[4] === "status")
+        return Promise.resolve({
+          stdout: "wpa_state=COMPLETED\nssid=Sevyn Home\n",
+          stderr: "",
+        });
+      return Promise.resolve({ stdout: "OK\n", stderr: "" });
+    };
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve(["wlan0"]),
+      execute,
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    await expect(service.reconnectToSavedNetwork()).resolves.toBe(true);
+    expect(requests.some((request) => request.executable.endsWith("udhcpc"))).toBe(true);
+  });
+
+  it("never throws from reconnect when the adapter is missing", async () => {
+    const requests: LinuxCommandRequest[] = [];
+    const service = new LinuxWirelessNetworkService({
+      discoverInterfaces: () => Promise.resolve([]),
+      execute: (request) => {
+        requests.push(request);
+        return Promise.resolve({ stdout: "", stderr: "" });
+      },
+      delay: () => Promise.resolve(),
+      controlSocketAccessible: () => Promise.resolve(true),
+    });
+
+    await expect(service.reconnectToSavedNetwork()).resolves.toBe(false);
+    expect(requests).toHaveLength(0);
   });
 
   it("disconnects from the current network", async () => {

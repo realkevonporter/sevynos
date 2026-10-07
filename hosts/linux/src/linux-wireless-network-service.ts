@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { access, readdir } from "node:fs/promises";
 import type {
+  SavedWirelessNetwork,
   SevynWirelessNetworkService,
   WirelessNetwork,
   WirelessNetworkSnapshot,
@@ -220,7 +221,9 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
     validateSsid(ssid);
     const selected = this.#current.networks.find((network) => network.ssid === ssid);
     if (selected !== undefined && !selected.supported)
-      throw new Error("This Wi-Fi security mode is not supported yet.");
+      throw new Error(
+        "Enterprise (WPA-Enterprise / 802.1X) networks are not supported in this version of SevynOS.",
+      );
     if (selected?.requiresPassword === true || password !== undefined)
       validatePassword(password);
     const interfaceName = await this.#requireInterface();
@@ -281,22 +284,7 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
         }
       }
       if (!connected) throw new Error("The network did not accept the connection.");
-      await this.#execute({
-        executable: "/sbin/udhcpc",
-        arguments: [
-          "-q",
-          "-n",
-          "-t",
-          "3",
-          "-T",
-          "3",
-          "-s",
-          "/usr/share/udhcpc/default.script",
-          "-i",
-          interfaceName,
-        ],
-        timeoutMilliseconds: 20_000,
-      });
+      await this.#acquireDhcpLease(interfaceName);
       await this.#wpa(interfaceName, ["save_config"]);
       this.#current = Object.freeze({ ...this.#current, state: "disconnected" });
       return await this.snapshot();
@@ -329,6 +317,90 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
       return await this.snapshot();
     } catch (error: unknown) {
       return this.#failure(interfaceName, error, "Unable to disconnect Wi-Fi.");
+    }
+  }
+
+  /**
+   * Lists the network profiles wpa_supplicant has persisted via save_config
+   * (stored in /var/lib/sevynos/wpa_supplicant.conf on SevynOS).
+   */
+  public async savedNetworks(): Promise<readonly SavedWirelessNetwork[]> {
+    const interfaceName = await this.#requireInterface();
+    const output = (await this.#wpa(interfaceName, ["list_networks"])).stdout;
+    return parseSavedNetworks(output);
+  }
+
+  /**
+   * Removes a saved network profile by its wpa_supplicant network id and
+   * persists the change, returning the remaining saved networks.
+   */
+  public async forgetNetwork(
+    networkId: string,
+  ): Promise<readonly SavedWirelessNetwork[]> {
+    if (!/^\d+$/.test(networkId)) throw new Error("The saved network id is not valid.");
+    const interfaceName = await this.#requireInterface();
+    await this.#expectOkay(interfaceName, ["remove_network", networkId]);
+    await this.#wpa(interfaceName, ["save_config"]);
+    return this.savedNetworks();
+  }
+
+  /**
+   * Best-effort reconnect to the strongest in-range saved network, for use at
+   * boot: if wpa_supplicant already associated on its own, just make sure a
+   * DHCP lease is in place. Returns true when the interface is connected.
+   * Never throws; boot must not fail because the network did.
+   */
+  public async reconnectToSavedNetwork(): Promise<boolean> {
+    const interfaceName = await this.#interfaceName();
+    if (interfaceName === undefined || !this.#enabled) return false;
+    try {
+      const initial = parseProperties(
+        (await this.#wpa(interfaceName, ["status"])).stdout,
+      );
+      if (initial.get("wpa_state") === "COMPLETED") {
+        await this.#acquireDhcpLease(interfaceName).catch(() => undefined);
+        await this.snapshot();
+        return true;
+      }
+      const saved = await this.savedNetworks();
+      if (saved.length === 0) return false;
+      await this.#expectOkay(interfaceName, ["scan"]);
+      // Real hardware needs time to scan across all channels.
+      await this.#delay(5_000);
+      const inRange = parseScanResults(
+        (await this.#wpa(interfaceName, ["scan_results"])).stdout,
+      );
+      const signalBySsid = new Map(
+        inRange.map((network) => [network.ssid, network.signal]),
+      );
+      let best: SavedWirelessNetwork | undefined;
+      let bestSignal = -1;
+      for (const candidate of saved) {
+        const signal = signalBySsid.get(candidate.ssid) ?? -1;
+        if (signal > bestSignal) {
+          best = candidate;
+          bestSignal = signal;
+        }
+      }
+      if (best === undefined || bestSignal < 0) return false;
+      await this.#expectOkay(interfaceName, ["select_network", best.networkId]);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await this.#delay(1_000);
+        const status = parseProperties(
+          (await this.#wpa(interfaceName, ["status"])).stdout,
+        );
+        if (status.get("wpa_state") === "COMPLETED") break;
+      }
+      const connected =
+        parseProperties((await this.#wpa(interfaceName, ["status"])).stdout).get(
+          "wpa_state",
+        ) === "COMPLETED";
+      if (!connected) return false;
+      await this.#acquireDhcpLease(interfaceName).catch(() => undefined);
+      await this.snapshot();
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -435,6 +507,25 @@ export class LinuxWirelessNetworkService implements SevynWirelessNetworkService 
       const lastLine = lines[lines.length - 1]?.trim() ?? "";
       if (lastLine !== "OK") throw new Error("The Wi-Fi service refused the request.");
     }
+  }
+
+  async #acquireDhcpLease(interfaceName: string): Promise<void> {
+    await this.#execute({
+      executable: "/sbin/udhcpc",
+      arguments: [
+        "-q",
+        "-n",
+        "-t",
+        "3",
+        "-T",
+        "3",
+        "-s",
+        "/usr/share/udhcpc/default.script",
+        "-i",
+        interfaceName,
+      ],
+      timeoutMilliseconds: 20_000,
+    });
   }
 
   async #setPersonalPassword(
@@ -580,6 +671,31 @@ export function parseProperties(output: string): ReadonlyMap<string, string> {
       properties.set(line.slice(0, separator), line.slice(separator + 1));
   }
   return properties;
+}
+
+export function parseSavedNetworks(output: string): readonly SavedWirelessNetwork[] {
+  const saved: SavedWirelessNetwork[] = [];
+  for (const line of output.split(/\r?\n/).slice(1)) {
+    if (line.trim() === "") continue;
+    const [networkId, ssid, bssid, ...flagParts] = line.split("\t");
+    if (
+      networkId === undefined ||
+      ssid === undefined ||
+      !/^\d+$/.test(networkId.trim()) ||
+      ssid.trim() === ""
+    )
+      continue;
+    const flags = flagParts.join("\t").trim();
+    saved.push(
+      Object.freeze({
+        networkId: networkId.trim(),
+        ssid: ssid.trim(),
+        ...(bssid === undefined || bssid.trim() === "" ? {} : { bssid: bssid.trim() }),
+        ...(flags === "" ? {} : { flags }),
+      }),
+    );
+  }
+  return Object.freeze(saved);
 }
 
 export function parseNetworkId(output: string): string {
