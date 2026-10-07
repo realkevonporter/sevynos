@@ -82,7 +82,9 @@ copy_with_libs() {
     while IFS= read -r lib; do
       [ -n "$lib" ] || continue
       case "$lib" in
-        /lib/* | /usr/lib/*) ;;
+        # /lib64 holds the dynamic loader (ld-linux); it must be staged or
+        # every dynamically linked binary fails with ENOENT ("not found").
+        /lib/* | /lib64/* | /usr/lib/*) ;;
         *) continue ;;
       esac
       rel="${lib#/}"
