@@ -6,5 +6,6 @@
 applications/tokrah/android
 applications/tokrah/ios
 applications/tokrah/dist
-tools/qemu/build
+tools/qemu/build/*
+!tools/qemu/build/trusted-update-keys.json
 **/*.log
