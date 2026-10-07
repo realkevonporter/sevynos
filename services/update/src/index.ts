@@ -22,3 +22,11 @@ export {
   parseOsVersion,
   type ParsedOsVersion,
 } from "./version.js";
+export {
+  APP_CATALOG_FEED_FORMAT,
+  defaultAppCatalogFeedUrl,
+  parseAppCatalogFeed,
+  type AppCatalogEntry,
+  type AppCatalogFeed,
+  type AppCatalogSignature,
+} from "./app-catalog-feed.js";

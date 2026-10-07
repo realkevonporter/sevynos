@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Software">
+  <defs>
+    <linearGradient id="sevyn-icon-store" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#818CF8"/>
+      <stop offset="1" stop-color="#4F46E5"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" rx="5.5" fill="url(#sevyn-icon-store)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.5 9.5 L6 5.5 L18 5.5 L19.5 9.5"/>
+    <path d="M4.5 9.5 L19.5 9.5 L18.3 19.5 L5.7 19.5 Z"/>
+    <path d="M9 12.5 L10.5 15.5 L14.5 11.5"/>
+  </g>
+</svg>
