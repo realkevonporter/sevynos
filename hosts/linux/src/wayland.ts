@@ -13,6 +13,19 @@ process.on("unhandledRejection", (reason) => {
   console.error("SEVYN_GENESIS_UNHANDLED_REJECTION", reason);
   process.exit(1);
 });
+
+// Protect the Genesis session host from the OOM killer (Ubuntu 26.10 model:
+// session-critical processes die last, applications die first). Gated on
+// SEVYN_WAYLAND_BRIDGE so test runners importing this module don't touch
+// /proc. Best-effort: boot continues when the write fails.
+if (
+  process.env["SEVYN_WAYLAND_BRIDGE"] !== undefined &&
+  process.env["SEVYN_WAYLAND_BRIDGE"] !== ""
+) {
+  if (!protectCurrentProcessFromOomKiller()) {
+    console.error("SEVYN_GENESIS_OOM_PROTECT_FAILED");
+  }
+}
 import { DisplayRenderPlanner, GenesisFrameExecutor } from "@sevynos/graphics";
 import { createWheelInputEvent, type PointerInputEvent } from "@sevynos/input";
 import {
@@ -52,6 +65,7 @@ import { LinuxBatteryService } from "./linux-battery-service.js";
 import { LinuxAudioService } from "./linux-audio-service.js";
 import { LinuxTimeService } from "./linux-time-service.js";
 import { LinuxNativeModuleServices } from "./linux-native-module-services.js";
+import { protectCurrentProcessFromOomKiller } from "./oom-score.js";
 import { LinuxSystemService } from "./linux-system-service.js";
 import { LinuxFileSystem } from "./linux-file-system.js";
 import { ChromiumBrowserEngine } from "./chromium-browser-engine.js";

@@ -10,11 +10,14 @@ import type {
   ApplicationWorkerTransport,
   HostWorkerMessage,
 } from "@sevynos/react-native/internal";
+import { oomScoreAdjForApplication, setOomScoreAdj } from "./oom-score.js";
 
 export interface LinuxApplicationProcess {
   readonly stdin: { write(value: string): boolean; end(): void };
   readonly stdout: NodeJS.ReadableStream;
   readonly stderr: NodeJS.ReadableStream;
+  /** Present when the factory spawned a real OS process. */
+  readonly pid?: number | undefined;
   once(event: "error", listener: (error: Error) => void): this;
   once(
     event: "exit",
@@ -28,6 +31,23 @@ export type LinuxApplicationProcessFactory = (
   argumentsValue: readonly string[],
   environment: Readonly<Record<string, string>>,
 ) => LinuxApplicationProcess;
+
+/**
+ * Order the OOM killer for a freshly spawned application process: ordinary
+ * apps keep the default score so they die before the session, while the
+ * recovery-path terminal is protected. Children inherit the spawner's score
+ * at fork, so this explicit write is what keeps a protected Genesis host
+ * from accidentally shielding every app. Best-effort; never throws.
+ */
+function applyApplicationOomScore(pid: number | undefined, applicationId: string): void {
+  if (pid === undefined) return;
+  const score = oomScoreAdjForApplication(applicationId);
+  if (!setOomScoreAdj(pid, score)) {
+    console.error(
+      `Genesis failed to set oom_score_adj=${String(score)} for application ${applicationId} (pid ${String(pid)}).`,
+    );
+  }
+}
 
 class ProcessWorkerTransport implements ApplicationWorkerTransport {
   readonly #messages = new Set<(message: unknown) => void>();
@@ -140,6 +160,7 @@ export class NativeLinuxProcessApplicationExecutor implements ApplicationWorkerE
     });
     try {
       const child = this.#factory(process.execPath, [this.runner], environment);
+      applyApplicationOomScore(child.pid, descriptor.applicationId);
       return new ProcessWorkerTransport(child, this.maximumMessageBytes, () =>
         rm(directory, { recursive: true, force: true }),
       );
@@ -194,6 +215,7 @@ export class HermesLinuxProcessApplicationExecutor implements ApplicationWorkerE
         [this.runtimeBytecode, bytecodePath],
         environment,
       );
+      applyApplicationOomScore(child.pid, descriptor.applicationId);
       return new ProcessWorkerTransport(child, this.maximumMessageBytes, () =>
         rm(directory, { recursive: true, force: true }),
       );
