@@ -183,9 +183,10 @@ Automatable, no false claims:
     fallback copy), `/boot/vmlinuz`, and the ESP-staged recovery kernel
     (`/boot/efi/EFI/SevynOS/vmlinuz`, staged by C1's `deploy_recovery`).
   - `queue-enrollment` — attempts `mokutil --import` of the DER certificate with
-    the generated enrollment password; records the outcome
-    (`queued` / `manual-required` / `no-mokutil` / `no-efi`) in
-    `/var/lib/sevyn/secureboot/state.json` for the OS and the verification tool.
+    the generated enrollment password; records the outcome in
+    `/var/lib/sevyn/secureboot/state.json` for the OS and the verification tool:
+    `enrollment` is `queued` / `manual-required` / `not-applicable`, with
+    `enrollmentReason` `no-mokutil` / `no-uefi` explaining the latter two.
   - `status` — prints the state file for diagnostics.
   - Every step degrades gracefully when its tool is missing (`sbsign`,
     `mokutil`): it logs, records the state, and continues the install — a
