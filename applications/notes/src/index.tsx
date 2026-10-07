@@ -66,7 +66,7 @@ export const notesManifest: SevynApplicationManifest = {
 
 export const notesApplicationBundle = `(() => {
   const { AppRegistry } = globalThis.__SEVYN_MODULES__["react-native"];
-  const { NotesApplication } = globalThis.__SEVYN_MODULES__["@sevynos/example-notes"];
+  const { NotesApplication } = globalThis.__SEVYN_MODULES__["@sevynos/app-notes"];
   AppRegistry.registerComponent("Notes", () => NotesApplication);
 })();`;
 

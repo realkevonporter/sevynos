@@ -852,6 +852,9 @@ export function getApplicationAliases(
   if (lowerLabel.includes("note") || lowerId.includes("note")) {
     aliases.push("text", "memo", "doc", "write", "pad", "scratchpad");
   }
+  if (lowerLabel.includes("calculator") || lowerId.includes("calculator")) {
+    aliases.push("calc", "math", "arithmetic", "compute");
+  }
   if (lowerLabel.includes("monitor") || lowerId.includes("system-monitor")) {
     aliases.push(
       "task",

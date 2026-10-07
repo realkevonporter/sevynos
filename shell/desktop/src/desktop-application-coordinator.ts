@@ -31,7 +31,8 @@ export type DesktopApplicationKind =
   | "notes"
   | "ide"
   | "camera"
-  | "music";
+  | "music"
+  | "calculator";
 export type DesktopApplicationId = string;
 
 export interface DesktopApplicationDefinition {
@@ -149,6 +150,13 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       kind: "music",
       title: "Music",
       layout: windowLayout(840, 600, 640, 440),
+    }),
+    Object.freeze({
+      id: "org.sevynos.calculator",
+      name: "Calculator",
+      kind: "calculator",
+      title: "Calculator",
+      layout: windowLayout(400, 640, 320, 480),
     }),
   ]);
 
@@ -622,6 +630,9 @@ export class DesktopApplicationCoordinator {
         return;
       case "notes":
         this.#surfaces.createNotes(windowId);
+        return;
+      case "calculator":
+        this.#surfaces.createCalculator(windowId);
         return;
       case "music":
         this.#surfaces.createMusic(windowId);

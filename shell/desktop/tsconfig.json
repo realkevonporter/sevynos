@@ -13,6 +13,8 @@
     { "path": "../../input" },
     { "path": "../../frameworks/react-native" },
     { "path": "../../applications/notes" },
+    { "path": "../../applications/text-editor" },
+    { "path": "../../applications/calculator" },
     { "path": "../../applications/browser" },
     { "path": "../../applications/camera" },
     { "path": "../../applications/music" },

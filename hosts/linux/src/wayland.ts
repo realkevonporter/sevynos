@@ -43,6 +43,7 @@ import type {
   SevynTimeService,
   SevynSystemService,
   SevynFileSystem,
+  FileSystemEntry,
   SevynApplicationPackage,
   StructuredValue,
   WirelessNetworkSnapshot,
@@ -467,6 +468,24 @@ export async function startWaylandHost(
                 if (typeof argumentsValue !== "string")
                   throw new Error("Clipboard writes require text.");
                 await clipboard.writeText(argumentsValue);
+                return null;
+              }
+              if (service === "filesystem.list" || service === "filesystem.read") {
+                if (typeof argumentsValue !== "string")
+                  throw new Error(`Service ${service} requires a path.`);
+                if (service === "filesystem.list")
+                  return (await filesystem.list(argumentsValue)).map(
+                    filesystemEntrySnapshot,
+                  );
+                return filesystem.read(argumentsValue);
+              }
+              if (service === "filesystem.write") {
+                const target = filesystemWriteTarget(argumentsValue);
+                if (target === undefined)
+                  throw new Error(
+                    "Service filesystem.write requires a path and content.",
+                  );
+                await filesystem.write(target.path, target.content);
                 return null;
               }
               if (service === "notifications.show") {
@@ -1147,6 +1166,33 @@ function structuredRecord(
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, StructuredValue>)
     : undefined;
+}
+
+/**
+ * Converts a filesystem entry into a structured value for worker service
+ * responses. Optional fields are omitted when unset so the payload always
+ * satisfies the worker protocol (which has no `undefined`).
+ */
+function filesystemEntrySnapshot(entry: FileSystemEntry): StructuredValue {
+  return {
+    name: entry.name,
+    path: entry.path,
+    kind: entry.kind,
+    size: entry.size,
+    ...(entry.modified === undefined ? {} : { modified: entry.modified }),
+    ...(entry.mimeType === undefined ? {} : { mimeType: entry.mimeType }),
+  };
+}
+
+function filesystemWriteTarget(
+  value: StructuredValue,
+): { readonly path: string; readonly content: string } | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record["path"] !== "string" || typeof record["content"] !== "string")
+    return undefined;
+  return { path: record["path"], content: record["content"] };
 }
 
 function networkInfoSnapshot(snapshot: WirelessNetworkSnapshot): {

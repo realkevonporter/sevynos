@@ -1,4 +1,9 @@
-import { notesApplicationBundle, notesManifest } from "@sevynos/example-notes";
+import { notesApplicationBundle, notesManifest } from "@sevynos/app-notes";
+import {
+  textEditorApplicationBundle,
+  textEditorManifest,
+} from "@sevynos/app-text-editor";
+import { calculatorApplicationBundle, calculatorManifest } from "@sevynos/app-calculator";
 import {
   InMemoryApplicationPermissionStore,
   IsolatedApplicationWorkerManager,
@@ -8,6 +13,7 @@ import {
   buildSevynApplicationPackage,
   verifyPackageIntegrity,
   type ApplicationPackageRepository,
+  type SevynApplicationManifest,
   type SevynApplicationPackage,
   type ApplicationWorkerExecutor,
   type ApplicationWorkerSnapshot,
@@ -24,6 +30,34 @@ export interface IsolatedApplicationServiceProvider {
     argumentsValue: StructuredValue,
   ): Promise<StructuredValue>;
 }
+
+interface IsolatedApplicationRegistration {
+  readonly manifest: SevynApplicationManifest;
+  readonly bundle: string;
+  readonly icon: string;
+}
+
+const ISOLATED_APPLICATIONS: readonly IsolatedApplicationRegistration[] = [
+  {
+    manifest: notesManifest,
+    bundle: notesApplicationBundle,
+    icon: "sevyn-notes",
+  },
+  {
+    manifest: textEditorManifest,
+    bundle: textEditorApplicationBundle,
+    icon: "sevyn-text-editor",
+  },
+  {
+    manifest: calculatorManifest,
+    bundle: calculatorApplicationBundle,
+    icon: "sevyn-calculator",
+  },
+];
+
+const ISOLATED_APPLICATION_IDS: ReadonlySet<string> = new Set(
+  ISOLATED_APPLICATIONS.map((registration) => registration.manifest.id),
+);
 
 export class DesktopIsolatedApplicationCoordinator {
   readonly #runtime: DesktopRuntime;
@@ -62,15 +96,19 @@ export class DesktopIsolatedApplicationCoordinator {
     readonly onProcessLaunched?: (applicationId: string) => void;
   }): Promise<DesktopIsolatedApplicationCoordinator> {
     const repository = new VirtualApplicationPackageRepository();
-    await repository.put(
-      await buildSevynApplicationPackage({
-        manifest: notesManifest,
-        files: { [notesManifest.entrypoint]: notesApplicationBundle },
-        icons: { [notesManifest.icon]: "sevyn-notes" },
-      }),
-    );
+    for (const registration of ISOLATED_APPLICATIONS) {
+      await repository.put(
+        await buildSevynApplicationPackage({
+          manifest: registration.manifest,
+          files: { [registration.manifest.entrypoint]: registration.bundle },
+          icons: { [registration.manifest.icon]: registration.icon },
+        }),
+      );
+    }
     const permissions = new InMemoryApplicationPermissionStore();
-    permissions.set(notesManifest.id, "notifications", "granted");
+    for (const registration of ISOLATED_APPLICATIONS)
+      for (const permission of registration.manifest.permissions)
+        permissions.set(registration.manifest.id, permission, "granted");
     const broker = new TrustedWorkerServiceBroker(permissions, {
       storage: options.storage ?? new NamespacedApplicationStorage(),
       request: (applicationId, service, argumentsValue) =>
@@ -93,7 +131,7 @@ export class DesktopIsolatedApplicationCoordinator {
 
   public async attachRunningApplications(): Promise<void> {
     for (const running of this.#runtime.applications.listRunning())
-      if (running.definition.id === notesManifest.id)
+      if (ISOLATED_APPLICATION_IDS.has(running.definition.id))
         await this.#ensureWindow(running.windowId, running.definition.id);
   }
 

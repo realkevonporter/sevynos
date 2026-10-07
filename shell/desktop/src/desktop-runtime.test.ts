@@ -744,6 +744,24 @@ describe("Genesis desktop host runtime", () => {
     ).toBe(true);
   });
 
+  it("launches the calculator as a native desktop surface", async () => {
+    const runtime = await createDesktopRuntime();
+    const calculator = await runtime.applications.launch("org.sevynos.calculator");
+    await waitForNativeApplication(runtime, calculator.windowId, "Calculator");
+
+    expect(runtime.surfaces.get(calculator.windowId)?.kind).toBe("calculator");
+    const scene = compose(runtime);
+    const calculatorWindow = scene.nodes.find(
+      (node) => node.kind === "desktop-window" && node.windowId === calculator.windowId,
+    );
+    expect(
+      calculatorWindow?.kind === "desktop-window" &&
+        calculatorWindow.nativeSurface?.accessibility.some(
+          (item) => item.label === "Calculator",
+        ),
+    ).toBe(true);
+  });
+
   it("focuses, restores, and minimizes applications through taskbar actions", async () => {
     const runtime = await createDesktopRuntime();
     runtime.applications.activateTaskbarApplication("org.sevynos.console");

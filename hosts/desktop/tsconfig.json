@@ -18,6 +18,8 @@
     { "path": "../../frameworks/react-native" },
     { "path": "../../shell/core" },
     { "path": "../../shell/desktop" },
-    { "path": "../../applications/notes" }
+    { "path": "../../applications/notes" },
+    { "path": "../../applications/text-editor" },
+    { "path": "../../applications/calculator" }
   ]
 }

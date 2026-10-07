@@ -24,11 +24,39 @@ import {
 } from "@sevynos/desktop-shell";
 import type { WindowControlHit } from "@sevynos/desktop-shell/internal";
 import type { SevynApplicationPackage } from "@sevynos/react-native";
+import type { FileSystemEntry, StructuredValue } from "@sevynos/react-native/internal";
 import { ElectronWorkerApplicationExecutor } from "./electron-worker-application-executor.js";
 import {
   createSystemApplicationModuleUrl,
   resolveSystemApplicationModule,
 } from "./shell-hot-reload.js";
+
+/**
+ * Converts a filesystem entry into a structured value for worker service
+ * responses. Optional fields are omitted when unset so the payload always
+ * satisfies the worker protocol (which has no `undefined`).
+ */
+function filesystemEntrySnapshot(entry: FileSystemEntry): StructuredValue {
+  return {
+    name: entry.name,
+    path: entry.path,
+    kind: entry.kind,
+    size: entry.size,
+    ...(entry.modified === undefined ? {} : { modified: entry.modified }),
+    ...(entry.mimeType === undefined ? {} : { mimeType: entry.mimeType }),
+  };
+}
+
+function filesystemWriteTarget(
+  value: StructuredValue,
+): { readonly path: string; readonly content: string } | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record["path"] !== "string" || typeof record["content"] !== "string")
+    return undefined;
+  return { path: record["path"], content: record["content"] };
+}
 
 function requireDesktopCanvas(): HTMLCanvasElement {
   const canvas = document.querySelector<HTMLCanvasElement>("#desktop");
@@ -82,6 +110,29 @@ const isolatedApplications = await DesktopIsolatedApplicationCoordinator.create(
         return window.genesisHost
           .writeClipboardText(typeof argumentsValue === "string" ? argumentsValue : "")
           .then(() => null);
+      }
+      if (service === "filesystem.list" || service === "filesystem.read") {
+        if (typeof argumentsValue !== "string")
+          return Promise.reject(new Error(`Service ${service} requires a path.`));
+        const filesystem = runtime.filesystem;
+        if (filesystem === undefined)
+          return Promise.reject(new Error(`Service ${service} has no filesystem.`));
+        return service === "filesystem.list"
+          ? filesystem
+              .list(argumentsValue)
+              .then((entries) => entries.map(filesystemEntrySnapshot))
+          : filesystem.read(argumentsValue);
+      }
+      if (service === "filesystem.write") {
+        const target = filesystemWriteTarget(argumentsValue);
+        if (target === undefined)
+          return Promise.reject(
+            new Error("Service filesystem.write requires a path and content."),
+          );
+        const filesystem = runtime.filesystem;
+        if (filesystem === undefined)
+          return Promise.reject(new Error("Service filesystem.write has no filesystem."));
+        return filesystem.write(target.path, target.content).then(() => null);
       }
       if (service !== "notifications.show")
         return Promise.reject(new Error(`Service ${service} has no desktop provider.`));

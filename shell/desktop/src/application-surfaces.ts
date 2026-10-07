@@ -38,7 +38,20 @@ import {
   createCoreSystemApplication,
   type AppManagerEntry,
 } from "@sevynos/core-applications";
+import { CalculatorApplication } from "@sevynos/app-calculator";
 import type { DesktopSettings } from "./desktop-settings.js";
+
+/**
+ * Surface kinds whose windows can be driven by an isolated application
+ * worker. The isolated application coordinator registers the matching
+ * application packages; once the worker attaches its surface it takes over
+ * rendering for that window.
+ */
+const ISOLATED_SURFACE_KINDS: ReadonlySet<string> = new Set([
+  "notes",
+  "text-editor",
+  "calculator",
+]);
 
 export interface WelcomeApplicationSurface {
   readonly kind: "welcome";
@@ -116,6 +129,10 @@ export interface NotesApplicationSurface {
   readonly kind: "notes";
   readonly heading: string;
 }
+export interface CalculatorApplicationSurface {
+  readonly kind: "calculator";
+  readonly heading: string;
+}
 export interface IdeApplicationSurface {
   readonly kind: "ide";
   readonly heading: string;
@@ -135,6 +152,7 @@ export type DesktopApplicationSurface =
   | TextEditorApplicationSurface
   | AppManagerApplicationSurface
   | NotesApplicationSurface
+  | CalculatorApplicationSurface
   | IdeApplicationSurface;
 
 export type ApplicationSurfaceListener = () => void;
@@ -385,6 +403,15 @@ export class ApplicationSurfaceRegistry {
     return surface;
   }
 
+  public createCalculator(windowId: GenesisWindowId): CalculatorApplicationSurface {
+    const surface: CalculatorApplicationSurface = Object.freeze({
+      kind: "calculator",
+      heading: "Calculator",
+    });
+    this.#set(windowId, surface);
+    return surface;
+  }
+
   public createIde(windowId: GenesisWindowId): IdeApplicationSurface {
     const surface: IdeApplicationSurface = Object.freeze({
       kind: "ide",
@@ -403,7 +430,10 @@ export class ApplicationSurfaceRegistry {
     const surface = this.#surfaces.get(windowId);
     if (surface === undefined) return undefined;
     this.#nativeBounds.set(windowId, Object.freeze({ ...bounds }));
-    if (surface.kind === "notes" && this.#isolatedSnapshots.has(windowId)) {
+    if (
+      ISOLATED_SURFACE_KINDS.has(surface.kind) &&
+      this.#isolatedSnapshots.has(windowId)
+    ) {
       const previousBounds = this.#isolatedBounds.get(windowId);
       this.#isolatedBounds.set(windowId, bounds);
       if (
@@ -535,7 +565,8 @@ export class ApplicationSurfaceRegistry {
     dispatch: (event: StructuredValue) => void,
     teardown?: () => void,
   ): void {
-    if (this.#surfaces.get(windowId)?.kind !== "notes")
+    const surface = this.#surfaces.get(windowId);
+    if (surface === undefined || !ISOLATED_SURFACE_KINDS.has(surface.kind))
       throw new Error("An isolated surface can only attach to a third-party window.");
     this.#isolatedSnapshots.set(windowId, snapshot);
     this.#isolatedDispatchers.set(windowId, dispatch);
@@ -860,6 +891,11 @@ export class ApplicationSurfaceRegistry {
           kind: "notes",
           filesystem: this.#filesystem,
           notifications: this.#notifications,
+        });
+      case "calculator":
+        return createElement(CalculatorApplication, {
+          appearance: settings.theme === "light" ? "light" : "dark",
+          accent: settings.accentColor,
         });
     }
   }

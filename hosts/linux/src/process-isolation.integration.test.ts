@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { notesApplicationBundle, notesManifest } from "@sevynos/example-notes";
+import { notesApplicationBundle, notesManifest } from "@sevynos/app-notes";
 import {
   DEFAULT_WORKER_EXECUTION_LIMITS,
   InMemoryApplicationPermissionStore,

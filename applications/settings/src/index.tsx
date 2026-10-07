@@ -90,6 +90,20 @@ export const DEFAULT_INSTALLED_APPS: readonly InstalledAppInfo[] = [
     system: false,
   },
   {
+    id: "org.sevynos.text-editor",
+    name: "Text Editor",
+    version: "1.0.0",
+    permissions: ["filesystem:user"],
+    system: false,
+  },
+  {
+    id: "org.sevynos.calculator",
+    name: "Calculator",
+    version: "1.0.0",
+    permissions: [],
+    system: false,
+  },
+  {
     id: "org.sevynos.settings",
     name: "Settings",
     version: "1.0.0",
