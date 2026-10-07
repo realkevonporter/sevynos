@@ -110,7 +110,16 @@ udevadm trigger --action=add --subsystem-match=net 2>/dev/null || true
 if ! udevadm settle --timeout=30; then
   echo "SEVYN_QEMU_UDEV_SETTLE_TIMEOUT"
 fi
-chmod -R 0666 /dev/dri /dev/fb* /dev/snd /dev/video* 2>/dev/null || true
+# Device nodes stay world-accessible so the desktop session (which runs as
+# the non-root installed user) can use DRM, sound and video. Directories
+# keep the execute bit: a blanket 0666 would make them untraversable.
+for sevyn_devdir in /dev/dri /dev/snd; do
+  if [ -d "$sevyn_devdir" ]; then
+    find "$sevyn_devdir" -type d -exec chmod 0755 {} + 2>/dev/null || true
+    find "$sevyn_devdir" ! -type d -exec chmod 0666 {} + 2>/dev/null || true
+  fi
+done
+chmod 0666 /dev/fb* /dev/video* 2>/dev/null || true
 chmod 0666 /dev/tty0 /dev/tty1 2>/dev/null || true
 if [ -d /dev/dri ]; then
   echo "SEVYN_DRM_DEVICES_INITIALIZED: $(ls -m /dev/dri 2>/dev/null || true)"

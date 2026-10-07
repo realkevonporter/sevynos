@@ -1,11 +1,20 @@
 #!/bin/sh
 # SevynOS Installer — Chroot post-installation script
 # Runs inside the chroot of the newly installed system.
+#
+# Creates the initial user account per the SevynOS accounts contract:
+#   /var/lib/sevyn/accounts/registry.json — user list (no secrets)
+#   /var/lib/sevyn/accounts/shadow.json   — mode 0600, username -> verifier
+# plus a real Unix account (home dir, sudo group). The root account is
+# locked whenever a user was created; the user's own password (via sudo)
+# is the recovery path.
 set -eu
 
 TARGET_DISK="${1:-}"
 ESP_DEV="${2:-}"
 ROOT_DEV="${3:-}"
+INSTALL_CONFIG="/tmp/sevyn-install-config"
+ACCOUNTS_HELPER="/tmp/sevyn-installer-accounts.mjs"
 
 log() {
   echo "[sevyn-chroot] $*"
@@ -169,17 +178,176 @@ OSEOF
   fi
 }
 
-# ─── Set Timezone ────────────────────────────────────────────────────
+# ─── Install configuration (written by sevyn-installer) ─────────────
+load_install_config() {
+  SEVYN_INSTALL_USER=""
+  SEVYN_INSTALL_UID="1000"
+  SEVYN_INSTALL_FULLNAME=""
+  SEVYN_INSTALL_LOCALE="en_US.UTF-8"
+  SEVYN_INSTALL_TIMEZONE="UTC"
+  SEVYN_INSTALL_MODE="unknown"
+  SEVYN_INSTALL_VERSION="unknown"
+  if [ -f "$INSTALL_CONFIG" ]; then
+    # Only the known keys are honored; anything else is ignored.
+    SEVYN_INSTALL_USER=$(sed -n 's/^SEVYN_INSTALL_USER=//p' "$INSTALL_CONFIG" | head -n 1)
+    SEVYN_INSTALL_UID=$(sed -n 's/^SEVYN_INSTALL_UID=//p' "$INSTALL_CONFIG" | head -n 1)
+    SEVYN_INSTALL_FULLNAME=$(sed -n 's/^SEVYN_INSTALL_FULLNAME=//p' "$INSTALL_CONFIG" | head -n 1)
+    SEVYN_INSTALL_LOCALE=$(sed -n 's/^SEVYN_INSTALL_LOCALE=//p' "$INSTALL_CONFIG" | head -n 1)
+    SEVYN_INSTALL_TIMEZONE=$(sed -n 's/^SEVYN_INSTALL_TIMEZONE=//p' "$INSTALL_CONFIG" | head -n 1)
+    SEVYN_INSTALL_MODE=$(sed -n 's/^SEVYN_INSTALL_MODE=//p' "$INSTALL_CONFIG" | head -n 1)
+    SEVYN_INSTALL_VERSION=$(sed -n 's/^SEVYN_INSTALL_VERSION=//p' "$INSTALL_CONFIG" | head -n 1)
+    [ -n "$SEVYN_INSTALL_UID" ] || SEVYN_INSTALL_UID="1000"
+  fi
+  log "Install config: user='${SEVYN_INSTALL_USER:-<none>}' locale=$SEVYN_INSTALL_LOCALE tz=$SEVYN_INSTALL_TIMEZONE mode=$SEVYN_INSTALL_MODE"
+}
+
+# ─── Locale + timezone ──────────────────────────────────────────────
+configure_locale_timezone() {
+  tz="$SEVYN_INSTALL_TIMEZONE"
+  if [ -n "$tz" ] && [ -f "/usr/share/zoneinfo/$tz" ]; then
+    ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+    printf '%s\n' "$tz" > /etc/timezone 2>/dev/null || true
+    log "Timezone set to $tz"
+  else
+    log "WARNING: unknown timezone '$tz'; leaving UTC"
+    [ -f /usr/share/zoneinfo/UTC ] && ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+  fi
+
+  locale="$SEVYN_INSTALL_LOCALE"
+  case "$locale" in
+    en_US.UTF-8 | en_GB.UTF-8 | de_DE.UTF-8 | fr_FR.UTF-8 | es_ES.UTF-8 | pt_BR.UTF-8 | it_IT.UTF-8 | nl_NL.UTF-8)
+      printf 'LANG=%s\n' "$locale" > /etc/default/locale
+      log "Locale set to $locale"
+      ;;
+    *)
+      log "WARNING: unsupported locale '$locale'; leaving default"
+      ;;
+  esac
+}
+
+# ─── User account ───────────────────────────────────────────────────
+create_user() {
+  username="$SEVYN_INSTALL_USER"
+  if [ -z "$username" ]; then
+    log "No user requested; skipping account creation (session will run as root)."
+    return 0
+  fi
+  uid="${SEVYN_INSTALL_UID:-1000}"
+  fullname="$SEVYN_INSTALL_FULLNAME"
+  password="${SEVYN_INSTALL_PASSWORD:-}"
+
+  # Username rules mirror services/accounts validateUsername exactly.
+  case "$username" in
+    "" | *[!a-z0-9_-]* ) fail "Refusing to create invalid username '$username'." ;;
+  esac
+  case "$username" in
+    [!a-z_]*) fail "Refusing to create invalid username '$username': must start with a lowercase letter or underscore." ;;
+  esac
+  [ ${#username} -le 32 ] || fail "Refusing to create invalid username '$username': at most 32 characters."
+  case "$username" in
+    root|admin|administrator|guest|system|sevyn|daemon|bin|sys|nobody|operator|superuser)
+      fail "Refusing to create reserved username '$username'." ;;
+  esac
+  [ ${#password} -ge 8 ] || fail "Refusing to create user '$username' with a short password."
+  [ ${#password} -le 256 ] || fail "Refusing to create user '$username': password too long (max 256)."
+  case "$password" in
+    *:* ) fail "Refusing to create user '$username': password may not contain a colon." ;;
+  esac
+
+  command -v useradd >/dev/null 2>&1 || fail "useradd is missing from the installed system."
+  command -v chpasswd >/dev/null 2>&1 || fail "chpasswd is missing from the installed system."
+  [ -f "$ACCOUNTS_HELPER" ] || fail "Installer accounts helper is missing: $ACCOUNTS_HELPER"
+  command -v /usr/local/bin/node >/dev/null 2>&1 || fail "node is missing from the installed system."
+
+  if id "$username" >/dev/null 2>&1; then
+    existing_uid=$(id -u "$username")
+    [ "$existing_uid" = "$uid" ] || fail "User '$username' already exists with a different uid ($existing_uid)."
+    log "User '$username' already exists; updating password and groups."
+  else
+    # nologin shell: SevynOS users never get a Linux shell (product rule);
+    # the desktop session is launched via setpriv with numeric ids.
+    # Home directory follows the accounts contract:
+    # /var/lib/sevyn/users/<username> (not /home).
+    nologin="/usr/sbin/nologin"
+    [ -x "$nologin" ] || nologin="/bin/false"
+    user_home="/var/lib/sevyn/users/$username"
+    useradd -m -d "$user_home" -u "$uid" -c "$fullname" -s "$nologin" "$username" \
+      || fail "Failed to create user '$username'."
+    log "Created user '$username' (uid $uid, home $user_home)"
+  fi
+
+  # Unix password (for sudo) — same secret the user chose in the installer.
+  printf '%s:%s\n' "$username" "$password" | chpasswd \
+    || fail "Failed to set the password for '$username'."
+
+  # Sudo group membership (Debian's sudo group is the admin group).
+  if getent group sudo >/dev/null 2>&1; then
+    usermod -aG sudo "$username" || fail "Failed to add '$username' to the sudo group."
+  else
+    fail "The 'sudo' group does not exist; is sudo installed?"
+  fi
+
+  # Narrow passwordless sudo for session lifecycle commands so the desktop
+  # (running as the user) can shut down / reboot without a Linux shell.
+  # Everything else still asks for the user's password.
+  sudoers_file="/etc/sudoers.d/sevyn-user"
+  printf '%s ALL=(ALL) NOPASSWD: /sbin/poweroff, /sbin/reboot, /sbin/halt, /usr/local/bin/request-genesis-shutdown\n' \
+    "$username" > "$sudoers_file"
+  chmod 0440 "$sudoers_file"
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -c -f "$sudoers_file" >/dev/null 2>&1 || fail "Generated sudoers file failed validation."
+  fi
+  log "Configured sudo for '$username'"
+
+  # SevynOS accounts contract files (format owned by services/accounts).
+  accounts_dir="/var/lib/sevyn/accounts"
+  mkdir -p "$accounts_dir"
+  chmod 0755 "$accounts_dir"
+  created_at_ms=$(date +%s%3N)
+  printf '%s' "$password" | /usr/local/bin/node "$ACCOUNTS_HELPER" make-user \
+    --username "$username" \
+    --uid "$uid" \
+    --full-name "$fullname" \
+    --created-at "$created_at_ms" \
+    --registry "$accounts_dir/registry.json" \
+    --shadow "$accounts_dir/shadow.json" \
+    || fail "Failed to write the SevynOS account files."
+  chmod 0644 "$accounts_dir/registry.json"
+  chmod 0600 "$accounts_dir/shadow.json"
+  # The desktop session runs as the user: it must be able to read the shadow
+  # file (lock-screen verification) and update it (password change).
+  chown "$uid:$uid" "$accounts_dir/registry.json" "$accounts_dir/shadow.json"
+  log "Wrote $accounts_dir/registry.json and shadow.json (0600)"
+
+  # Home directory skeleton. The accounts service provisions the same
+  # standard subdirectories; the installer creates them up front so the
+  # home is complete even before first login. Projects holds the default
+  # Sevyn Code workspace.
+  user_home=$(sed -n "s|^${username}:[^:]*:[^:]*:[^:]*:[^:]*:\\([^:]*\\).*|\\1|p" /etc/passwd | head -n 1)
+  [ -n "$user_home" ] || user_home="/var/lib/sevyn/users/$username"
+  mkdir -p "$user_home"
+  for dir in Desktop Documents Downloads Pictures Music Videos Projects; do
+    mkdir -p "$user_home/$dir"
+  done
+  chown -R "$uid:$uid" "$user_home"
+  chmod 0755 "$user_home"
+  log "Prepared home directory $user_home"
+
+  # Lock the root account: with a user + sudo in place, root login is
+  # unnecessary. Recovery goes through the user's Terminal app + sudo.
+  if command -v passwd >/dev/null 2>&1; then
+    passwd -l root >/dev/null 2>&1 || log "WARNING: could not lock the root account"
+    log "Root account locked"
+  fi
+}
+
+# ─── System configuration ───────────────────────────────────────────
 configure_system() {
   log "Configuring system..."
 
-  # Set timezone to UTC by default
-  if [ -f /usr/share/zoneinfo/UTC ]; then
-    ln -sf /usr/share/zoneinfo/UTC /etc/localtime
-  fi
-
   # Ensure essential directories exist
-  mkdir -p /var/lib/sevynos
+  mkdir -p /var/lib/sevyn
+  mkdir -p /var/lib/sevyn/accounts
   mkdir -p /var/log
   mkdir -p /tmp
   mkdir -p /media
@@ -196,12 +364,29 @@ configure_system() {
     printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
   fi
 
+  # Install manifest — records how this system was provisioned.
+  created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cat > /var/lib/sevyn/install.json <<EOF
+{
+  "installedAt": "$created_at",
+  "installerVersion": "$SEVYN_INSTALL_VERSION",
+  "mode": "$SEVYN_INSTALL_MODE",
+  "locale": "$SEVYN_INSTALL_LOCALE",
+  "timezone": "$SEVYN_INSTALL_TIMEZONE",
+  "user": "$SEVYN_INSTALL_USER"
+}
+EOF
+  chmod 0644 /var/lib/sevyn/install.json
+
   log "System configuration complete."
 }
 
 # ─── Main ────────────────────────────────────────────────────────────
 install_grub
 generate_grub_config
+load_install_config
+configure_locale_timezone
 configure_system
+create_user
 
 log "Post-installation setup complete."
