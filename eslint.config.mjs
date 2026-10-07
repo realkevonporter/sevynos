@@ -40,6 +40,7 @@ export default tseslint.config(
       "frameworks/*/src/**/*.ts",
       "shell/core/src/**/*.ts",
       "shell/desktop/src/**/*.ts",
+      "services/*/src/**/*.ts",
       "applications/shell/**/*.ts",
       "applications/shell/**/*.tsx",
       "applications/*/src/**/*.ts",

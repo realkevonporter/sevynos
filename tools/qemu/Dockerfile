@@ -43,6 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server
 
 FROM debian:bookworm-slim AS image
+ARG SEVYN_OS_VERSION=0.1.0
 RUN (sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources 2>/dev/null || sed -i 's/main/main contrib non-free non-free-firmware/' /etc/apt/sources.list 2>/dev/null || true) && \
     apt-get update && apt-get install -y --no-install-recommends \
     acpid at-spi2-core busybox-static chromium chromium-sandbox cpio dialog dosfstools e2fsprogs efibootmgr fonts-dejavu-core gzip grub-common grub2-common grub-efi-amd64-bin grub-pc-bin iproute2 libglib2.0-bin libnotify-bin live-boot linux-image-amd64 libxkbcommon0 os-prober parted python3 python3-pil speech-dispatcher squashfs-tools tzdata udev weston zstd ntfs-3g exfatprogs \
@@ -82,6 +83,7 @@ COPY tools/qemu/request-shutdown.sh /usr/local/bin/request-genesis-shutdown
 COPY tools/qemu/sevyn-installer.sh /usr/local/bin/sevyn-installer
 COPY tools/qemu/sevyn-installer-chroot.sh /usr/local/bin/sevyn-installer-chroot
 COPY tools/qemu/sevyn-installed-init /usr/local/lib/sevynos/installed-init
+COPY tools/qemu/sevyn-apply-update.sh /usr/local/lib/sevynos/apply-update
 COPY tools/qemu/sevyn-installer.desktop /usr/share/applications/sevyn-installer.desktop
 COPY tools/qemu/acpi-power-button /etc/acpi/events/sevyn-power-button
 COPY tools/qemu/usb-automount.rules /etc/udev/rules.d/99-sevyn-usb-automount.rules
@@ -96,7 +98,8 @@ RUN mkdir -p /usr/local/share/sevynos && ln -s /opt/sevynos/studio-tools/node_mo
     ffmpeg -nostdin -loglevel error -i /tmp/sevyn-demo-audio/nebula-drift.wav /usr/share/sevyn/music/nebula-drift.ogg && \
     cp /tmp/sevyn-demo-audio/digital-dawn.wav /usr/share/sevyn/music/digital-dawn.wav && \
     ffmpeg -nostdin -loglevel error -i /tmp/sevyn-demo-audio/midnight-terminal.wav /usr/share/sevyn/music/midnight-terminal.m4a && rm -rf /tmp/sevyn-demo-audio && \
-    mkdir -p /etc/udhcpc && cp /usr/share/udhcpc/default.script /etc/udhcpc/default.script && chmod 0755 /init /usr/local/bin/start-genesis /usr/local/bin/request-genesis-shutdown /usr/local/bin/sevyn-installer /usr/local/bin/sevyn-installer-chroot /usr/local/bin/sevyn-studio-build /usr/local/lib/sevynos/installed-init /usr/local/lib/sevynos/hermesc /usr/local/lib/sevynos/esbuild /usr/local/bin/smoke-wayland /usr/local/bin/build-sevyn-image /usr/local/bin/sevyn-usb-mount /usr/local/bin/sevyn-usb-unmount /usr/share/udhcpc/default.script /etc/udhcpc/default.script && /usr/local/bin/build-sevyn-image
+    mkdir -p /etc/udhcpc && cp /usr/share/udhcpc/default.script /etc/udhcpc/default.script && chmod 0755 /init /usr/local/bin/start-genesis /usr/local/bin/request-genesis-shutdown /usr/local/bin/sevyn-installer /usr/local/bin/sevyn-installer-chroot /usr/local/bin/sevyn-studio-build /usr/local/lib/sevynos/installed-init /usr/local/lib/sevynos/apply-update /usr/local/lib/sevynos/hermesc /usr/local/lib/sevynos/esbuild /usr/local/bin/smoke-wayland /usr/local/bin/build-sevyn-image /usr/local/bin/sevyn-usb-mount /usr/local/bin/sevyn-usb-unmount /usr/share/udhcpc/default.script /etc/udhcpc/default.script && /usr/local/bin/build-sevyn-image && \
+    printf 'VERSION_ID=%s\n' "$SEVYN_OS_VERSION" > /etc/sevynos-release
 
 FROM debian:bookworm-slim AS boot-media
 ARG DEBIAN_FRONTEND=noninteractive

@@ -185,6 +185,12 @@ configure_system() {
   mkdir -p /media
   mkdir -p /run
 
+  # The OS update service reads this to know the installed version.
+  # Normally written at image build time; this is a fallback.
+  if [ ! -s /etc/sevynos-release ]; then
+    printf 'VERSION_ID=0.1.0\n' > /etc/sevynos-release
+  fi
+
   # Set up basic network config
   if [ ! -f /etc/resolv.conf ] || [ ! -s /etc/resolv.conf ]; then
     printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
