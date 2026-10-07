@@ -8,6 +8,7 @@ import { lastRollback, type RollbackRecord } from "./boot-health.js";
 import { verifyUpdateFeed, type TrustedUpdateKey } from "./feed-signing.js";
 import {
   parseUpdateFeed,
+  selectKernelArtifacts,
   selectRootfsArtifact,
   type UpdateArtifact,
   type UpdateChannel,
@@ -36,11 +37,24 @@ export interface UpdateCheckResult {
   readonly error?: string | undefined;
 }
 
+export interface StagedPayload {
+  readonly path: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+}
+
 export interface StagedUpdate {
   readonly version: string;
   readonly path: string;
   readonly sha256: string;
   readonly sizeBytes: number;
+  /**
+   * Kernel lifecycle pair (Phase 3): staged only when the feed carries
+   * both "vmlinuz" and "initramfs" artifacts. The boot-time applier
+   * installs them as versioned /boot files next to the new rootfs.
+   */
+  readonly kernel?: StagedPayload | undefined;
+  readonly initramfs?: StagedPayload | undefined;
 }
 
 export interface PendingUpdate {
@@ -49,6 +63,14 @@ export interface PendingUpdate {
   readonly sha256: string;
   readonly sizeBytes: number;
   readonly stagedAt: string;
+  /**
+   * Kernel lifecycle pair. In memory this is the nested StagedPayload
+   * shape; on disk (pending.json) applyUpdate() writes it as flat
+   * kernelPath/kernelSha256/kernelSizeBytes (+ initramfs*) fields for the
+   * sed-based applier parser.
+   */
+  readonly kernel?: StagedPayload | undefined;
+  readonly initramfs?: StagedPayload | undefined;
 }
 
 export interface OsUpdateServiceOptions {
@@ -231,8 +253,9 @@ export class OsUpdateService {
   }
 
   /**
-   * Downloads the rootfs payload from the most recent check. Requires a
-   * check that found an update; verifies size and sha256 while streaming.
+   * Downloads the rootfs payload from the most recent check, plus the
+   * kernel+initramfs pair when the feed carries one. Requires a check that
+   * found an update; verifies size and sha256 while streaming.
    */
   public async downloadUpdate(
     onProgress?: UpdateProgressListener,
@@ -248,6 +271,8 @@ export class OsUpdateService {
     await mkdir(stagingDir, { recursive: true });
     const finalPath = join(stagingDir, "rootfs.squashfs");
     const tmpPath = `${finalPath}.part`;
+    let kernel: StagedPayload | undefined;
+    let initramfs: StagedPayload | undefined;
     try {
       const received = await this.#streamToFile(artifact, tmpPath, onProgress);
       if (received !== artifact.sizeBytes) {
@@ -256,6 +281,24 @@ export class OsUpdateService {
         );
       }
       await rename(tmpPath, finalPath);
+      // Kernel lifecycle pair: staged next to the rootfs when the feed
+      // ships one. A half pair is a malformed feed — selectKernelArtifacts
+      // throws, which fails the download loudly before anything is staged.
+      const kernelArtifacts = selectKernelArtifacts(manifest);
+      if (kernelArtifacts !== undefined) {
+        kernel = await this.#downloadKernelArtifact(
+          stagingDir,
+          "vmlinuz",
+          kernelArtifacts.vmlinuz,
+          onProgress,
+        );
+        initramfs = await this.#downloadKernelArtifact(
+          stagingDir,
+          "initramfs.cpio.gz",
+          kernelArtifacts.initramfs,
+          onProgress,
+        );
+      }
     } catch (error) {
       await rm(tmpPath, { force: true });
       this.#setStatus("error");
@@ -267,6 +310,8 @@ export class OsUpdateService {
       path: finalPath,
       sha256: artifact.sha256,
       sizeBytes: artifact.sizeBytes,
+      kernel,
+      initramfs,
     };
   }
 
@@ -277,13 +322,27 @@ export class OsUpdateService {
    */
   public async applyUpdate(staged: StagedUpdate): Promise<void> {
     this.#setStatus("applying");
-    const record: PendingUpdate = {
+    // The boot-time applier (tools/qemu/sevyn-apply-update.sh) parses
+    // pending.json with sed, so the kernel fields are written FLAT
+    // (kernelPath/kernelSha256/…, not nested objects) — nested objects
+    // break its line-oriented patterns.
+    const record: Record<string, unknown> = {
       version: staged.version,
       payloadPath: staged.path,
       sha256: staged.sha256,
       sizeBytes: staged.sizeBytes,
       stagedAt: new Date(this.#now()).toISOString(),
     };
+    if (staged.kernel !== undefined) {
+      record["kernelPath"] = staged.kernel.path;
+      record["kernelSha256"] = staged.kernel.sha256;
+      record["kernelSizeBytes"] = staged.kernel.sizeBytes;
+    }
+    if (staged.initramfs !== undefined) {
+      record["initramfsPath"] = staged.initramfs.path;
+      record["initramfsSha256"] = staged.initramfs.sha256;
+      record["initramfsSizeBytes"] = staged.initramfs.sizeBytes;
+    }
     await mkdir(this.#updatesDir(), { recursive: true });
     await writeFile(this.#pendingPath(), `${JSON.stringify(record)}\n`, "utf8");
     this.#setStatus("pending-reboot");
@@ -306,6 +365,8 @@ export class OsUpdateService {
         sha256: parsed["sha256"],
         sizeBytes: parsed["sizeBytes"],
         stagedAt: typeof parsed["stagedAt"] === "string" ? parsed["stagedAt"] : "",
+        kernel: parseStagedPayload(parsed, "kernel"),
+        initramfs: parseStagedPayload(parsed, "initramfs"),
       };
     } catch {
       return undefined;
@@ -375,6 +436,39 @@ export class OsUpdateService {
     return this.#lastManifest === undefined
       ? undefined
       : selectRootfsArtifact(this.#lastManifest);
+  }
+
+  /**
+   * Downloads one kernel-lifecycle artifact (vmlinuz or initramfs) into the
+   * version staging dir. Same integrity contract as the rootfs payload:
+   * size and sha256 verified while streaming.
+   */
+  async #downloadKernelArtifact(
+    stagingDir: string,
+    fileName: string,
+    artifact: UpdateArtifact,
+    onProgress: UpdateProgressListener | undefined,
+  ): Promise<StagedPayload> {
+    const finalPath = join(stagingDir, fileName);
+    const tmpPath = `${finalPath}.part`;
+    try {
+      const received = await this.#streamToFile(artifact, tmpPath, onProgress);
+      if (received !== artifact.sizeBytes) {
+        throw new Error(
+          `Download size mismatch for ${fileName}: got ${String(received)} bytes, ` +
+            `expected ${String(artifact.sizeBytes)}.`,
+        );
+      }
+      await rename(tmpPath, finalPath);
+    } catch (error) {
+      await rm(tmpPath, { force: true });
+      throw error;
+    }
+    return {
+      path: finalPath,
+      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes,
+    };
   }
 
   async #performCheck(): Promise<UpdateCheckResult> {
@@ -500,6 +594,25 @@ function parseChannelArgument(value: string): UpdateChannel {
   if (value !== "stable" && value !== "nightly")
     throw new Error(`Unknown update channel: "${value}".`);
   return value;
+}
+
+/** Parses an optional staged kernel/initramfs payload from pending.json. */
+function parseStagedPayload(
+  parsed: Record<string, unknown>,
+  prefix: string,
+): StagedPayload | undefined {
+  const path = parsed[`${prefix}Path`];
+  const sha256 = parsed[`${prefix}Sha256`];
+  const sizeBytes = parsed[`${prefix}SizeBytes`];
+  if (path === undefined && sha256 === undefined && sizeBytes === undefined)
+    return undefined;
+  if (
+    typeof path !== "string" ||
+    typeof sha256 !== "string" ||
+    typeof sizeBytes !== "number"
+  )
+    return undefined;
+  return { path, sha256, sizeBytes };
 }
 
 /** Best-effort persistence for setChannel(); a failed write must not break the UI. */

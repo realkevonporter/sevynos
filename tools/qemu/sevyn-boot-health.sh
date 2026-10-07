@@ -17,6 +17,8 @@
 #   SEVYN_ROLLBACK_HISTORY_KEEP default 20
 #   SEVYN_BOOT_HEALTH_LIB / SEVYN_APPLY_UPDATE_BIN / SEVYN_INIT_BIN
 #   SEVYN_UNSQUASHFS_BIN / SEVYN_SHA256SUM_BIN
+#   SEVYN_KERNEL_LIFECYCLE_LIB  default /usr/local/lib/sevyn-kernel-lifecycle-lib.sh
+#                              (Phase 3 B3: the rollback kernel flip)
 #
 # ─── Design ──────────────────────────────────────────────────────────
 # The pre-update snapshot is the single rollback slot, shared with the
@@ -70,6 +72,15 @@ set -eu
 : "${SEVYN_SHA256SUM_BIN:=sha256sum}"
 : "${SEVYN_APPLY_UPDATE_BIN:=/usr/local/lib/sevynos/apply-update}"
 : "${SEVYN_INIT_BIN:=/usr/local/lib/sevynos/installed-init}"
+# Kernel lifecycle library (Phase 3 B3): sevyn_kernel_rollback_flip, used
+# by sevyn_rollback_restore so the kernel pair flips together with the
+# rootfs snapshot. Guarded: systems predating the kernel updater have no
+# such file and no previous/kernels.json to flip.
+: "${SEVYN_KERNEL_LIFECYCLE_LIB:=/usr/local/lib/sevyn-kernel-lifecycle-lib.sh}"
+if [ -f "$SEVYN_KERNEL_LIFECYCLE_LIB" ]; then
+  # shellcheck disable=SC1090
+  . "$SEVYN_KERNEL_LIFECYCLE_LIB"
+fi
 
 # SEVYN_MAX_FAILED_BOOTS: consecutive boots without a healthy desktop
 # before init automatically rolls back to the pre-update snapshot.
@@ -330,6 +341,24 @@ sevyn_rollback_restore() {
     exec "$SEVYN_INIT_BIN"
   fi
   sevyn_restore_machine_state "$state_backup"
+
+  # Kernel pairing (Phase 3 B3): the restored snapshot carries the OLD
+  # kernel modules, so the kernel must flip back with it — a new rootfs
+  # with an old kernel (or vice versa) is a bricked combination.
+  # previous/kernels.json (written by the applier before extracting the
+  # update) names the pre-update pair; the flip regenerates grub.cfg
+  # (previous pair default, failed kernel fallback) and refreshes the ESP
+  # staging + the /boot recovery image. When there was no kernel update
+  # the flip is a no-op. A failed flip is NOT swallowed: the counter is
+  # left alone so the next boot retries the rollback.
+  if command -v sevyn_kernel_rollback_flip >/dev/null 2>&1; then
+    if ! sevyn_kernel_rollback_flip /; then
+      sevyn_boot_health_log "SEVYN_ROLLBACK_FAILED reason=kernel-flip-failed"
+      sevyn_record_history "rollback-failed" "$from_version" "$to_version" \
+        "kernel pair flip failed; will retry next boot"
+      exec "$SEVYN_INIT_BIN"
+    fi
+  fi
 
   _sevyn_write_attempts 0
   sevyn_record_history "rollback" "$from_version" "$to_version" \

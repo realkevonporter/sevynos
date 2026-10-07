@@ -15,18 +15,30 @@ set -eu
 
 SRC="${SEVYN_RECOVERY_SRC:-/usr/local/src/sevyn-recovery}"
 GRUB_CFG_LIB="${SEVYN_GRUB_CFG_LIB:-/usr/local/lib/sevyn-grub-cfg-lib.sh}"
+KERNEL_LIFECYCLE_LIB="${SEVYN_KERNEL_LIFECYCLE_LIB:-/usr/local/lib/sevyn-kernel-lifecycle-lib.sh}"
 ARTIFACTS="${SEVYN_ARTIFACTS:-/artifacts}"
 OS_VERSION="${SEVYN_OS_VERSION:-0.1.0}"
+# SEVYN_MODULES_DIR — when set, kernel modules are located under this
+# directory instead of the host's /lib/modules (via `modinfo -k $KVER`).
+# The update-time rebuild (Phase 3 B3) sets it to the NEW kernel's modules
+# extracted from the staged rootfs, so the recovery image is built against
+# the new kernel before the rootfs is replaced.
+MODULES_DIR="${SEVYN_MODULES_DIR:-}"
 
 log() { echo "[build-recovery-image] $*"; }
 fail() { log "FATAL: $*"; exit 1; }
 
 [ -d "$SRC" ] || fail "recovery tree not found: $SRC"
 [ -f "$GRUB_CFG_LIB" ] || fail "GRUB config lib not found: $GRUB_CFG_LIB"
+[ -f "$KERNEL_LIFECYCLE_LIB" ] || fail "kernel lifecycle lib not found: $KERNEL_LIFECYCLE_LIB"
 [ -f "$ARTIFACTS/kernel-version.txt" ] || fail "kernel-version.txt missing; run build-image.sh first."
 command -v cpio >/dev/null 2>&1 || fail "cpio is required."
 command -v depmod >/dev/null 2>&1 || fail "depmod is required."
-command -v modinfo >/dev/null 2>&1 || fail "modinfo is required."
+if [ -z "$MODULES_DIR" ]; then
+  command -v modinfo >/dev/null 2>&1 || fail "modinfo is required."
+else
+  [ -d "$MODULES_DIR" ] || fail "SEVYN_MODULES_DIR is not a directory: $MODULES_DIR"
+fi
 
 KVER=$(cat "$ARTIFACTS/kernel-version.txt")
 log "Building recovery initramfs for kernel $KVER (OS $OS_VERSION)"
@@ -41,6 +53,11 @@ mkdir -p "$STAGE"/bin "$STAGE"/sbin "$STAGE"/usr/bin "$STAGE"/usr/sbin \
 cp -a "$SRC/init" "$STAGE/init"
 cp -a "$SRC/usr" "$STAGE/usr"
 cp "$GRUB_CFG_LIB" "$STAGE/usr/lib/sevyn/recovery/grub-cfg-lib.sh"
+# Kernel lifecycle lib: lets the recovery rollback flip the kernel pair
+# together with the rootfs snapshot (Phase 3 B3 pairing contract).
+# Sourced opportunistically by rollback.sh — older recovery images lack
+# it and skip the flip.
+cp "$KERNEL_LIFECYCLE_LIB" "$STAGE/usr/lib/sevyn/recovery/kernel-lifecycle-lib.sh"
 printf '%s\n' "$OS_VERSION" > "$STAGE/usr/lib/sevyn/recovery/VERSION"
 chmod 0755 "$STAGE/init"
 chmod 0755 "$STAGE"/usr/lib/sevyn/recovery/*.sh
@@ -98,6 +115,18 @@ fi
 # recovery mounts (ext4, vfat, iso9660), and USB HID for keyboards.
 # Everything is best-effort per module: a kernel built without one simply
 # loses that hardware path in recovery.
+find_module() {
+  # find_module <name> — print the .ko path for a module, or nothing.
+  _fm_mod="$1"
+  if [ -n "$MODULES_DIR" ]; then
+    find "$MODULES_DIR" \
+      \( -name "$_fm_mod.ko" -o -name "$_fm_mod.ko.zst" \
+         -o -name "$_fm_mod.ko.xz" -o -name "$_fm_mod.ko.gz" \) \
+      2>/dev/null | head -n 1
+  else
+    modinfo -k "$KVER" -n "$_fm_mod" 2>/dev/null || true
+  fi
+}
 RECOVERY_MODULES="ext4 mbcache jbd2 vfat fat nls_cp437 nls_iso8859-1 isofs \
   virtio_blk virtio_pci virtio_ring virtio nvme nvme_core \
   ahci libahci libata sd_mod sr_mod cdrom \
@@ -105,12 +134,18 @@ RECOVERY_MODULES="ext4 mbcache jbd2 vfat fat nls_cp437 nls_iso8859-1 isofs \
   usb_common usbcore hid hid_generic usbhid \
   mmc_core mmc_block sdhci sdhci_pci"
 for mod in $RECOVERY_MODULES; do
-  ko=$(modinfo -k "$KVER" -n "$mod" 2>/dev/null || true)
+  ko=$(find_module "$mod")
   if [ -z "$ko" ] || [ ! -f "$ko" ]; then
     log "WARNING: kernel module '$mod' not found; skipping."
     continue
   fi
   rel="${ko#/}"
+  # With SEVYN_MODULES_DIR the .ko lives outside /lib/modules/<kver>;
+  # re-root it so the stage layout stays canonical.
+  case "$rel" in
+    lib/modules/*) ;;
+    *) rel="lib/modules/$KVER/${ko##*/}" ;;
+  esac
   mkdir -p "$STAGE/$(dirname "$rel")"
   cp -a "$ko" "$STAGE/$rel"
 done

@@ -60,6 +60,15 @@ installer, it is kept in sync with the OS version by construction.
 > refresh `EFI/SevynOS/vmlinuz` and `EFI/SevynOS/recovery-initramfs.cpio.gz`
 > (rebuild the recovery image against the new kernel) or recovery will
 > lose its storage drivers.
+>
+> Implemented by the Phase 3 kernel updater (`docs/kernel-lifecycle.md`):
+> kernel updates install versioned pairs (`/boot/vmlinuz-<kver>`, …), the
+> recovery initramfs is rebuilt against the new kernel's modules _before_
+> the update commits (a stale recovery image refuses the update), and the
+> ESP staging is refreshed from the new pair. The manual rollback flips
+> the kernel pair back together with the rootfs snapshot
+> (`previous/kernels.json`); recovery images that predate the kernel
+> updater skip the flip (their updates were rootfs-only).
 
 ## The updates/previous rollback contract
 
@@ -67,14 +76,15 @@ installer, it is kept in sync with the OS version by construction.
 the boot-time applier `tools/qemu/sevyn-apply-update.sh`; reader:
 recovery):
 
-| Path                       | Contents                                                                              |
-| -------------------------- | ------------------------------------------------------------------------------------- |
-| `pending.json`             | staged update waiting to be applied at next boot                                      |
-| `<VERSION>/`               | staged payload directory (removed after apply)                                        |
-| `failed-<ts>.json`         | records of failed applies                                                             |
-| `previous/`                | **pre-update rollback snapshot** (one generation, replaced per update)                |
-| `previous/version.json`    | `{"version","appliedAt","sha256"}`                                                    |
-| `previous/rootfs.squashfs` | squashfs of the pre-update root tree (excludes `boot`, `updates`, pseudo-filesystems) |
+| Path                       | Contents                                                                                                                                                                                                                                                       |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pending.json`             | staged update waiting to be applied at next boot                                                                                                                                                                                                               |
+| `<VERSION>/`               | staged payload directory (removed after apply)                                                                                                                                                                                                                 |
+| `failed-<ts>.json`         | records of failed applies                                                                                                                                                                                                                                      |
+| `previous/`                | **pre-update rollback snapshot** (one generation, replaced per update)                                                                                                                                                                                         |
+| `previous/version.json`    | `{"version","appliedAt","sha256"}`                                                                                                                                                                                                                             |
+| `previous/rootfs.squashfs` | squashfs of the pre-update root tree (excludes `boot`, `updates`, pseudo-filesystems)                                                                                                                                                                          |
+| `previous/kernels.json`    | kernel pairing record (Phase 3 B3, kernel updates only): `{"previousKernelVersion", "previousKernel", "previousInitramfs", "previousRecoveryInitramfs", "newKernelVersion"}` — lets both rollback paths flip the kernel pair together with the rootfs snapshot |
 
 The applier writes the snapshot **before** extracting an update. It is
 best-effort: if `mksquashfs` is missing or fewer than 6 GiB are free on

@@ -14,6 +14,10 @@ import { signFeedManifest, type TrustedUpdateKey } from "./feed-signing.js";
 
 const PAYLOAD = Buffer.from("fake-squashfs-payload");
 const PAYLOAD_SHA = createHash("sha256").update(PAYLOAD).digest("hex");
+const KERNEL = Buffer.from("fake-vmlinuz");
+const KERNEL_SHA = createHash("sha256").update(KERNEL).digest("hex");
+const INITRAMFS = Buffer.from("fake-initramfs");
+const INITRAMFS_SHA = createHash("sha256").update(INITRAMFS).digest("hex");
 
 // Test trust anchor: every fixture feed is signed with this key, and the
 // service under test trusts its public half — the enforced path.
@@ -28,19 +32,39 @@ const TEST_TRUSTED_KEYS: TrustedUpdateKey[] = [
 ];
 const TEST_PRIVATE_JWK = testPrivateKey.export({ format: "jwk" });
 
-function feedJson(version = "0.1.0-nightly.20261007.abc1234"): string {
+function feedJson(
+  version = "0.1.0-nightly.20261007.abc1234",
+  withKernel = false,
+): string {
+  const artifacts: Record<string, unknown>[] = [
+    {
+      kind: "rootfs-squashfs",
+      url: "https://example.com/rootfs.squashfs",
+      sha256: PAYLOAD_SHA,
+      sizeBytes: PAYLOAD.byteLength,
+    },
+  ];
+  if (withKernel) {
+    artifacts.push(
+      {
+        kind: "vmlinuz",
+        url: "https://example.com/vmlinuz",
+        sha256: KERNEL_SHA,
+        sizeBytes: KERNEL.byteLength,
+      },
+      {
+        kind: "initramfs",
+        url: "https://example.com/initramfs.cpio.gz",
+        sha256: INITRAMFS_SHA,
+        sizeBytes: INITRAMFS.byteLength,
+      },
+    );
+  }
   const unsigned = JSON.stringify({
     version,
     publishedAt: "2026-10-07T10:00:00.000Z",
     releaseNotes: "Nightly build.",
-    artifacts: [
-      {
-        kind: "rootfs-squashfs",
-        url: "https://example.com/rootfs.squashfs",
-        sha256: PAYLOAD_SHA,
-        sizeBytes: PAYLOAD.byteLength,
-      },
-    ],
+    artifacts,
   });
   const signed = signFeedManifest(
     parseUpdateFeed(unsigned),
@@ -304,6 +328,57 @@ describe("OsUpdateService", () => {
     expect(onDisk["version"]).toBe(staged.version);
     await service.clearPendingUpdate();
     expect(await service.pendingUpdate()).toBeUndefined();
+    service.dispose();
+  });
+
+  it("downloads the kernel pair when the feed ships one and flattens it into pending.json", async () => {
+    const dir = await tempDir();
+    const service = new OsUpdateService(
+      options(dir, {
+        fetchImpl: stubFetch({
+          [FEED_URL]: { status: 200, body: feedJson("0.2.0", true) },
+          "https://example.com/rootfs.squashfs": { status: 200, body: PAYLOAD },
+          "https://example.com/vmlinuz": { status: 200, body: KERNEL },
+          "https://example.com/initramfs.cpio.gz": { status: 200, body: INITRAMFS },
+        }),
+      }),
+    );
+    await service.checkNow();
+    const staged = await service.downloadUpdate();
+    expect(staged.kernel?.sha256).toBe(KERNEL_SHA);
+    expect(staged.kernel?.sizeBytes).toBe(KERNEL.byteLength);
+    expect(await readFile(staged.kernel?.path ?? "")).toEqual(KERNEL);
+    expect(staged.initramfs?.sha256).toBe(INITRAMFS_SHA);
+    expect(await readFile(staged.initramfs?.path ?? "")).toEqual(INITRAMFS);
+
+    await service.applyUpdate(staged);
+    // The applier parses pending.json with sed: kernel fields are flat.
+    const onDisk = JSON.parse(
+      await readFile(join(dir, "updates", "pending.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(onDisk["kernelPath"]).toBe(staged.kernel?.path);
+    expect(onDisk["kernelSha256"]).toBe(KERNEL_SHA);
+    expect(onDisk["kernelSizeBytes"]).toBe(KERNEL.byteLength);
+    expect(onDisk["initramfsPath"]).toBe(staged.initramfs?.path);
+    expect(onDisk["initramfsSha256"]).toBe(INITRAMFS_SHA);
+    expect(onDisk["kernel"]).toBeUndefined();
+
+    const pending = await service.pendingUpdate();
+    expect(pending?.kernel?.sha256).toBe(KERNEL_SHA);
+    expect(pending?.initramfs?.sha256).toBe(INITRAMFS_SHA);
+    service.dispose();
+  });
+
+  it("stages no kernel pair when the feed has none", async () => {
+    const dir = await tempDir();
+    const service = new OsUpdateService(options(dir));
+    await service.checkNow();
+    const staged = await service.downloadUpdate();
+    expect(staged.kernel).toBeUndefined();
+    expect(staged.initramfs).toBeUndefined();
+    await service.applyUpdate(staged);
+    const pending = await service.pendingUpdate();
+    expect(pending?.kernel).toBeUndefined();
     service.dispose();
   });
 

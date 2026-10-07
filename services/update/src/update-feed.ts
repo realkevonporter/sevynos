@@ -21,12 +21,23 @@
  * canonical feed body (see feed-signing.ts). The sha256 here remains an
  * integrity check — trust comes from the feed signature, which covers the
  * sha256 values (see the trust argument in feed-signing.ts).
+ *
+ * Phase 3 (kernel lifecycle) adds two more artifact kinds — "vmlinuz" and
+ * "initramfs" — so a release can ship a new kernel+initramfs next to the
+ * rootfs. They ride the same signature: the canonical feed body covers the
+ * whole artifacts array, so adding kinds needs no signing-format change.
  */
 
 /** The release channel a feed manifest belongs to. */
 export type UpdateChannel = "stable" | "nightly";
 
-export type UpdateArtifactKind = "rootfs-squashfs" | "iso";
+/**
+ * Artifact kinds a feed can carry. "vmlinuz"/"initramfs" are the kernel
+ * lifecycle pair (Phase 3): when both are present the boot-time applier
+ * installs them as versioned /boot files next to the new rootfs (see
+ * tools/qemu/sevyn-apply-update.sh).
+ */
+export type UpdateArtifactKind = "rootfs-squashfs" | "iso" | "vmlinuz" | "initramfs";
 
 export interface UpdateArtifact {
   readonly kind: UpdateArtifactKind;
@@ -72,8 +83,15 @@ function requireString(record: Record<string, unknown>, field: string): string {
 function parseArtifact(value: unknown, index: number): UpdateArtifact {
   if (!isRecord(value)) fail(`artifacts[${String(index)}] must be an object`);
   const kind = value["kind"];
-  if (kind !== "rootfs-squashfs" && kind !== "iso")
-    fail(`artifacts[${String(index)}].kind must be "rootfs-squashfs" or "iso"`);
+  if (
+    kind !== "rootfs-squashfs" &&
+    kind !== "iso" &&
+    kind !== "vmlinuz" &&
+    kind !== "initramfs"
+  )
+    fail(
+      `artifacts[${String(index)}].kind must be "rootfs-squashfs", "iso", "vmlinuz" or "initramfs"`,
+    );
   const url = requireString(value, "url");
   if (!url.startsWith("https://")) fail(`artifacts[${String(index)}].url must be https`);
   const sha256 = requireString(value, "sha256");
@@ -144,4 +162,33 @@ export function selectRootfsArtifact(
   manifest: UpdateFeedManifest,
 ): UpdateArtifact | undefined {
   return manifest.artifacts.find((artifact) => artifact.kind === "rootfs-squashfs");
+}
+
+export interface KernelArtifacts {
+  readonly vmlinuz: UpdateArtifact;
+  readonly initramfs: UpdateArtifact;
+}
+
+/**
+ * Picks the kernel+initramfs pair the boot-time applier installs when the
+ * feed ships one. Returns undefined when the feed carries no kernel
+ * artifacts (kernel updates are optional per release). Throws when the
+ * feed carries only half the pair — a kernel without its matching
+ * initramfs (or vice versa) is a malformed feed, fail loud.
+ */
+export function selectKernelArtifacts(
+  manifest: UpdateFeedManifest,
+): KernelArtifacts | undefined {
+  const vmlinuz = manifest.artifacts.find((artifact) => artifact.kind === "vmlinuz");
+  const initramfs = manifest.artifacts.find((artifact) => artifact.kind === "initramfs");
+  if (vmlinuz === undefined && initramfs === undefined) return undefined;
+  if (vmlinuz === undefined)
+    throw new Error(
+      'Invalid update feed: "initramfs" artifact without a matching "vmlinuz".',
+    );
+  if (initramfs === undefined)
+    throw new Error(
+      'Invalid update feed: "vmlinuz" artifact without a matching "initramfs".',
+    );
+  return { vmlinuz, initramfs };
 }
