@@ -51,7 +51,9 @@ mkdir -p "$STAGE"/bin "$STAGE"/sbin "$STAGE"/usr/bin "$STAGE"/usr/sbin \
 
 # ─── Recovery tree ────────────────────────────────────────────────
 cp -a "$SRC/init" "$STAGE/init"
-cp -a "$SRC/usr" "$STAGE/usr"
+# Merge (don't nest): $STAGE/usr already exists from the mkdir block above;
+# "$SRC/usr" without the trailing "/." would land at $STAGE/usr/usr/...
+cp -a "$SRC/usr/." "$STAGE/usr/"
 cp "$GRUB_CFG_LIB" "$STAGE/usr/lib/sevyn/recovery/grub-cfg-lib.sh"
 # Kernel lifecycle lib: lets the recovery rollback flip the kernel pair
 # together with the rootfs snapshot (Phase 3 B3 pairing contract).
