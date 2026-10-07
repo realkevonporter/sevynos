@@ -104,13 +104,25 @@ copy_with_libs /sbin/fsck.vfat sbin/fsck.vfat
 copy_with_libs /sbin/blkid sbin/blkid
 copy_with_libs /usr/bin/unsquashfs usr/bin/unsquashfs
 
-# ncurses terminal database for dialog.
-if [ -f /usr/share/terminfo/l/linux ]; then
-  mkdir -p "$STAGE/usr/share/terminfo/l"
-  cp -a /usr/share/terminfo/l/linux "$STAGE/usr/share/terminfo/l/linux"
-else
+# ncurses terminal database for dialog. The terminfo location varies by
+# Debian layout: bookworm-slim (merged-/usr) ships it under /lib/terminfo
+# (== /usr/lib/terminfo); fuller images use /usr/share/terminfo.
+TERMINFO_SRC=""
+for _terminfo_candidate in \
+  /usr/share/terminfo/l/linux \
+  /usr/lib/terminfo/l/linux \
+  /lib/terminfo/l/linux; do
+  if [ -f "$_terminfo_candidate" ]; then
+    TERMINFO_SRC="$_terminfo_candidate"
+    break
+  fi
+done
+unset _terminfo_candidate
+if [ -z "$TERMINFO_SRC" ]; then
   fail "terminfo entry for 'linux' not found."
 fi
+mkdir -p "$STAGE/usr/share/terminfo/l"
+cp -a "$TERMINFO_SRC" "$STAGE/usr/share/terminfo/l/linux"
 
 # ─── Kernel modules ───────────────────────────────────────────────
 # Curated set: storage (SATA/NVMe/virtio/USB/MMC), filesystems the
