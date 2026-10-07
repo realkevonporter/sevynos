@@ -21,6 +21,7 @@ export {
   type AudioSnapshot,
   type BatterySnapshot,
   type WirelessNetworkSnapshot,
+  type SavedWirelessNetwork,
   type TextBrowserPage,
 } from "./services.js";
 export { type SevynSettingsModel } from "./settings-application.js";

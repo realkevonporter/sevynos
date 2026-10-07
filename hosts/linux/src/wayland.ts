@@ -170,6 +170,19 @@ export async function startWaylandHost(
       .catch(() => undefined);
   });
 
+  // Reconnect to a saved Wi-Fi network at boot. The persisted
+  // wpa_supplicant configuration is the source of truth, so an installed
+  // system comes back online without the QEMU init script's help.
+  // Fire-and-forget: boot must not wait on or fail because of the network.
+  void (async () => {
+    try {
+      if ((await network.reconnectToSavedNetwork?.()) === true)
+        marker("SEVYN_WIFI_RECONNECTED_ON_BOOT");
+    } catch {
+      // Best effort only.
+    }
+  })();
+
   const runtime = await createDesktopRuntime({
     launchDefaults: false,
     ...(loadedSettings === undefined ? {} : { settings: loadedSettings }),

@@ -82,12 +82,36 @@ export interface WirelessNetworkSnapshot {
   readonly error?: string | undefined;
 }
 
+export interface SavedWirelessNetwork {
+  /** The wpa_supplicant network id (e.g. "0"), used by forgetNetwork. */
+  readonly networkId: string;
+  readonly ssid: string;
+  readonly bssid?: string | undefined;
+  readonly flags?: string | undefined;
+}
+
 export interface SevynWirelessNetworkService {
   snapshot(): Promise<WirelessNetworkSnapshot>;
   setEnabled?(enabled: boolean): Promise<WirelessNetworkSnapshot>;
   scan(): Promise<WirelessNetworkSnapshot>;
   connect(ssid: string, password?: string): Promise<WirelessNetworkSnapshot>;
   disconnect(): Promise<WirelessNetworkSnapshot>;
+  /**
+   * Saved network profiles persisted by wpa_supplicant. Optional so
+   * non-Linux implementations do not have to support profile storage.
+   */
+  savedNetworks?(): Promise<readonly SavedWirelessNetwork[]>;
+  /**
+   * Removes a saved network profile by its wpa_supplicant network id and
+   * returns the remaining saved networks. Optional, like savedNetworks.
+   */
+  forgetNetwork?(networkId: string): Promise<readonly SavedWirelessNetwork[]>;
+  /**
+   * Best-effort reconnect to the strongest in-range saved network.
+   * Used by the host at boot; returns true when a connection (and a DHCP
+   * lease attempt) completed. Optional, like savedNetworks.
+   */
+  reconnectToSavedNetwork?(): Promise<boolean>;
   subscribe(listener: () => void): () => void;
 }
 
