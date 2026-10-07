@@ -235,19 +235,58 @@ async function uninstallApp(appId) {
 
 async function powerSystem(action) {
   const { execFile } = await import("node:child_process");
-  const commands = {
+  const { access, constants, writeFile } = await import("node:fs/promises");
+  const exists = async (path) => {
+    try {
+      await access(path, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const run = (cmd, args) =>
+    new Promise((resolve) => {
+      execFile(cmd, args, (error) => resolve(error ?? null));
+    });
+
+  // systemd-based environments (dev machines) first.
+  const systemd = {
     shutdown: ["systemctl", ["poweroff"]],
     restart: ["systemctl", ["reboot"]],
     suspend: ["systemctl", ["suspend"]],
   };
-  const [cmd, args] = commands[action];
-  execFile(cmd, args, (error) => {
-    if (error) {
-      console.error(`Failed to ${action}: ${error.message}`);
-      console.error("Power management requires systemd. This system may not support it.");
+  if (await exists("/usr/bin/systemctl")) {
+    const [cmd, args] = systemd[action];
+    const error = await run(cmd, args);
+    if (!error) return;
+    console.error(`systemctl failed: ${error.message}`);
+  }
+
+  // SevynOS init environment (no systemd): drive the session supervisor.
+  // request-genesis-shutdown orderly stops the desktop; installed-init then
+  // powers off, or reboots when the reboot marker is present.
+  const shutdownHelper = "/usr/local/bin/request-genesis-shutdown";
+  if (!(await exists(shutdownHelper))) {
+    console.error(`Failed to ${action}: no supported power backend found.`);
+    process.exit(1);
+  }
+  if (action === "restart") {
+    try {
+      await writeFile("/run/sevynos/reboot-requested", "");
+    } catch (error) {
+      console.error(`Failed to request reboot: ${error.message}`);
       process.exit(1);
     }
-  });
+  } else if (action !== "shutdown") {
+    console.error(`Unsupported power action on this system: ${action}`);
+    process.exit(1);
+  }
+  const error = await run(shutdownHelper, []);
+  if (error) {
+    console.error(`Failed to ${action}: ${error.message}`);
+    process.exit(1);
+  }
+  console.log(action === "restart" ? "Restarting..." : "Shutting down...");
 }
 
 function printHelp() {

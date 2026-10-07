@@ -54,6 +54,64 @@ log_marker() {
   fi
 }
 
+# ─── Session user ────────────────────────────────────────────────────
+# On installed systems the desktop session runs as the installed user,
+# never as root. The installer writes the accounts registry; when it is
+# absent (live session, or an install without a user) the session keeps
+# running as root, exactly as before.
+#
+# This block runs while still root: it hands ownership of the runtime,
+# state and log paths to the user, then re-execs itself via setpriv.
+if [ "$(id -u)" -eq 0 ] && [ -z "${SEVYN_SESSION_DROPPED:-}" ]; then
+  session_user=""
+  if [ -f /var/lib/sevyn/accounts/registry.json ]; then
+    # registry.json is { version: 1, users: [{ username, uid, ... }] }.
+    # Prefer node for exact parsing; fall back to sed.
+    if command -v node >/dev/null 2>&1; then
+      session_user=$(node -e '
+        try {
+          const fs = require("node:fs");
+          const reg = JSON.parse(fs.readFileSync("/var/lib/sevyn/accounts/registry.json", "utf8"));
+          const users = Array.isArray(reg) ? reg : reg.users;
+          const first = Array.isArray(users) ? users[0] : undefined;
+          if (first && typeof first.username === "string") process.stdout.write(first.username);
+        } catch { /* fall back to sed */ }
+      ' 2>/dev/null)
+    fi
+    if [ -z "$session_user" ]; then
+      session_user=$(sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        /var/lib/sevyn/accounts/registry.json 2>/dev/null | head -n 1)
+    fi
+  fi
+  if [ -n "$session_user" ] && id "$session_user" >/dev/null 2>&1; then
+    session_uid=$(id -u "$session_user")
+    session_gid=$(id -g "$session_user")
+    session_home=$(sed -n "s|^${session_user}:[^:]*:[^:]*:[^:]*:[^:]*:\\([^:]*\\).*|\\1|p" /etc/passwd | head -n 1)
+    [ -n "$session_home" ] || session_home="/var/lib/sevyn/users/$session_user"
+    if command -v setpriv >/dev/null 2>&1; then
+      log_marker "SEVYN_SESSION_USER=$session_user"
+      # Hand over everything the session writes as root, before dropping.
+      chown -R "$session_uid:$session_gid" "$runtime_dir" /var/lib/sevyn 2>/dev/null || true
+      touch /var/log/weston.log /var/log/genesis.log /tmp/genesis.log 2>/dev/null || true
+      chown "$session_uid:$session_gid" /var/log/weston.log /var/log/genesis.log /tmp/genesis.log 2>/dev/null || true
+      export SEVYN_SESSION_DROPPED=1
+      export SEVYN_SESSION_USER="$session_user"
+      export HOME="$session_home" USER="$session_user" LOGNAME="$session_user"
+      if [ -z "${SEVYN_CODE_WORKSPACE:-}" ]; then
+        SEVYN_CODE_WORKSPACE="$session_home/Projects"
+        export SEVYN_CODE_WORKSPACE
+      fi
+      log_marker "SEVYN_SESSION_WHOAMI=$(id "$session_user" 2>/dev/null || echo "uid=$session_uid")"
+      exec setpriv --reuid="$session_uid" --regid="$session_gid" --clear-groups \
+        /usr/local/bin/start-genesis "$@"
+    else
+      log_marker "SEVYN_SESSION_USER_FALLBACK_ROOT reason=setpriv-missing user=$session_user"
+    fi
+  elif [ -n "$session_user" ]; then
+    log_marker "SEVYN_SESSION_USER_FALLBACK_ROOT reason=unknown-user user=$session_user"
+  fi
+fi
+
 echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
 echo "contents of /dev/dri:"

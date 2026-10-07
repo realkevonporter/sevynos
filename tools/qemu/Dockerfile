@@ -51,7 +51,7 @@ RUN (sed -i 's/Components: main/Components: main contrib non-free non-free-firmw
     alsa-utils alsa-ucm-conf pipewire pipewire-audio geoclue-2.0 geoclue-2-demo bluez iio-sensor-proxy fprintd libpam-fprintd firmware-sof-signed \
     firmware-amd-graphics firmware-iwlwifi firmware-realtek firmware-atheros firmware-brcm80211 firmware-misc-nonfree \
     wpasupplicant wireless-tools rfkill wireless-regdb fonts-font-awesome \
-    v4l-utils ffmpeg && rm -rf /var/lib/apt/lists/*
+    v4l-utils ffmpeg sudo passwd && rm -rf /var/lib/apt/lists/*
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=studio-tools /opt/sevynos/studio-tools /opt/sevynos/studio-tools
 COPY --from=sevyn-code-server /opt/code-server /opt/code-server
@@ -82,6 +82,8 @@ COPY tools/qemu/start-genesis.sh /usr/local/bin/start-genesis
 COPY tools/qemu/request-shutdown.sh /usr/local/bin/request-genesis-shutdown
 COPY tools/qemu/sevyn-installer.sh /usr/local/bin/sevyn-installer
 COPY tools/qemu/sevyn-installer-chroot.sh /usr/local/bin/sevyn-installer-chroot
+COPY tools/qemu/installer-accounts.mjs /usr/local/lib/sevyn-installer-accounts.mjs
+COPY tools/qemu/installer-partition-plan.mjs /usr/local/lib/sevyn-installer-partition-plan.mjs
 COPY tools/qemu/sevyn-installed-init /usr/local/lib/sevynos/installed-init
 COPY tools/qemu/sevyn-apply-update.sh /usr/local/lib/sevynos/apply-update
 COPY tools/qemu/sevyn-installer.desktop /usr/share/applications/sevyn-installer.desktop
