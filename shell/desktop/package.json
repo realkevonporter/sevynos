@@ -42,6 +42,7 @@
     "@sevynos/app-notes": "workspace:*",
     "@sevynos/graphics": "workspace:*",
     "@sevynos/input": "workspace:*",
+    "@sevynos/os-update": "workspace:*",
     "@sevynos/react-native": "workspace:*",
     "@sevynos/runtime": "workspace:*",
     "@sevynos/shell-core": "workspace:*",

@@ -19,6 +19,11 @@ import {
   type WirelessNetworkSnapshot,
   type SevynApplicationManifest,
 } from "@sevynos/react-native";
+import type {
+  OsUpdateService,
+  StagedUpdate,
+  UpdateCheckResult,
+} from "@sevynos/os-update";
 
 export const settingsManifest: SevynApplicationManifest = {
   manifestVersion: 1,
@@ -45,6 +50,7 @@ export type SettingsCategory =
   | "datetime"
   | "applications"
   | "shortcuts"
+  | "update"
   | "about";
 
 export interface InstalledAppInfo {
@@ -168,6 +174,7 @@ export interface SettingsApplicationProps {
   readonly audio?: SevynAudioService | undefined;
   readonly time?: SevynTimeService | undefined;
   readonly system?: SevynSystemService | undefined;
+  readonly update?: OsUpdateService | undefined;
   readonly onUpdateSetting?: ((key: string, value: unknown) => void) | undefined;
   readonly installedApplications?: readonly InstalledAppInfo[] | undefined;
   readonly onUninstallApp?: ((id: string) => void) | undefined;
@@ -322,6 +329,8 @@ export function SettingsApplication({
   audio,
   time,
   network,
+  power,
+  update,
   onUpdateSetting,
   installedApplications,
   onUninstallApp,
@@ -346,6 +355,15 @@ export function SettingsApplication({
   const [wifiBusy, setWifiBusy] = useState<boolean>(false);
   const [wifiError, setWifiError] = useState<string | null>(null);
   const [savedNetworks, setSavedNetworks] = useState<readonly SavedWirelessNetwork[]>([]);
+  const [updateStatus, setUpdateStatus] = useState<string>("idle");
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | undefined>(
+    undefined,
+  );
+  const [updateBusy, setUpdateBusy] = useState<boolean>(false);
+  const [stagedUpdate, setStagedUpdate] = useState<StagedUpdate | undefined>(undefined);
+  const [downloadProgress, setDownloadProgress] = useState<
+    { received: number; total: number } | undefined
+  >(undefined);
   const [batteryPercent, setBatteryPercent] = useState<number>(85);
   const [isCharging, setIsCharging] = useState<boolean>(true);
   const [timeState, setTimeState] = useState<TimeSyncState>({
@@ -392,6 +410,60 @@ export function SettingsApplication({
     }
     return undefined;
   }, [audio, battery, time]);
+
+  useEffect(() => {
+    if (!update) return undefined;
+    setUpdateStatus(update.status);
+    setUpdateResult(update.lastResult);
+    return update.subscribe(() => {
+      setUpdateStatus(update.status);
+      setUpdateResult(update.lastResult);
+    });
+  }, [update]);
+
+  const handleCheckForUpdates = () => {
+    if (!update || updateBusy) return;
+    setUpdateBusy(true);
+    void update
+      .checkNow()
+      .catch((error: unknown) => {
+        console.warn("update check failed:", error);
+      })
+      .finally(() => {
+        setUpdateBusy(false);
+      });
+  };
+
+  const handleDownloadUpdate = () => {
+    if (!update || updateStatus === "downloading") return;
+    setDownloadProgress({ received: 0, total: 0 });
+    void update
+      .downloadUpdate((received, total) => {
+        setDownloadProgress({ received, total });
+      })
+      .then((staged) => {
+        setStagedUpdate(staged);
+        setDownloadProgress(undefined);
+      })
+      .catch((error: unknown) => {
+        console.warn("update download failed:", error);
+        setDownloadProgress(undefined);
+      });
+  };
+
+  const handleInstallUpdate = () => {
+    if (!update || !stagedUpdate) return;
+    void update
+      .applyUpdate(stagedUpdate)
+      .then(() => power?.restart?.())
+      .catch((error: unknown) => {
+        console.warn("update apply failed:", error);
+      });
+  };
+
+  const handleReboot = () => {
+    void power?.restart?.();
+  };
 
   const handleTimezoneSave = () => {
     if (!time || timezoneInput.trim().length === 0) return;
@@ -658,6 +730,14 @@ export function SettingsApplication({
             label="Keyboard Shortcuts"
             onPress={() => {
               setActiveCategory("shortcuts");
+            }}
+          />
+          <SidebarItem
+            active={activeCategory === "update"}
+            icon="download"
+            label="Software Update"
+            onPress={() => {
+              setActiveCategory("update");
             }}
           />
           <SidebarItem
@@ -1315,6 +1395,142 @@ export function SettingsApplication({
             </View>
           )}
 
+          {activeCategory === "update" && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Software Update</Text>
+              <Text style={styles.sectionSubtitle}>
+                Check for SevynOS system updates, download, and install them.
+              </Text>
+
+              <View style={styles.card}>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.settingLabel}>Installed version</Text>
+                  <Text style={styles.settingValueBold}>
+                    {update?.currentVersion ?? "unknown"}
+                  </Text>
+                </View>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.settingLabel}>Status</Text>
+                  <Text style={styles.settingValue}>
+                    {updateStatusLabel(updateStatus)}
+                  </Text>
+                </View>
+                {updateResult?.checkedAt !== undefined && (
+                  <View style={styles.rowBetween}>
+                    <Text style={styles.settingLabel}>Last checked</Text>
+                    <Text style={styles.settingValue}>
+                      {new Date(updateResult.checkedAt).toLocaleString()}
+                    </Text>
+                  </View>
+                )}
+                {updateResult?.error !== undefined && (
+                  <Text style={styles.wifiErrorText}>{updateResult.error}</Text>
+                )}
+                {update === undefined && (
+                  <Text style={styles.settingValue}>
+                    The update service is unavailable on this system.
+                  </Text>
+                )}
+              </View>
+
+              {update !== undefined && updateResult?.status === "update-available" && (
+                <View style={styles.card}>
+                  <View style={styles.rowBetween}>
+                    <Text style={styles.settingLabel}>Available version</Text>
+                    <Text style={styles.settingValueBold}>
+                      {updateResult.latestVersion}
+                    </Text>
+                  </View>
+                  <Text style={styles.settingValue}>{updateResult.releaseNotes}</Text>
+                </View>
+              )}
+
+              {downloadProgress !== undefined && (
+                <View style={styles.card}>
+                  <Text style={styles.settingLabel}>
+                    Downloading… {formatBytes(downloadProgress.received)} of{" "}
+                    {formatBytes(downloadProgress.total)}
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.updateButtonRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Check for updates"
+                  disabled={
+                    update === undefined || updateBusy || updateStatus === "checking"
+                  }
+                  onPress={() => {
+                    handleCheckForUpdates();
+                  }}
+                  style={
+                    updateBusy || updateStatus === "checking"
+                      ? { ...styles.scanButton, ...styles.buttonDisabled }
+                      : styles.scanButton
+                  }
+                >
+                  <Text style={styles.scanButtonText}>
+                    {updateStatus === "checking" ? "Checking…" : "Check for updates"}
+                  </Text>
+                </Pressable>
+
+                {updateResult?.status === "update-available" && (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Download update"
+                    disabled={updateStatus === "downloading"}
+                    onPress={() => {
+                      handleDownloadUpdate();
+                    }}
+                    style={
+                      updateStatus === "downloading"
+                        ? { ...styles.scanButton, ...styles.buttonDisabled }
+                        : styles.scanButton
+                    }
+                  >
+                    <Text style={styles.scanButtonText}>
+                      {updateStatus === "downloading" ? "Downloading…" : "Download"}
+                    </Text>
+                  </Pressable>
+                )}
+
+                {updateStatus === "downloaded" && stagedUpdate !== undefined && (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Install update and reboot"
+                    onPress={() => {
+                      handleInstallUpdate();
+                    }}
+                    style={styles.scanButton}
+                  >
+                    <Text style={styles.scanButtonText}>Install & reboot</Text>
+                  </Pressable>
+                )}
+
+                {updateStatus === "pending-reboot" && (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Reboot to apply the update"
+                    onPress={() => {
+                      handleReboot();
+                    }}
+                    style={styles.scanButton}
+                  >
+                    <Text style={styles.scanButtonText}>Reboot to apply</Text>
+                  </Pressable>
+                )}
+              </View>
+
+              {(updateStatus === "downloaded" || updateStatus === "pending-reboot") && (
+                <Text style={styles.sectionSubtitle}>
+                  The update is staged and will be applied before the desktop starts on
+                  the next boot. Your files and settings are preserved.
+                </Text>
+              )}
+            </View>
+          )}
+
           {activeCategory === "about" && (
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>About SevynOS</Text>
@@ -1352,6 +1568,36 @@ export function SettingsApplication({
       </View>
     </View>
   );
+}
+
+function updateStatusLabel(status: string): string {
+  switch (status) {
+    case "checking":
+      return "Checking…";
+    case "up-to-date":
+      return "Up to date";
+    case "update-available":
+      return "Update available";
+    case "downloading":
+      return "Downloading…";
+    case "downloaded":
+      return "Downloaded";
+    case "applying":
+      return "Applying…";
+    case "pending-reboot":
+      return "Reboot to apply";
+    case "error":
+      return "Check failed";
+    case "idle":
+    default:
+      return "Not checked yet";
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${String(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function WifiSignalBars({ signal }: { signal: number }): JSX.Element {
@@ -2022,6 +2268,12 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     opacity: 0.5,
+  },
+  updateButtonRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 12,
+    flexWrap: "wrap",
   },
   wifiErrorBanner: {
     backgroundColor: "rgba(239, 68, 68, 0.15)",

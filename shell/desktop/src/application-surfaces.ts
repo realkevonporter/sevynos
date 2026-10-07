@@ -44,6 +44,7 @@ import {
   type AppManagerEntry,
 } from "@sevynos/core-applications";
 import { CalculatorApplication } from "@sevynos/app-calculator";
+import type { OsUpdateService } from "@sevynos/os-update";
 import type { DesktopSettings } from "./desktop-settings.js";
 
 /**
@@ -225,6 +226,7 @@ export class ApplicationSurfaceRegistry {
   #workerSnapshots: readonly ApplicationWorkerSnapshot[] = Object.freeze([]);
   #applicationManagement: ApplicationManagementController | undefined;
   #onUpdateSetting: ((key: string, value: unknown) => void) | undefined;
+  #updateService: OsUpdateService | undefined;
 
   public constructor(
     onChange: ApplicationSurfaceListener,
@@ -305,6 +307,15 @@ export class ApplicationSurfaceRegistry {
     onUpdateSetting: (key: string, value: unknown) => void,
   ): void {
     this.#onUpdateSetting = onUpdateSetting;
+    this.#onChange();
+  }
+
+  /**
+   * Supplies the OS update service after construction. Powers the Settings
+   * "Software Update" section; without it the section reports unavailable.
+   */
+  public configureUpdateService(update: OsUpdateService): void {
+    this.#updateService = update;
     this.#onChange();
   }
 
@@ -895,6 +906,7 @@ export class ApplicationSurfaceRegistry {
           audio: this.#audio,
           time: this.#time,
           system: this.#system,
+          update: this.#updateService,
           onUpdateSetting: this.#onUpdateSetting,
           onUninstallApp: (appId: string) => {
             void this.#applicationManagement?.terminate(appId);

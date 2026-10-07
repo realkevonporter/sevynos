@@ -29,6 +29,11 @@ if (
 import { DisplayRenderPlanner, GenesisFrameExecutor } from "@sevynos/graphics";
 import { createWheelInputEvent, type PointerInputEvent } from "@sevynos/input";
 import {
+  defaultUpdateFeedUrl,
+  OsUpdateService,
+  resolveCurrentVersion,
+} from "@sevynos/os-update";
+import {
   createDesktopRuntime,
   DesktopIsolatedApplicationCoordinator,
   DesktopPersistenceController,
@@ -116,6 +121,12 @@ export interface WaylandHostOptions {
   readonly filesystem?: SevynFileSystem;
   readonly createBrowserEngine?: () => SevynBrowserEngine;
   readonly createSevynCodeEngine?: () => SevynBrowserEngine | undefined;
+  /**
+   * OS update service (versioned feed check + download + stage). When
+   * provided, it is wired into the desktop surfaces so Settings can drive
+   * check/download/install.
+   */
+  readonly update?: OsUpdateService | undefined;
 }
 
 export async function startWaylandHost(
@@ -520,6 +531,12 @@ export async function startWaylandHost(
         };
   if (sessionAdapter !== undefined && loadedSettings?.restorePreviousSession === true) {
     await restoreDesktopSession(runtime, await sessionAdapter.load(), viewport);
+  }
+  // Wire the OS update service into the desktop so Settings can drive
+  // check / download / install. Auto-check runs on its own timer.
+  if (options.update !== undefined) {
+    runtime.surfaces.configureUpdateService(options.update);
+    marker("SEVYN_GENESIS_UPDATE_SERVICE_READY");
   }
   // Fresh boot starts with a clean desktop (no auto-launched apps).
   // resetToDefaults() is reserved for explicit user-initiated reset
@@ -1746,6 +1763,14 @@ if (
       // Ignore errors writing to serial port
     }
   }
+  // OS update service: versioned feed check + download + stage. The feed URL
+  // is overridable for testing; failures never block boot.
+  const updateService = new OsUpdateService({
+    currentVersion: await resolveCurrentVersion().catch(() => "0.0.0-dev"),
+    feedUrl: process.env["SEVYN_UPDATE_FEED_URL"] ?? defaultUpdateFeedUrl(),
+    stateDirectory,
+  });
+  updateService.startAutoCheck();
   const host = await startWaylandHost(new NativeProcessBridgeTransport(executable), {
     persistence: new FileLinuxPersistenceAdapter(stateDirectory),
     network: new LinuxWirelessNetworkService(),
@@ -1754,6 +1779,7 @@ if (
     audio: new LinuxAudioService(),
     system: new LinuxSystemService(),
     filesystem: new LinuxFileSystem(),
+    update: updateService,
     createBrowserEngine: () => {
       // The browser keeps a persistent profile; every other engine
       // (Sevyn Code, webviews) gets an isolated temp profile so two

@@ -41,4 +41,6 @@ jobs:
           makeLatest: false
           allowUpdates: true
           removeArtifacts: true
-          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS"
+          # rootfs.squashfs + updates.json feed the OS update service's
+          # check/download/apply flow (Settings → Software Update).
+          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json"

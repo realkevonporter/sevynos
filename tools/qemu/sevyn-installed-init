@@ -21,6 +21,15 @@ log_marker() {
   fi
 }
 
+# ─── Pending OS update ────────────────────────────────────────────────
+# If the OS update service staged a new rootfs (pending.json), apply it now —
+# before anything else runs from the old tree. The applier verifies, backs
+# up machine state, extracts, then re-execs this init.
+if [ -f /var/lib/sevynos/updates/pending.json ]; then
+  log_marker "SEVYN_PENDING_UPDATE_FOUND"
+  exec /usr/local/lib/sevynos/apply-update
+fi
+
 log_marker "SEVYN_KERNEL_BOOTED"
 log_marker "SEVYN_INSTALLED_MODE"
 

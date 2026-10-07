@@ -28,6 +28,7 @@
     "@sevynos/app-text-editor": "workspace:*",
     "@sevynos/graphics": "workspace:*",
     "@sevynos/input": "workspace:*",
+    "@sevynos/os-update": "workspace:*",
     "@sevynos/react-native": "workspace:*",
     "@sevynos/runtime": "workspace:*",
     "react": "^19.2.8",

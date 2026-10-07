@@ -1,9 +1,17 @@
 import { spawn } from "node:child_process";
-import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { access, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "../..");
 const output = resolve(import.meta.dirname, "build");
+// OS version stamped into the image at /etc/sevynos-release and published in
+// updates.json. Format: <pkg>-nightly.YYYYMMDD.<shortsha>.
+const rootPkg = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+const buildDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+const shortSha = process.env["GITHUB_SHA"]?.slice(0, 7) ?? "local";
+const osVersion = `${String(rootPkg.version)}-nightly.${buildDate}.${shortSha}`;
 await mkdir(output, { recursive: true });
 for (const generated of [
   "vmlinuz",
@@ -20,6 +28,8 @@ await run("docker", [
   "build",
   "--file",
   resolve(import.meta.dirname, "Dockerfile"),
+  "--build-arg",
+  `SEVYN_OS_VERSION=${osVersion}`,
   "--no-cache-filter=boot-media",
   "--output",
   `type=local,dest=${output}`,
@@ -83,6 +93,43 @@ await writeFile(
   )}\n`,
 );
 console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
+
+// updates.json: the versioned update feed consumed by the OS update service.
+// The workflow publishes this alongside the rootfs artifact for nightly
+// releases (URL template baked into the image at build time via
+// SEVYN_UPDATE_FEED_URL / defaultUpdateFeedUrl()).
+{
+  const rootfsPath = resolve(output, "rootfs.squashfs");
+  const rootfsStat = await stat(rootfsPath);
+  const rootfsHash = createHash("sha256");
+  for await (const chunk of createReadStream(rootfsPath)) {
+    rootfsHash.update(chunk);
+  }
+  const artifactUrl =
+    process.env["SEVYN_UPDATE_ARTIFACT_URL"] ??
+    `https://github.com/realkevonporter/sevynos/releases/download/nightly/rootfs.squashfs`;
+  await writeFile(
+    resolve(output, "updates.json"),
+    `${JSON.stringify(
+      {
+        version: osVersion,
+        publishedAt: new Date().toISOString(),
+        releaseNotes: `SevynOS nightly ${osVersion}.`,
+        artifacts: [
+          {
+            kind: "rootfs",
+            url: artifactUrl,
+            sha256: rootfsHash.digest("hex"),
+            sizeBytes: rootfsStat.size,
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  console.log(`Update feed written for version ${osVersion}`);
+}
 
 function run(command, arguments_) {
   return new Promise((resolvePromise, reject) => {
