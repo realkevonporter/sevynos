@@ -1,10 +1,11 @@
 /**
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
-import { useEffect, useState, type JSX } from "react";
+import { Fragment, useEffect, useState, type JSX } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SevynIcon } from "@sevynos/react-native";
 import { SevynShellTheme } from "../theme.js";
+import { VolumeOsdOverlay } from "../osd/index.js";
 import type { DesktopShellDisplay, DesktopStatusBarRenderInput } from "../desktop.js";
 
 export interface DesktopStatusBarProps extends DesktopStatusBarRenderInput {
@@ -39,23 +40,29 @@ export function DesktopStatusBar({
   return (
     <>
       {displays.map((display) => (
-        <DisplayMenuBar
-          key={display.id}
-          display={display}
-          timeText={timeText}
-          dateText={dateText}
-          wifiState={wifiState}
-          wifiSignal={wifiSignal}
-          wifiSsid={wifiSsid}
-          batteryAvailable={batteryAvailable}
-          batteryPercent={batteryPercent}
-          batteryCharging={batteryCharging}
-          audioVolume={audioVolume}
-          audioMuted={audioMuted}
-          activeApplicationName={activeApplicationName}
-          menus={menus}
-          onOpenMenu={onOpenMenu}
-        />
+        <Fragment key={display.id}>
+          <DisplayMenuBar
+            display={display}
+            timeText={timeText}
+            dateText={dateText}
+            wifiState={wifiState}
+            wifiSignal={wifiSignal}
+            wifiSsid={wifiSsid}
+            batteryAvailable={batteryAvailable}
+            batteryPercent={batteryPercent}
+            batteryCharging={batteryCharging}
+            audioVolume={audioVolume}
+            audioMuted={audioMuted}
+            activeApplicationName={activeApplicationName}
+            menus={menus}
+            onOpenMenu={onOpenMenu}
+          />
+          <VolumeOsdOverlay
+            display={display}
+            audioVolume={audioVolume}
+            audioMuted={audioMuted}
+          />
+        </Fragment>
       ))}
     </>
   );
