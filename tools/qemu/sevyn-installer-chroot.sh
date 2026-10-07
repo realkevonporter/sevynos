@@ -16,6 +16,7 @@ ROOT_DEV="${3:-}"
 INSTALL_CONFIG="/tmp/sevyn-install-config"
 ACCOUNTS_HELPER="/tmp/sevyn-installer-accounts.mjs"
 GRUB_CFG_LIB="/tmp/sevyn-grub-cfg-lib.sh"
+SECUREBOOT_HELPER="/tmp/sevyn-secure-boot.sh"
 
 log() {
   echo "[sevyn-chroot] $*"
@@ -166,6 +167,23 @@ OSEOF
       log "No other operating systems detected."
     fi
   fi
+}
+
+# ─── Secure Boot (Machine Owner Key) ────────────────────────────────
+# Implements the automatable part of the MOK flow (docs/secure-boot.md):
+# generate a per-machine keypair, sbsign the bootloader + kernels, and queue
+# the MOK for enrollment. Never fatal: the helper degrades gracefully when
+# sbsign/mokutil are unavailable, and a missing helper skips this step.
+setup_secure_boot() {
+  if [ ! -f "$SECUREBOOT_HELPER" ]; then
+    log "Secure Boot helper not found; skipping MOK setup (non-fatal)."
+    return 0
+  fi
+  log "Setting up Secure Boot (Machine Owner Key)..."
+  "$SECUREBOOT_HELPER" generate-mok || log "WARNING: MOK generation step failed; continuing."
+  "$SECUREBOOT_HELPER" sign || log "WARNING: signing step failed; continuing."
+  "$SECUREBOOT_HELPER" queue-enrollment || log "WARNING: enrollment step failed; continuing."
+  log "Secure Boot setup finished."
 }
 
 # ─── Install configuration (written by sevyn-installer) ─────────────
@@ -374,6 +392,7 @@ EOF
 # ─── Main ────────────────────────────────────────────────────────────
 install_grub
 generate_grub_config
+setup_secure_boot
 load_install_config
 configure_locale_timezone
 configure_system

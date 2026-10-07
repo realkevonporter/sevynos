@@ -30,6 +30,7 @@ SQUASHFS_PATH="/live/filesystem.squashfs"
 INSTALLED_INIT="/usr/local/lib/sevynos/installed-init"
 CHROOT_SCRIPT="/usr/local/bin/sevyn-installer-chroot"
 GRUB_CFG_LIB="/usr/local/lib/sevyn-grub-cfg-lib.sh"
+SECUREBOOT_SCRIPT="/usr/local/lib/sevyn-secure-boot.sh"
 ACCOUNTS_SCRIPT="/usr/local/lib/sevyn-installer-accounts.mjs"
 PARTITION_PLAN_SCRIPT="/usr/local/lib/sevyn-installer-partition-plan.mjs"
 NODE_BIN="/usr/local/bin/node"
@@ -891,6 +892,12 @@ EOF
     cp "$ACCOUNTS_SCRIPT" "$target/tmp/sevyn-installer-accounts.mjs"
     [ -f "$GRUB_CFG_LIB" ] || { stop_gauge; fail "Required installer helper is missing: $GRUB_CFG_LIB"; }
     cp "$GRUB_CFG_LIB" "$target/tmp/sevyn-grub-cfg-lib.sh"
+    if [ -f "$SECUREBOOT_SCRIPT" ]; then
+      cp "$SECUREBOOT_SCRIPT" "$target/tmp/sevyn-secure-boot.sh"
+      chmod 0755 "$target/tmp/sevyn-secure-boot.sh"
+    else
+      log "WARNING: Secure Boot helper is missing from the live media: $SECUREBOOT_SCRIPT; MOK setup will be skipped."
+    fi
     chmod 0755 "$target/tmp/sevyn-chroot-setup"
 
     # Bind-mount essential filesystems for chroot
@@ -914,8 +921,13 @@ EOF
     umount "$target/dev/pts" 2>/dev/null || true
     umount "$target/dev" 2>/dev/null || true
     rm -f "$target/tmp/sevyn-chroot-setup" "$target/tmp/sevyn-installer-accounts.mjs" \
-      "$target/tmp/sevyn-grub-cfg-lib.sh" "$target/tmp/sevyn-install-config"
+      "$target/tmp/sevyn-grub-cfg-lib.sh" "$target/tmp/sevyn-secure-boot.sh" \
+      "$target/tmp/sevyn-install-config"
   fi
+
+  # Capture the Secure Boot state while the target is still mounted; the
+  # enrollment screen (guided flow) and the install log (unattended) use it.
+  capture_secure_boot_state "$target"
 
   # Cleanup
   gauge 98 "Finishing up..."
@@ -928,6 +940,47 @@ EOF
   stop_gauge
 
   log "Installation complete."
+}
+
+# ─── Secure Boot state capture + enrollment screen ──────────────────
+# The chroot step writes /var/lib/sevyn/secureboot/state.json; capture the
+# fields the installer screens need while the target is still mounted.
+SB_MOK_FP=""; SB_SIGNED=""; SB_ENROLLMENT=""; SB_ENROLL_REASON=""; SB_PW=""
+
+capture_secure_boot_state() {
+  target="$1"
+  sb_dir="$target/var/lib/sevyn/secureboot"
+  state_file="$sb_dir/state.json"
+  [ -f "$state_file" ] || { log "No Secure Boot state recorded."; return 0; }
+  SB_MOK_FP=$(sed -n 's/.*"fingerprint": *"\([^"]*\)".*/\1/p' "$state_file" | head -n 1)
+  SB_SIGNED=$(sed -n 's/.*"signed": *"\([^"]*\)".*/\1/p' "$state_file" | head -n 1)
+  SB_ENROLLMENT=$(sed -n 's/.*"enrollment": *"\([^"]*\)".*/\1/p' "$state_file" | head -n 1)
+  SB_ENROLL_REASON=$(sed -n 's/.*"enrollmentReason": *"\([^"]*\)".*/\1/p' "$state_file" | head -n 1)
+  if [ -f "$sb_dir/mok-enrollment-password" ]; then
+    SB_PW=$(cat "$sb_dir/mok-enrollment-password")
+  fi
+  log "Secure Boot state: signed=$SB_SIGNED enrollment=$SB_ENROLLMENT"
+}
+
+show_secure_boot_enrollment() {
+  # One-time MOK enrollment screen. Only meaningful on UEFI installs where a
+  # MOK was generated; on legacy BIOS there is no Secure Boot to enroll into.
+  [ -d /sys/firmware/efi ] || { log "Legacy BIOS install; skipping the Secure Boot enrollment screen."; return 0; }
+  [ -n "$SB_MOK_FP" ] || { log "No MOK was generated; skipping the Secure Boot enrollment screen."; return 0; }
+
+  fp_pretty=$(printf '%s' "$SB_MOK_FP" | sed 's/\(..\)/\1:/g; s/:$//' | tr 'a-z' 'A-Z')
+
+  case "$SB_ENROLLMENT" in
+    queued)
+      intro="  A SevynOS Machine Owner Key (MOK) was generated during\n  installation and queued for enrollment. On the next boot,\n  the MOK Manager will open automatically — complete the\n  one-time enrollment there so the signed bootloader and\n  kernel are trusted."
+      ;;
+    *)
+      intro="  A SevynOS Machine Owner Key (MOK) was generated during\n  installation, but it could not be queued automatically\n  ($SB_ENROLL_REASON).\n\n  After your first boot, enroll it manually (this needs a\n  Microsoft-signed shim — see docs/secure-boot.md):\n\n    sudo mokutil --import /var/lib/sevyn/secureboot/MOK.der\n\n  then reboot and follow the MOK Manager steps below."
+      ;;
+  esac
+
+  dialog --title "Secure Boot — One-Time Key Enrollment" \
+    --msgbox "\n$intro\n\n  Your key fingerprint (verify this in the MOK Manager):\n  $fp_pretty\n\n  Enrollment password (type it once at the MOK Manager):\n  >>>  $SB_PW  <<<\n\n  Write it down — you will type it on the next reboot.\n\n  ── At the MOK Manager screen ──\n\n  1. Select \"Enroll MOK\" and press Enter.\n  2. Optionally select \"View key 0\" and check the\n     fingerprint above matches. If it does not, go\n     Back and do NOT enroll.\n  3. Select \"Continue\".\n  4. When asked \"Enroll the key(s)?\", select \"Yes\".\n  5. Type the enrollment password above, press Enter.\n  6. Select \"Reboot\".\n\n  You need a physical keyboard — this cannot be done\n  remotely, by design. If you mistype, the menu returns\n  and you can try again.\n\n  SevynOS does not claim full Secure Boot support yet;\n  this key prepares the machine for it. Details:\n  docs/secure-boot.md" 32 72
 }
 
 # ─── Guided step 8: completion ──────────────────────────────────────
@@ -993,6 +1046,10 @@ run_unattended() {
   [ -b "$SWAP_DEV" ] || fail "Swap partition was not created: $SWAP_DEV"
   install_system "$ESP_DEV" "$ROOT_DEV" "$SWAP_DEV" "$unattended_target"
   SEVYN_PASSWORD=""
+  if [ -n "$SB_MOK_FP" ]; then
+    log "Secure Boot MOK fingerprint: $SB_MOK_FP (signed=$SB_SIGNED enrollment=$SB_ENROLLMENT)"
+    log "MOK enrollment password is stored 0600 at /var/lib/sevyn/secureboot/mok-enrollment-password on the installed system"
+  fi
   log "SEVYN_INSTALL_COMPLETE"
   echo "SEVYN_INSTALL_COMPLETE" > /dev/ttyS0 2>/dev/null || true
   sync
@@ -1080,6 +1137,7 @@ main() {
   install_system "$ESP_DEV" "$ROOT_DEV" "$SWAP_DEV" "$target_disk"
   SEVYN_PASSWORD=""
 
+  show_secure_boot_enrollment
   if show_complete; then
     sync
     reboot -f
