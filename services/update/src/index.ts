@@ -14,6 +14,7 @@ export {
   selectRootfsArtifact,
   type UpdateArtifact,
   type UpdateArtifactKind,
+  type UpdateChannel,
   type UpdateFeedManifest,
 } from "./update-feed.js";
 export {

@@ -5,6 +5,7 @@
  *
  * {
  *   "version": "0.1.0-nightly.20261007.abc1234",
+ *   "channel": "nightly",
  *   "publishedAt": "2026-10-07T10:00:00.000Z",
  *   "releaseNotes": "…",
  *   "artifacts": [
@@ -22,6 +23,9 @@
  * sha256 values (see the trust argument in feed-signing.ts).
  */
 
+/** The release channel a feed manifest belongs to. */
+export type UpdateChannel = "stable" | "nightly";
+
 export type UpdateArtifactKind = "rootfs-squashfs" | "iso";
 
 export interface UpdateArtifact {
@@ -33,6 +37,8 @@ export interface UpdateArtifact {
 
 export interface UpdateFeedManifest {
   readonly version: string;
+  /** Release channel; feeds written before channels existed read as "nightly". */
+  readonly channel: UpdateChannel;
   readonly publishedAt: string;
   readonly releaseNotes: string;
   readonly artifacts: readonly UpdateArtifact[];
@@ -96,6 +102,14 @@ function parseSignatures(value: unknown): Record<string, string> | undefined {
   }
   return signatures;
 }
+
+function parseChannel(value: unknown): UpdateChannel {
+  // Feeds written before the channel field existed are nightly feeds.
+  if (value === undefined) return "nightly";
+  if (value === "stable" || value === "nightly") return value;
+  return fail(`"channel" must be "stable" or "nightly"`);
+}
+
 /** Parses and validates a feed manifest. Throws a descriptive error. */
 export function parseUpdateFeed(text: string): UpdateFeedManifest {
   let parsed: unknown;
@@ -106,6 +120,7 @@ export function parseUpdateFeed(text: string): UpdateFeedManifest {
   }
   if (!isRecord(parsed)) fail("top level must be an object");
   const version = requireString(parsed, "version");
+  const channel = parseChannel(parsed["channel"]);
   const publishedAt = requireString(parsed, "publishedAt");
   if (Number.isNaN(Date.parse(publishedAt))) fail('"publishedAt" must be a date');
   const releaseNotes = requireString(parsed, "releaseNotes");
@@ -114,6 +129,7 @@ export function parseUpdateFeed(text: string): UpdateFeedManifest {
     fail('"artifacts" must be a non-empty array');
   return {
     version,
+    channel,
     publishedAt,
     releaseNotes,
     artifacts: Object.freeze(

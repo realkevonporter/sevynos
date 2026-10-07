@@ -9,6 +9,7 @@ import {
   parseUpdateFeed,
   selectRootfsArtifact,
   type UpdateArtifact,
+  type UpdateChannel,
   type UpdateFeedManifest,
 } from "./update-feed.js";
 
@@ -52,8 +53,19 @@ export interface PendingUpdate {
 export interface OsUpdateServiceOptions {
   /** Version of the running system, e.g. from /etc/sevynos-release. */
   readonly currentVersion: string;
-  /** URL of the versioned JSON feed (updates.json). */
-  readonly feedUrl: string;
+  /**
+   * Explicit feed URL. Overrides the channel default — useful for tests and
+   * staging. When set, setChannel() updates the tracked channel but leaves
+   * this URL alone.
+   */
+  readonly feedUrl?: string | undefined;
+  /**
+   * Update channel; selects the default feed URL when feedUrl is not given.
+   * Installed systems default to "stable". Hosts should pass the channel
+   * previously chosen via setChannel() (see readPersistedChannel) so the
+   * user's choice survives reboots.
+   */
+  readonly channel?: UpdateChannel | undefined;
   /** Host state directory; updates stage under <stateDirectory>/updates. */
   readonly stateDirectory: string;
   /**
@@ -106,7 +118,9 @@ export async function resolveCurrentVersion(
  */
 export class OsUpdateService {
   readonly #currentVersion: string;
-  readonly #feedUrl: string;
+  #feedUrl: string;
+  readonly #feedUrlPinned: boolean;
+  #channel: UpdateChannel;
   readonly #stateDirectory: string;
   readonly #trustedKeys: readonly TrustedUpdateKey[];
   readonly #fetch: typeof fetch;
@@ -124,10 +138,14 @@ export class OsUpdateService {
   public constructor(options: OsUpdateServiceOptions) {
     // Validate the version eagerly so a bad install is loud, not silent.
     parseOsVersion(options.currentVersion);
-    if (!options.feedUrl.startsWith("https://"))
+    // Installed systems default to the stable channel. Hosts pass the
+    // persisted user choice via options.channel (see readPersistedChannel).
+    this.#channel = options.channel ?? "stable";
+    this.#feedUrlPinned = options.feedUrl !== undefined;
+    this.#feedUrl = options.feedUrl ?? defaultUpdateFeedUrl(this.#channel);
+    if (!this.#feedUrl.startsWith("https://"))
       throw new Error("The update feed URL must be https.");
     this.#currentVersion = options.currentVersion;
-    this.#feedUrl = options.feedUrl;
     this.#stateDirectory = options.stateDirectory;
     this.#trustedKeys = options.trustedKeys ?? [];
     this.#fetch = options.fetchImpl ?? fetch;
@@ -143,6 +161,53 @@ export class OsUpdateService {
 
   public get currentVersion(): string {
     return this.#currentVersion;
+  }
+
+  public get feedUrl(): string {
+    return this.#feedUrl;
+  }
+
+  public get channel(): UpdateChannel {
+    return this.#channel;
+  }
+
+  /**
+   * Reads the channel previously persisted by setChannel(), if any. Hosts
+   * call this before constructing the service so a user's channel choice
+   * survives reboots. Never throws: a missing or corrupt file simply means
+   * "no persisted choice".
+   */
+  public static async readPersistedChannel(
+    stateDirectory: string,
+  ): Promise<UpdateChannel | undefined> {
+    try {
+      const raw = await readFile(join(stateDirectory, "updates", "channel.json"), "utf8");
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed === "stable" || parsed === "nightly") return parsed;
+    } catch {
+      // No persisted choice yet (or unreadable) — fall back to the default.
+    }
+    return undefined;
+  }
+
+  /**
+   * Switches the update channel (stable/nightly). The choice is persisted
+   * under the state directory so it survives reboots. Any check result from
+   * the previous channel is discarded; the caller should checkNow() again.
+   * When the feed URL was explicitly pinned via options, the URL is left
+   * alone and only the tracked channel changes.
+   */
+  public setChannel(channel: UpdateChannel): void {
+    const next = parseChannelArgument(channel);
+    if (next === this.#channel) return;
+    this.#channel = next;
+    if (!this.#feedUrlPinned) this.#feedUrl = defaultUpdateFeedUrl(next);
+    // Best-effort: the in-memory channel is authoritative for this session;
+    // the write lands right after under normal conditions.
+    void persistChannel(this.#stateDirectory, next).catch(() => undefined);
+    this.#lastManifest = undefined;
+    this.#lastResult = undefined;
+    this.#setStatus("idle");
   }
 
   public get lastResult(): UpdateCheckResult | undefined {
@@ -406,6 +471,35 @@ export class OsUpdateService {
   }
 }
 
-export function defaultUpdateFeedUrl(): string {
+/**
+ * Default update feed URL for a channel. Stable releases are published as
+ * full (non-prerelease) GitHub releases, so `releases/latest` always
+ * resolves to the newest stable feed; nightly builds publish to the
+ * floating `nightly` prerelease tag. Installed systems default to the
+ * stable channel.
+ */
+export function defaultUpdateFeedUrl(channel: UpdateChannel = "stable"): string {
+  if (channel === "stable")
+    return "https://github.com/realkevonporter/sevynos/releases/latest/download/updates.json";
   return "https://github.com/realkevonporter/sevynos/releases/download/nightly/updates.json";
+}
+
+/** Validates a channel argument at runtime (JS callers can lie about types). */
+function parseChannelArgument(value: string): UpdateChannel {
+  if (value !== "stable" && value !== "nightly")
+    throw new Error(`Unknown update channel: "${value}".`);
+  return value;
+}
+
+/** Best-effort persistence for setChannel(); a failed write must not break the UI. */
+async function persistChannel(
+  stateDirectory: string,
+  channel: UpdateChannel,
+): Promise<void> {
+  await mkdir(join(stateDirectory, "updates"), { recursive: true });
+  await writeFile(
+    join(stateDirectory, "updates", "channel.json"),
+    `${JSON.stringify(channel)}\n`,
+    "utf8",
+  );
 }

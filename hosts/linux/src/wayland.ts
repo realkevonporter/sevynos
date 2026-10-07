@@ -29,7 +29,6 @@ if (
 import { DisplayRenderPlanner, GenesisFrameExecutor } from "@sevynos/graphics";
 import { createWheelInputEvent, type PointerInputEvent } from "@sevynos/input";
 import {
-  defaultUpdateFeedUrl,
   loadTrustedUpdateKeys,
   OsUpdateService,
   resolveCurrentVersion,
@@ -1855,7 +1854,6 @@ if (
     }
   }
   // OS update service: versioned feed check + download + stage. The feed URL
-  // is overridable for testing; failures never block boot.
   // The trust anchor (/etc/sevynos/trusted-update-keys.json, baked into the
   // image) is loaded explicitly: when it is missing or empty the service
   // fails closed and every check reports "no trusted update keys" in the
@@ -1867,9 +1865,15 @@ if (
     const message = error instanceof Error ? error.message : String(error);
     console.error(`No trusted update keys loaded: ${message}`);
   }
+  // Installed systems default to the stable channel; a channel the user
+  // previously chose in Settings → Software Update is restored here.
+  const persistedChannel = await OsUpdateService.readPersistedChannel(
+    stateDirectory,
+  ).catch(() => undefined);
   const updateService = new OsUpdateService({
     currentVersion: await resolveCurrentVersion().catch(() => "0.0.0-dev"),
-    feedUrl: process.env["SEVYN_UPDATE_FEED_URL"] ?? defaultUpdateFeedUrl(),
+    feedUrl: process.env["SEVYN_UPDATE_FEED_URL"],
+    channel: persistedChannel ?? "stable",
     stateDirectory,
     trustedKeys,
   });

@@ -4,15 +4,20 @@ import { createReadStream } from "node:fs";
 import { access, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseSigningKeyEnv, signFeedFile } from "../update-signing/sign-feed.mjs";
+import { resolveReleaseInfo } from "./release-version.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const output = resolve(import.meta.dirname, "build");
 // OS version stamped into the image at /etc/sevynos-release and published in
-// updates.json. Format: <pkg>-nightly.YYYYMMDD.<shortsha>.
+// updates.json. Stable releases come from git tags `vX.Y.Z` (see
+// resolveReleaseInfo); anything else is a nightly:
+// <pkg>-nightly.YYYYMMDD.<shortsha>.
 const rootPkg = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
-const buildDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
-const shortSha = process.env["GITHUB_SHA"]?.slice(0, 7) ?? "local";
-const osVersion = `${String(rootPkg.version)}-nightly.${buildDate}.${shortSha}`;
+const releaseInfo = resolveReleaseInfo(process.env, {
+  packageVersion: String(rootPkg.version),
+  shortSha: process.env["GITHUB_SHA"]?.slice(0, 7),
+});
+const osVersion = releaseInfo.version;
 await mkdir(output, { recursive: true });
 
 // ─── Update trust anchor ─────────────────────────────────────────────
@@ -141,9 +146,11 @@ await writeFile(
 console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
 
 // updates.json: the versioned update feed consumed by the OS update service.
-// The workflow publishes this alongside the rootfs artifact for nightly
-// releases (URL template baked into the image at build time via
-// SEVYN_UPDATE_FEED_URL / defaultUpdateFeedUrl()).
+// The workflow publishes this alongside the rootfs artifact (URL template
+// baked into the image at build time via SEVYN_UPDATE_FEED_URL /
+// defaultUpdateFeedUrl()). Stable builds point their artifact URLs at the
+// tag's own release assets; nightly builds point at the floating `nightly`
+// release.
 {
   const rootfsPath = resolve(output, "rootfs.squashfs");
   const rootfsStat = await stat(rootfsPath);
@@ -151,8 +158,13 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
   for await (const chunk of createReadStream(rootfsPath)) {
     rootfsHash.update(chunk);
   }
+  const stableArtifactUrl =
+    releaseInfo.releaseTag === undefined
+      ? undefined
+      : `https://github.com/realkevonporter/sevynos/releases/download/${releaseInfo.releaseTag}/rootfs.squashfs`;
   const artifactUrl =
     process.env["SEVYN_UPDATE_ARTIFACT_URL"] ??
+    stableArtifactUrl ??
     `https://github.com/realkevonporter/sevynos/releases/download/nightly/rootfs.squashfs`;
   const feedPath = resolve(output, "updates.json");
   await writeFile(
@@ -160,8 +172,12 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
     `${JSON.stringify(
       {
         version: osVersion,
+        channel: releaseInfo.channel,
         publishedAt: new Date().toISOString(),
-        releaseNotes: `SevynOS nightly ${osVersion}.`,
+        releaseNotes:
+          releaseInfo.channel === "stable"
+            ? `SevynOS ${osVersion} stable release.`
+            : `SevynOS nightly ${osVersion}.`,
         artifacts: [
           {
             kind: "rootfs-squashfs",
@@ -188,7 +204,9 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
     const keyId = await signFeedFile(feedPath, await parseSigningKeyEnv(signingKeyEnv));
     console.log(`Update feed signed with key "${keyId}".`);
   }
-  console.log(`Update feed written for version ${osVersion}`);
+  console.log(
+    `Update feed written for version ${osVersion} (channel: ${releaseInfo.channel})`,
+  );
 }
 
 function run(command, arguments_) {

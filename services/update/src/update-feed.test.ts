@@ -115,4 +115,19 @@ describe("parseUpdateFeed", () => {
       '"signatures"',
     );
   });
+
+  it("parses the channel field", () => {
+    expect(parseUpdateFeed(feed({ channel: "stable" })).channel).toBe("stable");
+    expect(parseUpdateFeed(feed({ channel: "nightly" })).channel).toBe("nightly");
+  });
+
+  it("defaults a missing channel to nightly for backward compatibility", () => {
+    const raw = JSON.parse(feed()) as Record<string, unknown>;
+    delete raw["channel"];
+    expect(parseUpdateFeed(JSON.stringify(raw)).channel).toBe("nightly");
+  });
+
+  it("rejects an unknown channel", () => {
+    expect(() => parseUpdateFeed(feed({ channel: "beta" }))).toThrow('"channel"');
+  });
 });
