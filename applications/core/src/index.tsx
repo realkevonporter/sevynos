@@ -88,8 +88,8 @@ export function InstallerApplication(): ReactElement {
 }
 
 export function TextEditorApplication(props: {
-  readonly filesystem: SevynFileSystem;
-  readonly notifications?: SystemNotificationService;
+  readonly filesystem: Pick<SevynFileSystem, "list" | "read" | "write">;
+  readonly notifications?: Pick<SystemNotificationService, "show"> | undefined;
 }): ReactElement {
   const [files, setFiles] = useState<readonly FileSystemEntry[]>([]);
   const [path, setPath] = useState("/Documents/Welcome.txt");

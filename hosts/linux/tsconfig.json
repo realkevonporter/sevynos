@@ -28,6 +28,12 @@
     },
     {
       "path": "../../applications/notes"
+    },
+    {
+      "path": "../../applications/text-editor"
+    },
+    {
+      "path": "../../applications/calculator"
     }
   ]
 }

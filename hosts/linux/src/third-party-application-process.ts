@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import { runInThisContext } from "node:vm";
 import * as React from "react";
 import * as ReactJsxRuntime from "react/jsx-runtime";
-import { NotesApplication } from "@sevynos/example-notes";
+import { NotesApplication } from "@sevynos/app-notes";
+import { TextEditorApplication } from "@sevynos/app-text-editor";
+import { CalculatorApplication } from "@sevynos/app-calculator";
 import * as ReactNative from "@sevynos/react-native";
 import * as ExpoCompat from "@sevynos/react-native/expo-compat";
 import * as ExpoModulesCore from "@sevynos/react-native/expo-modules-core";
@@ -13,6 +15,7 @@ import {
   SevynApplicationRuntime,
   isStructuredValue,
   validateHostWorkerMessage,
+  type FileSystemEntry,
   type SevynApplicationSdk,
   type StructuredValue,
   type WorkerHostMessage,
@@ -550,9 +553,36 @@ function sdk(): SevynApplicationSdk {
         });
       },
     },
+    filesystem: {
+      list: async (path) => {
+        const entries = await request("filesystem.list", path);
+        if (!Array.isArray(entries) || !entries.every(isFileSystemEntry))
+          throw new Error("Filesystem list did not return entries.");
+        return entries;
+      },
+      read: async (path) => {
+        const content = await request("filesystem.read", path);
+        if (typeof content !== "string")
+          throw new Error("Filesystem read did not return text.");
+        return content;
+      },
+      write: async (path, content) => {
+        await request("filesystem.write", { path, content });
+      },
+    },
     workspace: { id: "workspace-1" },
     display: { id: "display-primary", scaleFactor: 1 },
   };
+}
+function isFileSystemEntry(value: unknown): value is FileSystemEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record["name"] === "string" &&
+    typeof record["path"] === "string" &&
+    (record["kind"] === "file" || record["kind"] === "directory") &&
+    typeof record["size"] === "number"
+  );
 }
 const lines = createInterface({ input: hostProcess.stdin });
 lines.on("line", (line) => {
@@ -631,7 +661,9 @@ async function loadApplication(): Promise<React.ReactElement> {
     "@sevynos/react-native/community-compat": CommunityCompat,
     "expo-modules-core": ExpoModulesCore,
     "@expo/vector-icons": VectorIcons,
-    "@sevynos/example-notes": Object.freeze({ NotesApplication }),
+    "@sevynos/app-notes": Object.freeze({ NotesApplication }),
+    "@sevynos/app-text-editor": Object.freeze({ TextEditorApplication }),
+    "@sevynos/app-calculator": Object.freeze({ CalculatorApplication }),
   });
   const safeProcess = Object.freeze({
     env: Object.freeze({

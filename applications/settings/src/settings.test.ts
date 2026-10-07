@@ -25,6 +25,12 @@ describe("SettingsApplication", () => {
       (app) => app.id === "org.sevynos.browser",
     );
     const notes = DEFAULT_INSTALLED_APPS.find((app) => app.id === "org.sevynos.notes");
+    const textEditor = DEFAULT_INSTALLED_APPS.find(
+      (app) => app.id === "org.sevynos.text-editor",
+    );
+    const calculator = DEFAULT_INSTALLED_APPS.find(
+      (app) => app.id === "org.sevynos.calculator",
+    );
 
     expect(shell).toBeDefined();
     if (shell) {
@@ -52,6 +58,18 @@ describe("SettingsApplication", () => {
       expect(notes.system).toBe(false);
       expect(isAppProtected(notes)).toBe(false);
       expect(canUninstallApp(notes)).toBe(true);
+    }
+
+    expect(textEditor).toBeDefined();
+    if (textEditor) {
+      expect(textEditor.system).toBe(false);
+      expect(canUninstallApp(textEditor)).toBe(true);
+    }
+
+    expect(calculator).toBeDefined();
+    if (calculator) {
+      expect(calculator.system).toBe(false);
+      expect(canUninstallApp(calculator)).toBe(true);
     }
   });
 

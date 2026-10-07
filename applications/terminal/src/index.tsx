@@ -83,6 +83,22 @@ export const DEFAULT_TERMINAL_APPS: readonly TerminalAppRecord[] = [
     description: "Personal note taking application",
   },
   {
+    id: "org.sevynos.text-editor",
+    name: "Text Editor",
+    version: "1.0.0",
+    system: false,
+    permissions: ["filesystem:user"],
+    description: "Plain-text document editor",
+  },
+  {
+    id: "org.sevynos.calculator",
+    name: "Calculator",
+    version: "1.0.0",
+    system: false,
+    permissions: [],
+    description: "Standard calculator with keyboard input",
+  },
+  {
     id: "org.sevynos.settings",
     name: "Settings",
     version: "1.0.0",
