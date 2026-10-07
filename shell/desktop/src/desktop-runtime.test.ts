@@ -793,6 +793,21 @@ describe("Genesis desktop host runtime", () => {
     expect(runtime.focusedInput.hasTarget(running.windowId)).toBe(false);
   });
 
+  it("keeps the first-run setup wizard out of the launcher but launchable", async () => {
+    const runtime = await createDesktopRuntime();
+    const definition = runtime.applications.catalog.find(
+      (entry) => entry.id === "org.sevynos.setup-wizard",
+    );
+    expect(definition).toBeDefined();
+    expect(definition?.hiddenFromLauncher).toBe(true);
+    runtime.applications.toggleLauncher();
+    const scene = compose(runtime);
+    const entries = scene.nodes.filter((node) => node.kind === "desktop-launcher-entry");
+    expect(
+      entries.some((entry) => entry.applicationId === "org.sevynos.setup-wizard"),
+    ).toBe(false);
+  });
+
   it("represents interactive launcher and taskbar controls outside window geometry", async () => {
     const runtime = await createDesktopRuntime();
     runtime.applications.toggleLauncher();
@@ -804,7 +819,12 @@ describe("Genesis desktop host runtime", () => {
     );
 
     expect(launcher?.kind === "desktop-launcher-button" && launcher.open).toBe(true);
-    expect(entries).toHaveLength(runtime.applications.catalog.length);
+    const visibleCatalog = runtime.applications.catalog.filter(
+      (definition) => definition.hiddenFromLauncher !== true,
+    );
+    expect(entries).toHaveLength(visibleCatalog.length);
+    // One-shot flows (first-run setup) stay launchable but hidden.
+    expect(visibleCatalog.length).toBeLessThan(runtime.applications.catalog.length);
     expect(running).toHaveLength(3);
     expect(
       running.some(
@@ -839,7 +859,10 @@ describe("Genesis desktop host runtime", () => {
       const entries = scene.nodes.filter(
         (node) => node.kind === "desktop-launcher-entry",
       );
-      expect(entries).toHaveLength(runtime.applications.catalog.length);
+      const visibleCatalog = runtime.applications.catalog.filter(
+        (definition) => definition.hiddenFromLauncher !== true,
+      );
+      expect(entries).toHaveLength(visibleCatalog.length);
       for (const entry of entries) {
         expect(entry.bounds.x).toBeGreaterThanOrEqual(primary.bounds.x);
         expect(entry.bounds.y).toBeGreaterThanOrEqual(primary.bounds.y);

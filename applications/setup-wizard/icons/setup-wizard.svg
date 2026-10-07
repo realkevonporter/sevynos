@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Setup Wizard">
+  <defs>
+    <linearGradient id="sevyn-icon-setup-wizard" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7DE8D3"/>
+      <stop offset="1" stop-color="#14957F"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="22" height="22" rx="5.5" fill="url(#sevyn-icon-setup-wizard)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="6.5" y1="17.5" x2="13" y2="11"/>
+    <path d="M14.5 5.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>
+    <line x1="18.5" y1="14" x2="18.5" y2="17"/>
+    <line x1="17" y1="15.5" x2="20" y2="15.5"/>
+    <line x1="6" y1="6" x2="6" y2="8.5"/>
+    <line x1="4.75" y1="7.25" x2="7.25" y2="7.25"/>
+  </g>
+</svg>

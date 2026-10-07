@@ -140,6 +140,14 @@ export interface DesktopRuntime {
     readonly import("@sevynos/react-native/internal").FileSystemEntry[]
   >;
 
+  /**
+   * Runs the first-run setup wizard as a blocking, maximized window before
+   * the desktop becomes interactive. Application launches are blocked until
+   * the wizard completes (or is dismissed); dismissal leaves setup
+   * incomplete so it runs again on the next boot.
+   */
+  readonly runFirstRunSetup: () => Promise<void>;
+
   readonly createDesktopFolder: () => Promise<string>;
 
   readonly createDesktopFile: () => Promise<string>;
@@ -294,6 +302,9 @@ export async function createDesktopRuntime(
     options.createSevynCodeEngine,
     options.processes,
   );
+  // The time service powers the Settings datetime section and the first-run
+  // setup wizard's timezone step; without this both silently do nothing.
+  if (options.time !== undefined) surfaces.configureTime(options.time);
 
   const nowDate = (): Date => new Date();
 
@@ -1193,6 +1204,36 @@ export async function createDesktopRuntime(
     createDesktopFolder: () => createDesktopEntry("directory"),
     createDesktopFile: () => createDesktopEntry("file"),
     requestRender: notify,
+    runFirstRunSetup: async () => {
+      let resolveSetup: (() => void) | undefined;
+      const completed = new Promise<void>((resolve) => {
+        resolveSetup = resolve;
+      });
+      surfaces.configureSetupWizard(() => resolveSetup?.());
+      const running = await applications.launch("org.sevynos.setup-wizard");
+      applications.blockLaunches();
+      // Dismissing the wizard window without finishing counts as "skip":
+      // unblock boot but leave setup incomplete so it runs again next boot.
+      const unsubscribe = subscribe(() => {
+        if (applications.getByApplicationId("org.sevynos.setup-wizard") === undefined)
+          resolveSetup?.();
+      });
+      try {
+        await activateWindowControl(running.windowId, "maximize", {
+          x: 0,
+          y: 0,
+          width: 1280,
+          height: 800,
+        });
+        await completed;
+      } finally {
+        unsubscribe();
+        const stillRunning = applications.getByApplicationId("org.sevynos.setup-wizard");
+        if (stillRunning !== undefined)
+          await applications.closeWindow(stillRunning.windowId).catch(() => undefined);
+        applications.allowLaunches();
+      }
+    },
   };
 }
 

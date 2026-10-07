@@ -19,6 +19,7 @@ import {
 
 export type DesktopApplicationKind =
   | "welcome"
+  | "setup-wizard"
   | "installer"
   | "console"
   | "system-monitor"
@@ -46,6 +47,11 @@ export interface DesktopApplicationDefinition {
    * ApplicationIcon as the app's custom vector glyph.
    */
   readonly icon?: string | undefined;
+  /**
+   * When true, the app stays launchable programmatically but is hidden from
+   * the user-facing launcher (used for one-shot flows like first-run setup).
+   */
+  readonly hiddenFromLauncher?: boolean | undefined;
 }
 
 export interface RunningDesktopApplication {
@@ -72,6 +78,16 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
       icon: "icons/welcome.svg",
       title: "Welcome to SevynOS",
       layout: windowLayout(620, 420, 480, 320),
+    }),
+    Object.freeze({
+      id: "org.sevynos.setup-wizard",
+      name: "Setup",
+      kind: "setup-wizard",
+      title: "Set up SevynOS",
+      layout: windowLayout(880, 640, 720, 520),
+      // One-shot first-run flow: launched by the host before the desktop,
+      // never from the launcher.
+      hiddenFromLauncher: true,
     }),
     Object.freeze({
       id: "org.sevynos.console",
@@ -616,6 +632,9 @@ export class DesktopApplicationCoordinator {
     switch (kind) {
       case "welcome":
         this.#surfaces.createWelcome(windowId);
+        return;
+      case "setup-wizard":
+        this.#surfaces.createSetupWizard(windowId);
         return;
       case "installer":
         this.#surfaces.createInstaller(windowId);

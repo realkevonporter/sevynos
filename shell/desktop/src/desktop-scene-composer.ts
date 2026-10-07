@@ -547,15 +547,17 @@ export class DesktopSceneComposer {
       taskbarBounds,
       displayBounds: primary.bounds,
       position: taskbarPosition,
-      catalog: this.#runtime.applications.catalog.map((definition) =>
-        Object.freeze({
-          applicationId: definition.id,
-          label: definition.name,
-          running:
-            this.#runtime.applications.getByApplicationId(definition.id) !== undefined,
-          icon: definition.icon,
-        }),
-      ),
+      catalog: this.#runtime.applications.catalog
+        .filter((definition) => definition.hiddenFromLauncher !== true)
+        .map((definition) =>
+          Object.freeze({
+            applicationId: definition.id,
+            label: definition.name,
+            running:
+              this.#runtime.applications.getByApplicationId(definition.id) !== undefined,
+            icon: definition.icon,
+          }),
+        ),
       order: topContentOrder + 1,
     } satisfies DesktopLauncherRenderInput;
     const launcherNodes = this.#renderShellApplication(
