@@ -76,6 +76,9 @@ import {
   type WindowSnapTarget,
 } from "./desktop-window-layout.js";
 import { WindowAnimationController } from "./window-animation-controller.js";
+import { DesktopSessionManager } from "./desktop-session.js";
+import { AccountService, FileAccountStore } from "@sevynos/accounts";
+import { join } from "node:path";
 
 export interface DesktopRuntime {
   readonly windows: GenesisWindowManager;
@@ -119,6 +122,21 @@ export interface DesktopRuntime {
   readonly dispatchPointerEvent: (event: BrowserPointerEvent) => void;
 
   readonly dispatchKeyboardEvent: (event: BrowserKeyboardEvent) => void;
+
+  /**
+   * The desktop session: login, lock/unlock verification, switch-user,
+   * logout, and ephemeral guest sessions.
+   */
+  readonly session: DesktopSessionManager;
+
+  /**
+   * Registers the handler that receives raw keyboard events while the
+   * session is locked. Installed by DesktopSceneComposer so typing reaches
+   * the lock-screen password field; replaces any previous handler.
+   */
+  readonly setLockedKeyboardHandler: (
+    handler: ((event: LockedKeyEvent) => void) | undefined,
+  ) => void;
 
   readonly activateWindowControl: (
     windowId: GenesisWindow["id"],
@@ -171,6 +189,12 @@ export interface CreateDesktopRuntimeOptions {
   readonly createBrowserEngine?: (() => SevynBrowserEngine) | undefined;
   readonly createSevynCodeEngine?: (() => SevynBrowserEngine | undefined) | undefined;
   /**
+   * Account service backing login and the lock screen. Defaults to the
+   * file-backed store at /var/lib/sevyn/accounts (see the @sevynos/accounts
+   * store contract). Tests should inject an in-memory service.
+   */
+  readonly accounts?: AccountService | undefined;
+  /**
    * Temporary diagnostic: when true, every pointer-down logs a
    * SEVYN_PROBE_HITTEST line with the pointer position, the selected
    * hit-test window, and every known window's bounds/z-index/state.
@@ -221,6 +245,39 @@ export interface BrowserKeyboardEvent {
   readonly shiftKey: boolean;
 }
 
+/**
+ * Raw keyboard event delivered to the lock-screen shell component while the
+ * session is locked. Unlike BrowserKeyboardEvent this is already normalized
+ * to the "down"/"up" vocabulary the shell runtimes dispatch.
+ */
+export interface LockedKeyEvent {
+  readonly type: "down" | "up";
+
+  readonly code: string;
+
+  readonly key: string;
+
+  readonly shift: boolean;
+
+  readonly alt: boolean;
+
+  readonly control: boolean;
+
+  readonly meta: boolean;
+}
+
+/**
+ * Best-effort read of the host filesystem's root directory (exposed publicly
+ * by LinuxFileSystem). Used to keep the accounts service's home directory
+ * base aligned with the user-data root the application filesystem is scoped
+ * to. Returns undefined when the root is not observable.
+ */
+function readFilesystemRoot(filesystem: SevynFileSystem | undefined): string | undefined {
+  const candidate = (filesystem as { rootDirectory?: unknown } | undefined)
+    ?.rootDirectory;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
 export async function createDesktopRuntime(
   options: CreateDesktopRuntimeOptions = {},
 ): Promise<DesktopRuntime> {
@@ -253,6 +310,10 @@ export async function createDesktopRuntime(
   const restoreBounds = new Map<GenesisWindow["id"], WindowBounds>();
 
   const applicationsHolder: { current?: DesktopApplicationCoordinator } = {};
+  const sessionHolder: { current?: DesktopSessionManager } = {};
+  const lockedKeyboardHandler: {
+    current: ((event: LockedKeyEvent) => void) | undefined;
+  } = { current: undefined };
   const powerProxy: SevynPowerService | undefined = options.power
     ? {
         get available() {
@@ -281,7 +342,11 @@ export async function createDesktopRuntime(
           await options.power?.sleep?.();
         },
         logout: async () => {
-          if (applicationsHolder.current !== undefined) {
+          if (sessionHolder.current !== undefined) {
+            // Session logout: closes all windows, wipes ephemeral guest
+            // data, and returns to the login screen.
+            await sessionHolder.current.logout();
+          } else if (applicationsHolder.current !== undefined) {
             await applicationsHolder.current.closeAll();
             applicationsHolder.current.lock();
           }
@@ -305,6 +370,33 @@ export async function createDesktopRuntime(
   // The time service powers the Settings datetime section and the first-run
   // setup wizard's timezone step; without this both silently do nothing.
   if (options.time !== undefined) surfaces.configureTime(options.time);
+
+  // User accounts + desktop session. The accounts service defaults to the
+  // file-backed store at /var/lib/sevyn/accounts (see the @sevynos/accounts
+  // store contract shared with the installer workstream). The store's home
+  // directory base is pointed at the host user-data root so account homes
+  // and the user-scoped application filesystem agree on one location.
+  const filesystemRoot = readFilesystemRoot(options.filesystem);
+  const accountService =
+    options.accounts ??
+    new AccountService({
+      store: new FileAccountStore({
+        usersDir:
+          filesystemRoot !== undefined ? join(filesystemRoot, "users") : undefined,
+      }),
+    });
+  const session = new DesktopSessionManager(accountService, {
+    lock: () => applicationsHolder.current?.lock(),
+    unlock: () => applicationsHolder.current?.unlock(),
+    closeAllWindows: async () => {
+      await applicationsHolder.current?.closeAll();
+    },
+    notify,
+  });
+  await session.init();
+  sessionHolder.current = session;
+  surfaces.configureAccountsService(accountService);
+  surfaces.configureSessionManager(session);
 
   const nowDate = (): Date => new Date();
 
@@ -544,6 +636,17 @@ export async function createDesktopRuntime(
     keys: { key: "l", meta: true },
     action: () => {
       applicationsHolder.current?.lock();
+    },
+  });
+  shortcuts.register({
+    id: "session.switch-user",
+    label: "Switch User",
+    category: "system",
+    keys: { key: "u", meta: true, shift: true },
+    action: () => {
+      const current = sessionHolder.current;
+      if (current !== undefined) void current.switchUser();
+      else applicationsHolder.current?.lock();
     },
   });
   shortcuts.register({
@@ -987,9 +1090,19 @@ export async function createDesktopRuntime(
   function dispatchKeyboardEvent(browserEvent: BrowserKeyboardEvent): void {
     resetActivity();
     if (applications.isLocked) {
-      if (browserEvent.type === "keydown" && browserEvent.key === "Enter") {
-        applications.unlock();
-      }
+      // While locked, physical-keyboard input goes to the lock-screen shell
+      // component (installed by DesktopSceneComposer) so the password field
+      // is typeable. Unlocking happens only through password verification —
+      // there is deliberately no key that unlocks on its own.
+      lockedKeyboardHandler.current?.({
+        type: browserEvent.type === "keydown" ? "down" : "up",
+        code: browserEvent.code,
+        key: browserEvent.key,
+        shift: browserEvent.shiftKey,
+        alt: browserEvent.altKey,
+        control: browserEvent.ctrlKey,
+        meta: browserEvent.metaKey,
+      });
       return;
     }
 
@@ -1156,7 +1269,7 @@ export async function createDesktopRuntime(
     return path;
   }
 
-  return {
+  const runtime: DesktopRuntime = {
     windows,
     cursor,
     dispatcher,
@@ -1185,6 +1298,10 @@ export async function createDesktopRuntime(
     registeredInputDeviceCount: () => inputDevices.list().length,
     dispatchPointerEvent,
     dispatchKeyboardEvent,
+    session,
+    setLockedKeyboardHandler: (handler) => {
+      lockedKeyboardHandler.current = handler;
+    },
     activateWindowControl,
     isMaximized: (windowId) => restoreBounds.has(windowId),
     getRestoreBounds: (windowId) => restoreBounds.get(windowId),
@@ -1209,6 +1326,9 @@ export async function createDesktopRuntime(
       const completed = new Promise<void>((resolve) => {
         resolveSetup = resolve;
       });
+      // The wizard cannot run behind the lock screen; temporarily unlock
+      // when booting to the login screen, then return to it afterwards.
+      session.unlockForSetup();
       surfaces.configureSetupWizard(() => resolveSetup?.());
       const running = await applications.launch("org.sevynos.setup-wizard");
       applications.blockLaunches();
@@ -1232,9 +1352,20 @@ export async function createDesktopRuntime(
         if (stillRunning !== undefined)
           await applications.closeWindow(stillRunning.windowId).catch(() => undefined);
         applications.allowLaunches();
+        // An account may have been created during setup (or by the
+        // installer): land on the login screen instead of an unlocked desktop.
+        if (session.loginRequired) session.beginLogin();
       }
     },
   };
+
+  // Boot with configured accounts lands on the login screen. With no
+  // accounts the legacy single-user live session boots unlocked, as today.
+  if (session.loginRequired) {
+    applications.lock();
+  }
+
+  return runtime;
 }
 
 /**

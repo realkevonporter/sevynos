@@ -22,6 +22,14 @@ export const homedir = () => "/";
 export const join = (...parts) => parts.filter(Boolean).join("/").replace(/\\/+/g, "/");
 export const deflateRawSync = (data) => data;
 export const inflateRawSync = (data) => data;
+// @sevynos/accounts (user accounts + scrypt password hashing). The browser
+// renderer bundle never performs real account I/O (the fs shims above are
+// no-ops), so these fail closed if they are ever reached there; the real
+// Linux host bundles with platform=node and uses the real builtins.
+export const chmod = async () => {};
+export const randomBytes = () => { throw new Error("node:crypto is unavailable in this bundle"); };
+export const scrypt = (password, salt, keylen, options, callback) => { callback(new Error("node:crypto is unavailable in this bundle")); };
+export const timingSafeEqual = () => { throw new Error("node:crypto is unavailable in this bundle"); };
 export default {};
 `,
       loader: "js",

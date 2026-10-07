@@ -24,7 +24,8 @@
     { "path": "../../applications/system-monitor" },
     { "path": "../../applications/welcome" },
     { "path": "../core" },
-    { "path": "../../applications/shell" }
+    { "path": "../../applications/shell" },
+    { "path": "../../services/accounts" }
   ],
   "exclude": ["dist", "node_modules"]
 }

@@ -113,6 +113,41 @@ export class ShellComponentRenderer {
     }
   }
 
+  /**
+   * Dispatch a keyboard event to a shell component.
+   * Used to route physical-keyboard input to the lock-screen component while
+   * the session is locked (the password field cannot be typed otherwise).
+   * Returns true if the event was handled.
+   */
+  public dispatchKeyboard(
+    applicationId: string,
+    type: "down" | "up",
+    event: {
+      readonly key: string;
+      readonly code: string;
+      readonly shift: boolean;
+      readonly alt: boolean;
+      readonly control: boolean;
+      readonly meta: boolean;
+    },
+  ): boolean {
+    const runtime = this.#runtimes.get(applicationId);
+    if (runtime === undefined) return false;
+    try {
+      runtime.dispatchKeyboard(type, {
+        key: event.key,
+        code: event.code,
+        shift: event.shift,
+        alt: event.alt,
+        control: event.control,
+        meta: event.meta,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   public dispose(applicationId: string): void {
     const runtime = this.#runtimes.get(applicationId);
     if (runtime !== undefined) {
