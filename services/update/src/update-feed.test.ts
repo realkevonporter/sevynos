@@ -100,4 +100,19 @@ describe("parseUpdateFeed", () => {
     );
     expect(selectRootfsArtifact(manifest)).toBeUndefined();
   });
+
+  it("parses a signed feed and carries the signatures through", () => {
+    const manifest = parseUpdateFeed(feed({ signatures: { nightly: "aGVsbG8=" } }));
+    expect(manifest.signatures).toEqual({ nightly: "aGVsbG8=" });
+  });
+
+  it("rejects malformed signatures", () => {
+    expect(() => parseUpdateFeed(feed({ signatures: "nope" }))).toThrow('"signatures"');
+    expect(() => parseUpdateFeed(feed({ signatures: { nightly: "" } }))).toThrow(
+      '"signatures"',
+    );
+    expect(() => parseUpdateFeed(feed({ signatures: { nightly: "!!!" } }))).toThrow(
+      '"signatures"',
+    );
+  });
 });

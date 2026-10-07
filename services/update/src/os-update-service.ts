@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { isUpdateAvailable, parseOsVersion } from "./version.js";
+import { verifyUpdateFeed, type TrustedUpdateKey } from "./feed-signing.js";
 import {
   parseUpdateFeed,
   selectRootfsArtifact,
@@ -55,6 +56,14 @@ export interface OsUpdateServiceOptions {
   readonly feedUrl: string;
   /** Host state directory; updates stage under <stateDirectory>/updates. */
   readonly stateDirectory: string;
+  /**
+   * Trust anchors for feed signature verification (public keys only).
+   * Verification is mandatory and fail-closed: when this is empty or
+   * omitted, every feed check errors with "no trusted update keys" rather
+   * than silently trusting an unsigned feed. Production hosts pass the keys
+   * loaded from /etc/sevynos/trusted-update-keys.json.
+   */
+  readonly trustedKeys?: readonly TrustedUpdateKey[] | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
   /** First automatic check delay; defaults to 60s so boot networking settles. */
   readonly autoCheckDelayMs?: number | undefined;
@@ -88,16 +97,18 @@ export async function resolveCurrentVersion(
 }
 
 /**
- * Minimal OS update check: polls a versioned JSON feed, downloads the new
- * rootfs payload with integrity verification, and stages it for the
- * boot-time applier (tools/qemu/sevyn-apply-update.sh consumes
- * <stateDirectory>/updates/pending.json). Signature verification is
- * explicitly Phase 3; the sha256 here guards against corrupt downloads only.
+ * Minimal OS update check: polls a versioned JSON feed, verifies its Ed25519
+ * signature against the configured trust anchors BEFORE trusting any
+ * artifact URL or hash, downloads the new rootfs payload with integrity
+ * verification, and stages it for the boot-time applier
+ * (tools/qemu/sevyn-apply-update.sh consumes
+ * <stateDirectory>/updates/pending.json).
  */
 export class OsUpdateService {
   readonly #currentVersion: string;
   readonly #feedUrl: string;
   readonly #stateDirectory: string;
+  readonly #trustedKeys: readonly TrustedUpdateKey[];
   readonly #fetch: typeof fetch;
   readonly #autoCheckDelayMs: number;
   readonly #autoCheckIntervalMs: number;
@@ -118,6 +129,7 @@ export class OsUpdateService {
     this.#currentVersion = options.currentVersion;
     this.#feedUrl = options.feedUrl;
     this.#stateDirectory = options.stateDirectory;
+    this.#trustedKeys = options.trustedKeys ?? [];
     this.#fetch = options.fetchImpl ?? fetch;
     this.#autoCheckDelayMs = options.autoCheckDelayMs ?? DEFAULT_AUTO_CHECK_DELAY_MS;
     this.#autoCheckIntervalMs =
@@ -299,6 +311,10 @@ export class OsUpdateService {
       if (!response.ok)
         throw new Error(`Feed request failed with HTTP ${String(response.status)}.`);
       const manifest = parseUpdateFeed(await response.text());
+      // Verify the feed signature BEFORE trusting any artifact URL or hash.
+      // A verification failure lands in the "error" result below and is
+      // shown in the Software Update UI; nothing is downloaded or staged.
+      verifyUpdateFeed(manifest, this.#trustedKeys);
       // Validate the feed version parses before comparing.
       parseOsVersion(manifest.version);
       const artifact = selectRootfsArtifact(manifest);

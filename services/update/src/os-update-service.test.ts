@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,12 +8,27 @@ import {
   resolveCurrentVersion,
   type OsUpdateServiceOptions,
 } from "./os-update-service.js";
+import { parseUpdateFeed } from "./update-feed.js";
+import { signFeedManifest, type TrustedUpdateKey } from "./feed-signing.js";
 
 const PAYLOAD = Buffer.from("fake-squashfs-payload");
 const PAYLOAD_SHA = createHash("sha256").update(PAYLOAD).digest("hex");
 
+// Test trust anchor: every fixture feed is signed with this key, and the
+// service under test trusts its public half — the enforced path.
+const TEST_KEY_ID = "test-key";
+const { publicKey: testPublicKey, privateKey: testPrivateKey } =
+  generateKeyPairSync("ed25519");
+const TEST_TRUSTED_KEYS: TrustedUpdateKey[] = [
+  {
+    keyId: TEST_KEY_ID,
+    publicKeyJwk: testPublicKey.export({ format: "jwk" }),
+  },
+];
+const TEST_PRIVATE_JWK = testPrivateKey.export({ format: "jwk" });
+
 function feedJson(version = "0.1.0-nightly.20261007.abc1234"): string {
-  return JSON.stringify({
+  const unsigned = JSON.stringify({
     version,
     publishedAt: "2026-10-07T10:00:00.000Z",
     releaseNotes: "Nightly build.",
@@ -26,6 +41,12 @@ function feedJson(version = "0.1.0-nightly.20261007.abc1234"): string {
       },
     ],
   });
+  const signed = signFeedManifest(
+    parseUpdateFeed(unsigned),
+    TEST_KEY_ID,
+    TEST_PRIVATE_JWK,
+  );
+  return JSON.stringify(signed);
 }
 
 function stubFetch(
@@ -52,6 +73,7 @@ function options(
     currentVersion: "0.1.0",
     feedUrl: FEED_URL,
     stateDirectory,
+    trustedKeys: TEST_TRUSTED_KEYS,
     fetchImpl: stubFetch({
       [FEED_URL]: { status: 200, body: feedJson() },
       "https://example.com/rootfs.squashfs": { status: 200, body: PAYLOAD },
@@ -141,6 +163,71 @@ describe("OsUpdateService", () => {
     const result = await service.checkNow();
     expect(result.status).toBe("error");
     expect(result.error).toContain("not valid JSON");
+    service.dispose();
+  });
+
+  function unsignedFeedJson(): string {
+    return JSON.stringify({
+      version: "0.1.0-nightly.20261007.abc1234",
+      publishedAt: "2026-10-07T10:00:00.000Z",
+      releaseNotes: "Nightly build.",
+      artifacts: [
+        {
+          kind: "rootfs-squashfs",
+          url: "https://example.com/rootfs.squashfs",
+          sha256: PAYLOAD_SHA,
+          sizeBytes: PAYLOAD.byteLength,
+        },
+      ],
+    });
+  }
+
+  it("refuses an unsigned feed with a clear error", async () => {
+    const dir = await tempDir();
+    const service = new OsUpdateService(
+      options(dir, {
+        fetchImpl: stubFetch({ [FEED_URL]: { status: 200, body: unsignedFeedJson() } }),
+      }),
+    );
+    const result = await service.checkNow();
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("not signed");
+    expect(service.status).toBe("error");
+    service.dispose();
+  });
+
+  it("refuses a feed signed by an untrusted key", async () => {
+    const { privateKey: roguePrivate } = generateKeyPairSync("ed25519");
+    const rogueSigned = JSON.stringify(
+      signFeedManifest(
+        parseUpdateFeed(unsignedFeedJson()),
+        "rogue-key",
+        roguePrivate.export({ format: "jwk" }),
+      ),
+    );
+    const dir = await tempDir();
+    const service = new OsUpdateService(
+      options(dir, {
+        fetchImpl: stubFetch({ [FEED_URL]: { status: 200, body: rogueSigned } }),
+      }),
+    );
+    const result = await service.checkNow();
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("no signature from a trusted key");
+    service.dispose();
+  });
+
+  it("fails closed when no trusted keys are configured", async () => {
+    const dir = await tempDir();
+    const service = new OsUpdateService(
+      options(dir, {
+        trustedKeys: [],
+        fetchImpl: stubFetch({ [FEED_URL]: { status: 200, body: feedJson() } }),
+      }),
+    );
+    const result = await service.checkNow();
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("no trusted update keys");
     service.dispose();
   });
 

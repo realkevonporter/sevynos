@@ -15,9 +15,11 @@
  *   ]
  * }
  *
- * Signature verification is explicitly Phase 3; the sha256 here is an
- * integrity check against a truncated or corrupted download, not a trust
- * anchor.
+ * Feed v2 adds an optional top-level "signatures" field:
+ * `{ "<keyId>": "<base64 Ed25519 signature>" }`, each signature covering the
+ * canonical feed body (see feed-signing.ts). The sha256 here remains an
+ * integrity check — trust comes from the feed signature, which covers the
+ * sha256 values (see the trust argument in feed-signing.ts).
  */
 
 export type UpdateArtifactKind = "rootfs-squashfs" | "iso";
@@ -34,6 +36,14 @@ export interface UpdateFeedManifest {
   readonly publishedAt: string;
   readonly releaseNotes: string;
   readonly artifacts: readonly UpdateArtifact[];
+  /**
+   * Phase 3 feed signatures: `{ "<keyId>": "<base64 Ed25519 signature>" }`.
+   * Each signature covers the canonical feed body (the whole manifest minus
+   * this field — see canonicalFeedBody in feed-signing.ts). Optional so
+   * older/unsigned feeds still parse; OsUpdateService rejects unsigned feeds
+   * via verifyUpdateFeed before trusting them.
+   */
+  readonly signatures?: Record<string, string> | undefined;
 }
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
@@ -69,6 +79,23 @@ function parseArtifact(value: unknown, index: number): UpdateArtifact {
   return { kind, url, sha256: sha256.toLowerCase(), sizeBytes };
 }
 
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function parseSignatures(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) fail('"signatures" must be an object when present');
+  const signatures: Record<string, string> = {};
+  for (const [keyId, signature] of Object.entries(value)) {
+    if (
+      typeof signature !== "string" ||
+      signature.length === 0 ||
+      !BASE64_PATTERN.test(signature)
+    )
+      fail(`"signatures"."${keyId}" must be a non-empty base64 string`);
+    signatures[keyId] = signature;
+  }
+  return signatures;
+}
 /** Parses and validates a feed manifest. Throws a descriptive error. */
 export function parseUpdateFeed(text: string): UpdateFeedManifest {
   let parsed: unknown;
@@ -92,6 +119,7 @@ export function parseUpdateFeed(text: string): UpdateFeedManifest {
     artifacts: Object.freeze(
       artifacts.map((entry, index) => parseArtifact(entry, index)),
     ),
+    signatures: parseSignatures(parsed["signatures"]),
   };
 }
 

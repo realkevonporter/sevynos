@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { parseSigningKeyEnv, signFeedFile } from "../update-signing/sign-feed.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const output = resolve(import.meta.dirname, "build");
@@ -13,6 +14,51 @@ const buildDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
 const shortSha = process.env["GITHUB_SHA"]?.slice(0, 7) ?? "local";
 const osVersion = `${String(rootPkg.version)}-nightly.${buildDate}.${shortSha}`;
 await mkdir(output, { recursive: true });
+
+// ─── Update trust anchor ─────────────────────────────────────────────
+// The device's feed-verification trust anchor: public keys only, baked into
+// the image at /etc/sevynos/trusted-update-keys.json (see the Dockerfile
+// COPY below and tools/update-signing/README.md). The private signing key
+// NEVER enters the image. Without SEVYN_UPDATE_TRUSTED_KEYS the image ships
+// an empty trust store and the on-device updater fails closed.
+{
+  const staged = resolve(output, "trusted-update-keys.json");
+  const raw = process.env["SEVYN_UPDATE_TRUSTED_KEYS"];
+  if (raw === undefined || raw.trim().length === 0) {
+    console.warn(
+      "WARNING: SEVYN_UPDATE_TRUSTED_KEYS is not set — the image will ship " +
+        "an EMPTY update trust store and the on-device updater will refuse " +
+        "all feeds (fail-closed). Set it to the public trusted-update-keys.json.",
+    );
+    await writeFile(staged, `${JSON.stringify({ keys: [] }, null, 2)}\n`, {
+      mode: 0o644,
+    });
+  } else {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("SEVYN_UPDATE_TRUSTED_KEYS is not valid JSON.");
+    }
+    const keys = parsed?.keys;
+    if (!Array.isArray(keys))
+      throw new Error('SEVYN_UPDATE_TRUSTED_KEYS must be JSON with a "keys" array.');
+    for (const [index, entry] of keys.entries()) {
+      const jwk = entry?.publicKeyJwk;
+      if (
+        typeof entry?.keyId !== "string" ||
+        jwk?.kty !== "OKP" ||
+        jwk?.crv !== "Ed25519" ||
+        typeof jwk?.x !== "string"
+      )
+        throw new Error(
+          `SEVYN_UPDATE_TRUSTED_KEYS.keys[${String(index)}] must have a keyId and an Ed25519 publicKeyJwk.`,
+        );
+    }
+    await writeFile(staged, `${JSON.stringify({ keys }, null, 2)}\n`, { mode: 0o644 });
+    console.log(`Update trust anchor staged with ${String(keys.length)} public key(s).`);
+  }
+}
 for (const generated of [
   "vmlinuz",
   "initramfs.cpio.gz",
@@ -108,8 +154,9 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
   const artifactUrl =
     process.env["SEVYN_UPDATE_ARTIFACT_URL"] ??
     `https://github.com/realkevonporter/sevynos/releases/download/nightly/rootfs.squashfs`;
+  const feedPath = resolve(output, "updates.json");
   await writeFile(
-    resolve(output, "updates.json"),
+    feedPath,
     `${JSON.stringify(
       {
         version: osVersion,
@@ -117,7 +164,7 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
         releaseNotes: `SevynOS nightly ${osVersion}.`,
         artifacts: [
           {
-            kind: "rootfs",
+            kind: "rootfs-squashfs",
             url: artifactUrl,
             sha256: rootfsHash.digest("hex"),
             sizeBytes: rootfsStat.size,
@@ -128,6 +175,19 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
       2,
     )}\n`,
   );
+  // Sign the feed when a signing key is available. Without it the feed
+  // ships unsigned and on-device updaters (which fail closed) will refuse
+  // it — correct for dev builds, loud on purpose.
+  const signingKeyEnv = process.env["SEVYN_UPDATE_SIGNING_KEY"];
+  if (signingKeyEnv === undefined || signingKeyEnv.trim().length === 0) {
+    console.warn(
+      "WARNING: SEVYN_UPDATE_SIGNING_KEY is not set — updates.json is UNSIGNED " +
+        "and devices with a trust anchor will refuse this feed.",
+    );
+  } else {
+    const keyId = await signFeedFile(feedPath, await parseSigningKeyEnv(signingKeyEnv));
+    console.log(`Update feed signed with key "${keyId}".`);
+  }
   console.log(`Update feed written for version ${osVersion}`);
 }
 

@@ -34,6 +34,13 @@ export const timingSafeEqual = () => { throw new Error("node:crypto is unavailab
 // renderer bundle never downloads or installs app bundles, so these fail
 // closed if reached there; the Linux host uses the real builtins.
 export const createHash = () => { throw new Error("node:crypto is unavailable in this bundle"); };
+// @sevynos/os-update feed signatures (Phase 3). The renderer bundle never
+// verifies update feeds — signature verification runs on the Linux host
+// with the real builtins — so these fail closed if reached there.
+export const createPublicKey = () => { throw new Error("node:crypto is unavailable in this bundle"); };
+export const createPrivateKey = () => { throw new Error("node:crypto is unavailable in this bundle"); };
+export const sign = () => { throw new Error("node:crypto is unavailable in this bundle"); };
+export const verify = () => { throw new Error("node:crypto is unavailable in this bundle"); };
 export const rename = async () => { throw new Error("node:fs/promises is unavailable in this bundle"); };
 export const createWriteStream = () => { throw new Error("node:fs is unavailable in this bundle"); };
 export const once = async () => { throw new Error("node:events is unavailable in this bundle"); };

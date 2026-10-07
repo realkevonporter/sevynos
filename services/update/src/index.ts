@@ -17,6 +17,15 @@ export {
   type UpdateFeedManifest,
 } from "./update-feed.js";
 export {
+  canonicalFeedBody,
+  loadTrustedUpdateKeys,
+  parseTrustedUpdateKeys,
+  signFeedManifest,
+  verifyUpdateFeed,
+  type FeedSignatureVerification,
+  type TrustedUpdateKey,
+} from "./feed-signing.js";
+export {
   compareOsVersions,
   isUpdateAvailable,
   parseOsVersion,
