@@ -10,6 +10,8 @@ import {
 import { ChromiumBrowserEngine, decodePng } from "./chromium-browser-engine.js";
 import { LinuxAccessibilityService } from "./linux-accessibility-service.js";
 import { LinuxBatteryService } from "./linux-battery-service.js";
+import { LinuxBluetoothService } from "./linux-bluetooth-service.js";
+import { LinuxDisplayService } from "./linux-display-service.js";
 
 export interface LinuxMediaPlaybackHandle {
   pause(): void;
@@ -67,6 +69,8 @@ export class LinuxNativeModuleServices {
   readonly #websockets = new Map<string, LinuxWebSocketSession>();
   readonly #accessibility = new LinuxAccessibilityService();
   readonly #batteryService = new LinuxBatteryService();
+  readonly #bluetoothService = new LinuxBluetoothService();
+  readonly #displayService = new LinuxDisplayService();
   #activeCall = false;
   #proximityNear = false;
   #savedBrightnessBeforeCallBlank = 1.0;
@@ -139,6 +143,9 @@ export class LinuxNativeModuleServices {
     if (service === "display.autoBrightness.set") return this.#setAutoBrightness(value);
     if (service === "display.wakeLock.acquire") return this.#acquireWakeLock();
     if (service === "display.wakeLock.release") return this.#releaseWakeLock(value);
+    if (service === "display.outputs.get") return this.#displayOutputs();
+    if (service === "display.mode.set") return this.#setDisplayMode(value);
+    if (service === "display.rotation.set") return this.#setDisplayRotation(value);
     if (service === "audio.outputs.get") return this.#getAudioOutputs();
     if (service === "audio.output.set") return this.#setAudioOutput(value);
     if (service === "vibration.vibrate") return this.#vibrate(value);
@@ -159,6 +166,15 @@ export class LinuxNativeModuleServices {
     if (service === "microphone.stop") return this.#stopMicrophone();
     if (service === "location.current") return this.#location();
     if (service === "bluetooth.scan") return this.#bluetooth();
+    if (service === "bluetooth.state") return this.#bluetoothState();
+    if (service === "bluetooth.power.set") return this.#bluetoothPowerSet(value);
+    if (service === "bluetooth.devices") return this.#bluetoothDevices();
+    if (service === "bluetooth.pair") return this.#bluetoothPair(value);
+    if (service === "bluetooth.pairRespond") return this.#bluetoothPairRespond(value);
+    if (service === "bluetooth.connect") return this.#bluetoothConnect(value);
+    if (service === "bluetooth.disconnect") return this.#bluetoothDisconnect(value);
+    if (service === "bluetooth.remove") return this.#bluetoothRemove(value);
+    if (service === "bluetooth.trust") return this.#bluetoothTrust(value);
     if (service === "sensors.read") return this.#sensor(value);
     if (service === "sensors.subscribe") return this.#subscribeSensor(value);
     if (service === "sensors.unsubscribe") return this.#unsubscribeSensor(value);
@@ -221,6 +237,9 @@ export class LinuxNativeModuleServices {
       case "display.autoBrightness.set":
       case "display.wakeLock.acquire":
       case "display.wakeLock.release":
+      case "display.outputs.get":
+      case "display.mode.set":
+      case "display.rotation.set":
       case "audio.outputs.get":
       case "audio.output.set":
       case "vibration.vibrate":
@@ -241,6 +260,15 @@ export class LinuxNativeModuleServices {
       case "microphone.stop":
       case "location.current":
       case "bluetooth.scan":
+      case "bluetooth.state":
+      case "bluetooth.power.set":
+      case "bluetooth.devices":
+      case "bluetooth.pair":
+      case "bluetooth.pairRespond":
+      case "bluetooth.connect":
+      case "bluetooth.disconnect":
+      case "bluetooth.remove":
+      case "bluetooth.trust":
       case "sensors.read":
       case "sensors.subscribe":
       case "sensors.unsubscribe":
@@ -299,6 +327,7 @@ export class LinuxNativeModuleServices {
     this.#microphone?.kill("SIGINT");
     this.#microphone = undefined;
     this.#microphonePath = undefined;
+    this.#bluetoothService.close();
     for (const session of this.#websockets.values())
       session.socket.close(1001, "SevynOS shutting down");
     this.#websockets.clear();
@@ -1265,6 +1294,138 @@ export class LinuxNativeModuleServices {
           ? { name: line }
           : { address: match[1] ?? "", name: match[2] ?? "" };
       });
+  }
+
+  async #bluetoothState(): Promise<StructuredValue> {
+    return { ...(await this.#bluetoothService.getState()) };
+  }
+
+  async #bluetoothPowerSet(value: StructuredValue): Promise<StructuredValue> {
+    const enabled = readBooleanField(value, "enabled");
+    return { ...(await this.#bluetoothService.setPowered(enabled)) };
+  }
+
+  async #bluetoothDevices(): Promise<StructuredValue> {
+    const devices = await this.#bluetoothService.listDevices();
+    return devices.map((device) => ({
+      address: device.address,
+      name: device.name,
+      alias: device.alias,
+      paired: device.paired,
+      trusted: device.trusted,
+      connected: device.connected,
+      rssi: device.rssi ?? null,
+      deviceClass: device.deviceClass ?? null,
+      icon: device.icon,
+      legacyPairing: device.legacyPairing,
+    }));
+  }
+
+  async #bluetoothPair(value: StructuredValue): Promise<StructuredValue> {
+    const address = readStringField(value, "address");
+    const outcome = await this.#bluetoothService.pair(address);
+    return {
+      status: outcome.status,
+      prompt: outcome.prompt ?? null,
+      error: outcome.error ?? null,
+    };
+  }
+
+  async #bluetoothPairRespond(value: StructuredValue): Promise<StructuredValue> {
+    const accept = readBooleanField(value, "accept");
+    const record = asRecord(value);
+    const pin = typeof record?.["pin"] === "string" ? record["pin"] : undefined;
+    const outcome = await this.#bluetoothService.respondToPairing(accept, pin);
+    return {
+      status: outcome.status,
+      prompt: outcome.prompt ?? null,
+      error: outcome.error ?? null,
+    };
+  }
+
+  async #bluetoothConnect(value: StructuredValue): Promise<StructuredValue> {
+    await this.#bluetoothService.connect(readStringField(value, "address"));
+    return null;
+  }
+
+  async #bluetoothDisconnect(value: StructuredValue): Promise<StructuredValue> {
+    await this.#bluetoothService.disconnect(readStringField(value, "address"));
+    return null;
+  }
+
+  async #bluetoothRemove(value: StructuredValue): Promise<StructuredValue> {
+    await this.#bluetoothService.remove(readStringField(value, "address"));
+    return null;
+  }
+
+  async #bluetoothTrust(value: StructuredValue): Promise<StructuredValue> {
+    const address = readStringField(value, "address");
+    await this.#bluetoothService.setTrusted(address, readBooleanField(value, "trusted"));
+    return null;
+  }
+
+  async #displayOutputs(): Promise<StructuredValue> {
+    const outputs = await this.#displayService.getOutputs();
+    return Promise.all(
+      outputs.map(async (output) => ({
+        id: output.id,
+        connected: output.connected,
+        modes: output.modes.map((mode) => ({
+          width: mode.width,
+          height: mode.height,
+          refreshHz: mode.refreshHz ?? null,
+        })),
+        configuredMode:
+          output.configuredMode === undefined
+            ? null
+            : {
+                width: output.configuredMode.width,
+                height: output.configuredMode.height,
+                refreshHz: output.configuredMode.refreshHz ?? null,
+              },
+        rotation: await this.#displayService.getRotation(output.id),
+        physicalMm:
+          output.physicalMm === undefined
+            ? null
+            : { width: output.physicalMm.width, height: output.physicalMm.height },
+      })),
+    );
+  }
+
+  async #setDisplayMode(value: StructuredValue): Promise<StructuredValue> {
+    const outputId = readStringField(value, "outputId");
+    const record = asRecord(value) ?? {};
+    const width = readNumberField(record, "width");
+    const height = readNumberField(record, "height");
+    const refreshHz =
+      typeof record["refreshHz"] === "number" ? record["refreshHz"] : undefined;
+    const change = await this.#displayService.setMode(
+      outputId,
+      refreshHz === undefined ? { width, height } : { width, height, refreshHz },
+    );
+    return {
+      restartRequired: change.restartRequired,
+      outputId: change.outputId,
+      mode: {
+        width: change.mode.width,
+        height: change.mode.height,
+        refreshHz: change.mode.refreshHz ?? null,
+      },
+    };
+  }
+
+  async #setDisplayRotation(value: StructuredValue): Promise<StructuredValue> {
+    const outputId = readStringField(value, "outputId");
+    const degrees = readNumberField(asRecord(value) ?? {}, "degrees");
+    if (degrees !== 0 && degrees !== 90 && degrees !== 180 && degrees !== 270) {
+      throw new Error("Display rotation must be one of 0, 90, 180, 270.");
+    }
+    const change = await this.#displayService.setRotation(outputId, degrees);
+    return {
+      restartRequired: change.restartRequired,
+      outputId: change.outputId,
+      rotation: change.rotation,
+    };
   }
 
   async #readSensorRaw(sensor: string): Promise<Record<string, number> | null> {
@@ -2394,6 +2555,39 @@ function launchFfplay(
       }, 120);
     });
   });
+}
+
+function asRecord(value: StructuredValue): Record<string, StructuredValue> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, StructuredValue>)
+    : undefined;
+}
+
+function readStringField(value: StructuredValue, field: string): string {
+  const record = asRecord(value);
+  const raw = record?.[field];
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new Error(`Service request requires a non-empty string "${field}".`);
+  }
+  return raw;
+}
+
+function readBooleanField(value: StructuredValue, field: string): boolean {
+  if (typeof value === "boolean") return value;
+  const record = asRecord(value);
+  const raw = record?.[field];
+  if (typeof raw !== "boolean") {
+    throw new Error(`Service request requires a boolean "${field}".`);
+  }
+  return raw;
+}
+
+function readNumberField(record: Record<string, StructuredValue>, field: string): number {
+  const raw = record[field];
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    throw new Error(`Service request requires a numeric "${field}".`);
+  }
+  return raw;
 }
 
 function run(

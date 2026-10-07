@@ -662,6 +662,17 @@ installNativeAdapters({
   location: { getCurrentPosition: () => request("location.current", null) },
   bluetooth: {
     scan: () => request("bluetooth.scan", null) as Promise<readonly unknown[]>,
+    getState: () => request("bluetooth.state", null),
+    setPowered: (enabled: boolean) => request("bluetooth.power.set", { enabled }),
+    listDevices: () => request("bluetooth.devices", null) as Promise<readonly unknown[]>,
+    pair: (address: string) => request("bluetooth.pair", { address }),
+    respondToPairing: (accept: boolean, pin?: string) =>
+      request("bluetooth.pairRespond", { accept, pin: pin ?? null }),
+    connect: (address: string) => request("bluetooth.connect", { address }),
+    disconnect: (address: string) => request("bluetooth.disconnect", { address }),
+    remove: (address: string) => request("bluetooth.remove", { address }),
+    setTrusted: (address: string, trusted: boolean) =>
+      request("bluetooth.trust", { address, trusted }),
   },
   sensors: { read: (sensor) => request("sensors.read", sensor) },
   biometrics: {

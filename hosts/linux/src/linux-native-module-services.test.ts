@@ -412,3 +412,62 @@ describe("Linux native module services", () => {
     services.close();
   });
 });
+
+describe("Linux native module services: bluetooth/display/power dispatch", () => {
+  it("advertises the Phase 2 bluetooth and display worker services", () => {
+    const services = new LinuxNativeModuleServices();
+    for (const name of [
+      "bluetooth.scan",
+      "bluetooth.state",
+      "bluetooth.power.set",
+      "bluetooth.devices",
+      "bluetooth.pair",
+      "bluetooth.pairRespond",
+      "bluetooth.connect",
+      "bluetooth.disconnect",
+      "bluetooth.remove",
+      "bluetooth.trust",
+      "display.outputs.get",
+      "display.mode.set",
+      "display.rotation.set",
+    ]) {
+      expect(services.supports(name)).toBe(true);
+    }
+    expect(services.supports("bluetooth.nonexistent")).toBe(false);
+    services.close();
+  });
+
+  it("reports bluetooth unavailable without throwing when no adapter exists", async () => {
+    const services = new LinuxNativeModuleServices();
+    const state = (await services.request("bluetooth.state", null)) as Record<
+      string,
+      unknown
+    >;
+    expect(typeof state["available"]).toBe("boolean");
+    // Actions without an adapter fail with a clear error, not a crash.
+    await expect(
+      services.request("bluetooth.pair", { address: "AA:BB:CC:DD:EE:FF" }),
+    ).rejects.toThrow(/unavailable/i);
+    await expect(
+      services.request("bluetooth.pair", { address: "not-a-mac" }),
+    ).rejects.toThrow(/invalid bluetooth address/i);
+    services.close();
+  });
+
+  it("enumerates display outputs without throwing", async () => {
+    const services = new LinuxNativeModuleServices();
+    const outputs = await services.request("display.outputs.get", null);
+    expect(Array.isArray(outputs)).toBe(true);
+    await expect(
+      services.request("display.mode.set", {
+        outputId: "card9-Nope-1",
+        width: 1280,
+        height: 720,
+      }),
+    ).rejects.toThrow(/unknown display output/i);
+    await expect(
+      services.request("display.rotation.set", { outputId: "card0-x", degrees: 45 }),
+    ).rejects.toThrow(/must be one of/);
+    services.close();
+  });
+});

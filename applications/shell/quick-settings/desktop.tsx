@@ -1,7 +1,7 @@
 /**
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
-import { useState, type JSX } from "react";
+import { useEffect, useState, type JSX } from "react";
 import {
   Pressable,
   ScrollView,
@@ -10,8 +10,29 @@ import {
   View,
   type DimensionValue,
 } from "react-native";
-import { SevynIcon, type SevynIconName } from "@sevynos/react-native";
+import { NativeModules, SevynIcon, type SevynIconName } from "@sevynos/react-native";
 import { SevynShellTheme } from "../theme.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read the real Bluetooth adapter power state. Returns undefined when the
+ * host did not install the bluetooth adapter (e.g. dev shells) so the tile
+ * can fall back to its local-only behavior.
+ */
+async function readBluetoothPowered(): Promise<boolean | undefined> {
+  try {
+    const state = await NativeModules.HardwareModules.bluetooth.getState();
+    if (isRecord(state) && typeof state["powered"] === "boolean") {
+      return state["powered"];
+    }
+  } catch {
+    // No backend available.
+  }
+  return undefined;
+}
 
 export interface DesktopQuickSettingsProps {
   readonly open?: boolean;
@@ -75,6 +96,25 @@ export function DesktopQuickSettings({
   const [localVolume, setLocalVolume] = useState(0.62);
   const [localMuted, setLocalMuted] = useState(false);
   const [operationError, setOperationError] = useState<string>();
+  // When the shell renders this panel without bluetooth props (the historic
+  // dead-toggle case), drive the real Bluetooth backend directly instead of
+  // flipping local-only UI state.
+  const bluetoothControlled =
+    bluetoothEnabled !== undefined || onSetBluetoothEnabled !== undefined;
+  const [bluetoothBackendAvailable, setBluetoothBackendAvailable] = useState(false);
+
+  useEffect(() => {
+    if (bluetoothControlled || !open) return;
+    let cancelled = false;
+    void readBluetoothPowered().then((powered) => {
+      if (cancelled || powered === undefined) return;
+      setLocalBluetooth(powered);
+      setBluetoothBackendAvailable(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, bluetoothControlled]);
 
   if (!open) return null;
 
@@ -194,6 +234,24 @@ export function DesktopQuickSettings({
               glyph="bluetooth"
               label="Bluetooth"
               onPress={() => {
+                if (!bluetoothControlled && bluetoothBackendAvailable) {
+                  const next = !resolvedBluetooth;
+                  setLocalBluetooth(next);
+                  setOperationError(undefined);
+                  void (async () => {
+                    try {
+                      await NativeModules.HardwareModules.bluetooth.setPowered(next);
+                      const powered = await readBluetoothPowered();
+                      if (powered !== undefined) setLocalBluetooth(powered);
+                    } catch (error: unknown) {
+                      setLocalBluetooth(!next);
+                      setOperationError(
+                        messageForError(error, "Bluetooth could not be changed."),
+                      );
+                    }
+                  })();
+                  return;
+                }
                 updateToggle(
                   bluetoothEnabled,
                   !resolvedBluetooth,
