@@ -10,6 +10,24 @@ export {
   type UpdateProgressListener,
 } from "./os-update-service.js";
 export {
+  BOOT_ATTEMPTS_FILE_NAME,
+  PIN_FILE_NAME,
+  ROLLBACK_HISTORY_FILE_NAME,
+  SESSION_READY_FILE_NAME,
+  SNAPSHOT_DIR_NAME,
+  SNAPSHOT_FILE_NAME,
+  SNAPSHOT_META_FILE_NAME,
+  TRUST_DIR_NAME,
+  UPDATES_DIR_NAME,
+  lastRollback,
+  markSessionReady,
+  readRollbackHistory,
+  snapshotDir,
+  updatesDir,
+  type RollbackEventKind,
+  type RollbackRecord,
+} from "./boot-health.js";
+export {
   parseUpdateFeed,
   selectRootfsArtifact,
   type UpdateArtifact,

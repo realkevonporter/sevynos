@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { isUpdateAvailable, parseOsVersion } from "./version.js";
+import { lastRollback, type RollbackRecord } from "./boot-health.js";
 import { verifyUpdateFeed, type TrustedUpdateKey } from "./feed-signing.js";
 import {
   parseUpdateFeed,
@@ -309,6 +310,16 @@ export class OsUpdateService {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Most recent rollback event recorded by the boot-health layer
+   * (tools/qemu/sevyn-boot-health.sh), if any. Surfaced in the Software
+   * Update UI so a user can see when the system last rolled back, to
+   * which version, and why.
+   */
+  public lastRollback(): Promise<RollbackRecord | undefined> {
+    return lastRollback(this.#stateDirectory);
   }
 
   public async clearPendingUpdate(): Promise<void> {

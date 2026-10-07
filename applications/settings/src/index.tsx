@@ -22,6 +22,7 @@ import {
 } from "@sevynos/react-native";
 import type {
   OsUpdateService,
+  RollbackRecord,
   StagedUpdate,
   UpdateChannel,
   UpdateCheckResult,
@@ -629,6 +630,7 @@ export function SettingsApplication({
   const [downloadProgress, setDownloadProgress] = useState<
     { received: number; total: number } | undefined
   >(undefined);
+  const [lastRollback, setLastRollback] = useState<RollbackRecord | undefined>(undefined);
   const [batteryPercent, setBatteryPercent] = useState<number>(85);
   const [isCharging, setIsCharging] = useState<boolean>(true);
   const [timeState, setTimeState] = useState<TimeSyncState>({
@@ -954,6 +956,22 @@ export function SettingsApplication({
       setUpdateResult(update.lastResult);
       setUpdateChannel(update.channel);
     });
+  }, [update]);
+
+  useEffect(() => {
+    if (!update) return undefined;
+    let cancelled = false;
+    void update
+      .lastRollback()
+      .then((record) => {
+        if (!cancelled) setLastRollback(record ?? undefined);
+      })
+      .catch((error: unknown) => {
+        console.warn("failed to read rollback history:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [update]);
 
   const handleCheckForUpdates = () => {
@@ -2844,6 +2862,27 @@ export function SettingsApplication({
                 </View>
               )}
 
+              {lastRollback !== undefined && (
+                <View style={styles.card}>
+                  <View style={styles.rowBetween}>
+                    <Text style={styles.settingLabel}>Last rollback</Text>
+                    <Text style={styles.settingValueBold}>
+                      {rollbackEventLabel(lastRollback.event)}
+                    </Text>
+                  </View>
+                  {lastRollback.toVersion !== "" && (
+                    <View style={styles.rowBetween}>
+                      <Text style={styles.settingLabel}>Restored version</Text>
+                      <Text style={styles.settingValue}>{lastRollback.toVersion}</Text>
+                    </View>
+                  )}
+                  <Text style={styles.settingValue}>{lastRollback.reason}</Text>
+                  <Text style={styles.settingValue}>
+                    {new Date(lastRollback.ts).toLocaleString()}
+                  </Text>
+                </View>
+              )}
+
               {update !== undefined && updateResult?.status === "update-available" && (
                 <View style={styles.card}>
                   <View style={styles.rowBetween}>
@@ -2979,6 +3018,21 @@ export function SettingsApplication({
       </View>
     </View>
   );
+}
+
+function rollbackEventLabel(event: string): string {
+  switch (event) {
+    case "rollback":
+      return "Rolled back";
+    case "rollback-aborted":
+      return "Rollback aborted";
+    case "rollback-unavailable":
+      return "Rollback unavailable";
+    case "rollback-failed":
+      return "Rollback failed";
+    default:
+      return event;
+  }
 }
 
 function updateStatusLabel(status: string): string {
