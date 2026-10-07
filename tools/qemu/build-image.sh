@@ -22,3 +22,7 @@ mksquashfs / /artifacts/rootfs.squashfs \
   -e artifacts "boot/*" "dev/*" "proc/*" "run/*" "sys/*" "tmp/*"
 dd if=/dev/zero of=/artifacts/data-template.img bs=1M count=512 status=none
 mkfs.ext4 -q -L SEVYN_DATA /artifacts/data-template.img
+# Recovery environment: a self-contained initramfs that boots without the
+# main rootfs. Built last so it can read /artifacts/kernel-version.txt.
+# Expects /usr/local/bin/build-sevyn-recovery-image (see Dockerfile).
+/usr/local/bin/build-sevyn-recovery-image
