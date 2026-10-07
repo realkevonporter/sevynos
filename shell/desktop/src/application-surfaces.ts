@@ -7,6 +7,7 @@ import { FilesApplication } from "@sevynos/app-files";
 import { TerminalApplication, type TerminalAppRecord } from "@sevynos/app-terminal";
 import { SystemMonitorApplication } from "@sevynos/app-system-monitor";
 import { WelcomeApplication } from "@sevynos/app-welcome";
+import { SetupWizardApplication } from "@sevynos/app-setup-wizard";
 import { CameraApplication } from "@sevynos/app-camera";
 import { MusicApplication } from "@sevynos/app-music";
 import type { DiagnosticEntry } from "./runtime-diagnostics.js";
@@ -18,6 +19,7 @@ import {
   UnavailableWirelessNetworkService,
   UnavailableBatteryService,
   UnavailableAudioService,
+  UnavailableTimeService,
   UnavailableSystemService,
   UnavailableProcessService,
   type NativeBounds,
@@ -30,6 +32,7 @@ import {
   type SevynWirelessNetworkService,
   type SevynBatteryService,
   type SevynAudioService,
+  type SevynTimeService,
   type SevynSystemService,
   type SevynProcessService,
   type SevynFileSystem,
@@ -60,6 +63,10 @@ export interface WelcomeApplicationSurface {
   readonly heading: string;
   readonly body: readonly string[];
   readonly runtimeStatus: string;
+}
+export interface SetupWizardApplicationSurface {
+  readonly kind: "setup-wizard";
+  readonly heading: string;
 }
 export interface InstallerApplicationSurface {
   readonly kind: "installer";
@@ -142,6 +149,7 @@ export interface IdeApplicationSurface {
 
 export type DesktopApplicationSurface =
   | WelcomeApplicationSurface
+  | SetupWizardApplicationSurface
   | InstallerApplicationSurface
   | ConsoleApplicationSurface
   | SystemMonitorApplicationSurface
@@ -204,6 +212,8 @@ export class ApplicationSurfaceRegistry {
   readonly #audio: SevynAudioService;
   readonly #system: SevynSystemService;
   readonly #processes: SevynProcessService;
+  #time: SevynTimeService = new UnavailableTimeService();
+  #onSetupWizardComplete: (() => void) | undefined;
   readonly #notifications = new SystemNotificationService();
   readonly #isolatedSnapshots = new Map<GenesisWindowId, NativeRuntimeSnapshot>();
   readonly #isolatedDispatchers = new Map<
@@ -271,6 +281,26 @@ export class ApplicationSurfaceRegistry {
     this.#onChange();
   }
 
+  /**
+   * Supplies the real time service after construction. The settings datetime
+   * section and the first-run setup wizard both need it; without this the
+   * timezone UI silently does nothing.
+   */
+  public configureTime(time: SevynTimeService): void {
+    this.#time = time;
+    this.#onChange();
+  }
+
+  /**
+   * Registers the callback fired when the first-run setup wizard reaches its
+   * final step. The indirection lets the host arm the callback before or
+   * after launching the wizard window.
+   */
+  public configureSetupWizard(onComplete: () => void): void {
+    this.#onSetupWizardComplete = onComplete;
+    this.#onChange();
+  }
+
   public configureSettingsUpdate(
     onUpdateSetting: (key: string, value: unknown) => void,
   ): void {
@@ -287,6 +317,16 @@ export class ApplicationSurfaceRegistry {
         "Its windows, focus, input, and lifecycle are owned by the real runtime.",
       ]),
       runtimeStatus: "Runtime online · Input connected · Compositor ready",
+    });
+
+    this.#set(windowId, surface);
+    return surface;
+  }
+
+  public createSetupWizard(windowId: GenesisWindowId): SetupWizardApplicationSurface {
+    const surface: SetupWizardApplicationSurface = Object.freeze({
+      kind: "setup-wizard",
+      heading: "Set up SevynOS",
     });
 
     this.#set(windowId, surface);
@@ -813,6 +853,12 @@ export class ApplicationSurfaceRegistry {
         return createElement(WelcomeApplication, {
           onLaunch: (appId: string) => void this.#applicationManagement?.launch(appId),
         });
+      case "setup-wizard":
+        return createElement(SetupWizardApplication, {
+          time: this.#time,
+          network: this.#network,
+          onComplete: () => this.#onSetupWizardComplete?.(),
+        });
       case "installer":
         return createCoreSystemApplication({ kind: "installer" });
       case "console":
@@ -847,6 +893,7 @@ export class ApplicationSurfaceRegistry {
           power: this.#power,
           battery: this.#battery,
           audio: this.#audio,
+          time: this.#time,
           system: this.#system,
           onUpdateSetting: this.#onUpdateSetting,
           onUninstallApp: (appId: string) => {

@@ -47,6 +47,7 @@ import {
   WebSocket as SevynWebSocket,
   type ApplicationWorkerExecutor,
 } from "@sevynos/react-native/internal";
+import { createOnboardingRecord, isOnboardingComplete } from "./onboarding.js";
 import type {
   SevynPowerService,
   SevynBrowserEngine,
@@ -523,6 +524,21 @@ export async function startWaylandHost(
   // Fresh boot starts with a clean desktop (no auto-launched apps).
   // resetToDefaults() is reserved for explicit user-initiated reset
   // via persistence.reset().
+  // First-run setup: before the desktop becomes interactive, run the setup
+  // wizard exactly once per state directory. The completion flag lives in the
+  // host persistence; without persistence the wizard is skipped so a
+  // stateless session can never nag on every boot.
+  if (persistenceAdapter !== undefined) {
+    const onboardingRecord = await persistenceAdapter
+      .load("onboarding")
+      .catch(() => undefined);
+    if (!isOnboardingComplete(onboardingRecord)) {
+      marker("SEVYN_GENESIS_FIRST_RUN_SETUP_STARTED");
+      await runtime.runFirstRunSetup();
+      await persistenceAdapter.save("onboarding", createOnboardingRecord());
+      marker("SEVYN_GENESIS_FIRST_RUN_SETUP_COMPLETE");
+    }
+  }
   marker("SEVYN_GENESIS_SYSTEM_APPLICATIONS_LAUNCHED");
   const isolatedApplications =
     options.isolatedExecutor === undefined
