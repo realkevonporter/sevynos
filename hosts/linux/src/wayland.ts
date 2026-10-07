@@ -73,6 +73,7 @@ import { LinuxBatteryService } from "./linux-battery-service.js";
 import { LinuxAudioService } from "./linux-audio-service.js";
 import { LinuxTimeService } from "./linux-time-service.js";
 import { LinuxNativeModuleServices } from "./linux-native-module-services.js";
+import { LinuxPowerService } from "./linux-power-service.js";
 import { protectCurrentProcessFromOomKiller } from "./oom-score.js";
 import { LinuxSystemService } from "./linux-system-service.js";
 import { LinuxProcessService } from "./linux-process-service.js";
@@ -128,6 +129,11 @@ export interface WaylandHostOptions {
    */
   readonly update?: OsUpdateService | undefined;
 }
+
+// Phase 2 (c): lid-close sleep + battery charge limits. Module-level so both
+// startWaylandHost (adapter install) and the main entry (lid watch wiring)
+// share one instance. The constructor performs no I/O.
+const powerService = new LinuxPowerService();
 
 export async function startWaylandHost(
   transport: NativeBridgeTransport,
@@ -421,6 +427,62 @@ export async function startWaylandHost(
         const value = await nativeModules.request("bluetooth.scan", null);
         return Array.isArray(value) ? (value as readonly unknown[]) : [];
       },
+      getState: () => nativeModules.request("bluetooth.state", null),
+      setPowered: (enabled: boolean) =>
+        nativeModules.request("bluetooth.power.set", { enabled }),
+      listDevices: async () => {
+        const value = await nativeModules.request("bluetooth.devices", null);
+        return Array.isArray(value) ? (value as readonly unknown[]) : [];
+      },
+      pair: (address: string) => nativeModules.request("bluetooth.pair", { address }),
+      respondToPairing: (accept: boolean, pin?: string) =>
+        nativeModules.request("bluetooth.pairRespond", {
+          accept,
+          pin: pin ?? null,
+        }),
+      cancelPairing: () =>
+        nativeModules
+          .request("bluetooth.pairRespond", { accept: false })
+          .then(() => undefined),
+      connect: (address: string) =>
+        nativeModules.request("bluetooth.connect", { address }),
+      disconnect: (address: string) =>
+        nativeModules.request("bluetooth.disconnect", { address }),
+      remove: (address: string) => nativeModules.request("bluetooth.remove", { address }),
+      setTrusted: (address: string, trusted: boolean) =>
+        nativeModules.request("bluetooth.trust", { address, trusted }),
+    },
+    display: {
+      getBrightness: async () => {
+        const value = await nativeModules.request("display.brightness.get", null);
+        return typeof value === "number" ? value : 1;
+      },
+      setBrightness: (val: number) =>
+        nativeModules.request("display.brightness.set", val).then(() => undefined),
+      getOutputs: async () => {
+        const value = await nativeModules.request("display.outputs.get", null);
+        return Array.isArray(value) ? (value as readonly unknown[]) : [];
+      },
+      setMode: (
+        outputId: string,
+        mode: { width: number; height: number; refreshHz?: number },
+      ) =>
+        nativeModules.request("display.mode.set", {
+          outputId,
+          width: mode.width,
+          height: mode.height,
+          refreshHz: mode.refreshHz ?? null,
+        }),
+      setRotation: (outputId: string, degrees: 0 | 90 | 180 | 270) =>
+        nativeModules.request("display.rotation.set", { outputId, degrees }),
+    },
+    power: {
+      getChargeLimit: () => powerService.getChargeLimit(),
+      setChargeLimit: (limit: { startPct?: number; endPct?: number }) =>
+        powerService.setChargeLimit(limit),
+      getLidAction: () => powerService.getLidAction(),
+      setLidAction: (action: "sleep" | "nothing") => powerService.setLidAction(action),
+      getLidState: () => powerService.getLidState(),
     },
     sensors: { read: (sensor) => nativeModules.request("sensors.read", sensor) },
     biometrics: {
@@ -1841,9 +1903,42 @@ if (
     return Promise.resolve();
   };
   requestSleep = async () => {
-    const { exec } = await import("child_process");
-    exec("systemctl suspend");
+    // SevynOS images boot without systemd (PID 1 is /init), so systemctl is
+    // unavailable there; suspend via the kernel sysfs interface instead.
+    const fs = await import("node:fs/promises");
+    const hasSystemd = await fs
+      .access("/run/systemd/system")
+      .then(() => true)
+      .catch(() => false);
+    if (hasSystemd) {
+      const { execFile } = await import("node:child_process");
+      execFile("systemctl", ["suspend"]);
+      return;
+    }
+    const states = await fs.readFile("/sys/power/state", "utf8").catch(() => "");
+    const target = /\bmem\b/.test(states)
+      ? "mem"
+      : /\bstandby\b/.test(states)
+        ? "standby"
+        : null;
+    if (target === null) {
+      throw new Error(
+        "Suspend is not supported: /sys/power/state offers no sleep state.",
+      );
+    }
+    await fs.writeFile("/sys/power/state", target, "utf8");
   };
+  // Phase 2 (c): lid-close sleep. The ACPI button interface is polled by
+  // LinuxPowerService (no logind on SevynOS); closing the lid invokes the
+  // orderly sleep() above when the lid action is "sleep".
+  powerService.startLidWatch(() => {
+    requestSleep().catch((error: unknown) => {
+      console.error(
+        "lid-close sleep failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  });
   requestLogout = async () => {
     if (stopping) return;
     stopping = true;

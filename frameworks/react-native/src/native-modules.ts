@@ -290,6 +290,20 @@ export const NativeModules = Object.freeze({
     }),
     bluetooth: Object.freeze({
       scan: () => requireNativeAdapter("bluetooth").scan(),
+      getState: () => requireNativeAdapter("bluetooth").getState?.(),
+      setPowered: (enabled: boolean) =>
+        requireNativeAdapter("bluetooth").setPowered?.(enabled),
+      listDevices: () => requireNativeAdapter("bluetooth").listDevices?.(),
+      pair: (address: string) => requireNativeAdapter("bluetooth").pair?.(address),
+      respondToPairing: (accept: boolean, pin?: string) =>
+        requireNativeAdapter("bluetooth").respondToPairing?.(accept, pin),
+      cancelPairing: () => requireNativeAdapter("bluetooth").cancelPairing?.(),
+      connect: (address: string) => requireNativeAdapter("bluetooth").connect?.(address),
+      disconnect: (address: string) =>
+        requireNativeAdapter("bluetooth").disconnect?.(address),
+      remove: (address: string) => requireNativeAdapter("bluetooth").remove?.(address),
+      setTrusted: (address: string, trusted: boolean) =>
+        requireNativeAdapter("bluetooth").setTrusted?.(address, trusted),
     }),
     geolocation: Object.freeze({
       getCurrentPosition: () => requireNativeAdapter("location").getCurrentPosition(),
@@ -318,6 +332,22 @@ export const NativeModules = Object.freeze({
       getBrightness: () => requireNativeAdapter("display").getBrightness?.(),
       setBrightness: (val: number) =>
         requireNativeAdapter("display").setBrightness?.(val),
+      getOutputs: () => requireNativeAdapter("display").getOutputs?.(),
+      setMode: (
+        outputId: string,
+        mode: { width: number; height: number; refreshHz?: number },
+      ) => requireNativeAdapter("display").setMode?.(outputId, mode),
+      setRotation: (outputId: string, degrees: 0 | 90 | 180 | 270) =>
+        requireNativeAdapter("display").setRotation?.(outputId, degrees),
+    }),
+    power: Object.freeze({
+      getChargeLimit: () => requireNativeAdapter("power").getChargeLimit?.(),
+      setChargeLimit: (limit: { startPct?: number; endPct?: number }) =>
+        requireNativeAdapter("power").setChargeLimit?.(limit),
+      getLidAction: () => requireNativeAdapter("power").getLidAction?.(),
+      setLidAction: (action: "sleep" | "nothing") =>
+        requireNativeAdapter("power").setLidAction?.(action),
+      getLidState: () => requireNativeAdapter("power").getLidState?.(),
     }),
     audio: Object.freeze({
       getOutputs: () => requireNativeAdapter("audio").getOutputs?.(),

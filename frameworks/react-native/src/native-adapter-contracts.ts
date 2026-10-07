@@ -82,7 +82,19 @@ export interface SevynNativeAdapters {
     stop(): Promise<void>;
   };
   readonly location?: { getCurrentPosition(): Promise<unknown> };
-  readonly bluetooth?: { scan(): Promise<readonly unknown[]> };
+  readonly bluetooth?: {
+    scan(): Promise<readonly unknown[]>;
+    getState?(): Promise<unknown>;
+    setPowered?(enabled: boolean): Promise<unknown>;
+    listDevices?(): Promise<readonly unknown[]>;
+    pair?(address: string): Promise<unknown>;
+    respondToPairing?(accept: boolean, pin?: string): Promise<unknown>;
+    cancelPairing?(): Promise<void>;
+    connect?(address: string): Promise<unknown>;
+    disconnect?(address: string): Promise<unknown>;
+    remove?(address: string): Promise<unknown>;
+    setTrusted?(address: string, trusted: boolean): Promise<unknown>;
+  };
   readonly sensors?: {
     read(sensor: string): Promise<unknown>;
     subscribe?(
@@ -124,6 +136,19 @@ export interface SevynNativeAdapters {
     lockOrientation?(orientation: string): Promise<void>;
     acquireWakeLock?(): Promise<() => void>;
     isWakeLocked?(): boolean;
+    getOutputs?(): Promise<readonly unknown[]>;
+    setMode?(
+      outputId: string,
+      mode: { width: number; height: number; refreshHz?: number },
+    ): Promise<unknown>;
+    setRotation?(outputId: string, degrees: 0 | 90 | 180 | 270): Promise<unknown>;
+  };
+  readonly power?: {
+    getChargeLimit?(): Promise<unknown>;
+    setChargeLimit?(limit: { startPct?: number; endPct?: number }): Promise<unknown>;
+    getLidAction?(): Promise<unknown>;
+    setLidAction?(action: "sleep" | "nothing"): Promise<unknown>;
+    getLidState?(): Promise<unknown>;
   };
   readonly audio?: {
     getOutputs?(): Promise<readonly unknown[]>;

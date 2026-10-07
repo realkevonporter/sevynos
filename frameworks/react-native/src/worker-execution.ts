@@ -138,6 +138,9 @@ const servicePermission = (service: WorkerServiceName): SevynPermission | undefi
     case "display.autoBrightness.set":
     case "display.wakeLock.acquire":
     case "display.wakeLock.release":
+    case "display.outputs.get":
+    case "display.mode.set":
+    case "display.rotation.set":
       return "display";
     case "audio.outputs.get":
     case "audio.output.set":
@@ -163,6 +166,15 @@ const servicePermission = (service: WorkerServiceName): SevynPermission | undefi
     case "microphone.stop":
       return "microphone";
     case "bluetooth.scan":
+    case "bluetooth.state":
+    case "bluetooth.power.set":
+    case "bluetooth.devices":
+    case "bluetooth.pair":
+    case "bluetooth.pairRespond":
+    case "bluetooth.connect":
+    case "bluetooth.disconnect":
+    case "bluetooth.remove":
+    case "bluetooth.trust":
       return "bluetooth";
     case "sensors.read":
     case "sensors.subscribe":

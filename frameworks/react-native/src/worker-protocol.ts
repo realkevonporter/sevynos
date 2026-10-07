@@ -94,6 +94,9 @@ export type WorkerServiceName =
   | "display.autoBrightness.set"
   | "display.wakeLock.acquire"
   | "display.wakeLock.release"
+  | "display.outputs.get"
+  | "display.mode.set"
+  | "display.rotation.set"
   | "audio.outputs.get"
   | "audio.output.set"
   | "vibration.vibrate"
@@ -113,6 +116,15 @@ export type WorkerServiceName =
   | "microphone.start"
   | "microphone.stop"
   | "bluetooth.scan"
+  | "bluetooth.state"
+  | "bluetooth.power.set"
+  | "bluetooth.devices"
+  | "bluetooth.pair"
+  | "bluetooth.pairRespond"
+  | "bluetooth.connect"
+  | "bluetooth.disconnect"
+  | "bluetooth.remove"
+  | "bluetooth.trust"
   | "sensors.read"
   | "sensors.subscribe"
   | "sensors.unsubscribe"
@@ -442,6 +454,9 @@ export function isWorkerServiceName(value: string): value is WorkerServiceName {
     case "display.autoBrightness.set":
     case "display.wakeLock.acquire":
     case "display.wakeLock.release":
+    case "display.outputs.get":
+    case "display.mode.set":
+    case "display.rotation.set":
     case "audio.outputs.get":
     case "audio.output.set":
     case "vibration.vibrate":
@@ -461,6 +476,15 @@ export function isWorkerServiceName(value: string): value is WorkerServiceName {
     case "microphone.start":
     case "microphone.stop":
     case "bluetooth.scan":
+    case "bluetooth.state":
+    case "bluetooth.power.set":
+    case "bluetooth.devices":
+    case "bluetooth.pair":
+    case "bluetooth.pairRespond":
+    case "bluetooth.connect":
+    case "bluetooth.disconnect":
+    case "bluetooth.remove":
+    case "bluetooth.trust":
     case "sensors.read":
     case "sensors.subscribe":
     case "sensors.unsubscribe":
