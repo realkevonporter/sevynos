@@ -870,7 +870,6 @@ export function VideoPlayer({
       void ignoreRejection(camera.stopVideo?.());
       void ignoreRejection(media?.stop());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Poll decoded frames while playing.
@@ -983,7 +982,7 @@ export function VideoPlayer({
 
   const progressPct =
     durationSec > 0 ? Math.min(100, Math.max(0, (positionSec / durationSec) * 100)) : 0;
-  const progressWidth: `${number}%` = `${Math.round(progressPct)}%`;
+  const progressWidth: `${number}%` = `${String(Math.round(progressPct))}%`;
 
   return (
     <View style={styles.videoPlayerContainer}>
