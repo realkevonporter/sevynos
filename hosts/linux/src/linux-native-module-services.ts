@@ -695,12 +695,12 @@ export class LinuxNativeModuleServices {
     this.#videoPlayback = session;
 
     let stderr = "";
-    child.stderr?.on("data", (chunk: Buffer) => {
+    child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.stdout?.on("data", (chunk: Buffer) => {
+    child.stdout.on("data", (chunk: Buffer) => {
       const active = this.#videoPlayback;
-      if (active === undefined || active.child !== child) return;
+      if (active?.child !== child) return;
       active.buffer = Buffer.concat([active.buffer, chunk]);
       while (active.buffer.length >= active.frameBytes) {
         const frame = active.buffer.subarray(0, active.frameBytes);
