@@ -19,6 +19,7 @@ import {
   UnavailableBatteryService,
   UnavailableAudioService,
   UnavailableSystemService,
+  UnavailableProcessService,
   type NativeBounds,
   type AccessibilityNode,
   type NativeRuntimeSnapshot,
@@ -30,6 +31,7 @@ import {
   type SevynBatteryService,
   type SevynAudioService,
   type SevynSystemService,
+  type SevynProcessService,
   type SevynFileSystem,
   type SevynStorageService,
 } from "@sevynos/react-native/internal";
@@ -201,6 +203,7 @@ export class ApplicationSurfaceRegistry {
   readonly #battery: SevynBatteryService;
   readonly #audio: SevynAudioService;
   readonly #system: SevynSystemService;
+  readonly #processes: SevynProcessService;
   readonly #notifications = new SystemNotificationService();
   readonly #isolatedSnapshots = new Map<GenesisWindowId, NativeRuntimeSnapshot>();
   readonly #isolatedDispatchers = new Map<
@@ -223,6 +226,7 @@ export class ApplicationSurfaceRegistry {
     audio?: SevynAudioService,
     system?: SevynSystemService,
     createSevynCodeEngine?: () => SevynBrowserEngine | undefined,
+    processes?: SevynProcessService,
   ) {
     this.#onChange = onChange;
     this.#network = network;
@@ -254,6 +258,7 @@ export class ApplicationSurfaceRegistry {
     this.#battery = battery ?? new UnavailableBatteryService();
     this.#audio = audio ?? new UnavailableAudioService();
     this.#system = system ?? new UnavailableSystemService();
+    this.#processes = processes ?? new UnavailableProcessService();
   }
 
   public configureApplicationManagement(
@@ -622,6 +627,10 @@ export class ApplicationSurfaceRegistry {
     return this.#system;
   }
 
+  public get processes(): SevynProcessService {
+    return this.#processes;
+  }
+
   public get(windowId: GenesisWindowId): DesktopApplicationSurface | undefined {
     return this.#surfaces.get(windowId);
   }
@@ -846,6 +855,8 @@ export class ApplicationSurfaceRegistry {
         });
       case "system-monitor":
         return createElement(SystemMonitorApplication, {
+          system: this.#system,
+          processes: this.#processes,
           model: monitor ?? {
             runningApplicationSessions: 0,
             openWindows: 0,
@@ -853,7 +864,6 @@ export class ApplicationSurfaceRegistry {
             cursorKind: "default",
             frameExecutionCount: 0,
             activeWorkspace: "workspace-1",
-            applicationWorkers: Object.freeze([]),
           },
         });
       case "gallery":

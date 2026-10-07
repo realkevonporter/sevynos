@@ -154,10 +154,47 @@ export interface SevynAudioService {
 export interface SystemHardwareSnapshot {
   readonly cpuPercent: number;
   readonly cpuCores: number;
+  /**
+   * Per-core utilization percentages, index-aligned with core number.
+   * Optional: hosts that cannot sample per-core data omit this and the app
+   * falls back to the aggregate cpuPercent.
+   */
+  readonly cpuCorePercents?: readonly number[] | undefined;
   readonly memoryTotalBytes: number;
   readonly memoryUsedBytes: number;
   readonly memoryAvailableBytes: number;
   readonly uptimeSeconds: number;
+  /**
+   * Filesystem usage for the volumes the host reports (the root volume at
+   * minimum). Optional: hosts that cannot sample disk data omit this.
+   */
+  readonly disks?: readonly DiskUsage[] | undefined;
+  /**
+   * Per-interface network throughput. Optional: hosts that cannot sample
+   * network counters omit this.
+   */
+  readonly networkInterfaces?: readonly NetworkInterfaceThroughput[] | undefined;
+}
+
+export interface DiskUsage {
+  /** Mount point this usage figure describes, e.g. "/". */
+  readonly mountPoint: string;
+  readonly totalBytes: number;
+  readonly usedBytes: number;
+  readonly freeBytes: number;
+}
+
+export interface NetworkInterfaceThroughput {
+  /**
+   * Interface name (loopback excluded on Linux). Throughput figures are
+   * per-second rates derived from the delta between the last two samples;
+   * they are 0 on the first sample.
+   */
+  readonly name: string;
+  readonly rxBytesPerSecond: number;
+  readonly txBytesPerSecond: number;
+  readonly rxBytesTotal: number;
+  readonly txBytesTotal: number;
 }
 
 export interface TimeSyncState {
@@ -178,6 +215,23 @@ export interface SevynTimeService {
 
 export interface SevynSystemService {
   snapshot(): Promise<SystemHardwareSnapshot>;
+  subscribe(listener: () => void): () => void;
+}
+
+export interface ProcessInfo {
+  readonly pid: number;
+  readonly name: string;
+  /** Single-letter process state from /proc (R, S, D, Z, T, ...). */
+  readonly state: string;
+  readonly memoryBytes: number;
+}
+
+export interface ProcessSnapshot {
+  readonly processes: readonly ProcessInfo[];
+}
+
+export interface SevynProcessService {
+  snapshot(): Promise<ProcessSnapshot>;
   subscribe(listener: () => void): () => void;
 }
 
@@ -361,6 +415,15 @@ export class UnavailableTimeService implements SevynTimeService {
       syncing: false,
       timezone,
     });
+  }
+  public subscribe(): () => void {
+    return () => undefined;
+  }
+}
+
+export class UnavailableProcessService implements SevynProcessService {
+  public snapshot(): Promise<ProcessSnapshot> {
+    return Promise.resolve({ processes: Object.freeze([]) });
   }
   public subscribe(): () => void {
     return () => undefined;

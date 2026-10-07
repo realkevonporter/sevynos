@@ -24,7 +24,9 @@ export type SevynPermission =
   | "audio"
   | "vibration"
   | "nfc"
-  | "cellular";
+  | "cellular"
+  | "hardware:query"
+  | "process:inspect";
 export type SevynWindowMode = "standard" | "dialog" | "utility" | "fullscreen";
 export type SevynInstanceMode = "single" | "multiple";
 
@@ -89,6 +91,8 @@ function parsePermission(value: string): SevynPermission | undefined {
     case "vibration":
     case "nfc":
     case "cellular":
+    case "hardware:query":
+    case "process:inspect":
       return value;
     default:
       return undefined;
