@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import {
   Pressable,
   ScrollView,
@@ -15,6 +15,21 @@ import {
   type SevynStorageService,
   type SevynVolume,
 } from "@sevynos/react-native";
+import {
+  deleteTrashItemForever,
+  emptyTrashBin,
+  formatBytes,
+  formatDeletedAt,
+  loadTrashItems,
+  restoreTrashItem,
+  type TrashItem,
+} from "./trash.js";
+import {
+  detectUnpluggedBrowsePath,
+  formatVolumeCapacity,
+  isPathOnVolume,
+} from "./volumes.js";
+import type { ArchiveProgress, SevynArchiveService } from "@sevynos/file-archives";
 
 export const filesManifest: SevynApplicationManifest = {
   manifestVersion: 1,
@@ -38,6 +53,26 @@ export interface FilesApplicationProps {
   readonly storage?: SevynStorageService | undefined;
   readonly notifications?: SystemNotificationService | undefined;
   readonly initialPath?: string | undefined;
+  /**
+   * Host-provided archive backend. The Extract affordance only appears when
+   * this is injected — without it the app shows no archive UI at all.
+   */
+  readonly archiveService?: SevynArchiveService | undefined;
+}
+
+/** Archive extensions the extraction backend supports. */
+function isArchiveName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower.endsWith(".zip") ||
+    lower.endsWith(".tar.gz") ||
+    lower.endsWith(".tgz") ||
+    lower.endsWith(".tar")
+  );
+}
+
+function stripArchiveExtension(name: string): string {
+  return name.replace(/\.(tar\.gz|tgz|zip|tar)$/i, "");
 }
 
 interface QuickFolder {
@@ -74,6 +109,7 @@ export function FilesApplication({
   storage,
   notifications,
   initialPath = "/",
+  archiveService,
 }: FilesApplicationProps): JSX.Element {
   const [currentPath, setCurrentPath] = useState<string>(initialPath);
   const [entries, setEntries] = useState<readonly FileSystemEntry[]>([]);
@@ -89,6 +125,25 @@ export function FilesApplication({
   const [isRenaming, setIsRenaming] = useState<boolean>(false);
   const [renameName, setRenameName] = useState<string>("");
   const [confirmEmptyTrash, setConfirmEmptyTrash] = useState<boolean>(false);
+  const [trashItems, setTrashItems] = useState<readonly TrashItem[]>([]);
+  const [trashLoading, setTrashLoading] = useState<boolean>(false);
+  const [confirmDeleteName, setConfirmDeleteName] = useState<string | undefined>(
+    undefined,
+  );
+  const [ejectingVolumeId, setEjectingVolumeId] = useState<string | undefined>(undefined);
+  const [extractDialog, setExtractDialog] = useState<
+    { archiveName: string; archivePath: string; destinationName: string } | undefined
+  >(undefined);
+  const [extractProgress, setExtractProgress] = useState<ArchiveProgress | undefined>(
+    undefined,
+  );
+  const [extractError, setExtractError] = useState<string | undefined>(undefined);
+  const [isExtracting, setIsExtracting] = useState<boolean>(false);
+
+  // Mount points ever seen from the volume service, used to detect a device
+  // that vanished while we were browsing it (unplug without eject).
+  const seenMountPointsRef = useRef<ReadonlySet<string>>(new Set());
+  const volumesPrimedRef = useRef<boolean>(false);
 
   const isInTrash = currentPath === "/.Trash";
 
@@ -111,17 +166,27 @@ export function FilesApplication({
         return true;
       }
       try {
-        // Special handling for Trash: use listTrash instead of list
-        const items =
-          dirPath === "/.Trash"
-            ? ((await filesystem.listTrash?.()) ?? [])
-            : await filesystem.list(dirPath);
-        setEntries(items);
+        // Special handling for Trash: build the rich view model (original
+        // location + deletion date from the .trashinfo records).
+        if (dirPath === "/.Trash") {
+          setTrashLoading(true);
+          try {
+            const items = await loadTrashItems(filesystem);
+            setTrashItems(items);
+            setEntries(items.map((item) => item.entry));
+          } finally {
+            setTrashLoading(false);
+          }
+        } else {
+          setTrashItems([]);
+          setEntries(await filesystem.list(dirPath));
+        }
         setCurrentPath(dirPath);
         setSelectedPath(undefined);
         setSearchQuery("");
         setDirectoryError(undefined);
         setConfirmEmptyTrash(false);
+        setConfirmDeleteName(undefined);
         return true;
       } catch (error: unknown) {
         const message =
@@ -144,18 +209,45 @@ export function FilesApplication({
   // Subscribe to USB/removable volume changes.
   useEffect(() => {
     if (!storage) return;
-    const unsubscribe = storage.subscribe((newVolumes: readonly SevynVolume[]) => {
+    const applyVolumes = (newVolumes: readonly SevynVolume[]): void => {
+      seenMountPointsRef.current = new Set([
+        ...seenMountPointsRef.current,
+        ...newVolumes.map((volume) => volume.mountPoint),
+      ]);
       setVolumes(newVolumes);
-    });
+      volumesPrimedRef.current = true;
+    };
+    const unsubscribe = storage.subscribe(applyVolumes);
     // Also fetch initial list.
     void storage
       .listVolumes()
-      .then(setVolumes)
+      .then(applyVolumes)
       .catch(() => {
         // Volumes unavailable; sidebar shows none.
+        volumesPrimedRef.current = true;
       });
     return unsubscribe;
   }, [storage]);
+
+  // Graceful unplug-during-browse: if the device backing the current folder
+  // vanishes (unplugged without eject), leave the dead folder instead of
+  // showing a stale listing or crashing on the next refresh.
+  useEffect(() => {
+    if (!volumesPrimedRef.current) return;
+    const vanished = detectUnpluggedBrowsePath(
+      currentPath,
+      seenMountPointsRef.current,
+      volumes,
+    );
+    if (vanished === undefined) return;
+    notifications?.show({
+      title: "Device removed",
+      message: "The USB device was unplugged.",
+    });
+    setBackStack([]);
+    setForwardStack([]);
+    void loadDirectory("/");
+  }, [volumes, currentPath, notifications, loadDirectory]);
 
   const navigateTo = useCallback(
     async (path: string): Promise<void> => {
@@ -170,21 +262,31 @@ export function FilesApplication({
 
   const handleEject = useCallback(
     async (volumeId: string): Promise<void> => {
-      if (!storage) return;
+      if (!storage || ejectingVolumeId !== undefined) return;
+      const volume = volumes.find((v) => v.id === volumeId);
+      setEjectingVolumeId(volumeId);
       try {
         await storage.eject(volumeId);
+        notifications?.show({
+          title: "Device ejected",
+          message: `${volume?.label ?? "USB device"} is safe to remove.`,
+        });
         // If we were browsing the ejected volume, go home.
-        const volume = volumes.find((v) => v.id === volumeId);
-        if (volume && currentPath.startsWith(volume.mountPoint)) {
-          await navigateTo("/");
+        if (volume && isPathOnVolume(currentPath, volume.mountPoint)) {
+          setBackStack([]);
+          setForwardStack([]);
+          await loadDirectory("/");
         }
       } catch (error: unknown) {
-        setDirectoryError(
-          error instanceof Error ? error.message : "Could not eject the device.",
-        );
+        const message =
+          error instanceof Error ? error.message : "Could not eject the device.";
+        setDirectoryError(message);
+        notifications?.show({ title: "Eject failed", message });
+      } finally {
+        setEjectingVolumeId(undefined);
       }
     },
-    [storage, volumes, currentPath, navigateTo],
+    [storage, volumes, currentPath, ejectingVolumeId, notifications, loadDirectory],
   );
 
   const handleNavigateBack = async (): Promise<void> => {
@@ -228,6 +330,21 @@ export function FilesApplication({
   const visibleEntries = entries.filter((entry) =>
     entry.name.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()),
   );
+  const visibleTrashItems = trashItems.filter((item) =>
+    item.name.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()),
+  );
+  const extractPercent =
+    extractProgress !== undefined && extractProgress.entriesTotal > 0
+      ? Math.min(
+          100,
+          Math.round((extractProgress.entriesDone / extractProgress.entriesTotal) * 100),
+        )
+      : 0;
+  const extractLabel =
+    extractProgress !== undefined && extractProgress.entriesTotal > 0
+      ? `${extractProgress.currentEntry} (${String(extractProgress.entriesDone)}/${String(extractProgress.entriesTotal)})`
+      : "Extracting…";
+  const extractWidth = `${String(extractPercent)}%` as `${number}%`;
   const selectedEntry = entries.find((entry) => entry.path === selectedPath);
   const pathSegments = currentPath.split("/").filter(Boolean);
 
@@ -294,44 +411,119 @@ export function FilesApplication({
     }
   };
 
-  const handleRestore = async () => {
-    if (!selectedPath || !filesystem?.restoreFromTrash || !isInTrash) return;
-    const entry = entries.find((e) => e.path === selectedPath);
-    if (!entry) return;
+  const handleRestore = async (name: string) => {
+    if (!filesystem || !isInTrash) return;
     try {
-      await filesystem.restoreFromTrash(entry.name);
+      await restoreTrashItem(filesystem, name);
       notifications?.show({
         title: "Restored",
-        message: `Restored ${entry.name}`,
+        message: `Restored ${name}`,
       });
       void loadDirectory(currentPath);
-    } catch {
+    } catch (error: unknown) {
       notifications?.show({
         title: "Error",
-        message: "Failed to restore",
+        message: error instanceof Error ? error.message : "Failed to restore",
+      });
+    }
+  };
+
+  const handleDeleteForever = async (name: string) => {
+    if (!filesystem || !isInTrash) return;
+    if (confirmDeleteName !== name) {
+      setConfirmDeleteName(name);
+      return;
+    }
+    try {
+      await deleteTrashItemForever(filesystem, name);
+      notifications?.show({
+        title: "Deleted",
+        message: `${name} was permanently deleted`,
+      });
+      setConfirmDeleteName(undefined);
+      void loadDirectory(currentPath);
+    } catch (error: unknown) {
+      notifications?.show({
+        title: "Error",
+        message: error instanceof Error ? error.message : "Failed to delete permanently",
       });
     }
   };
 
   const handleEmptyTrash = async () => {
-    if (!filesystem?.emptyTrash || !isInTrash) return;
+    if (!filesystem || !isInTrash) return;
     if (!confirmEmptyTrash) {
       setConfirmEmptyTrash(true);
       return;
     }
     try {
-      await filesystem.emptyTrash();
+      await emptyTrashBin(filesystem);
       notifications?.show({
         title: "Trash Emptied",
         message: "All items permanently deleted",
       });
       setConfirmEmptyTrash(false);
       void loadDirectory(currentPath);
-    } catch {
+    } catch (error: unknown) {
       notifications?.show({
         title: "Error",
-        message: "Failed to empty Trash",
+        message: error instanceof Error ? error.message : "Failed to empty Trash",
       });
+    }
+  };
+
+  const openExtractDialog = () => {
+    if (archiveService === undefined) return;
+    if (selectedEntry?.kind !== "file") return;
+    if (!isArchiveName(selectedEntry.name)) return;
+    const base = stripArchiveExtension(selectedEntry.name);
+    setExtractDialog({
+      archiveName: selectedEntry.name,
+      archivePath: selectedEntry.path,
+      destinationName: base === "" ? `${selectedEntry.name}-extracted` : base,
+    });
+    setExtractError(undefined);
+    setExtractProgress(undefined);
+  };
+
+  const closeExtractDialog = () => {
+    if (isExtracting) return;
+    setExtractDialog(undefined);
+    setExtractProgress(undefined);
+    setExtractError(undefined);
+  };
+
+  const runExtract = async () => {
+    if (!archiveService || !extractDialog || isExtracting) return;
+    const destinationName = extractDialog.destinationName.trim();
+    if (destinationName === "" || destinationName.includes("/")) {
+      setExtractError("Enter a folder name without slashes.");
+      return;
+    }
+    setIsExtracting(true);
+    setExtractError(undefined);
+    try {
+      const destinationDir = `${currentPath}/${destinationName}`.replace(/\/\//g, "/");
+      const result = await archiveService.extract(
+        extractDialog.archivePath,
+        destinationDir,
+        (progress) => {
+          setExtractProgress(progress);
+        },
+      );
+      const skippedNote =
+        result.skipped.length > 0 ? ` (${String(result.skipped.length)} skipped)` : "";
+      notifications?.show({
+        title: "Archive extracted",
+        message: `${String(result.entriesExtracted)} items extracted to ${destinationName}${skippedNote}`,
+      });
+      setExtractDialog(undefined);
+      setExtractProgress(undefined);
+      void loadDirectory(currentPath);
+    } catch (error: unknown) {
+      setExtractError(error instanceof Error ? error.message : "Extraction failed.");
+    } finally {
+      setIsExtracting(false);
     }
   };
 
@@ -376,29 +568,43 @@ export function FilesApplication({
             <Text style={styles.sidebarSectionTitle}>Devices</Text>
             <ScrollView style={styles.quickLocations}>
               {volumes.map((volume) => {
-                const isActive = currentPath === volume.mountPoint;
+                const isActive = isPathOnVolume(currentPath, volume.mountPoint);
+                const isEjecting = ejectingVolumeId === volume.id;
                 return (
                   <View key={volume.id} style={styles.deviceRow}>
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel={`Open ${volume.label}`}
                       onPress={() => void navigateTo(volume.mountPoint)}
-                      style={isActive ? styles.locationItemActive : styles.locationItem}
+                      style={isActive ? styles.deviceItemActive : styles.deviceItem}
                     >
                       <SevynIcon name="hard-drive" size={15} color="#C7CDD8" />
-                      <Text
-                        style={isActive ? styles.locationNameActive : styles.locationName}
-                      >
-                        {volume.label}
-                      </Text>
+                      <View style={styles.deviceLabelColumn}>
+                        <Text
+                          style={
+                            isActive ? styles.locationNameActive : styles.locationName
+                          }
+                          numberOfLines={1}
+                        >
+                          {volume.label}
+                        </Text>
+                        <Text style={styles.deviceCapacity} numberOfLines={1}>
+                          {formatVolumeCapacity(
+                            volume.sizeBytes,
+                            volume.availableBytes,
+                            formatBytes,
+                          )}
+                        </Text>
+                      </View>
                     </Pressable>
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel={`Eject ${volume.label}`}
+                      disabled={isEjecting}
                       onPress={() => void handleEject(volume.id)}
-                      style={styles.ejectButton}
+                      style={isEjecting ? styles.ejectButtonDisabled : styles.ejectButton}
                     >
-                      <Text style={styles.ejectIcon}>⏏</Text>
+                      <Text style={styles.ejectIcon}>{isEjecting ? "…" : "⏏"}</Text>
                     </Pressable>
                   </View>
                 );
@@ -514,6 +720,21 @@ export function FilesApplication({
           {/* File operations - only show when an item is selected */}
           {selectedPath !== undefined && !isInTrash && (
             <>
+              {selectedEntry?.kind === "file" &&
+                isArchiveName(selectedEntry.name) &&
+                archiveService !== undefined && (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Extract ${selectedEntry.name}`}
+                    onPress={openExtractDialog}
+                    style={styles.actionButton}
+                  >
+                    <View style={styles.actionButtonGlyphRow}>
+                      <SevynIcon name="package" size={12} color="#F3F4F6" />
+                      <Text style={styles.actionButtonText}>Extract</Text>
+                    </View>
+                  </Pressable>
+                )}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Rename selected item"
@@ -535,31 +756,24 @@ export function FilesApplication({
 
           {/* Trash operations */}
           {isInTrash && (
-            <>
-              {selectedPath !== undefined && (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Restore selected item"
-                  onPress={() => void handleRestore()}
-                  style={styles.actionButton}
-                >
-                  <View style={styles.actionButtonGlyphRow}>
-                    <SevynIcon name="refresh" size={12} color="#F3F4F6" />
-                    <Text style={styles.actionButtonText}>Restore</Text>
-                  </View>
-                </Pressable>
-              )}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Empty Trash"
-                onPress={() => void handleEmptyTrash()}
-                style={styles.actionButton}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                confirmEmptyTrash ? "Confirm emptying the Trash" : "Empty Trash"
+              }
+              onPress={() => void handleEmptyTrash()}
+              style={confirmEmptyTrash ? styles.dangerButtonConfirm : styles.actionButton}
+            >
+              <Text
+                style={
+                  confirmEmptyTrash
+                    ? styles.dangerButtonConfirmText
+                    : styles.actionButtonText
+                }
               >
-                <Text style={styles.actionButtonText}>
-                  {confirmEmptyTrash ? "Confirm" : "Empty"}
-                </Text>
-              </Pressable>
-            </>
+                {confirmEmptyTrash ? "Click again to confirm" : "Empty Trash"}
+              </Text>
+            </Pressable>
           )}
         </View>
 
@@ -625,69 +839,164 @@ export function FilesApplication({
         )}
 
         {/* Directory Contents Viewport */}
-        <ScrollView style={styles.contentScroll}>
-          {visibleEntries.length === 0 ? (
-            <View style={styles.emptyState}>
-              <SevynIcon name="folder" size={44} color="#5B6472" />
-              <Text style={styles.emptyText}>
-                {searchQuery.trim() === ""
-                  ? "This folder is empty"
-                  : `No items match “${searchQuery}”`}
-              </Text>
-            </View>
-          ) : viewMode === "grid" ? (
-            <View style={styles.gridContainer}>
-              {visibleEntries.map((entry) => {
-                const isSelected = selectedPath === entry.path;
-                return (
-                  <Pressable
-                    key={entry.path}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Open ${entry.name}`}
-                    onPress={() => {
-                      handleOpenItem(entry);
-                    }}
-                    style={isSelected ? styles.gridCardSelected : styles.gridCard}
-                  >
-                    <SevynIcon
-                      name={getFileIcon(entry.name, entry.kind)}
-                      size={28}
-                      color="#C7CDD8"
-                    />
-                    <Text style={styles.gridName}>{entry.name}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          ) : (
-            <View style={styles.listContainer}>
-              {visibleEntries.map((entry) => {
-                const isSelected = selectedPath === entry.path;
-                return (
-                  <Pressable
-                    key={entry.path}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Open ${entry.name}`}
-                    onPress={() => {
-                      handleOpenItem(entry);
-                    }}
-                    style={isSelected ? styles.listItemSelected : styles.listItem}
-                  >
-                    <SevynIcon
-                      name={getFileIcon(entry.name, entry.kind)}
-                      size={16}
-                      color="#C7CDD8"
-                    />
-                    <Text style={styles.listName}>{entry.name}</Text>
-                    <Text style={styles.listKind}>
-                      {entry.kind === "directory" ? "Folder" : "File"}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          )}
-        </ScrollView>
+        {isInTrash ? (
+          <ScrollView style={styles.contentScroll}>
+            {trashLoading ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyText}>Loading Trash…</Text>
+              </View>
+            ) : visibleTrashItems.length === 0 ? (
+              <View style={styles.emptyState}>
+                <SevynIcon name="trash" size={44} color="#5B6472" />
+                <Text style={styles.emptyText}>
+                  {searchQuery.trim() === ""
+                    ? "Trash is empty"
+                    : `No trashed items match “${searchQuery}”`}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.trashTable}>
+                <View style={styles.trashHeaderRow}>
+                  <Text style={styles.trashHeaderNameCell}>Name</Text>
+                  <Text style={styles.trashHeaderLocationCell}>Original location</Text>
+                  <Text style={styles.trashHeaderDateCell}>Date deleted</Text>
+                  <Text style={styles.trashHeaderSizeCell}>Size</Text>
+                  <View style={styles.trashHeaderActionsCell} />
+                </View>
+                {visibleTrashItems.map((item) => {
+                  const confirmingDelete = confirmDeleteName === item.name;
+                  return (
+                    <View key={item.name} style={styles.trashRow}>
+                      <View style={styles.trashNameCell}>
+                        <SevynIcon
+                          name={getFileIcon(item.name, item.kind)}
+                          size={16}
+                          color="#C7CDD8"
+                        />
+                        <Text style={styles.trashName} numberOfLines={1}>
+                          {item.name}
+                        </Text>
+                      </View>
+                      <Text style={styles.trashLocationCell} numberOfLines={1}>
+                        {item.originalLocation ?? "Unknown"}
+                      </Text>
+                      <Text style={styles.trashDateCell} numberOfLines={1}>
+                        {formatDeletedAt(item.deletedAt)}
+                      </Text>
+                      <Text style={styles.trashSizeCell} numberOfLines={1}>
+                        {item.kind === "directory" ? "Folder" : formatBytes(item.size)}
+                      </Text>
+                      <View style={styles.trashActionsCell}>
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Restore ${item.name}`}
+                          onPress={() => void handleRestore(item.name)}
+                          style={styles.trashRowButton}
+                        >
+                          <SevynIcon name="refresh" size={12} color="#D7AC57" />
+                          <Text style={styles.trashRowButtonText}>Restore</Text>
+                        </Pressable>
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            confirmingDelete
+                              ? `Confirm permanently deleting ${item.name}`
+                              : `Delete ${item.name} forever`
+                          }
+                          onPress={() => void handleDeleteForever(item.name)}
+                          style={
+                            confirmingDelete
+                              ? styles.trashDeleteConfirmButton
+                              : styles.trashRowButton
+                          }
+                        >
+                          <SevynIcon
+                            name="trash"
+                            size={12}
+                            color={confirmingDelete ? "#0F1115" : "#F87171"}
+                          />
+                          <Text
+                            style={
+                              confirmingDelete
+                                ? styles.trashDeleteConfirmText
+                                : styles.trashDeleteText
+                            }
+                          >
+                            {confirmingDelete ? "Confirm" : "Delete"}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </ScrollView>
+        ) : (
+          <ScrollView style={styles.contentScroll}>
+            {visibleEntries.length === 0 ? (
+              <View style={styles.emptyState}>
+                <SevynIcon name="folder" size={44} color="#5B6472" />
+                <Text style={styles.emptyText}>
+                  {searchQuery.trim() === ""
+                    ? "This folder is empty"
+                    : `No items match “${searchQuery}”`}
+                </Text>
+              </View>
+            ) : viewMode === "grid" ? (
+              <View style={styles.gridContainer}>
+                {visibleEntries.map((entry) => {
+                  const isSelected = selectedPath === entry.path;
+                  return (
+                    <Pressable
+                      key={entry.path}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${entry.name}`}
+                      onPress={() => {
+                        handleOpenItem(entry);
+                      }}
+                      style={isSelected ? styles.gridCardSelected : styles.gridCard}
+                    >
+                      <SevynIcon
+                        name={getFileIcon(entry.name, entry.kind)}
+                        size={28}
+                        color="#C7CDD8"
+                      />
+                      <Text style={styles.gridName}>{entry.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : (
+              <View style={styles.listContainer}>
+                {visibleEntries.map((entry) => {
+                  const isSelected = selectedPath === entry.path;
+                  return (
+                    <Pressable
+                      key={entry.path}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${entry.name}`}
+                      onPress={() => {
+                        handleOpenItem(entry);
+                      }}
+                      style={isSelected ? styles.listItemSelected : styles.listItem}
+                    >
+                      <SevynIcon
+                        name={getFileIcon(entry.name, entry.kind)}
+                        size={16}
+                        color="#C7CDD8"
+                      />
+                      <Text style={styles.listName}>{entry.name}</Text>
+                      <Text style={styles.listKind}>
+                        {entry.kind === "directory" ? "Folder" : "File"}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+          </ScrollView>
+        )}
 
         {/* Status Bar */}
         <View style={styles.statusBar}>
@@ -703,6 +1012,87 @@ export function FilesApplication({
           </Text>
         </View>
       </View>
+
+      {/* Archive extraction dialog */}
+      {extractDialog !== undefined && (
+        <View style={styles.overlay}>
+          <View style={styles.dialog}>
+            <Text style={styles.dialogTitle}>Extract archive</Text>
+            <Text style={styles.dialogSubtitle} numberOfLines={1}>
+              {extractDialog.archiveName}
+            </Text>
+
+            {isExtracting || extractProgress !== undefined ? (
+              <>
+                <Text style={styles.dialogStatus} numberOfLines={1}>
+                  {extractLabel}
+                </Text>
+                <View style={styles.progressTrack}>
+                  <View
+                    style={{
+                      backgroundColor: "#D7AC57",
+                      height: 8,
+                      borderRadius: 4,
+                      width: extractWidth,
+                    }}
+                  />
+                </View>
+                {extractError !== undefined && (
+                  <Text style={styles.dialogError}>{extractError}</Text>
+                )}
+                <View style={styles.dialogButtons}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Close"
+                    disabled={isExtracting}
+                    onPress={closeExtractDialog}
+                    style={
+                      isExtracting ? styles.cancelButtonDisabled : styles.cancelButton
+                    }
+                  >
+                    <Text style={styles.cancelButtonText}>Close</Text>
+                  </Pressable>
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={styles.dialogLabel}>Extract to a new folder:</Text>
+                <TextInput
+                  accessibilityLabel="Destination folder name"
+                  onChangeText={(name) => {
+                    setExtractDialog({ ...extractDialog, destinationName: name });
+                  }}
+                  placeholder="Folder name"
+                  placeholderTextColor="#6B7280"
+                  style={styles.dialogInput}
+                  value={extractDialog.destinationName}
+                />
+                {extractError !== undefined && (
+                  <Text style={styles.dialogError}>{extractError}</Text>
+                )}
+                <View style={styles.dialogButtons}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Cancel extraction"
+                    onPress={closeExtractDialog}
+                    style={styles.cancelButton}
+                  >
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Extract the archive"
+                    onPress={() => void runExtract()}
+                    style={styles.confirmButton}
+                  >
+                    <Text style={styles.confirmButtonText}>Extract</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -997,6 +1387,174 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#6B7280",
   },
+  deviceItem: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    gap: 8,
+  },
+  deviceItemActive: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    gap: 8,
+    backgroundColor: "rgba(215, 172, 87, 0.15)",
+  },
+  deviceLabelColumn: {
+    flex: 1,
+    minWidth: 0,
+  },
+  deviceCapacity: {
+    fontSize: 10,
+    color: "#6B7280",
+    marginTop: 2,
+  },
+  ejectButtonDisabled: {
+    padding: 8,
+    marginLeft: 4,
+    opacity: 0.4,
+  },
+  dangerButtonConfirm: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: "rgba(239, 68, 68, 0.25)",
+    borderWidth: 1,
+    borderColor: "#EF4444",
+  },
+  dangerButtonConfirmText: {
+    color: "#FCA5A5",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  trashTable: {
+    gap: 4,
+  },
+  trashHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    gap: 12,
+  },
+  trashHeaderNameCell: {
+    flex: 2,
+    minWidth: 0,
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#6B7280",
+    textTransform: "uppercase",
+  },
+  trashHeaderLocationCell: {
+    flex: 3,
+    minWidth: 0,
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#6B7280",
+    textTransform: "uppercase",
+  },
+  trashHeaderDateCell: {
+    flex: 2,
+    minWidth: 0,
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#6B7280",
+    textTransform: "uppercase",
+  },
+  trashHeaderSizeCell: {
+    width: 80,
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#6B7280",
+    textTransform: "uppercase",
+  },
+  trashHeaderActionsCell: {
+    width: 190,
+  },
+  trashRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: "#161920",
+    gap: 12,
+  },
+  trashNameCell: {
+    flex: 2,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  trashName: {
+    flex: 1,
+    fontSize: 13,
+    color: "#F3F4F6",
+    fontWeight: "500",
+  },
+  trashLocationCell: {
+    flex: 3,
+    minWidth: 0,
+    fontSize: 12,
+    color: "#9CA3AF",
+  },
+  trashDateCell: {
+    flex: 2,
+    minWidth: 0,
+    fontSize: 12,
+    color: "#9CA3AF",
+  },
+  trashSizeCell: {
+    width: 80,
+    fontSize: 12,
+    color: "#9CA3AF",
+  },
+  trashActionsCell: {
+    width: 190,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
+  trashRowButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+  },
+  trashRowButtonText: {
+    fontSize: 12,
+    color: "#D7AC57",
+    fontWeight: "600",
+  },
+  trashDeleteText: {
+    fontSize: 12,
+    color: "#F87171",
+    fontWeight: "600",
+  },
+  trashDeleteConfirmButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: "#EF4444",
+  },
+  trashDeleteConfirmText: {
+    fontSize: 12,
+    color: "#0F1115",
+    fontWeight: "700",
+  },
   statusBar: {
     height: 24,
     backgroundColor: "#161920",
@@ -1008,5 +1566,75 @@ const styles = StyleSheet.create({
   statusText: {
     fontSize: 11,
     color: "#6B7280",
+  },
+  overlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
+  },
+  dialog: {
+    width: 420,
+    backgroundColor: "#1A1D24",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.1)",
+    padding: 20,
+    gap: 12,
+  },
+  dialogTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#F3F4F6",
+  },
+  dialogSubtitle: {
+    fontSize: 13,
+    color: "#9CA3AF",
+  },
+  dialogLabel: {
+    fontSize: 12,
+    color: "#9CA3AF",
+  },
+  dialogInput: {
+    height: 36,
+    backgroundColor: "rgba(0, 0, 0, 0.3)",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    color: "#F3F4F6",
+    fontSize: 13,
+    paddingHorizontal: 12,
+  },
+  dialogError: {
+    fontSize: 12,
+    color: "#FCA5A5",
+  },
+  dialogStatus: {
+    fontSize: 12,
+    color: "#D7AC57",
+  },
+  dialogButtons: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginTop: 4,
+  },
+  cancelButtonDisabled: {
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    paddingHorizontal: 12,
+    height: 32,
+    borderRadius: 8,
+    justifyContent: "center",
+    opacity: 0.4,
+  },
+  progressTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    overflow: "hidden",
   },
 });

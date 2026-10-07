@@ -17,6 +17,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@sevynos/file-archives": "workspace:*",
     "@sevynos/react-native": "workspace:*",
     "@sevynos/sdk": "workspace:*",
     "react": "^19.2.8"
