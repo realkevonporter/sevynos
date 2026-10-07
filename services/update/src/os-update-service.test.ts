@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OsUpdateService,
+  defaultUpdateFeedUrl,
   resolveCurrentVersion,
   type OsUpdateServiceOptions,
 } from "./os-update-service.js";
@@ -94,6 +95,19 @@ describe("OsUpdateService", () => {
     const dir = await mkdtemp(join(tmpdir(), "sevyn-update-test-"));
     dirs.push(dir);
     return dir;
+  }
+
+  async function waitForFile(path: string): Promise<void> {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      try {
+        await readFile(path, "utf8");
+        return;
+      } catch {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
   }
 
   it("rejects a non-https feed URL and an invalid current version", () => {
@@ -304,6 +318,111 @@ describe("OsUpdateService", () => {
     expect(seen).toContain("update-available");
     unsubscribe();
     service.dispose();
+  });
+
+  it("defaults to the stable channel and its feed URL", async () => {
+    const service = new OsUpdateService({
+      currentVersion: "0.1.0",
+      stateDirectory: await tempDir(),
+    });
+    expect(service.channel).toBe("stable");
+    expect(service.feedUrl).toBe(defaultUpdateFeedUrl("stable"));
+    service.dispose();
+  });
+
+  it("selects the nightly feed URL when the nightly channel is configured", async () => {
+    const service = new OsUpdateService({
+      currentVersion: "0.1.0",
+      channel: "nightly",
+      stateDirectory: await tempDir(),
+    });
+    expect(service.channel).toBe("nightly");
+    expect(service.feedUrl).toBe(defaultUpdateFeedUrl("nightly"));
+    service.dispose();
+  });
+
+  it("lets an explicit feed URL win over the channel default", async () => {
+    const service = new OsUpdateService(options(await tempDir(), { channel: "nightly" }));
+    expect(service.channel).toBe("nightly");
+    expect(service.feedUrl).toBe(FEED_URL);
+    service.dispose();
+  });
+
+  it("setChannel switches the feed, clears stale results, and persists", async () => {
+    const dir = await tempDir();
+    const nightlyFeed = defaultUpdateFeedUrl("nightly");
+    const service = new OsUpdateService(
+      options(dir, {
+        channel: "nightly",
+        feedUrl: undefined,
+        fetchImpl: stubFetch({
+          [nightlyFeed]: { status: 200, body: feedJson() },
+          "https://example.com/rootfs.squashfs": { status: 200, body: PAYLOAD },
+        }),
+      }),
+    );
+    expect(service.channel).toBe("nightly");
+    expect(service.feedUrl).toBe(nightlyFeed);
+    const result = await service.checkNow();
+    expect(result.status).toBe("update-available");
+
+    service.setChannel("stable");
+    expect(service.channel).toBe("stable");
+    expect(service.feedUrl).toBe(defaultUpdateFeedUrl("stable"));
+    expect(service.status).toBe("idle");
+    expect(service.lastResult).toBeUndefined();
+
+    // The channel write is fire-and-forget; wait for it to land, then the
+    // host restores it via readPersistedChannel on the next boot.
+    const channelFile = join(dir, "updates", "channel.json");
+    await waitForFile(channelFile);
+    expect(await readFile(channelFile, "utf8")).toBe('"stable"\n');
+    const persisted = await OsUpdateService.readPersistedChannel(dir);
+    const reloaded = new OsUpdateService({
+      currentVersion: "0.1.0",
+      channel: persisted ?? "nightly",
+      stateDirectory: dir,
+    });
+    expect(reloaded.channel).toBe("stable");
+    expect(reloaded.feedUrl).toBe(defaultUpdateFeedUrl("stable"));
+    service.dispose();
+    reloaded.dispose();
+  });
+
+  it("readPersistedChannel returns undefined when nothing was persisted", async () => {
+    await expect(
+      OsUpdateService.readPersistedChannel(await tempDir()),
+    ).resolves.toBeUndefined();
+  });
+
+  it("setChannel keeps a pinned feed URL but still tracks the channel", async () => {
+    const service = new OsUpdateService(options(await tempDir()));
+    service.setChannel("nightly");
+    expect(service.channel).toBe("nightly");
+    expect(service.feedUrl).toBe(FEED_URL);
+    service.dispose();
+  });
+
+  it("rejects an unknown channel", async () => {
+    const service = new OsUpdateService(options(await tempDir()));
+    expect(() => {
+      service.setChannel("beta" as "stable");
+    }).toThrow("Unknown update channel");
+    service.dispose();
+  });
+});
+
+describe("defaultUpdateFeedUrl", () => {
+  it("selects the feed by channel, defaulting to stable", () => {
+    expect(defaultUpdateFeedUrl()).toBe(
+      "https://github.com/realkevonporter/sevynos/releases/latest/download/updates.json",
+    );
+    expect(defaultUpdateFeedUrl("stable")).toBe(
+      "https://github.com/realkevonporter/sevynos/releases/latest/download/updates.json",
+    );
+    expect(defaultUpdateFeedUrl("nightly")).toBe(
+      "https://github.com/realkevonporter/sevynos/releases/download/nightly/updates.json",
+    );
   });
 });
 

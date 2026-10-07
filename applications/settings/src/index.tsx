@@ -23,6 +23,7 @@ import {
 import type {
   OsUpdateService,
   StagedUpdate,
+  UpdateChannel,
   UpdateCheckResult,
 } from "@sevynos/os-update";
 
@@ -620,6 +621,9 @@ export function SettingsApplication({
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | undefined>(
     undefined,
   );
+  const [updateChannel, setUpdateChannel] = useState<UpdateChannel>(
+    update?.channel ?? "stable",
+  );
   const [updateBusy, setUpdateBusy] = useState<boolean>(false);
   const [stagedUpdate, setStagedUpdate] = useState<StagedUpdate | undefined>(undefined);
   const [downloadProgress, setDownloadProgress] = useState<
@@ -944,9 +948,11 @@ export function SettingsApplication({
     if (!update) return undefined;
     setUpdateStatus(update.status);
     setUpdateResult(update.lastResult);
+    setUpdateChannel(update.channel);
     return update.subscribe(() => {
       setUpdateStatus(update.status);
       setUpdateResult(update.lastResult);
+      setUpdateChannel(update.channel);
     });
   }, [update]);
 
@@ -992,6 +998,16 @@ export function SettingsApplication({
 
   const handleReboot = () => {
     void power?.restart?.();
+  };
+
+  const handleUpdateChannelChange = (channel: UpdateChannel) => {
+    if (!update || channel === update.channel) return;
+    update.setChannel(channel);
+    setUpdateChannel(channel);
+    setStagedUpdate(undefined);
+    setDownloadProgress(undefined);
+    // Check the new channel's feed right away so the panel reflects it.
+    handleCheckForUpdates();
   };
 
   const handleTimezoneSave = () => {
@@ -2789,6 +2805,44 @@ export function SettingsApplication({
                   </Text>
                 )}
               </View>
+
+              {update !== undefined && (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Release channel</Text>
+                  <Text style={styles.cardDesc}>
+                    Stable delivers tested releases. Nightly tracks the latest development
+                    build and may be unstable.
+                  </Text>
+                  <View style={styles.segmentedControl}>
+                    {(["stable", "nightly"] as const).map((channel) => (
+                      <Pressable
+                        key={channel}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Use the ${channel} release channel`}
+                        disabled={updateBusy || updateStatus === "checking"}
+                        onPress={() => {
+                          handleUpdateChannelChange(channel);
+                        }}
+                        style={
+                          updateChannel === channel
+                            ? styles.segmentButtonActive
+                            : styles.segmentButton
+                        }
+                      >
+                        <Text
+                          style={
+                            updateChannel === channel
+                              ? styles.segmentTextActive
+                              : styles.segmentText
+                          }
+                        >
+                          {channel.charAt(0).toUpperCase() + channel.slice(1)}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              )}
 
               {update !== undefined && updateResult?.status === "update-available" && (
                 <View style={styles.card}>

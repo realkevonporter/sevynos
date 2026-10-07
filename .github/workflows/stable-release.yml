@@ -1,0 +1,64 @@
+name: Stable release
+
+# Cut a stable release by pushing a tag: `git tag v1.0.0 && git push origin v1.0.0`
+# (see docs/release-process.md). The tag must be semver `vMAJOR.MINOR.PATCH`.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build bootable image
+        run: pnpm qemu:build
+        env:
+          # Stamps the OS version from the tag (tools/qemu/release-version.mjs)
+          # and writes updates.json with channel "stable" plus artifact URLs
+          # pointing at this tag's release assets.
+          SEVYN_RELEASE_TAG: ${{ github.ref_name }}
+      - name: Publish stable release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          name: SevynOS ${{ github.ref_name }}
+          body: |
+            ## SevynOS ${{ github.ref_name }}
+
+            Stable release. Installed systems on the stable channel pick this
+            up automatically via Settings → Software Update.
+
+            - Version: ${{ github.ref_name }}
+            - Commit: ${{ github.sha }}
+
+            ### Changelog
+
+            Summarize the user-facing changes since the previous stable tag
+            here before announcing (see docs/release-process.md).
+
+            ### Verify your download
+
+            Compare the artifacts against the attached SHA256SUMS:
+
+                sha256sum -c SHA256SUMS
+          prerelease: false
+          makeLatest: true
+          # rootfs.squashfs + updates.json feed the OS update service's
+          # check/download/apply flow (Settings → Software Update) on the
+          # stable channel.
+          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json"
