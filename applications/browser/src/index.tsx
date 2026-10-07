@@ -14,6 +14,15 @@ import {
   type SevynBrowserEngine,
   type SevynApplicationManifest,
 } from "@sevynos/react-native";
+import {
+  EngineDownloadManager,
+  describeDownloadState,
+  downloadProgressPercent,
+  formatDownloadBytes,
+  isDownloadFinished,
+  isInstallableDownload,
+  type EngineDownload,
+} from "./download-manager.js";
 
 interface BrowserPointerEvent {
   readonly x: number;
@@ -82,6 +91,16 @@ export interface BrowserApplicationProps {
   readonly engine?: SevynBrowserEngine | undefined;
   readonly createEngine?: (() => SevynBrowserEngine | undefined) | undefined;
   readonly initialUrl?: string | undefined;
+  /**
+   * Host-implemented download actions. The host resolves the download's
+   * on-disk path from its download directory and the filename. When absent
+   * the corresponding buttons are hidden rather than faked.
+   */
+  readonly onOpenDownload?: ((download: EngineDownload) => void) | undefined;
+  readonly onRevealDownload?: ((download: EngineDownload) => void) | undefined;
+  /** Installs a finished `.sevyn` download through the real app registry. */
+  readonly onInstallDownload?:
+    ((download: EngineDownload) => Promise<unknown>) | undefined;
 }
 
 export interface DocsSection {
@@ -141,6 +160,9 @@ export function BrowserApplication({
   engine,
   createEngine,
   initialUrl = "sevyn://start",
+  onOpenDownload,
+  onRevealDownload,
+  onInstallDownload,
 }: BrowserApplicationProps): JSX.Element {
   // Storage is optional: the browser works without persistence when no SDK
   // provider is present (e.g. in host runtime tests).
@@ -274,6 +296,54 @@ export function BrowserApplication({
   const [findText, setFindText] = useState("");
   const [findResult, setFindResult] = useState<string | null>(null);
   const [downloadsVisible, setDownloadsVisible] = useState(false);
+  const [installingDownload, setInstallingDownload] = useState<string | undefined>(
+    undefined,
+  );
+  const [downloadActionError, setDownloadActionError] = useState<string | undefined>(
+    undefined,
+  );
+  const [, setDownloadTick] = useState(0);
+
+  // Downloads manager: merges live engine downloads with a persisted
+  // finished-download history. The engine is the only source of in-progress
+  // state; history keeps finished entries actionable across restarts.
+  const downloadManagerRef = useRef<EngineDownloadManager | undefined>(undefined);
+  downloadManagerRef.current ??= new EngineDownloadManager({ storage });
+  const downloadManager = downloadManagerRef.current;
+
+  useEffect(() => {
+    const unsubscribe = downloadManager.subscribe(() => {
+      setDownloadTick((tick) => tick + 1);
+    });
+    void downloadManager.load();
+    return unsubscribe;
+  }, [downloadManager]);
+
+  // Feed every engine snapshot's download list into the manager so progress
+  // stays live while the engine reports it.
+  useEffect(() => {
+    downloadManager.syncEngineDownloads(engineSnapshot?.downloads ?? []);
+  }, [downloadManager, engineSnapshot]);
+
+  const handleInstallDownload = useCallback(
+    (download: EngineDownload) => {
+      if (onInstallDownload === undefined || installingDownload !== undefined) return;
+      setInstallingDownload(download.guid);
+      setDownloadActionError(undefined);
+      void onInstallDownload(download)
+        .catch((error: unknown) => {
+          setDownloadActionError(
+            `Could not install ${download.filename}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        })
+        .finally(() => {
+          setInstallingDownload(undefined);
+        });
+    },
+    [onInstallDownload, installingDownload],
+  );
 
   const activeTab: BrowserTab = tabs.find((t) => t.id === activeTabId) ??
     tabs[0] ?? {
@@ -629,9 +699,9 @@ export function BrowserApplication({
         >
           <View style={styles.navButtonGlyphRow}>
             <SevynIcon name="download" size={15} color="#E2E8F0" />
-            {(engineSnapshot?.downloads?.length ?? 0) > 0 ? (
+            {downloadManager.list().length > 0 ? (
               <Text style={styles.navButtonText}>
-                {` ${String(engineSnapshot?.downloads?.length ?? 0)}`}
+                {` ${String(downloadManager.list().length)}`}
               </Text>
             ) : null}
           </View>
@@ -1027,38 +1097,135 @@ export function BrowserApplication({
             </Pressable>
           </View>
         )}
-        {/* Downloads panel */}
+        {/* Downloads manager */}
         {downloadsVisible && (
           <View style={styles.downloadsPanel}>
             <View style={styles.downloadsHeader}>
               <Text style={styles.downloadsTitle}>Downloads</Text>
-              <Pressable
-                onPress={() => {
-                  setDownloadsVisible(false);
-                }}
-              >
-                <SevynIcon name="x" size={14} color="#E2E8F0" />
-              </Pressable>
+              <View style={styles.downloadsHeaderActions}>
+                {downloadManager.finishedCount > 0 && (
+                  <Pressable
+                    accessibilityLabel="Clear finished downloads"
+                    onPress={() => {
+                      downloadManager.clearFinished();
+                    }}
+                    style={styles.downloadsClearButton}
+                  >
+                    <Text style={styles.downloadsClearText}>Clear finished</Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  accessibilityLabel="Close downloads"
+                  onPress={() => {
+                    setDownloadsVisible(false);
+                  }}
+                >
+                  <SevynIcon name="x" size={14} color="#E2E8F0" />
+                </Pressable>
+              </View>
             </View>
-            {(engineSnapshot?.downloads ?? []).length === 0 ? (
+            {downloadManager.list().length === 0 ? (
               <Text style={styles.downloadsEmpty}>No downloads yet</Text>
             ) : (
-              (engineSnapshot?.downloads ?? []).map((download) => (
-                <View key={download.guid} style={styles.downloadItem}>
-                  <Text style={styles.downloadFilename}>{download.filename}</Text>
-                  <Text style={styles.downloadStatus}>
-                    {download.state === "in_progress"
-                      ? download.totalBytes > 0
-                        ? `${String(Math.round((download.receivedBytes / download.totalBytes) * 100))}%`
-                        : "Downloading…"
-                      : download.state === "completed"
-                        ? "Completed"
-                        : download.state === "cancelled"
-                          ? "Cancelled"
-                          : "Interrupted"}
-                  </Text>
-                </View>
-              ))
+              <ScrollView style={styles.panelScroll}>
+                {downloadManager.list().map((download) => {
+                  const percent = downloadProgressPercent(download);
+                  const installable =
+                    isInstallableDownload(download) && onInstallDownload !== undefined;
+                  return (
+                    <View key={download.guid} style={styles.downloadItem}>
+                      <View style={styles.downloadRow}>
+                        <View style={styles.downloadInfo}>
+                          <Text style={styles.downloadFilename} numberOfLines={1}>
+                            {download.filename}
+                          </Text>
+                          <Text style={styles.downloadStatus}>
+                            {describeDownloadState(download)}
+                            {download.totalBytes > 0 &&
+                              ` · ${formatDownloadBytes(download.totalBytes)}`}
+                          </Text>
+                        </View>
+                        <Pressable
+                          accessibilityLabel={`Remove ${download.filename} from downloads`}
+                          onPress={() => {
+                            downloadManager.dismiss(download.guid);
+                          }}
+                          style={styles.downloadDismiss}
+                        >
+                          <SevynIcon name="x" size={12} color="#64748B" />
+                        </Pressable>
+                      </View>
+                      {percent !== undefined && (
+                        <View style={styles.downloadProgressTrack}>
+                          <View
+                            style={{
+                              ...styles.downloadProgressFill,
+                              // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- intentional number in template for the `${number}%` width type
+                              width: `${percent}%`,
+                            }}
+                          />
+                        </View>
+                      )}
+                      {isDownloadFinished(download.state) && (
+                        <View style={styles.downloadActions}>
+                          {onOpenDownload !== undefined && (
+                            <Pressable
+                              accessibilityLabel={`Open ${download.filename}`}
+                              onPress={() => {
+                                onOpenDownload(download);
+                              }}
+                              style={styles.downloadActionButton}
+                            >
+                              <Text style={styles.downloadActionText}>Open</Text>
+                            </Pressable>
+                          )}
+                          {onRevealDownload !== undefined && (
+                            <Pressable
+                              accessibilityLabel={`Show ${download.filename} in Files`}
+                              onPress={() => {
+                                onRevealDownload(download);
+                              }}
+                              style={styles.downloadActionButton}
+                            >
+                              <Text style={styles.downloadActionText}>Show in Files</Text>
+                            </Pressable>
+                          )}
+                          {installable && (
+                            <Pressable
+                              accessibilityLabel={`Install ${download.filename}`}
+                              onPress={() => {
+                                handleInstallDownload(download);
+                              }}
+                              disabled={installingDownload === download.guid}
+                              style={
+                                installingDownload === download.guid
+                                  ? {
+                                      ...styles.downloadActionButton,
+                                      ...styles.downloadInstallButton,
+                                      ...styles.downloadActionDisabled,
+                                    }
+                                  : {
+                                      ...styles.downloadActionButton,
+                                      ...styles.downloadInstallButton,
+                                    }
+                              }
+                            >
+                              <Text style={styles.downloadActionText}>
+                                {installingDownload === download.guid
+                                  ? "Installing…"
+                                  : "Install"}
+                              </Text>
+                            </Pressable>
+                          )}
+                        </View>
+                      )}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            )}
+            {downloadActionError !== undefined && (
+              <Text style={styles.downloadError}>{downloadActionError}</Text>
             )}
           </View>
         )}
@@ -1590,6 +1757,67 @@ const styles = StyleSheet.create({
     color: "#94A3B8",
     fontSize: 12,
     marginTop: 2,
+  },
+  downloadsHeaderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  downloadsClearButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  downloadsClearText: {
+    color: "#93C5FD",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  downloadRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  downloadInfo: { flex: 1 },
+  downloadDismiss: { padding: 4 },
+  downloadProgressTrack: {
+    height: 4,
+    backgroundColor: "#334155",
+    borderRadius: 2,
+    marginTop: 6,
+    overflow: "hidden",
+  },
+  downloadProgressFill: {
+    height: 4,
+    backgroundColor: "#38BDF8",
+    borderRadius: 2,
+  },
+  downloadActions: {
+    flexDirection: "row",
+    gap: 6,
+    marginTop: 8,
+  },
+  downloadActionButton: {
+    borderWidth: 1,
+    borderColor: "#334155",
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  downloadInstallButton: {
+    borderColor: "#0284C7",
+    backgroundColor: "#0C4A6E",
+  },
+  downloadActionDisabled: { opacity: 0.5 },
+  downloadActionText: {
+    color: "#E2E8F0",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  downloadError: {
+    color: "#FCA5A5",
+    fontSize: 12,
+    marginTop: 8,
   },
   panelScroll: {
     maxHeight: 240,
