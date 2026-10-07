@@ -122,6 +122,9 @@ const servicePermission = (service: WorkerServiceName): SevynPermission | undefi
     case "camera.recordStop":
     case "camera.preview":
     case "camera.readImage":
+    case "camera.playVideo":
+    case "camera.videoFrame":
+    case "camera.stopVideo":
     case "camera.status":
     case "camera.torch":
       return "camera";

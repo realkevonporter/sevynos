@@ -24,6 +24,24 @@ export type LinuxMediaLauncher = (
   offsetSeconds: number,
 ) => Promise<LinuxMediaPlaybackHandle>;
 
+interface VideoPlaybackSession {
+  readonly child: ChildProcess;
+  readonly width: number;
+  readonly height: number;
+  readonly durationSec: number;
+  readonly fps: number;
+  readonly frameBytes: number;
+  buffer: Buffer;
+  frameIndex: number;
+  ended: boolean;
+  failed: string | undefined;
+  latestPath: string;
+  useSlotA: boolean;
+}
+
+const VIDEO_PLAYBACK_FPS = 10;
+const VIDEO_PLAYBACK_MAX_WIDTH = 640;
+
 export class LinuxNativeModuleServices {
   readonly #root: string;
   readonly #mediaLauncher: LinuxMediaLauncher;
@@ -42,6 +60,7 @@ export class LinuxNativeModuleServices {
   #cameraRecording: ChildProcess | undefined;
   #cameraRecordingPath: string | undefined;
   #cameraRecordingStartTime: number | undefined;
+  #videoPlayback: VideoPlaybackSession | undefined;
   readonly #binaryLoader: LinuxBinaryNativeModuleLoader;
   readonly #binaryModules = new Map<string, LinuxBinaryNativeModule>();
   readonly #webviews = new Map<string, ChromiumBrowserEngine>();
@@ -106,6 +125,9 @@ export class LinuxNativeModuleServices {
     if (service === "camera.readImage") return this.#readImageCamera(value);
     if (service === "camera.recordStart") return this.#startCameraRecord();
     if (service === "camera.recordStop") return this.#stopCameraRecord();
+    if (service === "camera.playVideo") return this.#startVideoPlayback(value);
+    if (service === "camera.videoFrame") return this.#videoPlaybackFrame();
+    if (service === "camera.stopVideo") return this.#stopVideoPlayback();
     if (service === "camera.torch") return this.#setTorch(value);
     if (service === "battery.status") return this.#batteryStatus();
     if (service === "display.brightness.get") return this.#getDisplayBrightness();
@@ -186,6 +208,9 @@ export class LinuxNativeModuleServices {
       case "camera.preview":
       case "camera.recordStart":
       case "camera.recordStop":
+      case "camera.playVideo":
+      case "camera.videoFrame":
+      case "camera.stopVideo":
       case "camera.torch":
       case "battery.status":
       case "display.brightness.get":
@@ -559,6 +584,232 @@ export class LinuxNativeModuleServices {
       format: "video/mp4",
       timestamp: Date.now(),
     };
+  }
+
+  /**
+   * Starts decoding a recorded video file into RGBA frames at a modest frame
+   * rate. Decoded frames are pumped through alternating `.rgba` files (the
+   * same file-based pattern as the camera preview); the app fetches the latest
+   * frame via `camera.videoFrame` and ends the session with `camera.stopVideo`.
+   */
+  async #startVideoPlayback(value: StructuredValue): Promise<StructuredValue> {
+    let path = "";
+    let startSec = 0;
+    if (typeof value === "string") {
+      path = value;
+    } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      const rec = value as Record<string, StructuredValue>;
+      if (typeof rec["path"] === "string") path = rec["path"];
+      if (typeof rec["startSec"] === "number" && Number.isFinite(rec["startSec"])) {
+        startSec = Math.max(0, rec["startSec"]);
+      }
+    }
+    if (path.length === 0) {
+      throw new Error("Video playback requires a file path.");
+    }
+    // Security: only allow playback from the camera's own photos/videos directories
+    const allowedPrefixes = [`${this.#root}/photos/`, `${this.#root}/videos/`];
+    if (!allowedPrefixes.some((prefix) => path.startsWith(prefix))) {
+      throw new Error("Video playback is restricted to the camera library.");
+    }
+    await access(path).catch(() => {
+      throw new Error(`Video file is unavailable: ${path}`);
+    });
+
+    // Stop any in-progress playback session before starting a new one.
+    await this.#stopVideoPlayback();
+
+    // Probe dimensions and duration.
+    const probe = await run("ffprobe", [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height,duration",
+      "-of",
+      "csv=p=0",
+      path,
+    ]).catch((error: unknown) => {
+      throw new Error(
+        `Unable to probe video file: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+    const parts = probe.trim().split(",");
+    const probedW = Number(parts[0]);
+    const probedH = Number(parts[1]);
+    const probedDuration = Number(parts[2]);
+    const srcWidth = Number.isFinite(probedW) && probedW > 0 ? probedW : 640;
+    const srcHeight = Number.isFinite(probedH) && probedH > 0 ? probedH : 360;
+    const durationSec =
+      Number.isFinite(probedDuration) && probedDuration > 0 ? probedDuration : 0;
+
+    // Scale down for the frame pump (keeps per-frame IPC/file reads cheap).
+    const scale = Math.min(1, VIDEO_PLAYBACK_MAX_WIDTH / srcWidth);
+    let width = Math.floor(srcWidth * scale);
+    let height = Math.floor(srcHeight * scale);
+    // ffmpeg scale requires even dimensions for most pixel formats.
+    if (width % 2 === 1) width -= 1;
+    if (height % 2 === 1) height -= 1;
+    width = Math.max(2, width);
+    height = Math.max(2, height);
+
+    const child = spawn(
+      "ffmpeg",
+      [
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-ss",
+        startSec.toFixed(3),
+        "-i",
+        path,
+        "-an",
+        "-vf",
+        `scale=${String(width)}:${String(height)}`,
+        "-r",
+        String(VIDEO_PLAYBACK_FPS),
+        "-pix_fmt",
+        "rgba",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    const session: VideoPlaybackSession = {
+      child,
+      width,
+      height,
+      durationSec,
+      fps: VIDEO_PLAYBACK_FPS,
+      frameBytes: width * height * 4,
+      buffer: Buffer.alloc(0),
+      frameIndex: 0,
+      ended: false,
+      failed: undefined,
+      latestPath: "",
+      useSlotA: true,
+    };
+    this.#videoPlayback = session;
+
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const active = this.#videoPlayback;
+      if (active === undefined || active.child !== child) return;
+      active.buffer = Buffer.concat([active.buffer, chunk]);
+      while (active.buffer.length >= active.frameBytes) {
+        const frame = active.buffer.subarray(0, active.frameBytes);
+        active.buffer = active.buffer.subarray(active.frameBytes);
+        // Double-buffer the frame files so readers never see a torn frame.
+        active.useSlotA = !active.useSlotA;
+        const framePath = `${this.#root}/camera-video-playback-${active.useSlotA ? "a" : "b"}.rgba`;
+        void writeFile(framePath, frame)
+          .then(() => {
+            if (this.#videoPlayback?.child === child) {
+              active.latestPath = framePath;
+              active.frameIndex += 1;
+            }
+          })
+          .catch(() => {
+            // A failed frame write is non-fatal; the next frame retries.
+          });
+      }
+    });
+    const finish = (failed: string | undefined): void => {
+      if (this.#videoPlayback?.child === child) {
+        session.ended = true;
+        session.failed = failed;
+      }
+    };
+    child.once("error", (error: Error) => {
+      finish(`Video decoder failed to start: ${error.message}`);
+    });
+    child.once("close", (code) => {
+      finish(
+        code !== 0 && code !== null && session.frameIndex === 0
+          ? `Video decoder exited (code ${String(code)}): ${stderr.trim().slice(0, 200)}`
+          : undefined,
+      );
+    });
+
+    // Wait for the first decoded frame so the player shows video immediately.
+    const firstFrame = await new Promise<boolean>((resolve) => {
+      const deadline = Date.now() + 5000;
+      const check = (): void => {
+        if (this.#videoPlayback?.child !== child || session.ended) {
+          resolve(false);
+          return;
+        }
+        if (session.frameIndex > 0) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          resolve(false);
+          return;
+        }
+        setTimeout(check, 50);
+      };
+      check();
+    });
+
+    if (!firstFrame) {
+      const failure = session.failed ?? "Timed out waiting for the first video frame.";
+      await this.#stopVideoPlayback();
+      throw new Error(failure);
+    }
+
+    return {
+      width,
+      height,
+      durationSec,
+      fps: VIDEO_PLAYBACK_FPS,
+      available: true,
+      path: session.latestPath,
+    };
+  }
+
+  #videoPlaybackFrame(): Promise<StructuredValue> {
+    const session = this.#videoPlayback;
+    if (session === undefined) {
+      return Promise.resolve({ available: false });
+    }
+    return Promise.resolve({
+      width: session.width,
+      height: session.height,
+      available: session.frameIndex > 0,
+      path: session.latestPath.length > 0 ? session.latestPath : null,
+      frameIndex: session.frameIndex,
+      ended: session.ended,
+      timestamp: Date.now(),
+    });
+  }
+
+  async #stopVideoPlayback(): Promise<StructuredValue> {
+    const session = this.#videoPlayback;
+    this.#videoPlayback = undefined;
+    if (session !== undefined) {
+      const child = session.child;
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = (): void => {
+          if (!done) {
+            done = true;
+            resolve();
+          }
+        };
+        child.once("close", finish);
+        child.once("error", finish);
+        child.kill("SIGKILL");
+        setTimeout(finish, 1000);
+      });
+    }
+    return { stopped: true };
   }
 
   async #setTorch(value: StructuredValue): Promise<StructuredValue> {

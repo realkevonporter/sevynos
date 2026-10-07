@@ -73,6 +73,9 @@ export interface SevynNativeAdapters {
     status?(): Promise<unknown>;
     setTorch?(enabled: boolean): Promise<unknown>;
     readImage?(path: string): Promise<unknown>;
+    playVideo?(path: string, options?: { startSec?: number }): Promise<unknown>;
+    videoFrame?(): Promise<unknown>;
+    stopVideo?(): Promise<unknown>;
   };
   readonly microphone?: {
     start(options?: unknown): Promise<void>;

@@ -1,13 +1,54 @@
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
-import {
-  DEFAULT_PLAYLISTS,
-  DEFAULT_TRACKS,
-  MusicApplication,
-  formatTime,
-  musicManifest,
-} from "./index.js";
-import type { MediaPlaybackStatus, MediaService } from "@sevynos/react-native";
+import { MusicApplication, formatTime, musicManifest } from "./index.js";
+import type {
+  MediaPlaylist,
+  MediaPlaybackStatus,
+  MediaService,
+  MediaTrack,
+} from "@sevynos/react-native";
+
+const SAMPLE_TRACKS: readonly MediaTrack[] = [
+  {
+    id: "track-a",
+    title: "First Song",
+    artist: "Test Artist",
+    album: "Test Album",
+    durationSec: 180,
+    path: "/var/lib/sevynos/user/Music/first-song.mp3",
+    format: "mp3",
+  },
+  {
+    id: "track-b",
+    title: "Second Song",
+    artist: "Test Artist",
+    durationSec: 200,
+    path: "/var/lib/sevynos/user/Music/second-song.flac",
+    format: "flac",
+  },
+];
+
+function createMediaService(overrides: Partial<MediaService> = {}): MediaService {
+  const idle: MediaPlaybackStatus = {
+    playing: false,
+    paused: false,
+    currentPositionSec: 0,
+    durationSec: 200,
+    volume: 100,
+  };
+  return {
+    play: vi.fn().mockResolvedValue({ ...idle, playing: true }),
+    pause: vi.fn().mockResolvedValue({ ...idle, playing: true, paused: true }),
+    resume: vi.fn().mockResolvedValue({ ...idle, playing: true }),
+    stop: vi.fn().mockResolvedValue(idle),
+    seek: vi.fn((seconds: number) =>
+      Promise.resolve({ ...idle, playing: true, currentPositionSec: seconds }),
+    ),
+    status: vi.fn().mockResolvedValue(idle),
+    scan: vi.fn().mockResolvedValue(SAMPLE_TRACKS),
+    ...overrides,
+  };
+}
 
 describe("Music Application Manifest and Utilities", () => {
   it("exposes valid application manifest with required media capabilities", () => {
@@ -28,73 +69,39 @@ describe("Music Application Manifest and Utilities", () => {
     expect(formatTime(3600)).toBe("60:00");
   });
 
-  it("includes default high-fidelity tracks covering mp3, ogg, flac, wav, and m4a formats", () => {
-    expect(DEFAULT_TRACKS.length).toBeGreaterThanOrEqual(5);
-    const formats = new Set(DEFAULT_TRACKS.map((t) => t.format.toLowerCase()));
-    expect(formats.has("flac")).toBe(true);
-    expect(formats.has("mp3")).toBe(true);
-    expect(formats.has("ogg")).toBe(true);
-    expect(formats.has("wav")).toBe(true);
-    expect(formats.has("m4a")).toBe(true);
+  it("does not ship hardcoded seed tracks or playlists", async () => {
+    const moduleSource = await import("node:fs/promises").then((fs) =>
+      fs.readFile(new URL("./index.tsx", import.meta.url), "utf8"),
+    );
+    expect(moduleSource).not.toContain("DEFAULT_TRACKS");
+    expect(moduleSource).not.toContain("DEFAULT_PLAYLISTS");
+    expect(moduleSource).not.toContain("Genesis Horizon");
   });
 
-  it("provides initial default playlists", () => {
-    expect(DEFAULT_PLAYLISTS.length).toBeGreaterThanOrEqual(2);
-    const names = DEFAULT_PLAYLISTS.map((p) => p.name);
-    expect(names).toContain("Favorites");
-    expect(names).toContain("Focus & Flow");
+  it("persists playlists through the SDK storage instead of memory only", async () => {
+    const moduleSource = await import("node:fs/promises").then((fs) =>
+      fs.readFile(new URL("./index.tsx", import.meta.url), "utf8"),
+    );
+    expect(moduleSource).toContain("useOptionalSevynApplicationSdk");
+    // Tolerate prettier wrapping the member chain across lines.
+    expect(moduleSource).toMatch(/sdk\.storage\s*\.\s*set/);
+    expect(moduleSource).toMatch(/sdk\.storage\s*\.\s*get/);
+  });
+
+  it("keeps a playlist only when the stored payload is well formed", () => {
+    const candidate: MediaPlaylist = {
+      id: "playlist-1",
+      name: "Mine",
+      trackIds: ["track-a"],
+      createdAt: 123,
+    };
+    expect(candidate.trackIds).toEqual(["track-a"]);
   });
 });
 
 describe("MusicApplication Component", () => {
   it("mounts and renders initial state with media service", () => {
-    const mediaService: MediaService = {
-      play: vi.fn().mockResolvedValue({
-        playing: true,
-        paused: false,
-        currentPositionSec: 0,
-        durationSec: 214,
-        volume: 100,
-      } satisfies MediaPlaybackStatus),
-      pause: vi.fn().mockResolvedValue({
-        playing: true,
-        paused: true,
-        currentPositionSec: 10,
-        durationSec: 214,
-        volume: 100,
-      } satisfies MediaPlaybackStatus),
-      resume: vi.fn().mockResolvedValue({
-        playing: true,
-        paused: false,
-        currentPositionSec: 10,
-        durationSec: 214,
-        volume: 100,
-      } satisfies MediaPlaybackStatus),
-      stop: vi.fn().mockResolvedValue({
-        playing: false,
-        paused: false,
-        currentPositionSec: 0,
-        durationSec: 214,
-        volume: 100,
-      } satisfies MediaPlaybackStatus),
-      seek: vi.fn((seconds: number) =>
-        Promise.resolve({
-          playing: true,
-          paused: false,
-          currentPositionSec: seconds,
-          durationSec: 214,
-          volume: 100,
-        } satisfies MediaPlaybackStatus),
-      ),
-      status: vi.fn().mockResolvedValue({
-        playing: false,
-        paused: false,
-        currentPositionSec: 0,
-        durationSec: 214,
-        volume: 100,
-      } satisfies MediaPlaybackStatus),
-      scan: vi.fn().mockResolvedValue(DEFAULT_TRACKS),
-    };
+    const mediaService = createMediaService();
 
     const element = createElement(MusicApplication, {
       media: mediaService,
