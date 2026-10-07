@@ -16,6 +16,14 @@
 # Exit status: 0 when nothing FAILs (OK or SKIP only), 1 on any FAIL.
 # This does not — and cannot — replace booting real Secure Boot hardware.
 # See docs/secure-boot.md.
+#
+# Environment:
+#   SEVYN_SB_SBVERIFY — path to the sbverify binary (default: resolved from
+#                       PATH). Empty means "treat as missing".
+#   SEVYN_SB_MOKUTIL  — path to the mokutil binary (default: resolved from
+#                       PATH). Empty means "treat as missing", in which case
+#                       enrollment state falls back to the installer's
+#                       state.json instead of live firmware queries.
 set -eu
 
 ROOT="/"
@@ -33,6 +41,11 @@ SB_DIR="$ROOT/var/lib/sevyn/secureboot"
 MOK_PRIV="$SB_DIR/MOK.priv"
 MOK_PEM="$SB_DIR/MOK.pem"
 STATE_FILE="$SB_DIR/state.json"
+
+# Resolve external tools once; an explicitly empty override means "treat as
+# missing", an unset variable resolves from PATH as before.
+SBVERIFY="${SEVYN_SB_SBVERIFY-$(command -v sbverify 2>/dev/null || true)}"
+MOKUTIL="${SEVYN_SB_MOKUTIL-$(command -v mokutil 2>/dev/null || true)}"
 
 FAILURES=0
 report() {
@@ -63,7 +76,7 @@ else
 fi
 
 # ─── 2. Artifact signatures ──────────────────────────────────────────
-if command -v sbverify >/dev/null 2>&1 && [ -f "$MOK_PEM" ]; then
+if [ -n "$SBVERIFY" ] && [ -f "$MOK_PEM" ]; then
   for artifact in \
     "$ROOT/boot/efi/EFI/SevynOS/grubx64.efi" \
     "$ROOT/boot/efi/EFI/BOOT/BOOTX64.EFI" \
@@ -71,7 +84,7 @@ if command -v sbverify >/dev/null 2>&1 && [ -f "$MOK_PEM" ]; then
     "$ROOT/boot/efi/EFI/SevynOS/vmlinuz"; do
     name="${artifact#$ROOT}"
     [ -f "$artifact" ] || continue
-    if sbverify --cert "$MOK_PEM" "$artifact" >/dev/null 2>&1; then
+    if "$SBVERIFY" --cert "$MOK_PEM" "$artifact" >/dev/null 2>&1; then
       report "OK" "signature: $name" "valid, signed by the MOK"
     else
       report "FAIL" "signature: $name" "sbverify rejected the signature"
@@ -87,11 +100,11 @@ else
 fi
 
 # ─── 3. Enrollment ───────────────────────────────────────────────────
-if command -v mokutil >/dev/null 2>&1 && [ -f "$MOK_PEM" ]; then
+if [ -n "$MOKUTIL" ] && [ -f "$MOK_PEM" ]; then
   fp=$(fingerprint)
-  if mokutil --list-enrolled 2>/dev/null | grep -qi "$fp"; then
+  if "$MOKUTIL" --list-enrolled 2>/dev/null | grep -qi "$fp"; then
     report "OK" "MOK enrollment" "fingerprint found in enrolled keys"
-  elif mokutil --list-new 2>/dev/null | grep -qi "$fp"; then
+  elif "$MOKUTIL" --list-new 2>/dev/null | grep -qi "$fp"; then
     report "OK" "MOK enrollment" "queued for enrollment (MOKNew); complete it at the MOK Manager on next boot"
   else
     report "FAIL" "MOK enrollment" "MOK neither enrolled nor queued"

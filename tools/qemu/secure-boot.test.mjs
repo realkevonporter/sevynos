@@ -2,8 +2,12 @@
 //   tools/qemu/sevyn-secure-boot.sh  (MOK generation, signing, enrollment)
 //   tools/qemu/verify-secure-boot.sh (chain verification reporting)
 //
-// sbsign/sbverify/mokutil are not installed in CI/sandbox; the tests use fake
-// shims on PATH to exercise both the happy path and graceful degradation.
+// The tests are hermetic: they never depend on the host's firmware state or
+// on which of sbsign/sbverify/mokutil happen to be installed. External tools
+// are pinned per test through the scripts' SEVYN_SB_SBSIGN / SEVYN_SB_SBVERIFY
+// / SEVYN_SB_MOKUTIL overrides (empty string = treat as missing, path = use
+// this fake shim), and firmware state is faked by constructing (or omitting)
+// $SEVYN_SB_ROOT/sys/firmware/efi in the scratch root.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, execSync } from "node:child_process";
@@ -52,6 +56,12 @@ function readState(root) {
   );
 }
 
+function fakeUefi(root) {
+  // Build a fake UEFI sysfs tree under the scratch root so the scripts see a
+  // UEFI boot. Omit this call and the scripts see a legacy (non-UEFI) boot.
+  mkdirSync(join(root, "sys/firmware/efi"), { recursive: true });
+}
+
 // A fake sbsign: copies the input artifact to --output, simulating a signature.
 const FAKE_SBSIGN_OK = `
 out=""
@@ -82,6 +92,22 @@ exit 1
 
 const FAKE_SBVERIFY_OK = `exit 0`;
 const FAKE_SBVERIFY_FAIL = `exit 1`;
+
+// A fake mokutil that accepts --import and records its argv in
+// $SEVYN_SB_TEST_LOG for the test to inspect. Reads (and discards) stdin so
+// the password pipe never blocks.
+const FAKE_MOKUTIL_OK = `
+printf '%s\\n' "$@" >> "$SEVYN_SB_TEST_LOG"
+cat >/dev/null
+exit 0
+`;
+
+// A fake mokutil that must never be invoked (e.g. on a non-UEFI boot where
+// enrollment does not apply). Exits 99 loudly if it is.
+const FAKE_MOKUTIL_NEVER = `
+echo "mokutil must not be invoked" >&2
+exit 99
+`;
 
 test("generate-mok creates a keypair with correct layout and permissions", () => {
   const root = scratch();
@@ -122,7 +148,8 @@ test("sign degrades gracefully when sbsign is missing", () => {
   const root = scratch();
   try {
     runHelper(root, ["generate-mok"]);
-    const out = runHelper(root, ["sign"]);
+    // Empty override = sbsign is missing, regardless of the host's PATH.
+    const out = runHelper(root, ["sign"], { SEVYN_SB_SBSIGN: "" });
     assert.match(out, /sbsign is missing/);
     const state = readState(root);
     assert.equal(state.signed, "false");
@@ -148,7 +175,7 @@ test("sign signs GRUB, kernel and recovery kernel with a working sbsign", () => 
       mkdirSync(join(p, ".."), { recursive: true });
       writeFileSync(p, `fake-efi-binary:${a}`);
     }
-    runHelper(root, ["sign"], { PATH: `${fakeBin}:${process.env.PATH}` });
+    runHelper(root, ["sign"], { SEVYN_SB_SBSIGN: join(fakeBin, "sbsign") });
     const state = readState(root);
     assert.equal(state.signed, "true");
     assert.equal(state.signedWith, state.fingerprint);
@@ -174,7 +201,7 @@ test("sign leaves artifacts untouched when sbsign fails", () => {
     const p = join(root, "boot/vmlinuz");
     mkdirSync(join(p, ".."), { recursive: true });
     writeFileSync(p, "original-kernel-bytes");
-    runHelper(root, ["sign"], { PATH: `${fakeBin}:${process.env.PATH}` });
+    runHelper(root, ["sign"], { SEVYN_SB_SBSIGN: join(fakeBin, "sbsign") });
     assert.equal(readFileSync(p, "utf8"), "original-kernel-bytes");
     assert.ok(!readFileSync || true); // no temp file may remain
     const state = readState(root);
@@ -190,7 +217,10 @@ test("queue-enrollment degrades gracefully without mokutil", () => {
   const root = scratch();
   try {
     runHelper(root, ["generate-mok"]);
-    const out = runHelper(root, ["queue-enrollment"]);
+    // Fake a UEFI boot so the script reaches the mokutil check, and hide
+    // mokutil via the override so the host's PATH cannot leak in.
+    fakeUefi(root);
+    const out = runHelper(root, ["queue-enrollment"], { SEVYN_SB_MOKUTIL: "" });
     assert.match(out, /mokutil is not installed/);
     const state = readState(root);
     assert.equal(state.enrollment, "manual-required");
@@ -200,13 +230,66 @@ test("queue-enrollment degrades gracefully without mokutil", () => {
   }
 });
 
+test("queue-enrollment is not applicable on a non-UEFI boot even with mokutil present", () => {
+  const root = scratch();
+  const fakeBin = makeFakeBin({ mokutil: FAKE_MOKUTIL_NEVER });
+  try {
+    runHelper(root, ["generate-mok"]);
+    // No fakeUefi(): legacy boot. mokutil must never be consulted.
+    const out = runHelper(root, ["queue-enrollment"], {
+      SEVYN_SB_MOKUTIL: join(fakeBin, "mokutil"),
+    });
+    assert.match(out, /Not a UEFI boot/);
+    const state = readState(root);
+    assert.equal(state.enrollment, "not-applicable");
+    assert.equal(state.enrollmentReason, "no-uefi");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+  }
+});
+
+test("queue-enrollment queues the MOK when mokutil accepts the import on UEFI", () => {
+  const root = scratch();
+  const fakeBin = makeFakeBin({ mokutil: FAKE_MOKUTIL_OK });
+  const mokutilLog = join(scratch(), "mokutil.log");
+  try {
+    runHelper(root, ["generate-mok"]);
+    fakeUefi(root);
+    const out = runHelper(root, ["queue-enrollment"], {
+      SEVYN_SB_MOKUTIL: join(fakeBin, "mokutil"),
+      SEVYN_SB_TEST_LOG: mokutilLog,
+    });
+    assert.match(out, /queued for enrollment/);
+    const state = readState(root);
+    assert.equal(state.enrollment, "queued");
+    // mokutil --import must have been called with the DER certificate.
+    const invoked = readFileSync(mokutilLog, "utf8");
+    assert.match(invoked, /--import/);
+    assert.ok(invoked.includes(join(root, "var/lib/sevyn/secureboot/MOK.der")));
+    // The enrollment password is stored 0600 and is 16 chars.
+    const pwFile = join(root, "var/lib/sevyn/secureboot/mok-enrollment-password");
+    assert.equal(statSync(pwFile).mode & 0o777, 0o600);
+    assert.equal(readFileSync(pwFile, "utf8").length, 16);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(join(mokutilLog, ".."), { recursive: true, force: true });
+  }
+});
+
 test("verify-secure-boot reports OK when sbverify accepts every artifact", () => {
   const root = scratch();
   const fakeBin = makeFakeBin({ sbverify: FAKE_SBVERIFY_OK });
+  const noTools = { SEVYN_SB_SBSIGN: "", SEVYN_SB_MOKUTIL: "" };
   try {
     runHelper(root, ["generate-mok"]);
-    runHelper(root, ["sign"]);
-    runHelper(root, ["queue-enrollment"]);
+    runHelper(root, ["sign"], noTools);
+    // Fake a UEFI boot so queue-enrollment records manual-required (mokutil
+    // hidden); the verifier then SKIPs enrollment instead of querying the
+    // host's real mokutil/firmware.
+    fakeUefi(root);
+    runHelper(root, ["queue-enrollment"], noTools);
     const p = join(root, "boot/vmlinuz");
     mkdirSync(join(p, ".."), { recursive: true });
     writeFileSync(p, "kernel");
@@ -214,7 +297,11 @@ test("verify-secure-boot reports OK when sbverify accepts every artifact", () =>
     let out = "";
     try {
       out = execFileSync(VERIFY, ["--root", root], {
-        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+        env: {
+          ...process.env,
+          SEVYN_SB_SBVERIFY: join(fakeBin, "sbverify"),
+          SEVYN_SB_MOKUTIL: "",
+        },
         encoding: "utf8",
       });
     } catch (e) {
@@ -244,7 +331,11 @@ test("verify-secure-boot fails when sbverify rejects a signature or the key is e
     let out = "";
     try {
       out = execFileSync(VERIFY, ["--root", root], {
-        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+        env: {
+          ...process.env,
+          SEVYN_SB_SBVERIFY: join(fakeBin, "sbverify"),
+          SEVYN_SB_MOKUTIL: "",
+        },
         encoding: "utf8",
       });
     } catch (e) {

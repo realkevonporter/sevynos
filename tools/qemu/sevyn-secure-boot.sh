@@ -20,7 +20,16 @@
 #
 # Environment:
 #   SEVYN_SB_ROOT — filesystem root to operate on (default /). The test
-#                   suite points this at a scratch directory.
+#                   suite points this at a scratch directory, which also
+#                   fakes the firmware sysfs tree ($ROOT/sys/firmware/efi)
+#                   per test case: create it for a UEFI boot, omit it for
+#                   a legacy boot.
+#   SEVYN_SB_SBSIGN  — path to the sbsign binary (default: resolved from
+#                      PATH). Set to the empty string to simulate a missing
+#                      sbsign without touching PATH.
+#   SEVYN_SB_MOKUTIL — path to the mokutil binary (default: resolved from
+#                      PATH). Set to the empty string to simulate a missing
+#                      mokutil without touching PATH.
 set -eu
 
 ROOT="${SEVYN_SB_ROOT:-/}"
@@ -30,6 +39,12 @@ MOK_PEM="$SB_DIR/MOK.pem"
 MOK_DER="$SB_DIR/MOK.der"
 MOK_PW_FILE="$SB_DIR/mok-enrollment-password"
 STATE_FILE="$SB_DIR/state.json"
+
+# Resolve external tools once. An explicitly empty override means "treat as
+# missing"; an unset variable resolves from PATH exactly as before, so
+# default (production) behavior is unchanged.
+SBSIGN="${SEVYN_SB_SBSIGN-$(command -v sbsign 2>/dev/null || true)}"
+MOKUTIL="${SEVYN_SB_MOKUTIL-$(command -v mokutil 2>/dev/null || true)}"
 
 log() {
   echo "[sevyn-secure-boot] $*"
@@ -118,7 +133,7 @@ cmd_sign() {
     state_write "signReason" "no-key"
     return 0
   fi
-  if ! command -v sbsign >/dev/null 2>&1; then
+  if [ -z "$SBSIGN" ]; then
     log "WARNING: sbsign is missing; artifacts left unsigned. Recording and continuing."
     state_write "signed" "false"
     state_write "signReason" "no-sbsign"
@@ -135,7 +150,7 @@ cmd_sign() {
     # sbsign replaces the signature in place; sign to a temp file first so a
     # failure never leaves a truncated artifact behind.
     tmp="$artifact.sbsign-tmp"
-    if sbsign --key "$MOK_PRIV" --cert "$MOK_PEM" --output "$tmp" "$artifact" >/dev/null 2>&1; then
+    if "$SBSIGN" --key "$MOK_PRIV" --cert "$MOK_PEM" --output "$tmp" "$artifact" >/dev/null 2>&1; then
       mv "$tmp" "$artifact"
       log "Signed: ${artifact#$ROOT}"
       signed_any=1
@@ -162,22 +177,26 @@ cmd_queue_enrollment() {
   # mokutil and the MOK Manager are part of shim. Without a signed shim there
   # is no MOK Manager screen; without UEFI variables there is nowhere to
   # queue the key. All of these are recorded, not fatal.
+  #
+  # The firmware check comes first: on a non-UEFI boot enrollment does not
+  # apply at all, so a missing mokutil there must not be misreported as
+  # "manual enrollment required".
   if [ ! -f "$MOK_DER" ]; then
     log "WARNING: no MOK certificate; cannot queue enrollment."
     state_write "enrollment" "no-key"
-    return 0
-  fi
-  if ! command -v mokutil >/dev/null 2>&1; then
-    log "mokutil is not installed; the MOK cannot be queued automatically."
-    log "Manual enrollment: mokutil --import $MOK_DER (needs a signed shim; see docs/secure-boot.md)"
-    state_write "enrollment" "manual-required"
-    state_write "enrollmentReason" "no-mokutil"
     return 0
   fi
   if [ ! -d "$ROOT/sys/firmware/efi" ]; then
     log "Not a UEFI boot; MOK enrollment does not apply."
     state_write "enrollment" "not-applicable"
     state_write "enrollmentReason" "no-uefi"
+    return 0
+  fi
+  if [ -z "$MOKUTIL" ]; then
+    log "mokutil is not installed; the MOK cannot be queued automatically."
+    log "Manual enrollment: mokutil --import $MOK_DER (needs a signed shim; see docs/secure-boot.md)"
+    state_write "enrollment" "manual-required"
+    state_write "enrollmentReason" "no-mokutil"
     return 0
   fi
 
@@ -189,7 +208,7 @@ cmd_queue_enrollment() {
   chmod 0600 "$MOK_PW_FILE"
 
   log "Queueing the MOK for enrollment (mokutil --import)..."
-  if printf '%s\n%s\n' "$pw" "$pw" | timeout 30 mokutil --import "$MOK_DER" >/dev/null 2>&1; then
+  if printf '%s\n%s\n' "$pw" "$pw" | timeout 30 "$MOKUTIL" --import "$MOK_DER" >/dev/null 2>&1; then
     log "MOK queued for enrollment. The next reboot will open the MOK Manager;"
     log "complete the one-time enrollment there (the installer shows the steps)."
     state_write "enrollment" "queued"
