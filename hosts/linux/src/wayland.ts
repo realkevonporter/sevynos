@@ -55,6 +55,7 @@ import type {
   SevynAudioService,
   SevynTimeService,
   SevynSystemService,
+  SevynProcessService,
   SevynFileSystem,
   FileSystemEntry,
   SevynApplicationPackage,
@@ -68,6 +69,7 @@ import { LinuxTimeService } from "./linux-time-service.js";
 import { LinuxNativeModuleServices } from "./linux-native-module-services.js";
 import { protectCurrentProcessFromOomKiller } from "./oom-score.js";
 import { LinuxSystemService } from "./linux-system-service.js";
+import { LinuxProcessService } from "./linux-process-service.js";
 import { LinuxFileSystem } from "./linux-file-system.js";
 import { ChromiumBrowserEngine } from "./chromium-browser-engine.js";
 import { LinuxSevynCodeService } from "./linux-sevyn-code-service.js";
@@ -109,6 +111,7 @@ export interface WaylandHostOptions {
   readonly audio?: SevynAudioService;
   readonly time?: SevynTimeService;
   readonly system?: SevynSystemService;
+  readonly processes?: SevynProcessService;
   readonly filesystem?: SevynFileSystem;
   readonly createBrowserEngine?: () => SevynBrowserEngine;
   readonly createSevynCodeEngine?: () => SevynBrowserEngine | undefined;
@@ -171,6 +174,7 @@ export async function startWaylandHost(
   const audio = options.audio ?? new LinuxAudioService();
   const time = options.time ?? new LinuxTimeService();
   const system = options.system ?? new LinuxSystemService();
+  const processes = options.processes ?? new LinuxProcessService();
   const filesystem = options.filesystem ?? new LinuxFileSystem();
 
   // Sync the system clock as soon as Wi-Fi connects; NTP needs the network.
@@ -208,6 +212,7 @@ export async function startWaylandHost(
     audio,
     time,
     system,
+    processes,
     filesystem,
     ...(options.createBrowserEngine === undefined
       ? {}
@@ -1078,6 +1083,8 @@ export async function startWaylandHost(
       (battery as { close: () => void }).close();
     if ("close" in system && typeof system.close === "function")
       (system as { close: () => void }).close();
+    if ("close" in processes && typeof processes.close === "function")
+      (processes as { close: () => void }).close();
     nativeModules.close();
     await runtime.closeForShutdown();
     presenter.shutdown();

@@ -39,6 +39,7 @@ import type {
   SevynAudioService,
   SevynTimeService,
   SevynSystemService,
+  SevynProcessService,
   SevynFileSystem,
 } from "@sevynos/react-native/internal";
 import {
@@ -97,6 +98,7 @@ export interface DesktopRuntime {
   readonly audio?: SevynAudioService | undefined;
   readonly time?: SevynTimeService | undefined;
   readonly system?: SevynSystemService | undefined;
+  readonly processes?: SevynProcessService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
   readonly environment: DesktopEnvironment;
   readonly layout: DesktopWindowLayoutManager;
@@ -150,6 +152,7 @@ export interface CreateDesktopRuntimeOptions {
   readonly audio?: SevynAudioService | undefined;
   readonly time?: SevynTimeService | undefined;
   readonly system?: SevynSystemService | undefined;
+  readonly processes?: SevynProcessService | undefined;
   readonly filesystem?: SevynFileSystem | undefined;
   readonly createBrowserEngine?: (() => SevynBrowserEngine) | undefined;
   readonly createSevynCodeEngine?: (() => SevynBrowserEngine | undefined) | undefined;
@@ -283,6 +286,7 @@ export async function createDesktopRuntime(
     options.audio,
     options.system,
     options.createSevynCodeEngine,
+    options.processes,
   );
 
   const nowDate = (): Date => new Date();
