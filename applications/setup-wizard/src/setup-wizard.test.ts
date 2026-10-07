@@ -51,11 +51,6 @@ function expectNoEmoji(text: string): void {
   for (const emoji of FORBIDDEN_EMOJI) expect(text).not.toContain(emoji);
 }
 
-const settle = (): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, 50);
-  });
-
 function createTimeService(timezone = "UTC"): SevynTimeService & { applied: string[] } {
   const applied: string[] = [];
   let current = timezone;
@@ -210,6 +205,22 @@ describe("SetupWizardApplication", () => {
       .join("\n");
   }
 
+  // The runtime applies press-driven re-renders asynchronously; under CI load a
+  // fixed short sleep is not enough to observe the next step. Poll instead.
+  async function waitForText(
+    runtime: SevynApplicationRuntime,
+    needle: string,
+    timeoutMs = 5000,
+  ): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    let text = textContent(runtime);
+    while (!text.includes(needle) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      text = textContent(runtime);
+    }
+    return text;
+  }
+
   it("renders the welcome step first with no prop warnings", () => {
     const { runtime, warnSpy } = mountWizard();
     const text = textContent(runtime);
@@ -236,8 +247,7 @@ describe("SetupWizardApplication", () => {
     const cy = button.bounds.y + button.bounds.height / 2;
     runtime.dispatchPointer("down", { x: cx, y: cy, pointerId: 1, button: 0 });
     runtime.dispatchPointer("up", { x: cx, y: cy, pointerId: 1, button: 0 });
-    await settle();
-    const text = textContent(runtime);
+    const text = await waitForText(runtime, "Choose your timezone");
     expect(text).toContain("Choose your timezone");
     expect(text).toContain("Step 2 of 4");
   });
