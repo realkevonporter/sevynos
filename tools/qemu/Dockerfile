@@ -91,6 +91,10 @@ COPY tools/qemu/acpi-power-button /etc/acpi/events/sevyn-power-button
 COPY tools/qemu/usb-automount.rules /etc/udev/rules.d/99-sevyn-usb-automount.rules
 COPY tools/qemu/sevyn-usb-mount.sh /usr/local/bin/sevyn-usb-mount
 COPY tools/qemu/sevyn-usb-unmount.sh /usr/local/bin/sevyn-usb-unmount
+# Update trust anchor (public keys only — the private signing key never
+# enters the image). Staged by tools/qemu/build.mjs from
+# SEVYN_UPDATE_TRUSTED_KEYS; an empty "keys" array means dev build.
+COPY tools/qemu/build/trusted-update-keys.json /etc/sevynos/trusted-update-keys.json
 COPY tools/qemu/build-image.sh /usr/local/bin/build-sevyn-image
 COPY tools/qemu/sevyn-studio-builder.mjs /usr/local/bin/sevyn-studio-build
 RUN mkdir -p /usr/local/share/sevynos && ln -s /opt/sevynos/studio-tools/node_modules/esbuild/bin/esbuild /usr/local/lib/sevynos/esbuild && python3 /usr/local/lib/sevynos/build-font-atlas.py /usr/local/share/sevynos/font-atlas.json && \
