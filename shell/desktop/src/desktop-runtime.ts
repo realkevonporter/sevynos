@@ -1402,7 +1402,20 @@ export async function createDesktopRuntime(
           width: 1280,
           height: 800,
         });
-        await completed;
+        // Never hang boot forever: if the wizard doesn't complete in 60s
+        // (e.g. its UI failed to render), log loudly and continue to the
+        // desktop. Onboarding stays incomplete so setup retries next boot.
+        const timeout = setTimeout(() => {
+          console.error(
+            "[sevyn] First-run setup wizard timed out after 60s without completing; skipping to desktop.",
+          );
+          resolveSetup?.();
+        }, 60000);
+        try {
+          await completed;
+        } finally {
+          clearTimeout(timeout);
+        }
       } finally {
         unsubscribe();
         const stillRunning = applications.getByApplicationId("org.sevynos.setup-wizard");

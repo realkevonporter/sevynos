@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { join } from "node:path";
 import type { GenesisWindowId } from "@sevynos/graphics";
 import type { KeyboardInputEvent, SevynInputEvent } from "@sevynos/input";
+import { SevynErrorBoundary } from "@sevynos/react-native";
 import {
   BrowserApplication,
   isInstallableDownload,
@@ -965,12 +966,18 @@ export class ApplicationSurfaceRegistry {
           onLaunch: (appId: string) => void this.#applicationManagement?.launch(appId),
         });
       case "setup-wizard":
-        return createElement(SetupWizardApplication, {
-          time: this.#time,
-          network: this.#network,
-          accounts: this.#accountsService,
-          onComplete: () => this.#onSetupWizardComplete?.(),
-        });
+        // Wrap in an error boundary: if the wizard throws during render,
+        // show the error UI instead of unmounting the entire desktop.
+        return createElement(
+          SevynErrorBoundary,
+          { title: "Setup Wizard Encountered an Error" },
+          createElement(SetupWizardApplication, {
+            time: this.#time,
+            network: this.#network,
+            accounts: this.#accountsService,
+            onComplete: () => this.#onSetupWizardComplete?.(),
+          }),
+        );
       case "installer":
         return createCoreSystemApplication({ kind: "installer" });
       case "console":
