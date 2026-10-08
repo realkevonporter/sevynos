@@ -54,6 +54,22 @@ log_marker() {
   fi
 }
 
+# Weston liveness probing library. A socket file alone never proves the
+# compositor is alive (a crashed Weston leaves its socket behind), so every
+# readiness check goes through weston_is_alive / wait_for_weston_liveness.
+_weston_liveness_lib=/usr/local/lib/sevynos/weston-liveness.sh
+if [ ! -f "$_weston_liveness_lib" ]; then
+  # Development layout: the library sits next to this script.
+  _weston_liveness_lib=$(dirname "$0")/weston-liveness.sh
+fi
+if [ -f "$_weston_liveness_lib" ]; then
+  . "$_weston_liveness_lib"
+else
+  echo "FATAL: weston-liveness.sh not found at $_weston_liveness_lib" >&2
+  exit 1
+fi
+unset _weston_liveness_lib
+
 # ─── Session user ────────────────────────────────────────────────────
 # On installed systems the desktop session runs as the installed user,
 # never as root. The installer writes the accounts registry; when it is
@@ -160,19 +176,16 @@ if [ "$weston_backend" = "drm-backend.so" ]; then
     echo "Attempting Weston launch with GPU hardware acceleration (DRM/GBM/EGL)..."
     weston --backend="$weston_backend" --shell="$weston_shell" --tty=1 --socket="$WAYLAND_DISPLAY" --idle-time=0 --log=/var/log/weston-gpu.log < /dev/tty1 &
     weston_pid=$!
-    attempt=0
-    while [ "$attempt" -lt 250 ]; do
-      if [ -S "$runtime_dir/$WAYLAND_DISPLAY" ]; then
-        gpu_active=1
-        break
-      fi
-      if ! kill -0 "$weston_pid" 2>/dev/null; then
-        echo "Weston with GPU hardware acceleration exited"
-        break
-      fi
-      attempt=$((attempt + 1))
-      sleep 0.05
-    done
+    # A socket FILE is not proof Weston is alive: under QEMU TCG the
+    # llvmpipe backend can abort after creating the socket, leaving it
+    # stale. Require the process to be alive AND the socket to accept
+    # connections before declaring GPU acceleration active.
+    if wait_for_weston_liveness "$weston_pid" "$runtime_dir/$WAYLAND_DISPLAY" 125; then
+      gpu_active=1
+      echo "Weston GPU backend verified alive and accepting connections"
+    else
+      echo "Weston with GPU hardware acceleration failed liveness check"
+    fi
     if [ "$gpu_active" -eq 1 ]; then
       echo "SEVYN_GPU_HARDWARE_ACCELERATION_ACTIVE"
       export SEVYN_GRAPHICS_ACCELERATION=gpu
@@ -203,12 +216,14 @@ fi
 
 # Prevent automatic restart in guest service mode by not respawning services from this script.
 # For systemd-based launches, service units should also use Restart=no where applicable.
-attempt=0
-while [ ! -S "$runtime_dir/$WAYLAND_DISPLAY" ]; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -gt 200 ]; then cat /var/log/weston.log; exit 1; fi
-  sleep 0.05
-done
+# As with the GPU path, require the compositor to actually accept connections,
+# not just to have created its socket file.
+if ! wait_for_weston_liveness "$weston_pid" "$runtime_dir/$WAYLAND_DISPLAY" 100; then
+  echo "Weston failed liveness check — no compositor available"
+  log_marker SEVYN_NO_COMPOSITOR
+  cat /var/log/weston.log
+  exit 1
+fi
 log_marker SEVYN_QEMU_WESTON_READY
 if [ "$weston_backend" = "drm-backend.so" ]; then
   log_marker SEVYN_QEMU_GRAPHICAL_WESTON_READY
@@ -245,9 +260,55 @@ if [ "${SEVYN_HITTEST_PROBE:-0}" = "1" ]; then
   done &
   probe_log_tail_pid=$!
 fi
-node /opt/sevynos/genesis-wayland.mjs > /tmp/genesis.log 2>&1 &
-genesis_pid=$!
-echo "$genesis_pid" > "$runtime_dir/genesis.pid"
+# ─── Weston late-death fallback ───────────────────────────────────────
+# If Genesis exits while the GPU Weston is dead (e.g. the QEMU TCG llvmpipe
+# abort, which strikes after the socket is created), the socket is stale
+# and no compositor will ever answer it. Remove the stale socket, start the
+# Pixman Weston, and give Genesis one more chance.
+# Bounded: a single retry, GPU path only, and only when Weston is actually
+# dead — a live Weston with a dead Genesis is a Genesis bug, not a
+# compositor death, and must not be masked by a fallback.
+maybe_fallback_to_pixman() {
+  if [ "${SEVYN_GRAPHICS_ACCELERATION:-}" != "gpu" ]; then
+    return 1
+  fi
+  if weston_is_alive "$weston_pid" "$runtime_dir/$WAYLAND_DISPLAY"; then
+    echo "Genesis failed but Weston is alive — no compositor fallback"
+    return 1
+  fi
+  echo "Weston died during startup — falling back to Pixman software renderer"
+  log_marker SEVYN_WESTON_DIED_FALLING_BACK_TO_PIXMAN
+  kill -9 "$weston_pid" 2>/dev/null || true
+  wait "$weston_pid" 2>/dev/null || true
+  rm -f "$runtime_dir/$WAYLAND_DISPLAY"*
+  weston --backend="$weston_backend" --shell="$weston_shell" --use-pixman --tty=1 --socket="$WAYLAND_DISPLAY" --idle-time=0 --log=/var/log/weston.log < /dev/tty1 &
+  weston_pid=$!
+  if ! wait_for_weston_liveness "$weston_pid" "$runtime_dir/$WAYLAND_DISPLAY" 200; then
+    echo "Pixman Weston failed liveness check — no compositor available"
+    log_marker SEVYN_NO_COMPOSITOR
+    return 1
+  fi
+  export SEVYN_GRAPHICS_ACCELERATION=software
+  echo "Pixman Weston verified alive and accepting connections"
+  log_marker SEVYN_PIXMAN_WESTON_READY
+  return 0
+}
+
+launch_genesis() {
+  # $1: "truncate" for the first launch, "append" for the fallback relaunch
+  # (append preserves the first failure's diagnostics in the log).
+  if [ "$1" = "truncate" ]; then
+    node /opt/sevynos/genesis-wayland.mjs > /tmp/genesis.log 2>&1 &
+  else
+    echo "=== SEVYN_GENESIS_RELAUNCH_AFTER_WESTON_FALLBACK ===" >> /tmp/genesis.log
+    node /opt/sevynos/genesis-wayland.mjs >> /tmp/genesis.log 2>&1 &
+  fi
+  genesis_pid=$!
+  echo "$genesis_pid" > "$runtime_dir/genesis.pid"
+}
+
+fell_back_to_pixman=0
+launch_genesis truncate
 controlled_shutdown() {
   kill -TERM "$genesis_pid" 2>/dev/null || true
   wait "$genesis_pid" 2>/dev/null || true
@@ -266,12 +327,34 @@ controlled_shutdown() {
 }
 trap controlled_shutdown TERM INT
 if grep -q 'sevyn.full-desktop-smoke=1' /proc/cmdline; then
-  attempt=0
-  while ! grep -q SEVYN_GENESIS_FIRST_COMPOSITOR_FRAME_PRESENTED /tmp/genesis.log; do
-    if ! kill -0 "$genesis_pid" 2>/dev/null; then cat /tmp/genesis.log; exit 1; fi
-    attempt=$((attempt + 1))
-    if [ "$attempt" -gt 800 ]; then cat /tmp/genesis.log; exit 1; fi
-    sleep 0.05
+  while :; do
+    attempt=0
+    while ! grep -q SEVYN_GENESIS_FIRST_COMPOSITOR_FRAME_PRESENTED /tmp/genesis.log; do
+      if ! kill -0 "$genesis_pid" 2>/dev/null; then break; fi
+      attempt=$((attempt + 1))
+      if [ "$attempt" -gt 800 ]; then break; fi
+      sleep 0.05
+    done
+    if grep -q SEVYN_GENESIS_FIRST_COMPOSITOR_FRAME_PRESENTED /tmp/genesis.log; then
+      break
+    fi
+    if [ "$fell_back_to_pixman" -eq 0 ]; then
+      # Make sure the old Genesis is not still running before falling back,
+      # otherwise two Genesises would race on the new compositor.
+      if kill -0 "$genesis_pid" 2>/dev/null; then
+        echo "Genesis still running without first frame — terminating before fallback"
+        kill -TERM "$genesis_pid" 2>/dev/null || true
+        wait "$genesis_pid" 2>/dev/null || true
+      fi
+      if maybe_fallback_to_pixman; then
+        fell_back_to_pixman=1
+        echo "Relaunching Genesis on the Pixman compositor (smoke mode)"
+        launch_genesis append
+        continue
+      fi
+    fi
+    cat /tmp/genesis.log
+    exit 1
   done
   kill -TERM "$genesis_pid"
   wait "$genesis_pid"
@@ -282,6 +365,13 @@ if grep -q 'sevyn.full-desktop-smoke=1' /proc/cmdline; then
 fi
 genesis_exit=0
 wait "$genesis_pid" || genesis_exit=$?
+if [ "$genesis_exit" -ne 0 ] && [ "$fell_back_to_pixman" -eq 0 ] && maybe_fallback_to_pixman; then
+  fell_back_to_pixman=1
+  echo "Relaunching Genesis on the Pixman compositor"
+  launch_genesis append
+  genesis_exit=0
+  wait "$genesis_pid" || genesis_exit=$?
+fi
 if [ -n "$genesis_log_tail_pid" ]; then
   kill "$genesis_log_tail_pid" 2>/dev/null || true
   wait "$genesis_log_tail_pid" 2>/dev/null || true

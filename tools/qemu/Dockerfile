@@ -79,6 +79,7 @@ COPY tools/qemu/default.script /usr/share/udhcpc/default.script
 COPY tools/qemu/weston.ini /etc/xdg/weston/weston.ini
 COPY tools/qemu/wpa_supplicant.conf /etc/sevynos/wpa_supplicant.conf
 COPY tools/qemu/start-genesis.sh /usr/local/bin/start-genesis
+COPY tools/qemu/weston-liveness.sh /usr/local/lib/sevynos/weston-liveness.sh
 COPY tools/qemu/request-shutdown.sh /usr/local/bin/request-genesis-shutdown
 COPY tools/qemu/sevyn-installer.sh /usr/local/bin/sevyn-installer
 COPY tools/qemu/sevyn-installer-chroot.sh /usr/local/bin/sevyn-installer-chroot
