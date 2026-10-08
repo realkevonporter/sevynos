@@ -56,6 +56,22 @@ export class NativeProcessBridgeTransport implements NativeBridgeTransport {
     this.#frameStream = frameStream;
     this.#lines = createInterface({ input: this.#child.stdout });
     this.#child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
+    // A dead bridge must fail loudly. Without these handlers, a bridge that
+    // exits during startup leaves every pending await (e.g. display
+    // discovery) hanging forever at 0% CPU with no diagnostic. Note: these
+    // deliberately do NOT set #closed — that flag stays exclusive to
+    // intentional close(), so already-received messages are still
+    // delivered and the transport's lifecycle semantics are unchanged.
+    this.#child.on("exit", (code, signal) => {
+      if (this.#closed) return;
+      console.error(
+        `Genesis native bridge exited unexpectedly (code=${String(code)} signal=${String(signal)}). Pending IPC will fail.`,
+      );
+    });
+    this.#child.on("error", (error: Error) => {
+      if (this.#closed) return;
+      console.error(`Genesis native bridge process error: ${error.message}`);
+    });
     this.#child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       if (error.code !== "EPIPE")
         console.error(`Genesis native bridge stdin failed: ${error.message}`);

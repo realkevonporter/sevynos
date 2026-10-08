@@ -98,6 +98,13 @@ export class WaylandBridgeConnection {
   }
 }
 
+/**
+ * Upper bound for waiting on the bridge's ready/display-configured message
+ * during startup. A bridge that dies (or never starts) must fail loudly
+ * here instead of hanging the boot forever.
+ */
+const WAYLAND_BRIDGE_DISCOVER_TIMEOUT_MS = 30_000;
+
 export class WaylandDisplayAdapter implements LinuxDisplayAdapter {
   #displays: readonly NativeBridgeMessage[] = [];
   readonly #ready: Promise<void>;
@@ -112,7 +119,26 @@ export class WaylandDisplayAdapter implements LinuxDisplayAdapter {
     });
   }
   public async discover() {
-    await this.#ready;
+    // A bridge that dies (or never starts) must fail loudly here instead of
+    // hanging the boot forever: the transport logs the unexpected exit, and
+    // this timeout turns the missing ready message into a thrown error.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.#ready,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(
+              new Error(
+                `Timed out after ${String(WAYLAND_BRIDGE_DISCOVER_TIMEOUT_MS / 1000)}s waiting for the Wayland bridge to report displays. The bridge process may have exited; its stderr is logged above.`,
+              ),
+            );
+          }, WAYLAND_BRIDGE_DISCOVER_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
     const message = this.#displays.at(-1);
     if (message?.type !== "ready" && message?.type !== "display-configured") return [];
     return message.displays.map((display) =>
