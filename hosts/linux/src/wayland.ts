@@ -953,6 +953,19 @@ export async function startWaylandHost(
     }, 1000);
     frameMetricsTimer.unref();
   }
+  // Defensive: the global performance entry buffer can accumulate
+  // measure/mark entries from bundled code without ever being cleared,
+  // leading to unbounded heap growth and OOM. Clear it periodically.
+  // This does not affect performance.now() timestamps used elsewhere.
+  const perfBufferTimer = setInterval(() => {
+    try {
+      performance.clearMarks();
+      performance.clearMeasures();
+    } catch {
+      // performance API may be unavailable in some environments; ignore.
+    }
+  }, 30000);
+  perfBufferTimer.unref();
   invalidate = (): void => {
     if (currentInputTraceId !== undefined) {
       traceRenderRequests.set(
