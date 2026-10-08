@@ -47,12 +47,10 @@ export class FrameExecutionResult {
       throw new RangeError("Frame execution number must be a positive safe integer.");
     }
 
-    if (options.completedAt.getTime() < options.startedAt.getTime()) {
-      throw new RangeError(
-        "Frame execution completion time cannot be earlier than its start time.",
-      );
-    }
-
+    // Wall-clock time is not monotonic: on VMs and hardware with unstable
+    // clocks, completedAt can briefly precede startedAt. That is a
+    // measurement artifact, not a programming error — never crash the
+    // compositor over it. durationMilliseconds clamps to zero.
     this.executionNumber = options.executionNumber;
 
     this.startedAt = new Date(options.startedAt);
@@ -65,7 +63,7 @@ export class FrameExecutionResult {
   }
 
   public get durationMilliseconds(): number {
-    return this.completedAt.getTime() - this.startedAt.getTime();
+    return Math.max(0, this.completedAt.getTime() - this.startedAt.getTime());
   }
 
   public get displayCount(): number {

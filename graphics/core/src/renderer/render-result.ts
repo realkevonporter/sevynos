@@ -34,12 +34,10 @@ export class RenderResult {
       throw new RangeError("Render command count must be a non-negative safe integer.");
     }
 
-    if (options.completedAt.getTime() < options.startedAt.getTime()) {
-      throw new RangeError(
-        "Render completion time cannot be earlier than its start time.",
-      );
-    }
-
+    // Wall-clock time is not monotonic: on VMs and hardware with unstable
+    // clocks, completedAt can briefly precede startedAt. That is a
+    // measurement artifact, not a programming error — never crash the
+    // compositor over it. durationMilliseconds clamps to zero.
     this.frameNumber = options.frameNumber;
 
     this.displayId = options.displayId;
@@ -54,6 +52,6 @@ export class RenderResult {
   }
 
   public get durationMilliseconds(): number {
-    return this.completedAt.getTime() - this.startedAt.getTime();
+    return Math.max(0, this.completedAt.getTime() - this.startedAt.getTime());
   }
 }
