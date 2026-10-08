@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compareOsVersions, isUpdateAvailable, parseOsVersion } from "./version.js";
 
 describe("parseOsVersion", () => {
-  it("parses plain and nightly versions", () => {
+  it("parses plain, nightly, and dev versions", () => {
     expect(parseOsVersion("0.1.0")).toEqual({ major: 0, minor: 1, patch: 0 });
     expect(parseOsVersion("1.2.3-nightly.20261007")).toEqual({
       major: 1,
@@ -15,6 +15,12 @@ describe("parseOsVersion", () => {
       minor: 1,
       patch: 0,
       nightly: "20261007.abc1234",
+    });
+    expect(parseOsVersion("0.0.0-dev")).toEqual({
+      major: 0,
+      minor: 0,
+      patch: 0,
+      dev: true,
     });
   });
 
@@ -49,6 +55,14 @@ describe("compareOsVersions", () => {
   it("lets a newer stable base beat an older nightly", () => {
     expect(compareOsVersions("0.1.0-nightly.20261007", "0.2.0")).toBe(-1);
     expect(compareOsVersions("0.2.0", "0.1.0-nightly.20261007")).toBe(1);
+  });
+
+  it("sorts a dev build older than the bare release and nightlies", () => {
+    expect(compareOsVersions("0.1.0-dev", "0.1.0")).toBe(-1);
+    expect(compareOsVersions("0.1.0", "0.1.0-dev")).toBe(1);
+    expect(compareOsVersions("0.1.0-dev", "0.1.0-nightly.20261007")).toBe(-1);
+    expect(compareOsVersions("0.1.0-nightly.20261007", "0.1.0-dev")).toBe(1);
+    expect(compareOsVersions("0.0.0-dev", "0.0.0-dev")).toBe(0);
   });
 
   it("drives isUpdateAvailable", () => {
