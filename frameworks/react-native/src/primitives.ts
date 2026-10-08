@@ -123,8 +123,15 @@ function element(type: NativeElementType, props: NativeComponentProps): ReactEle
   );
 }
 export const View = (props: NativeComponentProps): ReactElement => element("view", props);
-export const NativeText = (props: NativeComponentProps): ReactElement =>
-  element("text", props);
+/**
+ * Props for the {@link NativeText} / {@link Text} component.
+ * `numberOfLines` is honored by the Yoga text measurement (single-line
+ * text is measured without wrapping); it is a prop, not a style.
+ */
+export interface TextProps extends NativeComponentProps {
+  readonly numberOfLines?: number;
+}
+export const NativeText = (props: TextProps): ReactElement => element("text", props);
 export const Text = NativeText;
 
 export const NativeImage = (props: NativeComponentProps): ReactElement =>

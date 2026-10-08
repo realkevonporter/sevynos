@@ -9,6 +9,7 @@ import Yoga, {
   Wrap,
 } from "yoga-layout";
 import type { NativeBounds, NativeHostNode, NativeStyle } from "./native-types.js";
+import type { TextProps } from "./primitives.js";
 import { measureNativeText } from "./font-metrics.js";
 import { sevynTokens } from "./tokens.js";
 
@@ -173,7 +174,7 @@ function attachTextMeasure(
   const fontWeight = cStyle.fontWeight ?? sevynTokens.typography.body.weight;
   const lineHeight = cStyle.lineHeight ?? Math.round(fontSize * 1.4);
   // numberOfLines is a prop, not a style.
-  const numberOfLines = (node.props as { numberOfLines?: number }).numberOfLines;
+  const numberOfLines = (node.props as TextProps).numberOfLines;
 
   nodeYoga.setMeasureFunc((width, widthMode, height, heightMode) => {
     // If numberOfLines is 1, don't wrap - measure as single line.
