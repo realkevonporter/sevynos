@@ -1887,14 +1887,23 @@ if (
   const persistedChannel = await OsUpdateService.readPersistedChannel(
     stateDirectory,
   ).catch(() => undefined);
-  const updateService = new OsUpdateService({
-    currentVersion: await resolveCurrentVersion().catch(() => "0.0.0-dev"),
-    feedUrl: process.env["SEVYN_UPDATE_FEED_URL"],
-    channel: persistedChannel ?? "stable",
-    stateDirectory,
-    trustedKeys,
-  });
-  updateService.startAutoCheck();
+  // The update service is best-effort: a bad version must disable updates,
+  // never prevent the desktop from booting.
+  let updateService: OsUpdateService | undefined;
+  try {
+    updateService = new OsUpdateService({
+      currentVersion: await resolveCurrentVersion().catch(() => "0.0.0-dev"),
+      feedUrl: process.env["SEVYN_UPDATE_FEED_URL"],
+      channel: persistedChannel ?? "stable",
+      stateDirectory,
+      trustedKeys,
+    });
+    updateService.startAutoCheck();
+  } catch (error) {
+    console.error(
+      `[sevyn] OS update service disabled: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const host = await startWaylandHost(new NativeProcessBridgeTransport(executable), {
     persistence: new FileLinuxPersistenceAdapter(stateDirectory),
     network: new LinuxWirelessNetworkService(),
