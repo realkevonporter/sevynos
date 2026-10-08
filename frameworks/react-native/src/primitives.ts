@@ -127,9 +127,12 @@ export const View = (props: NativeComponentProps): ReactElement => element("view
  * Props for the {@link NativeText} / {@link Text} component.
  * `numberOfLines` is honored by the Yoga text measurement (single-line
  * text is measured without wrapping); it is a prop, not a style.
+ * `ellipsizeMode` selects where the ellipsis appears when text is
+ * truncated (default `"tail"`).
  */
 export interface TextProps extends NativeComponentProps {
   readonly numberOfLines?: number;
+  readonly ellipsizeMode?: "head" | "middle" | "tail" | "clip";
 }
 export const NativeText = (props: TextProps): ReactElement => element("text", props);
 export const Text = NativeText;
