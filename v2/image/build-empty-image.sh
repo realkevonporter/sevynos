@@ -13,9 +13,13 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${SEVYN_V2_BUILD_DIR:-$ROOT/image/build}"
 
-kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -n 1 || true)"
+# The build host may carry more than one kernel, and its own kernel can be
+# unreadable to the build user (GitHub runners: /boot/vmlinuz-*-azure is
+# root-only). Take the newest kernel we can actually read — on CI that is
+# the linux-image-generic kernel the workflow installs.
+kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -readable 2>/dev/null | sort -V | tail -n 1 || true)"
 if [ -z "$kernel" ]; then
-  echo "error: no kernel found in /boot (install linux-image-generic)" >&2
+  echo "error: no readable kernel found in /boot (install linux-image-generic)" >&2
   exit 1
 fi
 kernel_version="${kernel#/boot/vmlinuz-}"
