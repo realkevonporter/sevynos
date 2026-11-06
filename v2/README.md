@@ -47,6 +47,10 @@ reaffirmed 2026-11-06.
   model, never around it.
 - **Targets:** desktop first, mobile next; the architecture must support
   tablets, watches, and other devices (later, not v1).
+- **Networks are plug-and-play.** Every network works in SevynOS —
+  SpaceX/Starlink is one option among all, not exclusive; Starlink gets
+  pushed because it's available worldwide. No single-network lock-in
+  (openness lock).
 - **License:** GPL-3.0-or-later (see `../LICENSE`).
 
 ## Layout
