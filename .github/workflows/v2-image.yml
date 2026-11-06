@@ -1,0 +1,43 @@
+name: SevynOS v2 image
+
+# M0: build the empty v2 image and prove it boots in QEMU.
+# The old tree and its pipelines are untouched by this workflow.
+on:
+  push:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-image.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  empty-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install build dependencies
+        run: >
+          sudo apt-get update && sudo apt-get install --yes
+          qemu-system-x86 busybox-static cpio linux-image-generic
+      - name: Build empty image
+        # sudo: /boot kernels ship mode 600 (root-only).
+        run: sudo sh v2/image/build-empty-image.sh
+      - name: Boot empty image in QEMU
+        run: sudo sh v2/image/boot-check.sh
+      - name: Upload image artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-empty-image
+          path: |
+            v2/image/build/vmlinuz
+            v2/image/build/initramfs.cpio.gz
+            v2/image/build/kernel-version.txt
+            v2/image/build/boot.log
