@@ -93,7 +93,8 @@ Each milestone stops for Kevon's word before the next starts.
 
 ```sh
 # Needs: a kernel in /boot (linux-image-generic), qemu-system-x86,
-# busybox-static, cpio.
+# busybox-static, cpio. /boot kernels ship mode 600 (root-only), so the
+# build needs read access to /boot — CI runs both steps under sudo.
 sh v2/image/build-empty-image.sh   # writes v2/image/build/
 sh v2/image/boot-check.sh          # boots in QEMU, expects SEVYNOS_V2_BOOT_OK
 ```
