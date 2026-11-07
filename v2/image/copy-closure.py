@@ -128,12 +128,21 @@ def main():
         # Copy it to its sysroot-relative path AND to the canonical
         # PT_INTERP path /lib64/ld-linux-x86-64.so.2, which is what the
         # binaries' interpreter headers point at.
+        # Always install a REAL copy at the canonical path: copy_into
+        # above may have left a symlink there (on a SYSROOT=/ host,
+        # /lib64/ld-linux is a symlink to ../lib/.../ld-linux, and
+        # nothing copies that target into the stage, so the link
+        # dangles and every dynamic binary fails with "not found" —
+        # the CI failure on the M1 PR). A dangling link must be
+        # replaced, not kept, so test islink/exists, not lexists.
         loader = find_loader(sysroot)
         if loader is not None:
             copy_into(sysroot, stage, loader)
             dest = os.path.join(stage, "lib64", "ld-linux-x86-64.so.2")
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            if not os.path.lexists(dest):
+            if os.path.islink(dest) or not os.path.exists(dest):
+                if os.path.lexists(dest):
+                    os.unlink(dest)
                 shutil.copy2(os.path.realpath(loader), dest)
                 os.chmod(dest, 0o755)
     print(f"closure copied into {stage}")
