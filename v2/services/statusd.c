@@ -49,6 +49,30 @@
 
 static int console_fd = -1;
 
+/* Retrying console writer: loops a write until complete, waiting for
+ * POLLOUT on EAGAIN. The guest console is opened O_NONBLOCK, so a
+ * single write can fail outright when the serial buffer is momentarily
+ * full — the line would silently vanish. Retrying keeps every logged
+ * line in the serial stream. Capped at ~5s so a wedged console cannot
+ * stall the process forever. */
+static void write_all_console(const char *buf, size_t n)
+{
+    size_t off = 0;
+    int tries = 0;
+    while (off < n && tries < 50) {
+        ssize_t w = write(console_fd, buf + off, n - off);
+        if (w > 0) {
+            off += (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno != EAGAIN && errno != EINTR)
+            break;
+        struct pollfd pfd = { .fd = console_fd, .events = POLLOUT };
+        (void)!poll(&pfd, 1, 100);
+        tries++;
+    }
+}
+
 static void log_line(const char *fmt, ...)
 {
     char buf[512];
@@ -63,7 +87,7 @@ static void log_line(const char *fmt, ...)
     if (buf[n - 1] != '\n')
         buf[n++] = '\n';
     if (console_fd >= 0)
-        (void)!write(console_fd, buf, (size_t)n);
+        write_all_console(buf, (size_t)n);
 }
 
 struct value {
