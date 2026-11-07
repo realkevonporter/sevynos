@@ -1,0 +1,79 @@
+# SevynOS v2 M1 — build the compositor image and prove it in QEMU.
+#
+# Runs on pushes and PRs touching v2/ (the fresh build). The job installs
+# the upstream compositor stack (Weston + seatd), builds the M1 image, and
+# runs the QMP harness: boot, surface on screen, cursor moves, clicks land
+# on the intended surface, keys reach the focused surface, status changes
+# arrive as pushed events. Screendumps, the serial log, and the JSON
+# result are kept as artifacts.
+name: SevynOS v2 M1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m1.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m1.yml"
+
+jobs:
+  m1-check:
+    runs-on: ubuntu-24.04
+    # 60, not 30: M0's v2-image push runs were twice cancelled at the
+    # 30-minute job timeout while still downloading linux-firmware
+    # (a hard dep of linux-image-generic) from a slow Azure mirror —
+    # the install step alone ran 22:27→22:57. The downloads were
+    # progressing, just slow; 60 minutes lets a slow mirror finish
+    # instead of failing the gate. (Same exposure exists in
+    # v2-image.yml; left for a follow-up so this PR stays M1-only.)
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build + boot dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            pkg-config \
+            libwayland-dev \
+            wayland-protocols \
+            weston \
+            seatd \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data
+
+      - name: Build the M1 image
+        run: sudo sh v2/image/build-m1-image.sh
+
+      - name: Run the M1 check in QEMU
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create m1-boot.log (EACCES — the CI failure on the
+          # first M1 PR run). Locally everything already runs as root,
+          # so this only matters on CI.
+          sudo chown -R "$USER" v2/image/build
+          node v2/image/m1-check.mjs
+
+      - name: Upload M1 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-m1
+          path: |
+            v2/image/build/m1-boot.log
+            v2/image/build/m1-check.json
+            v2/image/build/m1-shot-*.ppm
+          if-no-files-found: warn
