@@ -785,7 +785,8 @@ async function main() {
     await click();
     await sleep(300);
   }
-  // Focus order: [X, Nightly, Stable]. Tab x3 -> Stable.
+  // Focus order: [X, Nightly, Stable, echo-ai, plan-ai] (M4.5 adds
+  // the AI buttons after the channel buttons). Tab x3 -> Stable.
   await key("tab");
   await key("tab");
   await key("tab");
@@ -797,7 +798,9 @@ async function main() {
     const st = await updCmd(b, "STATUS", /UPDATE STATUS .* channel=stable /);
     check("settings: persisted channel reads back as stable", !!st, st || "");
   }
-  // Tab from Stable wraps to X, then Nightly.
+  // Tab from Stable wraps through the AI buttons to X, then Nightly.
+  await key("tab");
+  await key("tab");
   await key("tab");
   await key("tab");
   {

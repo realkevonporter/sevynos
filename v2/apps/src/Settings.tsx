@@ -8,8 +8,9 @@
 // itself over the updater's control serial.
 //
 // Also shows Sevyn Code status (read-only) and the AI-choice surface
-// as a placeholder: the connector itself is M4.5, so this row only
-// says where the choice will live.
+// (M4.5): which AI is plugged into the connector, picked through
+// `sevyn ai select` and read back through `sevyn ai list`. The
+// daemon persists the choice, so the selected AI survives a reboot.
 
 import * as React from "react";
 import { View, Text, Pressable } from "./host";
@@ -20,10 +21,20 @@ function readChannel(): string {
   return parseField(out, "channel") ?? "unknown";
 }
 
+function readAi(): { selected: string; backends: string[] } {
+  const { out } = runCli("sevyn ai list");
+  const selected = parseField(out, "selected") ?? "unknown";
+  const backends = parseField(out, "backends");
+  return { selected, backends: backends ? backends.split(",") : [] };
+}
+
 export function Settings(): React.ReactElement {
   // Lazy initializers: the reads run once, synchronously, on mount
   // (this renderer is sync; there is no effect flush to wait for).
   const [channel, setChannel] = React.useState<string>(() => readChannel());
+  const [ai, setAi] = React.useState<{ selected: string; backends: string[] }>(() =>
+    readAi(),
+  );
   const [codeInfo, setCodeInfo] = React.useState<string>(() =>
     runCli("sevyn code status").out.trim(),
   );
@@ -42,6 +53,51 @@ export function Settings(): React.ReactElement {
       current === next ? "Channel set to " + next + "." : "Channel is " + current + ".",
     );
     Sevyn.log("SETTINGS channel=" + current);
+  }
+
+  function selectAi(next: string): void {
+    const { code } = runCli("sevyn ai select " + next);
+    if (code !== 0) {
+      setMessage("Could not select that AI.");
+      return;
+    }
+    const current = readAi();
+    setAi(current);
+    setMessage(
+      current.selected === next
+        ? "AI set to " + next + "."
+        : "AI is " + current.selected + ".",
+    );
+    Sevyn.log("SETTINGS ai=" + current.selected);
+  }
+
+  function aiButton(label: string, value: string): React.ReactElement {
+    const active = ai.selected === value;
+    return (
+      <Pressable
+        onPress={() => selectAi(value)}
+        style={{
+          width: 120,
+          height: 36,
+          borderRadius: 8,
+          backgroundColor: active ? "#111827" : "#e5e7eb",
+          justifyContent: "center",
+          alignItems: "center",
+          marginRight: 12,
+        }}
+      >
+        <Text
+          style={{
+            fontSize: 15,
+            fontWeight: active ? "bold" : "normal",
+            color: active ? "#ffffff" : "#111827",
+            textAlign: "center",
+          }}
+        >
+          {label}
+        </Text>
+      </Pressable>
+    );
   }
 
   function channelButton(label: string, value: string): React.ReactElement {
@@ -139,9 +195,12 @@ export function Settings(): React.ReactElement {
         >
           AI assistant
         </Text>
-        <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
-          Choose your AI assistant here — coming in M4.5.
+        <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+          AI: {ai.selected}
         </Text>
+        <View style={{ flexDirection: "row", marginTop: 12 }}>
+          {ai.backends.map((id) => aiButton(id, id))}
+        </View>
       </View>
     </View>
   );

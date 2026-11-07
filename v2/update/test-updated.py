@@ -16,7 +16,8 @@ Coverage:
     channel-mismatch / no-trusted-keys — all refused (fail-closed)
   - apply: verified artifacts land in the idle slot, state flips,
     reboot requested; a bad-hash apply changes nothing
-  - the sevyn CLI (status / check / channel / apply)
+  - the sevyn CLI (status / check / channel / apply, ai list /
+    select / status / ask)
   - no-data-disk degradation
 
 Run: python3 v2/update/test-updated.py
@@ -573,6 +574,110 @@ def main():
     check("APPLY with no data disk refused",
           nodata.sock("APPLY") == "ERR no-data-disk")
     nodata.stop()
+
+    # --- CLI: ai (M4.5) ----------------------------------------------
+    # Fake sevyn-aid: canned replies, records the verb lines it got.
+    ai_sock_path = tmp / "ai.sock"
+    ai_seen = []
+    ai_stop = [False]
+
+    def fake_aid():
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(ai_sock_path))
+        srv.listen(8)
+        srv.settimeout(0.5)
+        while not ai_stop[0]:
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            conn.settimeout(5)
+            try:
+                data = b""
+                while b"\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                line = data.decode(errors="replace").strip()
+                if line:
+                    ai_seen.append(line)
+                    if line == "LIST":
+                        conn.sendall(
+                            b"OK selected=echo-ai "
+                            b"backends=echo-ai,plan-ai\n")
+                    elif line == "STATUS":
+                        conn.sendall(
+                            b"OK selected=echo-ai "
+                            b"backends=echo-ai,plan-ai "
+                            b"grant=app.launch,app.close,app.list,"
+                            b"status.set\n")
+                    elif line == "SELECT plan-ai":
+                        conn.sendall(b"OK selected plan-ai\n")
+                    elif line == "SELECT bogus":
+                        conn.sendall(b"ERR unknown backend bogus\n")
+                    elif line.startswith("ASK "):
+                        conn.sendall(
+                            b"OK backend=echo-ai allowed=1 denied=0 "
+                            b"failed=0\n")
+                    else:
+                        conn.sendall(b"ERR unknown command\n")
+            except OSError:
+                pass
+            finally:
+                conn.close()
+        srv.close()
+
+    ai_thread = threading.Thread(target=fake_aid, daemon=True)
+    ai_thread.start()
+    for _ in range(50):
+        if ai_sock_path.exists():
+            break
+        time.sleep(0.1)
+    ai_env = dict(os.environ)
+    ai_env["SEVYN_AI_SOCK"] = str(ai_sock_path)
+    r = subprocess.run([str(cli_bin), "ai", "list"],
+                       capture_output=True, text=True, env=ai_env)
+    check("CLI ai list prints selection",
+          r.returncode == 0 and
+          r.stdout.strip() == "selected=echo-ai backends=echo-ai,plan-ai",
+          r.stdout[:200] + r.stderr[:200])
+    r = subprocess.run([str(cli_bin), "ai", "status"],
+                       capture_output=True, text=True, env=ai_env)
+    check("CLI ai status prints grant",
+          r.returncode == 0 and
+          "grant=app.launch,app.close,app.list,status.set" in r.stdout,
+          r.stdout[:200])
+    r = subprocess.run([str(cli_bin), "ai", "select", "plan-ai"],
+                       capture_output=True, text=True, env=ai_env)
+    check("CLI ai select plan-ai",
+          r.returncode == 0 and r.stdout.strip() == "selected plan-ai",
+          r.stdout[:200] + r.stderr[:200])
+    r = subprocess.run([str(cli_bin), "ai", "ask", "launch", "files"],
+                       capture_output=True, text=True, env=ai_env)
+    check("CLI ai ask joins the task words",
+          r.returncode == 0 and "allowed=1" in r.stdout and
+          "ASK launch files" in ai_seen,
+          r.stdout[:200] + str(ai_seen))
+    r = subprocess.run([str(cli_bin), "ai", "select", "bogus"],
+                       capture_output=True, text=True, env=ai_env)
+    check("CLI ai select unknown -> exit 1 + error",
+          r.returncode == 1 and "unknown backend bogus" in r.stderr,
+          r.stdout[:200] + r.stderr[:200])
+    r = subprocess.run([str(cli_bin), "ai"],
+                       capture_output=True, text=True, env=ai_env)
+    check("CLI ai with no verb prints usage, exit 1",
+          r.returncode == 1 and "usage:" in r.stderr)
+    r = subprocess.run([str(cli_bin), "ai", "ask"],
+                       capture_output=True, text=True, env=ai_env)
+    check("CLI ai ask with no task prints usage, exit 1",
+          r.returncode == 1 and "usage:" in r.stderr)
+    ai_stop[0] = True
+    ai_thread.join(timeout=5)
+    if ai_sock_path.exists():
+        os.unlink(ai_sock_path)
 
     server.shutdown()
     os.close(master_fd)

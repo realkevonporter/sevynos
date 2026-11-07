@@ -1,0 +1,43 @@
+#!/bin/sh
+# plan-ai — the second AI backend (stub for the M4.5 proof).
+#
+# Goal-style parsing, deliberately DIFFERENT from echo-ai's keyword
+# parsing: it reads the task as a goal and plans it. Understands:
+#   any stock app name in the task ("open files", "files and music")
+#     -> LAUNCH <id> for each, in stock order
+#   "list" -> LIST (first, so the plan sees what is running)
+#   "volume to <n>" / "volume <n>" -> SET volume <n>
+#   "wifi <on|off>" -> SET wifi <on|off>
+# The swap test: the same connector, a different plan shape, no code
+# change — only `sevyn ai select plan-ai`.
+# Runs under busybox sh in the image; no bashisms, no jq.
+IFS= read -r task || exit 0
+task=$(printf '%s' "$task" | tr 'A-Z' 'a-z')
+case "$task" in
+  *list*) echo "LIST" ;;
+esac
+# Stock apps, in registry order. A name anywhere in the task plans a
+# launch for it ("open files and music" -> LAUNCH files, LAUNCH music).
+for app in files terminal browser settings music photos calendar notes calculator camera messages store; do
+  case " $task " in
+    *" $app "*) echo "LAUNCH $app" ;;
+  esac
+done
+# Volume: "volume to 55", "set the volume to 55", "volume 55".
+vol=""
+case "$task" in
+  *volume\ to\ *) vol=${task##*volume to } ;;
+  *volume\ *) vol=${task##*volume } ;;
+esac
+if [ -n "$vol" ]; then
+  vol=${vol%% *}
+  case "$vol" in
+    ''|*[!0-9]*) ;;
+    *) echo "SET volume $vol" ;;
+  esac
+fi
+case "$task" in
+  *wifi\ on*) echo "SET wifi on" ;;
+  *wifi\ off*) echo "SET wifi off" ;;
+esac
+echo "END"

@@ -1,0 +1,1 @@
+{ "permissions": ["app.launch", "app.close", "app.list", "status.set"] }

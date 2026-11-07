@@ -1,0 +1,140 @@
+# SevynOS v2 M4.5 — build the AI-connector image and prove it in QEMU.
+#
+# Runs on pushes and PRs touching v2/ (the fresh build). The job builds
+# the native deps (Hermes + Yoga, cached), the shell + app bundles, the
+# loader + app daemon + update daemon + CLI + AI daemon, and the M4.5
+# image (the M4 image plus sevyn-aid, the stub backends echo-ai and
+# plan-ai, and the permission grant), then runs the QMP harness: boot
+# and check the shell is on screen with appd + aid answering PING (the
+# M4 stack still works); in the Terminal, prove echo-ai drives a system
+# value (SET volume) and launches an app (LAUNCH files) through the
+# permission grant, and prove an out-of-grant action (uninstall +
+# reboot) is refused; in Settings, swap the AI to plan-ai through the
+# UI and read the new selection back over aid's control serial; then
+# prove plan-ai drives the same goal differently through the same
+# connector, same boot, no rebuild. The M4 check runs as a regression
+# on the same image (its Settings step accounts for the M4.5 AI
+# buttons in the focus order). Boot logs, screendumps, the data disk,
+# and the JSON result are kept as artifacts.
+#
+# The Hermes build is the slow step (10-20 min on a 2-core runner); the
+# deps dir is cached on the pinned versions + build-deps.sh hash, so a
+# warm cache makes this job about as fast as M4. The code-server
+# tarball (~120 MB) downloads on every run.
+name: SevynOS v2 M4.5
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m4.5.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m4.5.yml"
+
+jobs:
+  m4-5-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          # setup-node v5 defaults package-manager-cache to true and
+          # auto-detects pnpm from the repo root's packageManager field —
+          # but this job uses npm only (v2/rn/renderer, v2/shell) and
+          # never installs pnpm, so the cache step fails with "Unable to
+          # locate executable file: pnpm". The Hermes/Yoga deps cache is
+          # handled by the actions/cache step below.
+          package-manager-cache: false
+
+      - name: Install build + boot dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            g++ \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwayland-dev \
+            wayland-protocols \
+            libfreetype-dev \
+            libpng-dev \
+            libssl-dev \
+            weston \
+            seatd \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data \
+            e2fsprogs \
+            curl
+
+      - name: Cache native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevynos-v2-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}-hermes-0.13.0-yoga-41118bd
+          restore-keys: |
+            sevynos-v2-deps-
+
+      - name: Build native deps
+        run: sh v2/rn/host/build-deps.sh
+
+      - name: Renderer + shell + apps JS checks
+        run: |
+          cd v2/rn/renderer && npm ci --no-audit --no-fund && npm test
+          cd ../../shell && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+          cd ../apps && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+
+      - name: Loader + appd + updater checks
+        run: |
+          python3 v2/loader/test-loader.py
+          python3 v2/loader/test-appd.py
+          python3 v2/ai/test-aid.py
+          python3 v2/update/test-updated.py
+
+      - name: Build the M4.5 image
+        run: |
+          # The harness boots the built image as version m4.5-test-1,
+          # so the image and the check agree on the version string.
+          sudo env SEVYN_V2_VERSION=m4.5-test-1 sh v2/image/build-m4.5-image.sh
+
+      - name: Run the M4.5 check in QEMU
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create m4.5-boot-*.log (EACCES — the M1 failure mode).
+          sudo chown -R "$USER" v2/image/build
+          node v2/image/m4.5-check.mjs
+
+      - name: Run the M4 check in QEMU (regression on the M4.5 image)
+        run: |
+          node v2/image/m4-check.mjs
+
+      - name: Upload M4.5 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-m4.5
+          path: |
+            v2/image/build/m4.5-boot-*.log
+            v2/image/build/m4.5-check.json
+            v2/image/build/m4.5-shot-*.ppm
+            v2/image/build/m4.5-data.img
+            v2/image/build/m4-boot-*.log
+            v2/image/build/m4-check.json
+            v2/image/build/m4-shot-*.ppm
+            v2/image/build/m4-data.img
+          if-no-files-found: warn

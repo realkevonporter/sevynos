@@ -14,6 +14,9 @@
 //   TERMINAL settings-json defaultProfile=<name>
 //                                        (after catting the
 //                                        code-server settings file)
+//   TERMINAL ai-status selected=<id>     (after `ai status`)
+//   TERMINAL ai-ask allowed=<n> denied=<m>
+//                                        (after `ai ask ...`)
 // The host logs every exec itself (EXEC <cmd> -> <code>); these
 // markers carry the parsed fields the harness asserts on.
 
@@ -34,6 +37,9 @@ const HELP_LINES: string[] = [
   "  sevyn files list [path]     list a directory",
   "  sevyn files cat <path>      print a file",
   "  sevyn code status           Sevyn Code status",
+  "  sevyn ai list|status        which AI is plugged in",
+  "  sevyn ai select <id>        plug in a different AI",
+  "  sevyn ai ask <task...>      ask the AI to do something",
   "",
   "Type a command below and press Enter.",
 ];
@@ -57,6 +63,17 @@ function logMarkers(cmd: string, out: string): void {
       ? "sevyn"
       : "other";
     Sevyn.log("TERMINAL settings-json defaultProfile=" + profile);
+  } else if (cmd === "ai status" || cmd.startsWith("ai status ")) {
+    Sevyn.log(
+      "TERMINAL ai-status selected=" + (parseField(out, "selected") ?? "unknown"),
+    );
+  } else if (cmd === "ai ask" || cmd.startsWith("ai ask ")) {
+    Sevyn.log(
+      "TERMINAL ai-ask allowed=" +
+        (parseField(out, "allowed") ?? "?") +
+        " denied=" +
+        (parseField(out, "denied") ?? "?"),
+    );
   }
 }
 
