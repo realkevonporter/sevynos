@@ -82,6 +82,29 @@ check("clicking a dock tile logs LAUNCH and shows Starting…", () => {
   );
 });
 
+check(
+  "app events: LAUNCHED clears Starting… and shows a running dot; STOPPED clears the dot",
+  () => {
+    assert.ok(Sevyn._handlers.appEvent, "appEvent handler registered");
+    Sevyn._handlers.appEvent("EVENT LAUNCHED files");
+    let after = Sevyn._presents[Sevyn._presents.length - 1];
+    let texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+    assert.ok(texts.includes("Welcome to SevynOS"), "welcome returns after LAUNCHED");
+    assert.ok(
+      !texts.some((t) => t.includes("Starting Files")),
+      "Starting… cleared after LAUNCHED",
+    );
+    const dots = after.ops.filter((o) => o.type === "rect" && o.w === 6 && o.h === 6);
+    assert.equal(dots.length, 1, "one running dot, got " + dots.length);
+    Sevyn._handlers.appEvent("EVENT STOPPED files signal 15");
+    after = Sevyn._presents[Sevyn._presents.length - 1];
+    const dotsAfter = after.ops.filter(
+      (o) => o.type === "rect" && o.w === 6 && o.h === 6,
+    );
+    assert.equal(dotsAfter.length, 0, "dot gone after STOPPED");
+  },
+);
+
 check("status push re-renders the tray", () => {
   Sevyn._status.battery = "42";
   Sevyn._status.volume = "10";
@@ -100,9 +123,12 @@ check("status push re-renders the tray", () => {
 
 check("right chevron scrolls the tray (scroll offset changes)", () => {
   const before = Sevyn._presents[Sevyn._presents.length - 1];
+  // The right chevron is the 28px-wide pressable on the right — NOT
+  // the rightmost pressable overall: scrolled-off tiles extend past
+  // it (that is the point of the dock overflowing).
   const chevron = before.ops
-    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect")
-    .sort((a, b) => b.x - a.x)[0]; // rightmost = right chevron
+    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.w === 28)
+    .sort((a, b) => b.x - a.x)[0]; // rightmost chevron
   Sevyn._handlers.pointer({
     type: "button",
     x: chevron.x + 2,

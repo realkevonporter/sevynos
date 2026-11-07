@@ -1,29 +1,59 @@
-// SevynOS v2 M2 — the shell.
+// SevynOS v2 M3 — the shell.
 //
 // Layout (1024x768):
 //   top bar (48px): "SevynOS" wordmark + live status tray
 //   main area (flex 1): welcome view, or "Starting <app>…" after a launch
 //   dock (96px): app launcher (see Dock.tsx)
 //
-// Launching is M3's app runtime. M2 records the attempt via
-// Sevyn.launchApp (the host logs "LAUNCH <appId>") and shows the
-// "Starting…" state so the click is visible on screen.
+// The dock renders from appd's app list (the renderer's app store,
+// useSyncExternalStore): the installed stock apps, with a running dot
+// under each running app. Launching asks appd to spawn a sandboxed
+// host for the app in its own window; "Starting…" shows until the
+// LAUNCHED event (or a STOPPED/CRASHED for the same id) arrives.
 
 import * as React from "react";
 import { View, Text } from "./host";
 import { Dock } from "./Dock";
-import { APPS } from "./apps";
+import { APPS, type ShellApp } from "./apps";
 import { StatusTray } from "./StatusTray";
+import { subscribeApps, getAppsSnapshot } from "../../rn/renderer/sevyn-renderer";
 
 export function Shell(): React.ReactElement {
   const [launching, setLaunching] = React.useState<string | null>(null);
+  const snap = React.useSyncExternalStore(subscribeApps, getAppsSnapshot);
+  // appd's list is the source of truth; the built-in 12 are the
+  // fallback when it is empty (appd down at first mount).
+  const apps: ShellApp[] =
+    snap.apps.length > 0
+      ? snap.apps.map((a) => ({
+          id: a.id,
+          name: a.name,
+          color: a.color,
+          glyph: a.glyph,
+        }))
+      : APPS;
+  const running = new Set(snap.running);
 
   const onLaunch = (appId: string) => {
-    Sevyn.launchApp(appId);
-    setLaunching(appId);
+    // Only claim "Starting…" when appd accepted the launch.
+    if (Sevyn.launchApp(appId)) setLaunching(appId);
   };
 
-  const app = launching ? APPS.find((a) => a.id === launching) : undefined;
+  const app = launching ? apps.find((a) => a.id === launching) : undefined;
+  // "Starting…" is derived, not cleared: it shows while the launch
+  // is outstanding — the app is neither running yet nor already
+  // stopped/crashed for this id. Once LAUNCHED arrives the window is
+  // up and the welcome text returns. (A second launch of an app that
+  // just stopped shows no "Starting…" flash — the window opens
+  // anyway; the running dot is the feedback.)
+  const showStarting =
+    !!app &&
+    !running.has(launching as string) &&
+    !(
+      snap.lastEvent &&
+      (snap.lastEvent.kind === "STOPPED" || snap.lastEvent.kind === "CRASHED") &&
+      snap.lastEvent.id === launching
+    );
 
   return (
     <View
@@ -58,9 +88,9 @@ export function Shell(): React.ReactElement {
           backgroundColor: "#0b0b0f",
         }}
       >
-        {app ? (
+        {showStarting ? (
           <Text style={{ fontSize: 22, color: "#ffffff", textAlign: "center" }}>
-            {"Starting " + app.name + "…"}
+            {"Starting " + (app as ShellApp).name + "…"}
           </Text>
         ) : (
           <Text style={{ fontSize: 22, color: "#ffffff", textAlign: "center" }}>
@@ -70,12 +100,12 @@ export function Shell(): React.ReactElement {
         <Text
           style={{ fontSize: 14, color: "#9ca3af", textAlign: "center", marginTop: 12 }}
         >
-          {app
-            ? "Apps open in their own window in M3."
+          {showStarting
+            ? "Opening in its own window."
             : "Pick an app from the dock to begin."}
         </Text>
       </View>
-      <Dock onLaunch={onLaunch} />
+      <Dock apps={apps} running={running} onLaunch={onLaunch} />
     </View>
   );
 }

@@ -16,6 +16,10 @@
 //     hit op (host hit-tests the last presented ops).
 //   Sevyn.onKey(ev)      ev = {key: <linux keycode>, pressed: bool}
 //   Sevyn.onStatus(ev)   ev = {key, value} — statusd push.
+//   Sevyn.onAppEvent(line) line = "EVENT LAUNCHED files" — appd push.
+//   Sevyn.listApps()     -> [{id, name, version, color, glyph,
+//                          system, protected, permissions}] — appd LIST.
+//   Sevyn.launchApp(id)  -> bool — appd LAUNCH.
 //
 // The renderer keeps a yoga-id -> instance map for hit routing and a
 // focus list for keyboard activation. ScrollView scrolls only via
@@ -430,6 +434,68 @@ function handleStatus(ev) {
   presentRoot();
 }
 
+// App store for useSyncExternalStore. The snapshot is {apps, running,
+// lastEvent, seq} — replaced (new object identity) on every appd
+// event, so the shell re-renders exactly when the app set or a
+// running state changes. apps comes from Sevyn.listApps() (the host
+// asks appd); running tracks LAUNCHED/STOPPED/CRASHED ids; lastEvent
+// is the most recent parsed event, for the shell's "Starting…" logic.
+let appsSnapshot = null;
+const appsListeners = new Set();
+function getAppsSnapshot() {
+  if (!appsSnapshot) {
+    let apps = [];
+    try {
+      apps = Sevyn.listApps() || [];
+    } catch (e) {
+      apps = [];
+    }
+    appsSnapshot = { apps, running: [], lastEvent: null, seq: 0 };
+  }
+  return appsSnapshot;
+}
+function subscribeApps(fn) {
+  appsListeners.add(fn);
+  return () => appsListeners.delete(fn);
+}
+function handleAppEvent(line) {
+  // "EVENT <KIND> <id> [rest]" — the host owns the single onAppEvent
+  // handler, like onStatus; the shell must not register its own.
+  const parts = String(line).split(" ");
+  const kind = parts[1] || "";
+  const id = parts[2] || "";
+  const prev = getAppsSnapshot();
+  let { apps, running } = prev;
+  if (kind === "LAUNCHED") {
+    if (!running.includes(id)) running = [...running, id];
+  } else if (kind === "STOPPED" || kind === "CRASHED") {
+    running = running.filter((r) => r !== id);
+  } else if (kind === "INSTALLED" || kind === "UNINSTALLED") {
+    try {
+      apps = Sevyn.listApps() || [];
+    } catch (e) {
+      apps = prev.apps;
+    }
+  } else {
+    return; // Unknown event: no re-render.
+  }
+  appsSnapshot = {
+    apps,
+    running,
+    lastEvent: { kind, id },
+    seq: prev.seq + 1,
+  };
+  for (const fn of Array.from(appsListeners)) {
+    try {
+      fn();
+    } catch (e) {
+      Sevyn.log("apps listener failed: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+  SevynReconciler.flushSyncWork();
+  presentRoot();
+}
+
 // ------------------------------------------------------------- host config
 const hostConfig = {
   isPrimaryRenderer: true,
@@ -639,6 +705,7 @@ function render(element, options) {
   Sevyn.onPointer(handlePointer);
   Sevyn.onKey(handleKey);
   Sevyn.onStatus(handleStatus);
+  if (typeof Sevyn.onAppEvent === "function") Sevyn.onAppEvent(handleAppEvent);
 
   // NOTE: the onUncaughtError handler must log — a no-op here would
   // silently swallow render throws and mount an empty tree.
@@ -734,6 +801,8 @@ module.exports = {
   scrollTo,
   subscribeStatus,
   getStatusSnapshot,
+  subscribeApps,
+  getAppsSnapshot,
   // Exposed for tests: the live instance map and present pass.
   _instancesByYogaId: instancesByYogaId,
   _presentRoot: presentRoot,

@@ -1,13 +1,18 @@
-// SevynOS v2 M2 — the React Native host (sevyn-rn-host).
+// SevynOS v2 M3 — the React Native host (sevyn-rn-host).
 //
-// One process, one app (the shell in M2). Embeds Hermes, lays out with
-// Yoga, paints to a Wayland surface, forwards pointer/keyboard input and
-// statusd broadcasts to JS. See v2/rn/README.md for the host ↔ JS
-// contract.
+// One process, one app: the shell (fullscreen, --bundle defaults to
+// the shell) or a sandboxed app window (--app <id>, 800x500, its own
+// Hermes runtime — a crashing app never takes down the shell).
+// Embeds Hermes, lays out with Yoga, paints to a Wayland surface,
+// forwards pointer/keyboard input and statusd broadcasts to JS, and
+// talks to sevyn-appd for the app list, launching, and app events.
+// See v2/rn/README.md for the host ↔ JS contract.
 //
 // Usage: sevyn-rn-host [--bundle <path>] [--width <px>] [--height <px>]
+//                      [--app <id>] [--name <name>] [--color <#rrggbb>]
+//                      [--glyph <letter>] [--permissions <csv>]
 //   bundle default: /usr/share/sevyn/shell/shell.hbc
-//   size default: 1024x768 (the Weston output mode)
+//   size default: 1024x768 (the Weston output mode); apps use 800x500
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -17,6 +22,7 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -25,6 +31,7 @@
 #include <hermes/hermes.h>
 #include <jsi/jsi.h>
 
+#include "appclient.h"
 #include "common.h"
 #include "painter.h"
 #include "status.h"
@@ -73,16 +80,28 @@ bool hasProp(jsi::Runtime& rt, const jsi::Object& obj, const char* name) {
 // --- the host ---
 class RnHost {
  public:
-  RnHost(int width, int height, std::string bundle)
-      : width_(width), height_(height), bundle_(std::move(bundle)) {}
+  RnHost(int width, int height, std::string bundle, std::string appId,
+         std::string appName, std::string appColor, std::string appGlyph,
+         std::set<std::string> permissions)
+      : width_(width),
+        height_(height),
+        bundle_(std::move(bundle)),
+        appId_(std::move(appId)),
+        appName_(std::move(appName)),
+        appColor_(std::move(appColor)),
+        appGlyph_(std::move(appGlyph)),
+        permissions_(std::move(permissions)) {}
 
-  // Stop the status subscriber thread FIRST, while every member its
-  // handler touches (statusMutex_/statusQueue_/statusSnapshot_) is
-  // still alive. Members are destroyed in reverse declaration order,
-  // so without this the thread could fire its handler on already
-  // destroyed members during teardown — seen in CI as a segfault when
-  // a STATUS broadcast arrived while the host was exiting.
+  // Stop the subscriber threads FIRST, while every member their
+  // handlers touch (statusMutex_/statusQueue_/statusSnapshot_,
+  // appEventMutex_/appEventQueue_) is still alive. Members are
+  // destroyed in reverse declaration order, so without this a thread
+  // could fire its handler on already destroyed members during
+  // teardown — seen in CI as a segfault when a STATUS broadcast
+  // arrived while the host was exiting.
   ~RnHost() {
+    if (appClient_)
+      appClient_->stop();
     if (status_)
       status_->stop();
   }
@@ -108,16 +127,39 @@ class RnHost {
                        uint32_t button, bool pressed);
   void dispatchKey(uint32_t key, bool pressed);
   void drainStatusQueue();
+  void drainAppEventQueue();
+  bool hasPermission(const std::string& name) const {
+    // The shell is trusted: it always has every permission. An app
+    // has only what its manifest granted (passed on the command line
+    // by appd from the registry).
+    return appId_.empty() || permissions_.count(name) > 0;
+  }
 
   int width_, height_;
   std::string bundle_;
+  // App identity: empty for the shell. appd launches apps with
+  // --app <id> --name <name> --color <#rrggbb> --glyph <letter>
+  // --permissions <csv>.
+  std::string appId_;
+  std::string appName_;
+  std::string appColor_;
+  std::string appGlyph_;
+  std::set<std::string> permissions_;
   std::unique_ptr<Wayland> wayland_;
   std::unique_ptr<YogaBridge> yoga_;
   std::unique_ptr<StatusClient> status_;
+  std::unique_ptr<AppClient> appClient_;
   std::unique_ptr<jsi::Runtime> runtime_;
   std::unordered_map<std::string, std::string> statusSnapshot_;
   std::mutex statusMutex_;
   std::queue<std::pair<std::string, std::string>> statusQueue_;
+  // App events (EVENT lines from appd), queued by the subscriber
+  // thread and drained on the main loop like the status queue.
+  std::mutex appEventMutex_;
+  std::queue<std::string> appEventQueue_;
+  // Set by the window close handler / Sevyn.closeApp(): the main loop
+  // exits cleanly (code 0) on the next tick.
+  std::atomic<bool> exitRequested_{false};
 
   // Last presented hit-test list, in draw order.
   struct Hit {
@@ -131,9 +173,11 @@ class RnHost {
   std::optional<jsi::Function> pointerHandler_;
   std::optional<jsi::Function> keyHandler_;
   std::optional<jsi::Function> statusHandler_;
+  std::optional<jsi::Function> appEventHandler_;
   bool hasPointerHandler_ = false;
   bool hasKeyHandler_ = false;
   bool hasStatusHandler_ = false;
+  bool hasAppEventHandler_ = false;
 
   // setTimeout/clearTimeout timers. Hermes has no timers of its own,
   // and React's scheduler falls back to setTimeout when neither
@@ -651,20 +695,92 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
                 size_t) {
            jsi::Object o(rt);
+           // Permission gate: without status.read an app sees an
+           // empty status object (and no subscriber ever runs, so
+           // onStatus never fires either).
+           if (!hasPermission("status.read"))
+             return o;
            std::lock_guard<std::mutex> lk(statusMutex_);
            for (auto& kv : statusSnapshot_)
              o.setProperty(rt, kv.first.c_str(), kv.second.c_str());
            return o;
          });
-  hostFn("launchApp", 1,
-         [](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
-            size_t count) {
-           // M2: launching is M3's app runtime. Record the attempt so
-           // the check can assert the click reached the shell.
+  hostFn("hasPermission", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
            if (count >= 1)
-             logLine("LAUNCH %s", jsString(rt, args[0]).c_str());
-           return jsi::Value(true);
+             return jsi::Value(hasPermission(jsString(rt, args[0])));
+           return jsi::Value(false);
          });
+  hostFn("listApps", 0,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           std::vector<AppInfo> apps =
+               appClient_ ? appClient_->listApps() : std::vector<AppInfo>{};
+           jsi::Array arr(rt, apps.size());
+           for (size_t i = 0; i < apps.size(); i++) {
+             jsi::Object o(rt);
+             o.setProperty(rt, "id", apps[i].id.c_str());
+             o.setProperty(rt, "name", apps[i].name.c_str());
+             o.setProperty(rt, "version", apps[i].version.c_str());
+             o.setProperty(rt, "color", apps[i].color.c_str());
+             o.setProperty(rt, "glyph", apps[i].glyph.c_str());
+             o.setProperty(rt, "system", apps[i].system);
+             o.setProperty(rt, "protected", apps[i].protected_);
+             jsi::Array perms(rt, apps[i].permissions.size());
+             for (size_t j = 0; j < apps[i].permissions.size(); j++)
+               perms.setValueAtIndex(rt, j,
+                                     apps[i].permissions[j].c_str());
+             o.setProperty(rt, "permissions", perms);
+             arr.setValueAtIndex(rt, i, o);
+           }
+           return arr;
+         });
+  hostFn("launchApp", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           // M3: the real app runtime — appd spawns a sandboxed host
+           // for the app in its own window. The shell shows
+           // "Starting…" until the LAUNCHED/STOPPED event arrives.
+           if (count >= 1) {
+             std::string id = jsString(rt, args[0]);
+             bool ok = appClient_ && appClient_->launchApp(id);
+             logLine("LAUNCH %s %s", id.c_str(), ok ? "ok" : "failed");
+             return jsi::Value(ok);
+           }
+           return jsi::Value(false);
+         });
+  hostFn("onAppEvent", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count >= 1 && args[0].isObject()) {
+             appEventHandler_ =
+                 std::move(args[0].asObject(rt).asFunction(rt));
+             hasAppEventHandler_ = true;
+           }
+           return jsi::Value::undefined();
+         });
+  hostFn("closeApp", 0,
+         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           // Apps close themselves (window X button does the same).
+           // The shell is not closable.
+           if (!appId_.empty()) {
+             exitRequested_.store(true);
+             return jsi::Value(true);
+           }
+           return jsi::Value(false);
+         });
+  // App identity, for the app template (the shell reads these too;
+  // its own values are the defaults below).
+  sevyn.setProperty(rt, "appId",
+                    appId_.empty() ? "shell" : appId_.c_str());
+  sevyn.setProperty(rt, "appName",
+                    appName_.empty() ? "SevynOS" : appName_.c_str());
+  sevyn.setProperty(rt, "appColor",
+                    appColor_.empty() ? "#111827" : appColor_.c_str());
+  sevyn.setProperty(rt, "appGlyph",
+                    appGlyph_.empty() ? "S" : appGlyph_.c_str());
   rt.global().setProperty(rt, "Sevyn", sevyn);
 }
 
@@ -814,21 +930,69 @@ void RnHost::drainStatusQueue() {
   }
 }
 
+void RnHost::drainAppEventQueue() {
+  if (!hasAppEventHandler_ || !runtime_)
+    return;
+  std::queue<std::string> q;
+  {
+    std::lock_guard<std::mutex> lk(appEventMutex_);
+    q.swap(appEventQueue_);
+  }
+  if (q.empty())
+    return;
+  jsi::Runtime& rt = *runtime_;
+  try {
+    while (!q.empty()) {
+      std::string line = q.front();
+      q.pop();
+      appEventHandler_->call(rt, jsi::String::createFromUtf8(rt, line));
+    }
+    rt.drainMicrotasks();
+  } catch (const jsi::JSError& e) {
+    logLine("JS app-event handler failed: %s", e.getMessage().c_str());
+  }
+}
+
 int RnHost::run() {
-  wayland_ = std::make_unique<Wayland>(width_, height_);
+  const bool isApp = !appId_.empty();
+  wayland_ = std::make_unique<Wayland>(
+      width_, height_, /*fullscreen=*/!isApp,
+      isApp ? appName_ : "SevynOS Shell",
+      isApp ? appId_ : "sevyn-shell");
   if (!wayland_->ok()) {
     logLine("HOST Wayland setup failed");
     return 1;
   }
+  if (isApp) {
+    // The compositor's close request ends the app (the shell is not
+    // closable). Exit code 0: appd reports STOPPED, not CRASHED.
+    wayland_->setCloseHandler(
+        [this] { exitRequested_.store(true); });
+  }
   yoga_ = std::make_unique<YogaBridge>();
-  status_ = std::make_unique<StatusClient>();
-  status_->setHandler([this](const std::string& key,
-                             const std::string& value) {
-    std::lock_guard<std::mutex> lk(statusMutex_);
-    statusSnapshot_[key] = value;
-    statusQueue_.push({key, value});
+  // Status is permission-gated: an app without status.read gets no
+  // subscriber, so no broadcasts ever reach it and getStatus() stays
+  // empty. The shell always has the permission.
+  if (hasPermission("status.read")) {
+    status_ = std::make_unique<StatusClient>();
+    status_->setHandler([this](const std::string& key,
+                               const std::string& value) {
+      std::lock_guard<std::mutex> lk(statusMutex_);
+      statusSnapshot_[key] = value;
+      statusQueue_.push({key, value});
+    });
+    status_->start();
+  }
+  // The appd subscriber runs for the shell (dock list + events) and
+  // for apps too (an app sees other apps' events; harmless, and the
+  // template never subscribes). It retries its connect, so a slow
+  // appd start does not fail the host.
+  appClient_ = std::make_unique<AppClient>();
+  appClient_->setEventHandler([this](const std::string& line) {
+    std::lock_guard<std::mutex> lk(appEventMutex_);
+    appEventQueue_.push(line);
   });
-  status_->start();
+  appClient_->start();
 
   wayland_->setPointerHandler(
       [this](const std::string& type, double x, double y, uint32_t button,
@@ -846,7 +1010,9 @@ int RnHost::run() {
   installSevyn(rt);
   installTimers(rt);
 
-  // Load the shell bundle (Hermes bytecode).
+  // Load the bundle (Hermes bytecode). A throwing bundle fails here
+  // with exit 1: for an app that is the sandbox working — appd reaps
+  // it as APP CRASHED and the shell keeps running.
   std::ifstream in(bundle_, std::ios::binary);
   if (!in) {
     logLine("HOST cannot open bundle %s", bundle_.c_str());
@@ -867,10 +1033,20 @@ int RnHost::run() {
     logLine("HOST bundle stack: %s", e.getStack().c_str());
     return 1;
   }
-  logLine("HOST shell running (SEVYNOS_M2_READY)");
+  if (isApp)
+    logLine("HOST app running (SEVYNOS_M3_APP_READY) %s", appId_.c_str());
+  else
+    logLine("HOST shell running (SEVYNOS_M2_READY)");
 
-  // Main loop: Wayland events drive JS; status updates drain each tick.
+  // Main loop: Wayland events drive JS; status + app-event updates
+  // drain each tick. A close request (window X or Sevyn.closeApp())
+  // exits cleanly with code 0.
   while (true) {
+    if (exitRequested_.load()) {
+      logLine("HOST %s exiting (close requested)",
+              isApp ? "app" : "shell");
+      return 0;
+    }
     if (!wayland_->dispatch(16)) {
       logLine("HOST Wayland display lost, exiting");
       return 1;
@@ -878,6 +1054,7 @@ int RnHost::run() {
     fireDueTimers(rt);
     rt.drainMicrotasks();
     drainStatusQueue();
+    drainAppEventQueue();
   }
   return 0;
 }
@@ -887,6 +1064,7 @@ int RnHost::run() {
 int main(int argc, char** argv) {
   std::string bundle = kDefaultBundle;
   int width = kDefaultWidth, height = kDefaultHeight;
+  std::string appId, appName, appColor, appGlyph, permissionsCsv;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--bundle" && i + 1 < argc)
@@ -895,13 +1073,37 @@ int main(int argc, char** argv) {
       width = atoi(argv[++i]);
     else if (a == "--height" && i + 1 < argc)
       height = atoi(argv[++i]);
+    else if (a == "--app" && i + 1 < argc)
+      appId = argv[++i];
+    else if (a == "--name" && i + 1 < argc)
+      appName = argv[++i];
+    else if (a == "--color" && i + 1 < argc)
+      appColor = argv[++i];
+    else if (a == "--glyph" && i + 1 < argc)
+      appGlyph = argv[++i];
+    else if (a == "--permissions" && i + 1 < argc)
+      permissionsCsv = argv[++i];
     else if (a == "--help" || a == "-h") {
       fprintf(stderr,
               "usage: sevyn-rn-host [--bundle <path>] [--width <px>] "
-              "[--height <px>]\n");
+              "[--height <px>] [--app <id>] [--name <name>] "
+              "[--color <#rrggbb>] [--glyph <letter>] "
+              "[--permissions <csv>]\n");
       return 0;
     }
   }
-  RnHost host(width, height, bundle);
+  std::set<std::string> permissions;
+  size_t start = 0;
+  while (start < permissionsCsv.size()) {
+    size_t comma = permissionsCsv.find(',', start);
+    if (comma == std::string::npos) {
+      permissions.insert(permissionsCsv.substr(start));
+      break;
+    }
+    permissions.insert(permissionsCsv.substr(start, comma - start));
+    start = comma + 1;
+  }
+  RnHost host(width, height, bundle, appId, appName, appColor, appGlyph,
+              permissions);
   return host.run();
 }

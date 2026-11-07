@@ -1,19 +1,25 @@
-# SevynOS v2 — React Native host (M2)
+# SevynOS v2 — React Native host (M3)
 
 The shell is a real React Native app. It runs on a purpose-built native
 host — no Electron, no web view, no Node in the image. One bridge, one
 runtime contract (see REBUILD_PLAN.md §2): the host embeds Hermes, lays
 out with Yoga, and paints to a Wayland surface through the Weston
-compositor M1 proved.
+compositor M1 proved. M3 adds the app runtime: one host process per app
+(the shell is one, each launched app is another), so a crashing app
+never takes down the shell.
 
 ## Pieces
 
-| Piece                        | What it is                                                                                                                                                                                     |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `host/sevyn-rn-host.cc`      | The host binary. Hermes embed + Yoga + Wayland client + painter + input + status bridge. One process, one app (the shell in M2; per-app sandboxed runtimes arrive with the M3 app runtime).    |
-| `host/build-deps.sh`         | Fetches and builds the native deps into a prefix: Hermes 0.13.0 (source) + Yoga (pinned commit). CI caches the prefix.                                                                         |
-| `renderer/sevyn-renderer.js` | The JS renderer: a `react-reconciler` host config. Host components `View`, `Text`, `Image`, `Pressable`, `ScrollView`. Layout is Yoga (via the host); paint is a flat draw-op list per commit. |
-| `shell/`                     | The shell app itself (TypeScript + RN components): dock, launcher, status tray. Built with esbuild, compiled to Hermes bytecode with `hermesc`.                                                |
+| Piece                        | What it is                                                                                                                                                                                                                                                                     |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `host/sevyn-rn-host.cc`      | The host binary. Hermes embed + Yoga + Wayland client + painter + input + status bridge. One process, one app: the shell in M2; since M3 every launched app is its own host process too (sandboxed — a crashing app never takes down the shell).                               |
+| `host/appclient.{h,cc}`      | M3: the appd client (mirrors `status.{h,cc}`) — subscribes to appd's `/run/sevyn-apps.sock` for EVENT lines, `listApps()` / `launchApp()` over the socket.                                                                                                                     |
+| `host/wayland.{h,cc}`        | M3: windowed mode — apps get an 800×500 `xdg_toplevel` with title + app_id and a close handler; the shell stays fullscreen and is not closable.                                                                                                                                |
+| `host/build-deps.sh`         | Fetches and builds the native deps into a prefix: Hermes 0.13.0 (source) + Yoga (pinned commit). CI caches the prefix.                                                                                                                                                         |
+| `renderer/sevyn-renderer.js` | The JS renderer: a `react-reconciler` host config. Host components `View`, `Text`, `Image`, `Pressable`, `ScrollView`. Layout is Yoga (via the host); paint is a flat draw-op list per commit.                                                                                 |
+| `shell/`                     | The shell app itself (TypeScript + RN components): dock, launcher, status tray. Built with esbuild, compiled to Hermes bytecode with `hermesc`. Since M3 the dock renders from appd's registry (`Sevyn.listApps()`), falling back to the built-in 12 when appd is unreachable. |
+| `../loader/`                 | M3: the `.sevyn` loader + app daemon (C, outside `rn/` — see `v2/loader/`).                                                                                                                                                                                                    |
+| `../apps/`                   | M3: the stock-app template (one RN screen, packaged per app by `make-bundles.py`).                                                                                                                                                                                             |
 
 ## Host ↔ JS contract
 
@@ -45,9 +51,28 @@ button, pressed, nodeId?}` — `nodeId` is set on button-press only:
   `{key, value}`. There is exactly one handler of each kind, owned by
   the renderer — the shell must not register its own.
 - `Sevyn.getStatus()` — last known `{battery, wifi, volume}` snapshot.
-- `Sevyn.launchApp(appId)` — M2: logs `LAUNCH <appId>` and returns
-  true. Real launching is M3 (app runtime); M2 proves click → shell
-  handles it.
+  M3: gated by the `status.read` permission — an app without it gets
+  `{}` and its status subscriber never starts (the shell always has it).
+- `Sevyn.appId` / `appName` / `appColor` / `appGlyph` — the app's
+  identity from its manifest, passed by appd at launch (the shell
+  reads `"shell"` / `"SevynOS"` / `"#111827"` / `"S"`).
+- `Sevyn.hasPermission(name)` — true when the manifest grants it (the
+  shell always returns true).
+- `Sevyn.listApps()` — M3: the registry over appd's socket, as
+  `[{id, name, version, color, glyph, system, protected, permissions,
+signatureKeyId}]`. Returns `[]` when appd is unreachable.
+- `Sevyn.launchApp(appId)` — M3: real launching through appd (the
+  shell's dock click). Returns true iff appd accepted the launch; the
+  app then runs in its own host process and window. M2 only logged
+  `LAUNCH <appId>`.
+- `Sevyn.onAppEvent(fn)` — M3: appd's `EVENT LAUNCHED / STOPPED /
+CRASHED / INSTALLED / UNINSTALLED <id>` lines. The renderer keeps an
+  app store (`subscribeApps` / `getAppsSnapshot`, mirroring the status
+  store) so the dock shows running dots and clears "Starting…" on
+  STOPPED/CRASHED, and re-lists on INSTALLED/UNINSTALLED.
+- `Sevyn.closeApp()` — M3: apps only; the host exits 0 (appd reports
+  STOPPED). The shell returns false (it is not closable; the
+  compositor's close button does the same thing for apps).
 - `Sevyn.log(msg)` — to `/dev/console` and the host log.
 
 The bundle's top-level code starts the app (the shell calls the
@@ -102,8 +127,10 @@ newProps`, and `commitUpdate` is called as
 ## Rendering model
 
 - One fullscreen `xdg_toplevel` surface (1024×768, the Weston output
-  mode). The shell owns the whole screen; window management for apps
-  arrives in M3+.
+  mode) for the shell. Apps get a windowed 800×500 `xdg_toplevel`
+  (title = app name, app_id = app id); closing it exits the app's host
+  process cleanly. The shell ignores close requests (it is not
+  closable).
 - Paint is CPU raster into a shared-memory buffer: solid rounded rects,
   FreeType text, PNG images (libpng). No GL — same as M1's pixman
   compositor. The painter is deliberately boring; a GPU path is a
@@ -112,21 +139,31 @@ newProps`, and `commitUpdate` is called as
   cost is negligible at 1024×768. Dirty-rect optimisation is deferred
   until a profile says it matters.
 
-## What M2 proves (m2-check.mjs)
+## What M3 proves (m3-check.mjs)
 
-1. The shell surface is on screen (screendump contains dock + top bar).
-2. The dock never overflows: with 12 apps the dock stays within the
-   screen width and scrolls to reach the far icons.
-3. Click lands on the intended control: clicking a launcher icon logs
-   `LAUNCH <appId>` and the shell shows its "Starting…" state.
-4. Status is live: the tray shows battery/wifi/volume pushed from
-   statusd, and a pushed change appears promptly.
-5. Keys reach the focused control (launcher keyboard navigation).
+1. Boot: the shell mounts and appd is ready with its control serial,
+   after seeding all 12 stock bundles from pristine.
+2. The dock is registry-driven: the first tile is Browser (alphabetical
+   seed order) and the dock still never overflows.
+3. Keys reach the shell: Tab + Enter launches the first app into its
+   own window (its own host reports `SEVYNOS_M3_APP_READY`).
+4. Input reaches the app: the app window's close X stops it (clean
+   exit 0) and the window disappears.
+5. Status is live inside a permitted app window (Files, `status.read`):
+   a volume push repaints its window body.
+6. Permissions are enforced: Notes (no `status.read`) does NOT repaint
+   on a status push, while the shell tray does.
+7. A crashing app never takes down the shell (`APP CRASHED crash 1`,
+   shell still on screen).
+8. The loader refuses bad bundles (tampered hash; untrusted system
+   signature) and refuses to uninstall the protected terminal.
+9. The done-when, end to end: a bundle installs, runs sandboxed, is
+   deleted (LIST no longer shows it), and reinstalls offline from
+   pristine (LIST shows it again) and relaunches.
 
-## What M2 does NOT do
+## What M3 does NOT do
 
-- Real app launching (M3), the Terminal/Settings/Files apps (M4),
-  networking/browser (M5), Tokrah (M6).
-- Per-app sandboxed runtimes — the host runs one app (the shell).
-  Sandboxing is part of the M3 app runtime.
+- The Terminal/Settings/Files apps (M4), networking/browser (M5),
+  Tokrah (M6). The stock apps are one shared template screen — real
+  app content arrives with M4.
 - A GPU renderer. CPU raster only, by design.

@@ -22,6 +22,17 @@ declare module "react" {
 }
 
 declare global {
+  interface SevynAppInfo {
+    id: string;
+    name: string;
+    version: string;
+    color: string;
+    glyph: string;
+    system: boolean;
+    protected: boolean;
+    permissions: string[];
+  }
+
   const Sevyn: {
     yogaCreateNode(): number;
     yogaFreeNode(id: number): void;
@@ -50,7 +61,16 @@ declare global {
     onKey(fn: (ev: any) => void): void;
     onStatus(fn: (ev: any) => void): void;
     getStatus(): { [key: string]: string };
+    // App identity (set by the host; the shell reads "shell" here).
+    appId: string;
+    appName: string;
+    appColor: string;
+    appGlyph: string;
+    hasPermission(name: string): boolean;
+    listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
+    onAppEvent(fn: (line: string) => void): void;
+    closeApp(): boolean;
     log(msg: string): void;
   };
 }
