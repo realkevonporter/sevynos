@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "react": "19.3.1",
+    "react-reconciler": "0.34.0"
+  },
+  "description": "SevynOS v2 M2 — React Native renderer for the Sevyn host (react-reconciler host config)",
+  "name": "@sevynos/renderer",
+  "private": true,
+  "scripts": {
+    "test": "node test/renderer-test.js"
+  },
+  "version": "0.2.0"
+}

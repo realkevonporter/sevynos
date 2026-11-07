@@ -25,6 +25,69 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build bootable image
         run: pnpm qemu:build
+      # --- SevynOS v2 image (M2 shell) -----------------------------------
+      # The nightly publishes a real, bootable v2 image alongside the old
+      # tree's ISO: vmlinuz + initramfs.cpio.gz + checksums + boot notes.
+      # The Hermes/Yoga deps are cached on the same key as v2-m2.yml, so
+      # a warm cache makes this a few minutes on top of the old build.
+      - name: Install v2 build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            g++ \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwayland-dev \
+            wayland-protocols \
+            libfreetype-dev \
+            libpng-dev \
+            weston \
+            seatd \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data
+      - name: Cache v2 native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevynos-v2-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}-hermes-0.13.0-yoga-41118bd
+          restore-keys: |
+            sevynos-v2-deps-
+      - name: Build v2 native deps
+        run: sh v2/rn/host/build-deps.sh
+      - name: Build v2 (M2 shell) image
+        run: |
+          sudo sh v2/image/build-m2-image.sh
+          sudo chown -R "$USER" v2/image/build
+      - name: Prepare v2 nightly artifacts
+        run: |
+          cd v2/image/build
+          sha256sum vmlinuz initramfs.cpio.gz > v2-SHA256SUMS
+          cat > v2-BOOT-NOTES.txt <<'EOF'
+          SevynOS v2 (M2 shell) — bootable image
+          ======================================
+          Kernel + initramfs for QEMU (x86_64). Boots to the SevynOS shell:
+          top bar with live status, main area, dock with 12 apps.
+
+          Boot it:
+            qemu-system-x86_64 -machine q35 -m 512 -kernel vmlinuz \
+              -initrd initramfs.cpio.gz -append "console=ttyS0" \
+              -vga none -device virtio-gpu-pci -device qemu-xhci \
+              -device usb-tablet -nic none
+
+          Verify the download with v2-SHA256SUMS.
+          This is a development snapshot, not a stable release.
+          EOF
+          ls -l vmlinuz initramfs.cpio.gz v2-SHA256SUMS v2-BOOT-NOTES.txt
       - name: Publish nightly release
         uses: ncipollo/release-action@v1
         with:
@@ -37,10 +100,16 @@ jobs:
 
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
+
+            SevynOS v2 (M2 shell) image: vmlinuz + initramfs.cpio.gz
+            (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
+            status tray, dock with 12 apps. The v1 ISO below is the old
+            tree's image.
           prerelease: true
           makeLatest: false
           allowUpdates: true
           removeArtifacts: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
-          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json"
+          # The v2-* files are the M2 shell image (kernel + initramfs).
+          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt"
