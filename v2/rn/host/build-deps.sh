@@ -137,12 +137,18 @@ HERMES_BUILD="$BUILD_DIR/hermes"
 # the build dir (and the verify step below expects libhermes.a/libjsi.a
 # in the prefix). Static also keeps the image free of .so runtime deps.
 # Verified the .so install in CI run 42330696308.
+# -DHERMES_BUILD_SHARED_JSI=OFF: the jsi subdir is configured with
+# BUILD_SHARED_LIBS temporarily set to HERMES_BUILD_SHARED_JSI (ON by
+# default on Linux), so BUILD_SHARED_LIBS=OFF alone still builds
+# libjsi.so and the libjsi.a copy below finds nothing. Verified in CI
+# run 42332501329 ("Linking CXX shared library libjsi.so").
 cmake -S "$HERMES_SRC" -B "$HERMES_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DHERMES_BUILD_APPLE_FRAMEWORK=OFF \
   -DHERMES_ENABLE_TEST_SUITE=OFF \
   -DCMAKE_CXX_FLAGS="-include string" \
   -DBUILD_SHARED_LIBS=OFF \
+  -DHERMES_BUILD_SHARED_JSI=OFF \
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
 cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi hermes hdb hbcdump hvm hcdp --parallel "$JOBS"
 cmake --install "$HERMES_BUILD"
