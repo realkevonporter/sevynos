@@ -90,12 +90,28 @@ wayland-scanner private-code \
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-statusd" "$ROOT/services/statusd.c"
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-status-client" "$ROOT/services/status-client.c"
 
+# wayland-scanner's private-code output is C: its `const struct
+# wl_interface` definitions have external linkage in C, but in C++
+# namespace-scope const has INTERNAL linkage — so passing the .c to g++
+# makes every interface invisible to wayland.cc (undefined reference to
+# xdg_wm_base_interface, verified in CI run 42333389196). M1 compiles
+# the same file with gcc (build-m1-image.sh). Compile it as C here too
+# and link the object.
+gcc -O2 -c $(pkg-config --cflags wayland-client) \
+  -I"$BUILD_TMP" \
+  -o "$BUILD_TMP/xdg-shell-protocol.o" \
+  "$BUILD_TMP/xdg-shell-protocol.c"
+
 # The RN host: Hermes embed + Yoga + Wayland + painter + status bridge.
 # Hermes's public headers (HermesExport.h, RuntimeConfig.h) are NOT
 # installed by cmake --install, so the source public/ dir is on the
 # include path too. Link: every Hermes build archive (except the lean
 # variants, which would duplicate libhermes's symbols) inside
 # --start-group/--end-group so order does not matter, plus yogacore.
+# ICU: Hermes's libhermesPlatformUnicode.a calls ICU (ucol_*/uloc_*/udat_*,
+# verified in CI run 42333389196) — link icui18n/icuuc/icudata. The host
+# binary is in the copy-closure list below, so the libicu*.so.74 runtime
+# closure is staged into the image with it.
 HERMES_LIBS="$(find "$HERMES_BUILD" -name '*.a' ! -name '*lean*' ! -path '*unittests*' ! -name '*Test*' | sort)"
 # shellcheck disable=SC2086
 g++ -O2 -std=c++17 -Wall -Wextra \
@@ -106,9 +122,9 @@ g++ -O2 -std=c++17 -Wall -Wextra \
   "$ROOT/rn/host/common.cc" "$ROOT/rn/host/painter.cc" \
   "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
   "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
-  "$BUILD_TMP/xdg-shell-protocol.c" \
+  "$BUILD_TMP/xdg-shell-protocol.o" \
   -Wl,--start-group $HERMES_LIBS "$PREFIX/lib/libyogacore.a" -Wl,--end-group \
-  $(pkg-config --libs wayland-client freetype2 libpng) -lpthread -ldl
+  $(pkg-config --libs wayland-client freetype2 libpng) $(pkg-config --libs icu-uc icu-i18n) -lpthread -ldl
 
 # --- build the shell bundle ------------------------------------------------
 # npm ci (frozen lockfile) + esbuild bundle + hermesc bytecode. The
