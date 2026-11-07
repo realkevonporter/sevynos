@@ -105,6 +105,15 @@ class RnHost {
       appClient_->stop();
     if (status_)
       status_->stop();
+    // Free the Yoga tree and the Wayland display BEFORE the Hermes
+    // runtime is destroyed (it is a later member, so implicit
+    // destruction would free them after it). Yoga nodes hold measure
+    // lambdas capturing shared_ptr<jsi::Function>; releasing the last
+    // copy into a dead runtime segfaults — seen in CI run 42362676981
+    // as a browser segfault on window-close exit (the only path that
+    // runs a clean teardown; SIGTERM kills never reach this code).
+    yoga_.reset();
+    wayland_.reset();
   }
 
   int run();
