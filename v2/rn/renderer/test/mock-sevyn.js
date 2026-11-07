@@ -8,9 +8,136 @@
 const nodes = new Map();
 let nextId = 1;
 
-const handlers = { pointer: null, key: null, status: null };
+const handlers = { pointer: null, key: null, status: null, appEvent: null };
 const presents = []; // {ops, bg} per Sevyn.present call
 const logs = [];
+
+// The 12 stock apps, as appd's LIST would return them (id|name|
+// version|color|glyph|...). The shell falls back to its built-in list
+// when listApps() is empty; the mock returns the full set so the
+// shell renders from the appd path.
+const MOCK_APPS = [
+  {
+    id: "files",
+    name: "Files",
+    version: "1.0.0",
+    color: "#3b82f6",
+    glyph: "F",
+    system: false,
+    protected: false,
+    permissions: ["status.read"],
+  },
+  {
+    id: "terminal",
+    name: "Terminal",
+    version: "1.0.0",
+    color: "#111827",
+    glyph: ">",
+    system: true,
+    protected: true,
+    permissions: [],
+  },
+  {
+    id: "browser",
+    name: "Browser",
+    version: "1.0.0",
+    color: "#0ea5e9",
+    glyph: "B",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "settings",
+    name: "Settings",
+    version: "1.0.0",
+    color: "#6b7280",
+    glyph: "S",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "music",
+    name: "Music",
+    version: "1.0.0",
+    color: "#ec4899",
+    glyph: "M",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "photos",
+    name: "Photos",
+    version: "1.0.0",
+    color: "#f59e0b",
+    glyph: "P",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "calendar",
+    name: "Calendar",
+    version: "1.0.0",
+    color: "#ef4444",
+    glyph: "C",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "notes",
+    name: "Notes",
+    version: "1.0.0",
+    color: "#eab308",
+    glyph: "N",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "calculator",
+    name: "Calculator",
+    version: "1.0.0",
+    color: "#8b5cf6",
+    glyph: "=",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "camera",
+    name: "Camera",
+    version: "1.0.0",
+    color: "#14b8a6",
+    glyph: "O",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "messages",
+    name: "Messages",
+    version: "1.0.0",
+    color: "#22c55e",
+    glyph: "M",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+  {
+    id: "store",
+    name: "Store",
+    version: "1.0.0",
+    color: "#f97316",
+    glyph: "S",
+    system: false,
+    protected: false,
+    permissions: [],
+  },
+];
 
 function dim(v, parent) {
   if (v == null) return null;
@@ -21,12 +148,26 @@ function dim(v, parent) {
   return null;
 }
 
-function layoutNode(id, px, py, pw, ph) {
+function layoutNode(
+  id,
+  px,
+  py,
+  pw,
+  ph,
+  parentPx,
+  parentPy,
+  flexW,
+  flexH,
+  stretchW,
+  stretchH,
+) {
   const n = nodes.get(id);
   if (!n) return { x: px, y: py, width: 0, height: 0 };
   const st = n.style || {};
   let w = dim(st.width, pw);
+  if (w == null && flexW != null) w = flexW;
   let h = dim(st.height, ph);
+  if (h == null && flexH != null) h = flexH;
   if (w == null || h == null) {
     if (n.measure) {
       // widthMode: 0 undefined, 1 exactly, 2 at-most.
@@ -37,14 +178,54 @@ function layoutNode(id, px, py, pw, ph) {
       if (h == null) h = m.height;
     }
   }
+  // Yoga stretch (default alignItems): a child with no explicit
+  // cross size and no measure function fills the parent's content
+  // cross size. Without this the dock row auto-sized to its content
+  // (1128px) instead of the 1024px surface, so its flex:1
+  // ScrollView took the content width and the dock never overflowed.
+  if (w == null && stretchW != null) w = stretchW;
+  if (h == null && stretchH != null) h = stretchH;
   if (w == null) w = 0;
   if (h == null) h = 0;
   // Children flow.
   const row = st.flexDirection === "row";
-  let cx = px;
-  let cy = py;
   const padL = st.paddingLeft || st.paddingHorizontal || st.padding || 0;
   const padT = st.paddingTop || st.paddingVertical || st.padding || 0;
+  const padR = st.paddingRight || st.paddingHorizontal || st.padding || 0;
+  const padB = st.paddingBottom || st.paddingVertical || st.padding || 0;
+  // Flex distribution: children with flex>0 and no explicit size in
+  // the flow direction share what is left after the fixed children,
+  // margins, and padding. (Without this the ScrollView's flex:1
+  // collapsed to its content width and the dock never overflowed.)
+  const mainSize = row ? w : h;
+  let fixed = row ? padL + padR : padT + padB;
+  let flexTotal = 0;
+  for (const cid of n.children) {
+    const c = nodes.get(cid);
+    if (!c) continue;
+    const cs = c.style || {};
+    const flex = cs.flex || 0;
+    const main = row ? cs.width : cs.height;
+    if (flex > 0 && dim(main, mainSize) == null) {
+      flexTotal += flex;
+    } else {
+      let sz = dim(main, mainSize);
+      if (sz == null && c.measure) {
+        const m = c.measure(0, 0, 0, 0);
+        sz = row ? m.width : m.height;
+      }
+      const m1 = row
+        ? cs.marginLeft || cs.marginHorizontal || cs.margin || 0
+        : cs.marginTop || cs.marginVertical || cs.margin || 0;
+      const m2 = row
+        ? cs.marginRight || cs.marginHorizontal || cs.margin || 0
+        : cs.marginBottom || cs.marginVertical || cs.margin || 0;
+      fixed += (sz == null ? 0 : sz) + m1 + m2;
+    }
+  }
+  const flexUnit = flexTotal > 0 ? Math.max(0, mainSize - fixed) / flexTotal : 0;
+  let cx = px;
+  let cy = py;
   cx += padL;
   cy += padT;
   for (const cid of n.children) {
@@ -52,24 +233,78 @@ function layoutNode(id, px, py, pw, ph) {
     if (!c) continue;
     const cs = c.style || {};
     const abs = cs.position === "absolute";
-    const clx = abs ? px + (cs.left || 0) : cx;
-    const cly = abs ? py + (cs.top || 0) : cy;
-    const cl = layoutNode(cid, clx, cly, w, h);
+    // Yoga honours margins in flow: the child is offset by its
+    // start margin and the cursor advances past its end margin.
+    const mL = cs.marginLeft || cs.marginHorizontal || cs.margin || 0;
+    const mR = cs.marginRight || cs.marginHorizontal || cs.margin || 0;
+    const mT = cs.marginTop || cs.marginVertical || cs.margin || 0;
+    const mB = cs.marginBottom || cs.marginVertical || cs.margin || 0;
+    const flex = cs.flex || 0;
+    const main = row ? cs.width : cs.height;
+    const isFlexChild = flex > 0 && dim(main, mainSize) == null;
+    const childFlexW = row && isFlexChild ? flexUnit * flex : null;
+    const childFlexH = !row && isFlexChild ? flexUnit * flex : null;
+    // Cross-axis stretch for this child (null when it has an
+    // explicit cross size or a measure function).
+    const cross = row ? cs.height : cs.width;
+    const crossAvail = row ? h : w;
+    const childStretchW =
+      !row && dim(cross, crossAvail) == null && !c.measure
+        ? Math.max(0, w - padL - padR - mL - mR)
+        : null;
+    const childStretchH =
+      row && dim(cross, crossAvail) == null && !c.measure
+        ? Math.max(0, h - padT - padB - mT - mB)
+        : null;
+    const clx = abs ? px + (cs.left || 0) : cx + (row ? mL : 0);
+    const cly = abs ? py + (cs.top || 0) : cy + (row ? 0 : mT);
+    const cl = layoutNode(
+      cid,
+      clx,
+      cly,
+      w,
+      h,
+      px,
+      py,
+      childFlexW,
+      childFlexH,
+      childStretchW,
+      childStretchH,
+    );
     if (!abs) {
-      if (row) cx += cl.width;
-      else cy += cl.height;
+      if (row) cx += cl.width + mL + mR;
+      else cy += cl.height + mT + mB;
     }
   }
-  // Auto size from children when no explicit size and no measure.
-  if (!n.measure && st.width == null) {
+  // Auto size from children when the size is genuinely unresolved
+  // (no explicit size, no flex share, no stretch, no measure). A
+  // stretched or flexed size must NOT be overridden by the content
+  // extent — that undid the stretch and re-broke the dock width.
+  const wAuto =
+    dim(st.width, pw) == null && flexW == null && stretchW == null && !n.measure;
+  const hAuto =
+    dim(st.height, ph) == null && flexH == null && stretchH == null && !n.measure;
+  if (wAuto) {
     if (row) w = Math.max(w, cx - px + (st.paddingRight || 0));
     else w = Math.max(w, 0);
   }
-  if (!n.measure && st.height == null) {
+  if (hAuto) {
     if (!row) h = Math.max(h, cy - py + (st.paddingBottom || 0));
     else h = Math.max(h, 0);
   }
-  n.layout = { x: px, y: py, width: w, height: h };
+  // Yoga parity: yogaGetLayout returns positions RELATIVE to the
+  // parent (the renderer adds the parent offset when emitting ops).
+  // The mock used to store absolute positions, which double-counted
+  // every ancestor offset in the ops — invisible while every
+  // pressable was a direct ScrollView child (one uniform shift), but
+  // the M3 dock wraps each tile in a column View and the extra level
+  // doubled the tile spacing in the ops.
+  n.layout = {
+    x: px - (parentPx || 0),
+    y: py - (parentPy || 0),
+    width: w,
+    height: h,
+  };
   return n.layout;
 }
 
@@ -150,9 +385,28 @@ const Sevyn = {
   onStatus(fn) {
     handlers.status = fn;
   },
+  onAppEvent(fn) {
+    handlers.appEvent = fn;
+  },
   _status: { battery: "87", wifi: "on", volume: "43" },
   getStatus() {
     return Object.assign({}, Sevyn._status);
+  },
+  appId: "shell",
+  appName: "SevynOS",
+  appColor: "#111827",
+  appGlyph: "S",
+  hasPermission() {
+    return true;
+  },
+  listApps() {
+    return MOCK_APPS.map((a) =>
+      Object.assign({}, a, { permissions: a.permissions.slice() }),
+    );
+  },
+  closeApp() {
+    logs.push("CLOSEAPP");
+    return true;
   },
   launchApp(appId) {
     logs.push("LAUNCH " + appId);
@@ -175,6 +429,7 @@ const Sevyn = {
     handlers.pointer = null;
     handlers.key = null;
     handlers.status = null;
+    handlers.appEvent = null;
   },
 };
 

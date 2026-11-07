@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 // M2 check: boot the SevynOS v2 M2 image in QEMU and prove the milestone.
 //
+// NOTE (M3): this check runs the M2 image, which has NO appd — so the
+// shell falls back to its built-in app list (Files first, M2 order) and
+// a dock click only logs LAUNCH (there is no appd to really launch).
+// The shell shows "Starting…" only on a real launch since M3, so the
+// click test asserts the main area does NOT change here; real launching
+// is proven by m3-check.mjs. The host link needs appclient.cc since M3
+// (see build-m2-image.sh) — the M2 image still builds and runs the same
+// host binary.
+//
 // What it proves, in order:
 //   1. The image boots and the shell mounts (SEVYNOS_M2_READY on serial).
 //   2. The shell surface is on screen: top bar, main area, and dock
@@ -9,7 +18,8 @@
 //      visible and the dock's right edge is the scroll chevron, not a
 //      half-cut tile.
 //   4. Click lands on the intended control: clicking the Files tile logs
-//      LAUNCH files and the main area changes (Welcome -> Starting…).
+//      LAUNCH files, and the main area does NOT change (no "Starting…"
+//      without a real launch — M3 behaviour, see note above).
 //   5. Status is live: SETs injected on the host control serial change
 //      the tray (pixel diff in the tray region).
 //   6. Keys reach the focused control: after clicking Files, Tab moves
@@ -388,8 +398,11 @@ async function main() {
     `chevron pixels=${rightChevron}`,
   );
 
-  // 4. Click the Files tile: LAUNCH files in the log + the main area
-  // changes (Welcome -> Starting Files…).
+  // 4. Click the Files tile: LAUNCH files in the log. The main area
+  // must NOT change: since M3 the shell shows "Starting…" only when
+  // launchApp returns true, and with no appd in this image it returns
+  // false — so a click here logs LAUNCH but shows no "Starting…".
+  // (Real launching, with the "Starting…" state, is m3-check's job.)
   const shotBefore = await shot(qmp, join(OUT, "m2-shot-before-click.ppm"));
   {
     const before = logLines().length;
@@ -403,8 +416,8 @@ async function main() {
   const shotAfter = await shot(qmp, join(OUT, "m2-shot-after-click.ppm"));
   const mainDiff = diffBox(shotBefore, shotAfter, { x0: 0, y0: 48, x1: W, y1: 672 });
   check(
-    "screen: main area changes after launch click (Starting…)",
-    mainDiff > 100,
+    "screen: main area unchanged after click (no fake Starting…)",
+    mainDiff < 100,
     `differing pixels=${mainDiff}`,
   );
 

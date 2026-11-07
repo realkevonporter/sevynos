@@ -1,4 +1,4 @@
-// SevynOS v2 M2 — the dock.
+// SevynOS v2 M3 — the dock.
 //
 // A horizontal ScrollView of app tiles. The dock never overflows: the
 // tray clips to the viewport and scrolls (chevron buttons scroll by one
@@ -7,13 +7,16 @@
 // fixed 1024px surface — no measurement effect, so the chevrons are
 // correct on the very first frame.
 //
-// At M2 sizes (80px tiles, 8px gaps) 12 apps need 1056px in a 1008px
+// At M3 sizes (80px tiles, 8px gaps) 12 apps need 1056px in a 1008px
 // tray, so the chevrons are always up with the full app set — which is
 // the point of the M2 check. Fewer apps fit and the chevrons hide.
+//
+// Tiles render from the apps prop (appd's list via the shell, or the
+// built-in fallback). A white dot under a tile marks a running app.
 
 import * as React from "react";
 import { View, Text, Pressable, ScrollView } from "./host";
-import { APPS } from "./apps";
+import { type ShellApp } from "./apps";
 import { scrollBy } from "../../rn/renderer/sevyn-renderer";
 
 const SURFACE_WIDTH = 1024;
@@ -23,13 +26,15 @@ const GAP = 8;
 const CHEVRON = 28;
 
 export interface DockProps {
+  apps: ShellApp[];
+  running: Set<string>;
   onLaunch(appId: string): void;
 }
 
 export function Dock(props: DockProps): React.ReactElement {
   const trayRef = React.useRef<any>(null);
 
-  const contentWidth = APPS.length * (TILE + GAP);
+  const contentWidth = props.apps.length * (TILE + GAP);
   const trayWidth = SURFACE_WIDTH - DOCK_H_PADDING;
   const overflow = contentWidth > trayWidth;
 
@@ -67,31 +72,50 @@ export function Dock(props: DockProps): React.ReactElement {
         ref={trayRef}
         style={{ flex: 1, flexDirection: "row", height: 96, alignItems: "center" }}
       >
-        {APPS.map((app) => (
-          <Pressable
+        {props.apps.map((app) => (
+          <View
             key={app.id}
-            onPress={() => props.onLaunch(app.id)}
             style={{
               width: TILE,
-              height: TILE,
               marginLeft: GAP,
-              backgroundColor: app.color,
-              borderRadius: 12,
-              justifyContent: "center",
+              flexDirection: "column",
               alignItems: "center",
             }}
           >
-            <Text
+            <Pressable
+              onPress={() => props.onLaunch(app.id)}
               style={{
-                fontSize: 28,
-                fontWeight: "bold",
-                color: "#ffffff",
-                textAlign: "center",
+                width: TILE,
+                height: TILE,
+                backgroundColor: app.color,
+                borderRadius: 12,
+                justifyContent: "center",
+                alignItems: "center",
               }}
             >
-              {app.glyph}
-            </Text>
-          </Pressable>
+              <Text
+                style={{
+                  fontSize: 28,
+                  fontWeight: "bold",
+                  color: "#ffffff",
+                  textAlign: "center",
+                }}
+              >
+                {app.glyph}
+              </Text>
+            </Pressable>
+            {props.running.has(app.id) ? (
+              <View
+                style={{
+                  width: 6,
+                  height: 6,
+                  marginTop: 4,
+                  borderRadius: 3,
+                  backgroundColor: "#ffffff",
+                }}
+              />
+            ) : null}
+          </View>
         ))}
       </ScrollView>
       {overflow ? (

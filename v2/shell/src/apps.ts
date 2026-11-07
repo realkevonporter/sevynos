@@ -1,10 +1,12 @@
-// SevynOS v2 M2 — the shell app registry.
+// SevynOS v2 M3 — the shell app registry.
 //
-// M2 ships 12 apps so the dock-overflow check has something to chew on.
-// Icons are coloured tiles with an initial (M2 has no staged image
-// assets yet); real app icons land with M3's app bundles. Launching is
-// M3's app runtime — M2 only records the attempt (Sevyn.launchApp logs
-// "LAUNCH <appId>" for the check to assert on).
+// The dock renders from appd (Sevyn.listApps(), via the renderer's
+// app store): the installed stock apps, each a .sevyn bundle in
+// pristine. These 12 are the FALLBACK when appd's list is empty
+// (appd down at first mount) — they match the pristine manifests, so
+// the dock looks identical either way. Icons are coloured tiles with
+// an initial (M3 has no staged image assets yet); real app icons land
+// with a later app-bundle pass.
 
 export interface ShellApp {
   id: string;

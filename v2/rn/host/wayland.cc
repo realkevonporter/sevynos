@@ -1,7 +1,8 @@
-// SevynOS v2 M2 — Wayland client (see wayland.h).
+// SevynOS v2 M3 — Wayland client (see wayland.h).
 #include "wayland.h"
 
 #include <cerrno>
+#include <cstdlib>
 #include <poll.h>
 #include <unistd.h>
 #include <cstring>
@@ -16,7 +17,13 @@ namespace sevyn {
 // reference the private static callbacks, so namespace scope cannot
 // name them.
 
-Wayland::Wayland(int width, int height) : width_(width), height_(height) {
+Wayland::Wayland(int width, int height, bool fullscreen,
+                 const std::string& title, const std::string& appId)
+    : width_(width),
+      height_(height),
+      fullscreen_(fullscreen),
+      title_(title),
+      appId_(appId) {
   static const wl_registry_listener kRegistryListener = {
       &Wayland::onRegistryGlobal, &Wayland::onRegistryGlobalRemove};
   static const xdg_surface_listener kXdgSurfaceListener = {
@@ -59,8 +66,10 @@ Wayland::Wayland(int width, int height) : width_(width), height_(height) {
   }
   xdgSurface_ = xdg_wm_base_get_xdg_surface(xdgWmBase_, surface_);
   xdgToplevel_ = xdg_surface_get_toplevel(xdgSurface_);
-  xdg_toplevel_set_title(xdgToplevel_, "SevynOS Shell");
-  xdg_toplevel_set_fullscreen(xdgToplevel_, nullptr);
+  xdg_toplevel_set_title(xdgToplevel_, title_.c_str());
+  xdg_toplevel_set_app_id(xdgToplevel_, appId_.c_str());
+  if (fullscreen_)
+    xdg_toplevel_set_fullscreen(xdgToplevel_, nullptr);
   xdg_surface_add_listener(xdgSurface_, &kXdgSurfaceListener, this);
   xdg_toplevel_add_listener(xdgToplevel_, &kXdgToplevelListener, this);
   wl_surface_commit(surface_);
@@ -189,12 +198,19 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
   (void)width;
   (void)height;
   (void)states;
-  // Fullscreen: the compositor owns the size (1024x768). Ignore.
+  // The shell is fullscreen and app windows are a fixed size: the
+  // compositor owns the shell size (1024x768) and app windows keep
+  // their committed buffer size. Ignore the suggestion either way.
 }
 
 void Wayland::onXdgToplevelClose(void* data, xdg_toplevel* toplevel) {
-  (void)data;
   (void)toplevel;
+  Wayland* self = static_cast<Wayland*>(data);
+  if (self->closeHandler_) {
+    logLine("WAYLAND toplevel close requested");
+    self->closeHandler_();
+    return;
+  }
   logLine("WAYLAND toplevel close requested (ignoring — shell is not closable)");
 }
 

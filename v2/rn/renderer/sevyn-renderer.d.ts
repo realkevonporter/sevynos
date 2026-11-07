@@ -20,3 +20,20 @@ export function scrollBy(instance: ScrollViewInstance, dx: number, dy: number): 
 export function scrollTo(instance: ScrollViewInstance, x: number, y: number): void;
 export function subscribeStatus(fn: () => void): () => void;
 export function getStatusSnapshot(): { [key: string]: string };
+export interface AppSnapshot {
+  apps: {
+    id: string;
+    name: string;
+    version: string;
+    color: string;
+    glyph: string;
+    system: boolean;
+    protected: boolean;
+    permissions: string[];
+  }[];
+  running: string[];
+  lastEvent: { kind: string; id: string } | null;
+  seq: number;
+}
+export function subscribeApps(fn: () => void): () => void;
+export function getAppsSnapshot(): AppSnapshot;

@@ -1,9 +1,12 @@
-// SevynOS v2 M2 — Wayland client for the RN host.
+// SevynOS v2 M3 — Wayland client for the RN host.
 //
-// One fullscreen xdg_toplevel surface (1024x768, the Weston output
-// mode). Double-buffered SHM: two Painters, each with its own wl_buffer;
-// a buffer is only reused after the compositor releases it, so frames
-// never tear. Pointer + keyboard events are forwarded to the host.
+// One xdg_toplevel surface. The shell runs fullscreen (1024x768, the
+// Weston output mode); an app runs windowed (800x500) with its own
+// title and app id, and the compositor's close request ends the app
+// (the shell is not closable). Double-buffered SHM: two Painters, each
+// with its own wl_buffer; a buffer is only reused after the compositor
+// releases it, so frames never tear. Pointer + keyboard events are
+// forwarded to the host.
 #pragma once
 
 #include <functional>
@@ -35,8 +38,15 @@ class Wayland {
   using KeyHandler = std::function<void(uint32_t key, bool pressed)>;
   // Frame callback: the compositor is ready for the next frame.
   using FrameHandler = std::function<void()>;
+  // Close request from the compositor (window X / Alt-F4). Set for
+  // app windows; the shell leaves it unset (not closable).
+  using CloseHandler = std::function<void()>;
 
-  Wayland(int width, int height);
+  // fullscreen=false makes a windowed toplevel with the given title
+  // and app id instead of a fullscreen shell surface.
+  Wayland(int width, int height, bool fullscreen = true,
+          const std::string& title = "SevynOS Shell",
+          const std::string& appId = "sevyn-shell");
   ~Wayland();
 
   Wayland(const Wayland&) = delete;
@@ -60,6 +70,7 @@ class Wayland {
   void setPointerHandler(PointerHandler h) { pointerHandler_ = h; }
   void setKeyHandler(KeyHandler h) { keyHandler_ = h; }
   void setFrameHandler(FrameHandler h) { frameHandler_ = h; }
+  void setCloseHandler(CloseHandler h) { closeHandler_ = h; }
 
  private:
   void onFrameDone();
@@ -125,6 +136,9 @@ class Wayland {
                                    int32_t rate, int32_t delay);
 
   int width_, height_;
+  bool fullscreen_;
+  std::string title_;
+  std::string appId_;
   bool ok_ = false;
   wl_display* display_ = nullptr;
   wl_registry* registry_ = nullptr;
@@ -162,6 +176,7 @@ class Wayland {
   PointerHandler pointerHandler_;
   KeyHandler keyHandler_;
   FrameHandler frameHandler_;
+  CloseHandler closeHandler_;
 
   double pointerX_ = 0, pointerY_ = 0;
 };

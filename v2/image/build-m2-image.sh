@@ -121,6 +121,7 @@ g++ -O2 -std=c++17 -Wall -Wextra \
   -o "$BUILD_TMP/sevyn-rn-host" \
   "$ROOT/rn/host/common.cc" "$ROOT/rn/host/painter.cc" \
   "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
+  "$ROOT/rn/host/appclient.cc" \
   "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
   "$BUILD_TMP/xdg-shell-protocol.o" \
   -Wl,--start-group $HERMES_LIBS "$PREFIX/lib/libyogacore.a" -Wl,--end-group \

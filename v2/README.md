@@ -1,8 +1,8 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M1 merged (PR #82, 2026-11-06). M2 in progress (this PR).**
-M0 merged 2026-11-06 (PR #81). M1 passes its full check locally — 15/15,
-~30 s under QEMU/TCG, twice in a row — and is merged. This directory is
+**Status: M2 merged (PR #85, 2026-11-07). M3 in progress (this PR).**
+M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
+#84 and #86). M2 merged 2026-11-07 (PR #85). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never
@@ -83,33 +83,48 @@ v2/
     statusd.c          # M1: status daemon (battery/wifi/volume event feed)
     status-client.c    # M1: status subscriber (the feed's proof client)
   rn/
-    README.md          # M2: host design + host↔JS contract + pinned deps
+    README.md          # M3: host design + host↔JS contract + pinned deps
     host/              # M2: the native host (Hermes + Yoga + Wayland + painter)
       sevyn-rn-host.cc #   Hermes embed, JSI Sevyn global, main loop
       common.{h,cc}    #   draw ops, colour parsing, logging
       painter.{h,cc}   #   CPU raster: rects, FreeType text, PNG images
-      wayland.{h,cc}   #   fullscreen xdg_toplevel, pointer/keyboard
+      wayland.{h,cc}   #   fullscreen shell + windowed app toplevels (M3)
       status.{h,cc}    #   statusd subscriber thread
+      appclient.{h,cc} #   M3: appd subscriber (listApps/launchApp/onAppEvent)
       yoga-bridge.{h,cc} # Yoga C API wrapper (integer node ids)
       build-deps.sh    #   fetch + build Hermes 0.13.0 + Yoga into deps/
     renderer/
       sevyn-renderer.js  # M2: react-reconciler host config (View/Text/…)
       test/              #   Node smoke tests (mock Sevyn host)
     shell/             # M2: the shell app (TSX: top bar, tray, dock)
-      src/Shell.tsx    #   layout + "Starting…" state
+      src/Shell.tsx    #   layout + "Starting…" state (M3: registry-driven dock)
       src/Dock.tsx     #   12-app dock, never overflows (scrolls)
       src/StatusTray.tsx # live status via the renderer status store
-      src/apps.ts      #   app registry
+      src/apps.ts      #   app registry (fallback when appd is unreachable)
       build-shell.mjs  #   esbuild bundle + hermesc -> shell.hbc
+  loader/              # M3: the .sevyn loader + app daemon (C)
+    sevyn-loader.c     #   install/verify/uninstall/reinstall/list (+ registry)
+    sevyn-appd.c       #   seeds from pristine, owns the app socket, spawns hosts
+    json.{h,c}         #   minimal strict JSON parser (manifests + registry)
+    ed25519-sign.c     #   Ed25519 signing helper (build-time)
+    test-loader.py     #   30 loader checks (no QEMU)
+    test-appd.py       #   38 appd checks (fake host, no QEMU)
+  apps/                # M3: the stock-app template (one RN screen)
+    src/App.tsx        #   header + glyph + status line (permission-gated)
+    src/crash-main.tsx #   crash fixture (throws at startup)
+    build-app.mjs      #   esbuild bundle + hermesc -> app.hbc / crash.hbc
+    make-bundles.py    #   12 stock .sevyn bundles + test fixtures (signed terminal)
   image/
     build-empty-image.sh  # M0: kernel + minimal initramfs ("empty image")
     boot-check.sh         # M0: boot the empty image in QEMU, assert the marker
     build-m1-image.sh     # M1: kernel + initramfs with Weston + test client + statusd
     build-m2-image.sh     # M2: kernel + initramfs with Weston + RN host + shell
+    build-m3-image.sh     # M3: + loader + appd + pristine bundles + trusted keys
     copy-closure.py       # M1: copy binaries + shared-library closure into the rootfs
     weston.ini            # M1: Weston configuration (DRM backend, dark background)
     m1-check.mjs          # M1: QMP harness — boot, cursor, clicks, keys, status
     m2-check.mjs          # M2: QMP harness — shell, dock, launch, tray, keys
+    m3-check.mjs          # M3: QMP harness — app runtime (see rn/README.md)
     build/                # build outputs (git-ignored): vmlinuz, initramfs, logs, shots
 ```
 
@@ -131,8 +146,8 @@ layer Kevon can replace later without touching the shell.
 The `nightly` release (published by the `Public build` workflow on every
 push to main) ships the **old tree's ISO and the v2 image side by side**:
 `vmlinuz` + `initramfs.cpio.gz` + `v2-SHA256SUMS` + `v2-BOOT-NOTES.txt`
-are the M2 shell image — boot it in QEMU with the command in the boot
-notes. The v2 image is also a CI artifact of the `SevynOS v2 M2`
+are the M3 app-runtime image — boot it in QEMU with the command in the boot
+notes. The v2 image is also a CI artifact of the `SevynOS v2 M3`
 workflow on every PR. **M2 is Kevon's checkpoint** — when it merges, he
 downloads the nightly himself and boots it.
 
@@ -148,7 +163,7 @@ downloads the nightly himself and boots it.
   → status values change live. Proven locally under QEMU (screendumps +
   serial log, 15/15 checks); CI runs the same check on the PR; real-
   hardware proof is Kevon's M2 boot of the nightly.
-- **M2 — Shell (Kevon's checkpoint, in progress).** RN shell: top bar
+- **M2 — Shell (merged, PR #85, 2026-11-07).** RN shell: top bar
   with live status tray, main area, dock with 12 apps that never
   overflows (scrolls with chevrons). Design pass from the start, not a
   later polish phase. The shell is a real React Native app on a
@@ -160,8 +175,15 @@ downloads the nightly himself and boots it.
   a pushed status change repaints the tray → Tab/Enter activates the
   focused control. When M2 merges, Kevon downloads the nightly and
   boots it himself.
-- **M3 — App runtime.** `.sevyn` loader, registry, permissions,
-  signatures.
+- **M3 — App runtime (in progress).** `.sevyn` loader, registry,
+  permissions, signatures. The dock is registry-driven (appd's LIST,
+  alphabetical seed order); dock clicks launch stock apps into their
+  own 800×500 windows, each in its own sandboxed Hermes runtime — a
+  crashing app never takes down the shell. Terminal is the protected
+  system app (trusted signature, cannot be uninstalled); stock apps
+  are deletable and reinstall offline from pristine. Done when: a
+  `.sevyn` bundle installs, runs sandboxed, is deleted, and reinstalls
+  offline from pristine — proven by `m3-check.mjs` in CI, not by hand.
 - **M4 — System apps.** Terminal (`sevyn` CLI only), Settings, Files,
   Sevyn Code baked in.
 - **M5 — Connectivity + browser.** Wifi connects, DNS resolves, the browser
@@ -240,6 +262,39 @@ touching `v2/` (see `.github/workflows/v2-m2.yml`); screendumps, the
 serial log, and `m2-check.json` are kept as artifacts. The v2 image is
 also published to the `nightly` release by the `Public build` workflow
 (see "Nightly" above).
+
+## Build + check the M3 image
+
+```sh
+# Needs (on top of the M2 list): libssl-dev (the loader verifies Ed25519
+# signatures with OpenSSL), openssl (make-bundles.py generates the
+# image's trusted terminal keypair).
+sh v2/image/build-m3-image.sh   # writes v2/image/build/
+node v2/image/m3-check.mjs      # boots in QEMU, proves M3, writes m3-check.json
+```
+
+The JS + C sides are checked without QEMU first (Node, mock host, and
+the loader/appd test rigs):
+
+```sh
+cd v2/rn/renderer && npm ci && npm test        # 8 renderer checks
+cd ../../shell && npm ci && npm run typecheck && npm run build && npm test  # tsc + bundle + 6 shell e2e checks
+cd ../apps && npm ci && npm run typecheck && npm run build && npm test      # tsc + bundles + 4 app e2e checks
+python3 v2/loader/test-loader.py               # 30 loader checks
+python3 v2/loader/test-appd.py                 # 38 appd checks
+```
+
+The M3 harness boots the image, asserts appd seeded all 12 stock
+bundles from pristine, the registry-driven dock (first tile Browser),
+Tab + Enter launching Browser into its own window, the app's close X
+stopping it, status repainting inside a permitted app window (Files)
+and NOT inside an unpermitted one (Notes), a crashing app never taking
+down the shell, the loader refusing tampered and untrusted-system
+bundles, the protected terminal refusing uninstall, and the done-when
+end to end (install → run → delete → reinstall offline from pristine →
+relaunch). CI runs the same build + check on every push and pull request
+touching `v2/` (see `.github/workflows/v2-m3.yml`); screendumps, the
+serial log, and `m3-check.json` are kept as artifacts.
 
 ## The old tree
 
