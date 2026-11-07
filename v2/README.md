@@ -1,8 +1,8 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M2 merged (PR #85, 2026-11-07). M3 in progress (this PR).**
+**Status: M3 merged (PR #87, 2026-11-07). M8 in progress (this PR).**
 M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
-#84 and #86). M2 merged 2026-11-07 (PR #85). This directory is
+#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never
@@ -12,9 +12,10 @@ Rebuild pace is **autopilot** (Kevon, 2026-11-06: "You finish one, you
 merge, you move on to the next"): finish a milestone, merge when CI is
 green and the diff is exactly that milestone's scope, move to the next.
 **M2 is Kevon's checkpoint** — when the shell lands, he downloads the
-nightly himself and boots it. That means the nightly release must publish
-a real, bootable v2 image by M2 (today it still publishes the old tree's
-image — see "Nightly" below).
+nightly himself and boots it. He is skipping the M2 nightly and waiting
+for the M8 nightly instead, so he doesn't have to keep reinstalling the
+OS — the M8 nightly is the one that must update itself in place (see
+"M8" and "Nightly" below).
 
 ## Vision
 
@@ -106,9 +107,15 @@ v2/
     sevyn-loader.c     #   install/verify/uninstall/reinstall/list (+ registry)
     sevyn-appd.c       #   seeds from pristine, owns the app socket, spawns hosts
     json.{h,c}         #   minimal strict JSON parser (manifests + registry)
+    verify.{h,c}       #   M8: shared SHA-256 / base64 / Ed25519 (loader + updater)
     ed25519-sign.c     #   Ed25519 signing helper (build-time)
     test-loader.py     #   30 loader checks (no QEMU)
     test-appd.py       #   38 appd checks (fake host, no QEMU)
+  update/              # M8: the system update daemon + CLI (C)
+    sevyn-updated.c    #   feed check/download/apply, A/B slots, slot state
+    sevyn.c            #   the `sevyn` CLI seed (update verbs only; M4 grows it)
+    canonical.{h,c}    #   canonical feed body (byte-identical to canonical.mjs)
+    test-updated.py    #   50 updater + CLI checks (no QEMU)
   apps/                # M3: the stock-app template (one RN screen)
     src/App.tsx        #   header + glyph + status line (permission-gated)
     src/crash-main.tsx #   crash fixture (throws at startup)
@@ -120,11 +127,16 @@ v2/
     build-m1-image.sh     # M1: kernel + initramfs with Weston + test client + statusd
     build-m2-image.sh     # M2: kernel + initramfs with Weston + RN host + shell
     build-m3-image.sh     # M3: + loader + appd + pristine bundles + trusted keys
+    build-m8-image.sh     # M8: + updater + sevyn CLI + A/B slots + trust anchor
+    make-data-disk.py     # M8: ext4 data disk (slots A/B + slot state)
+    make-update-fixtures.py # M8: v2 + bad images, signed manifest templates
+    make-v2-feed.py       # M8: the nightly updates-v2.json feed (+ signing)
     copy-closure.py       # M1: copy binaries + shared-library closure into the rootfs
     weston.ini            # M1: Weston configuration (DRM backend, dark background)
     m1-check.mjs          # M1: QMP harness — boot, cursor, clicks, keys, status
     m2-check.mjs          # M2: QMP harness — shell, dock, launch, tray, keys
     m3-check.mjs          # M3: QMP harness — app runtime (see rn/README.md)
+    m8-check.mjs          # M8: QMP harness — update in place + fallback
     build/                # build outputs (git-ignored): vmlinuz, initramfs, logs, shots
 ```
 
@@ -146,10 +158,29 @@ layer Kevon can replace later without touching the shell.
 The `nightly` release (published by the `Public build` workflow on every
 push to main) ships the **old tree's ISO and the v2 image side by side**:
 `vmlinuz` + `initramfs.cpio.gz` + `v2-SHA256SUMS` + `v2-BOOT-NOTES.txt`
-are the M3 app-runtime image — boot it in QEMU with the command in the boot
-notes. The v2 image is also a CI artifact of the `SevynOS v2 M3`
-workflow on every PR. **M2 is Kevon's checkpoint** — when it merges, he
-downloads the nightly himself and boots it.
+are the M8 system-updates image — boot it in QEMU with the command in the boot
+notes. The v2 image is also a CI artifact of the `SevynOS v2 M8`
+workflow on every PR. `updates-v2.json` is the v2 update feed: an
+installed v2 system checks it and updates itself in place (A/B slots,
+signed) — no USB re-flash. It is a separate feed file from the old
+tree's `updates.json`, which describes the old tree's kernel and
+initramfs, not the v2 image.
+
+**Update-key provisioning (one-time, Kevon's action).** The feed is
+signed with Ed25519 (the same protocol as `tools/update-signing/`:
+canonical body + `signatures` map; the updater verifies it against the
+trust anchor baked into the image). Until it is provisioned, the nightly
+feed ships unsigned and installed systems refuse it (fail-closed):
+
+1. `node tools/update-signing/generate-key.mjs --key-id nightly --out /secure/nightly-signing-key.json`
+   — prints the public fragment; guard the private file.
+2. Commit the public fragment as `v2/update/trusted-update-keys.json`.
+3. Add the private-key JSON as the `SEVYN_UPDATE_SIGNING_KEY` repo
+   secret. The nightly signs the feed when the secret is set; the build
+   stages the committed anchor into the image. Without the committed
+   anchor the build generates a per-image TEST keypair instead (keyId
+   `nightly-test`, private key in the git-ignored build dir) — a test
+   image trusts only feeds signed with its own test key.
 
 ## Milestones
 
@@ -175,7 +206,7 @@ downloads the nightly himself and boots it.
   a pushed status change repaints the tray → Tab/Enter activates the
   focused control. When M2 merges, Kevon downloads the nightly and
   boots it himself.
-- **M3 — App runtime (in progress).** `.sevyn` loader, registry,
+- **M3 — App runtime (merged, PR #87, 2026-11-07).** `.sevyn` loader, registry,
   permissions, signatures. The dock is registry-driven (appd's LIST,
   alphabetical seed order); dock clicks launch stock apps into their
   own 800×500 windows, each in its own sandboxed Hermes runtime — a
@@ -184,6 +215,20 @@ downloads the nightly himself and boots it.
   are deletable and reinstall offline from pristine. Done when: a
   `.sevyn` bundle installs, runs sandboxed, is deleted, and reinstalls
   offline from pristine — proven by `m3-check.mjs` in CI, not by hand.
+- **M8 — System updates (in progress, this PR; queued right after M3,
+  ahead of M4, on Kevon's word).** No USB re-flash: the OS checks the
+  nightly feed, verifies the signature, downloads the new kernel +
+  initramfs into the idle A/B slot, and reboots into it. A slot that
+  fails to boot twice is never booted again — the bootloader falls back
+  to the previous working slot automatically, and the good slot becomes
+  the active slot, so the system never ping-pongs. Signed updates
+  (Ed25519, the established feed protocol); the channel (nightly vs
+  stable) is a user choice. User-facing trigger for M8 is the `sevyn`
+  CLI (`sevyn update check|apply|status|channel`); full Settings UI
+  comes with M4. Done when: an installed system updates to the next
+  nightly in place and boots it; a failed update falls back to the
+  previous working system automatically — proven by `m8-check.mjs` in
+  CI, not by hand.
 - **M4 — System apps.** Terminal (`sevyn` CLI only), Settings, Files,
   Sevyn Code baked in.
 - **M5 — Connectivity + browser.** Wifi connects, DNS resolves, the browser

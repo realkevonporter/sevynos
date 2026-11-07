@@ -23,6 +23,11 @@ struct jval {
     /* J_BOOL: boolean value. J_NUM: number. */
     int boolean;
     double number;
+    /* J_NUM: the exact number lexeme from the input (owned). The
+     * canonical feed serializer (M8) re-emits numbers verbatim, so a
+     * large integer such as sizeBytes round-trips exactly instead of
+     * going through a double. */
+    char *numraw;
     /* J_STR: NUL-terminated string (owned). */
     char *string;
     /* J_ARR: items[0..len). J_OBJ: keys/vals pairs, keys owned. */

@@ -132,7 +132,7 @@ def main():
     print(f"work dir: {tmp}")
     build = subprocess.run(
         ["gcc", "-O2", "-Wall", "-Wextra", "-o", str(LOADER_BIN),
-         str(LOADER_C), str(JSON_C), "-lcrypto"],
+         str(LOADER_C), str(JSON_C), str(HERE / "verify.c"), "-lcrypto"],
         capture_output=True, text=True)
     if build.returncode != 0:
         print("FAIL: loader build failed")

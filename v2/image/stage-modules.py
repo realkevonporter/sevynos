@@ -45,6 +45,19 @@ def main():
             elif f.endswith(".ko"):
                 idx[f[:-3]] = os.path.join(root, f)
 
+    # Modules built into the kernel (=y) have no .ko file; they are
+    # already present at boot and need no staging. modules.builtin
+    # lists them by path (kernel/.../<name>.ko).
+    builtin = set()
+    try:
+        with open(os.path.join(modroot, "modules.builtin")) as f:
+            for line in f:
+                base = os.path.basename(line.strip())
+                if base.endswith(".ko"):
+                    builtin.add(base[:-3])
+    except OSError:
+        pass
+
     order = []
     seen = set()
 
@@ -52,8 +65,18 @@ def main():
         if name in seen:
             return
         seen.add(name)
-        path = idx.get(name)
+        # Kernel module files use underscores (virtio_blk.ko.zst) but
+        # the conventional spelling uses hyphens (virtio-blk); modprobe
+        # accepts both. Try the name as given, then the underscored form.
+        path = idx.get(name) or idx.get(name.replace("-", "_"))
         if path is None:
+            # Built-in: nothing to stage (and nothing to insmod — the
+            # manifest only lists staged modules). A built-in module
+            # cannot depend on a loadable one, so no dep walk is needed.
+            uname = name.replace("-", "_")
+            if uname in builtin:
+                print(f"note: {name} is built into the kernel, not staged")
+                return
             print(f"error: module {name} not found under {modroot}", file=sys.stderr)
             sys.exit(1)
         r = subprocess.run(["modinfo", "-F", "depends", path],

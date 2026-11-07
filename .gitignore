@@ -61,3 +61,6 @@ out/
 *.blockmap
 *.dmg
 *.iso
+
+# SevynOS v2 native deps (fetched + built by build-deps.sh; third-party)
+v2/rn/host/deps/
