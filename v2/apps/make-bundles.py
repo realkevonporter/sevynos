@@ -10,8 +10,10 @@ it), then for each app writes <id>.sevyn (zip: manifest.json + app.hbc
     generated for this image build; the public key lands in the
     trusted-keys dir as <keyId>.pub so the loader trusts it. The
     private key is kept in the build temp dir and never shipped.
-  - files: permission status.read (the template's live status line).
-  - every other stock app: unsigned, no permissions.
+  - terminal, settings, files: permission cli.exec (they run the
+    `sevyn` CLI through the host's Sevyn.exec bridge) and each ships
+    its OWN bundle (M4: terminal.hbc, settings.hbc, files.hbc).
+  - every other stock app: unsigned, no permissions, the template hbc.
 
 Also writes the harness fixtures to the test-bundles dir:
   - crash.sevyn: the crash bundle (unsigned; throws at startup),
@@ -23,6 +25,8 @@ Also writes the harness fixtures to the test-bundles dir:
 
 Usage:
   python3 make-bundles.py --hbc <app.hbc> --crash-hbc <crash.hbc>
+      [--terminal-hbc <terminal.hbc>] [--settings-hbc <settings.hbc>]
+      [--files-hbc <files.hbc>]
       --out <bundles-dir> --trusted-keys-dir <dir>
       [--test-bundles-dir <dir>]
 
@@ -47,11 +51,20 @@ APPS_TS = REPO / "v2" / "shell" / "src" / "apps.ts"
 SIGN_HELPER = REPO / "v2" / "loader" / "ed25519-sign.c"
 
 # Per-app overrides beyond apps.ts (id -> manifest fields). Terminal
-# is the protected system app (the recovery path); files shows live
-# status in its window.
+# is the protected system app (the recovery path); terminal, settings
+# and files run the `sevyn` CLI, so they hold cli.exec. Files keeps
+# status.read too: the M3 template still shows a live status line in
+# its window (m3-check step 5), and the real M4 Files app simply never
+# subscribes — it has no status line.
 OVERRIDES = {
-    "terminal": {"system": True, "protected": True, "sign": True},
-    "files": {"permissions": ["status.read"]},
+    "terminal": {
+        "system": True,
+        "protected": True,
+        "sign": True,
+        "permissions": ["cli.exec"],
+    },
+    "settings": {"permissions": ["cli.exec"]},
+    "files": {"permissions": ["status.read", "cli.exec"]},
 }
 
 
@@ -125,6 +138,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hbc", required=True, help="template app.hbc")
     ap.add_argument("--crash-hbc", required=True, help="crash app.hbc")
+    ap.add_argument("--terminal-hbc", default=None,
+                    help="terminal app.hbc (defaults to the template)")
+    ap.add_argument("--settings-hbc", default=None,
+                    help="settings app.hbc (defaults to the template)")
+    ap.add_argument("--files-hbc", default=None,
+                    help="files app.hbc (defaults to the template)")
     ap.add_argument("--out", required=True, help="stock bundles dir")
     ap.add_argument("--trusted-keys-dir", required=True)
     ap.add_argument("--test-bundles-dir", default=None)
@@ -132,6 +151,16 @@ def main():
 
     hbc = Path(args.hbc).read_bytes()
     crash_hbc = Path(args.crash_hbc).read_bytes()
+    # M4 real apps ship their own bundles; anything without one falls
+    # back to the template (the other nine stock apps).
+    hbc_for = {
+        "terminal": (Path(args.terminal_hbc).read_bytes()
+                     if args.terminal_hbc else hbc),
+        "settings": (Path(args.settings_hbc).read_bytes()
+                     if args.settings_hbc else hbc),
+        "files": (Path(args.files_hbc).read_bytes()
+                  if args.files_hbc else hbc),
+    }
     out_dir = Path(args.out)
     trusted_dir = Path(args.trusted_keys_dir)
     test_dir = Path(args.test_bundles_dir) if args.test_bundles_dir else None
@@ -151,6 +180,7 @@ def main():
 
         for app in apps:
             ov = OVERRIDES.get(app["id"], {})
+            app_hbc = hbc_for.get(app["id"], hbc)
             manifest = {
                 "id": app["id"],
                 "name": app["name"],
@@ -161,12 +191,12 @@ def main():
                 "system": ov.get("system", False),
                 "protected": ov.get("protected", False),
                 "permissions": ov.get("permissions", []),
-                "bundleHash": sha256_hex(hbc),
+                "bundleHash": sha256_hex(app_hbc),
             }
             if ov.get("sign"):
                 manifest["signature"] = sign_bundle(
                     sign_bin, priv, pub, manifest)
-            write_bundle(out_dir / f"{app['id']}.sevyn", manifest, hbc)
+            write_bundle(out_dir / f"{app['id']}.sevyn", manifest, app_hbc)
             signed = "signed" if ov.get("sign") else "unsigned"
             print(f"  {app['id']}.sevyn ({signed}, "
                   f"system={manifest['system']}, "
@@ -188,7 +218,7 @@ def main():
                 "id": "files", "name": files["name"], "version": "1.0.0",
                 "entry": "app.hbc", "color": files["color"],
                 "glyph": files["glyph"], "system": False,
-                "protected": False, "permissions": ["status.read"],
+                "protected": False, "permissions": ["cli.exec"],
                 "bundleHash": "0" * 64,
             }
             write_bundle(test_dir / "tampered.sevyn", tampered, hbc)
@@ -199,7 +229,8 @@ def main():
             badsystem = {
                 "id": "terminal", "name": "Terminal", "version": "9.9.9",
                 "entry": "app.hbc", "color": "#111827", "glyph": ">",
-                "system": True, "protected": True, "permissions": [],
+                "system": True, "protected": True,
+                "permissions": ["cli.exec"],
                 "bundleHash": sha256_hex(hbc),
             }
             badsystem["signature"] = sign_bundle(

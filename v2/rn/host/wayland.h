@@ -35,8 +35,12 @@ class Wayland {
       std::function<void(const std::string& type, double x, double y,
                          uint32_t button, bool pressed)>;
   // Key event: evdev keycode (28 Enter, 103 Up, 105 Left, 106 Right,
-  // 108 Down, 15 Tab, 1 Esc…), pressed or released.
-  using KeyHandler = std::function<void(uint32_t key, bool pressed)>;
+  // 108 Down, 15 Tab, 1 Esc…), pressed or released. shift is the
+  // state of either Shift key at the moment of the event (tracked in
+  // wayland.cc — the host reads no xkb keymap, so modifiers are
+  // tracked by keycode, not by keysym).
+  using KeyHandler =
+      std::function<void(uint32_t key, bool pressed, bool shift)>;
   // Frame callback: the compositor is ready for the next frame.
   using FrameHandler = std::function<void()>;
   // Close request from the compositor (window X / Alt-F4). Set for
@@ -184,6 +188,13 @@ class Wayland {
 
   bool framePending_ = false;
   bool configured_ = false;
+
+  // Either Shift key held (evdev 42 left, 54 right). The host reads no
+  // xkb keymap, so modifiers are tracked by keycode here and forwarded
+  // with every key event (see onKeyboardKey). Per-key booleans, so
+  // holding both Shifts and releasing one still counts as Shift.
+  bool shiftLeft_ = false;
+  bool shiftRight_ = false;
 
   PointerHandler pointerHandler_;
   KeyHandler keyHandler_;

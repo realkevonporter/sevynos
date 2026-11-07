@@ -6,10 +6,12 @@
 // appColor/appGlyph), so make-bundles.py packages the same app.hbc
 // under twelve different manifests.
 //
-// Usage: node build-app.mjs [--entry app|crash] [--hermesc <path>]
-//                            [--out <dir>]
+// Usage: node build-app.mjs [--entry app|crash|terminal|settings|files]
+//                            [--hermesc <path>] [--out <dir>]
 //   --entry: app (default) builds src/main.tsx -> app.hbc;
-//            crash builds src/crash-main.tsx -> crash.hbc.
+//            crash builds src/crash-main.tsx -> crash.hbc;
+//            terminal|settings|files build src/<entry>-main.tsx ->
+//            <entry>.hbc.
 //   --hermesc: path to hermesc (from the Hermes build in build-deps.sh).
 //              Without it, only the .js is produced (hermesc runs in CI).
 //   --out: output dir (default: dist).
@@ -29,17 +31,24 @@ const getArg = (name, dflt) => {
 const outDir = getArg("--out", join(root, "dist"));
 const hermesc = getArg("--hermesc", "");
 const entry = getArg("--entry", "app");
-if (entry !== "app" && entry !== "crash") {
-  console.error("--entry must be app or crash, got " + entry);
+const ENTRIES = ["app", "crash", "terminal", "settings", "files"];
+if (!ENTRIES.includes(entry)) {
+  console.error("--entry must be one of " + ENTRIES.join("|") + ", got " + entry);
   process.exit(1);
 }
-
-mkdirSync(outDir, { recursive: true });
-const base = entry === "app" ? "app" : "crash";
+const mainFile =
+  entry === "app"
+    ? "main.tsx"
+    : entry === "crash"
+      ? "crash-main.tsx"
+      : entry + "-main.tsx";
+const base = entry === "app" ? "app" : entry;
 const jsOut = join(outDir, base + ".js");
 
+mkdirSync(outDir, { recursive: true });
+
 await build({
-  entryPoints: [join(root, "src", entry === "app" ? "main.tsx" : "crash-main.tsx")],
+  entryPoints: [join(root, "src", mainFile)],
   bundle: true,
   // Single React copy: the renderer (../../rn/renderer) requires
   // react-reconciler, which requires react. Both must resolve to this
@@ -79,7 +88,8 @@ console.log("wrote " + jsOut);
   const hits = src.split(needle).length - 1;
   // The app entry imports React (1 helper, as in the shell build).
   // The crash entry imports nothing, so it has no helper at all.
-  const expected = entry === "app" ? 1 : 0;
+  // The terminal/settings/files entries import React too (1 helper).
+  const expected = entry === "crash" ? 0 : 1;
   if (hits !== expected) {
     console.error(
       `expected exactly ${expected} __copyProps getter(s) in ${jsOut}, found ${hits} — ` +

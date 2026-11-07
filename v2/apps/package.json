@@ -4,7 +4,7 @@
   "private": true,
   "description": "SevynOS v2 M3 \u2014 stock apps (one RN template, packaged per app by make-bundles.py)",
   "scripts": {
-    "build": "node build-app.mjs && node build-app.mjs --entry crash",
+    "build": "node build-app.mjs && node build-app.mjs --entry crash && node build-app.mjs --entry terminal && node build-app.mjs --entry settings && node build-app.mjs --entry files",
     "test": "node test/app-e2e-test.js",
     "typecheck": "tsc --noEmit"
   },

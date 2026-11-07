@@ -17,6 +17,7 @@ declare module "react" {
       Image: any;
       Pressable: any;
       ScrollView: any;
+      TextInput: any;
     }
   }
 }
@@ -67,6 +68,9 @@ declare global {
     appColor: string;
     appGlyph: string;
     hasPermission(name: string): boolean;
+    // One-shot run of /usr/local/bin/sevyn only; returns
+    // "<exit-code>\n<output>". Gated by the cli.exec permission.
+    exec(cmdline: string): string;
     listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
     onAppEvent(fn: (line: string) => void): void;

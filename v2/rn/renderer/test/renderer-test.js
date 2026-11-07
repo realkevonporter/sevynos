@@ -169,4 +169,127 @@ check("unmount frees yoga nodes", () => {
   assert.ok(Sevyn._nodes.size > 0, "nodes recreated on remount");
 });
 
+// --- TextInput (M4) -----------------------------------------------------
+const submitted = [];
+const inputClicks = [];
+let inputValue = "";
+function InputApp() {
+  const [value, setValue] = React.useState("");
+  inputValue = value;
+  return h(
+    "View",
+    { style: { width: 800, height: 500, backgroundColor: "#111827" } },
+    h("TextInput", {
+      value,
+      onChangeText: setValue,
+      onSubmitEditing: () => submitted.push(value),
+      placeholder: "type a command",
+      autoFocus: true,
+      style: {
+        height: 32,
+        backgroundColor: "#1f2937",
+        fontSize: 16,
+        color: "#ffffff",
+      },
+    }),
+    h(
+      "Pressable",
+      {
+        onPress: () => inputClicks.push("go"),
+        style: { width: 80, height: 32, backgroundColor: "#3b82f6" },
+      },
+      h("Text", { style: { fontSize: 14, color: "#fff" } }, "Go"),
+    ),
+  );
+}
+
+function lastPresent() {
+  return Sevyn._presents[Sevyn._presents.length - 1];
+}
+function lastTexts() {
+  return lastPresent()
+    .ops.filter((o) => o.type === "text")
+    .map((o) => o.text);
+}
+function key(code, shift) {
+  Sevyn._handlers.key({ key: code, pressed: true, shift: !!shift });
+}
+function caret() {
+  // The caret is the only 2-wide WHITE rect; the focus ring is gold.
+  return lastPresent().ops.find(
+    (o) => o.type === "rect" && o.w === 2 && o.color === "#ffffff",
+  );
+}
+
+renderer.update(h(InputApp));
+
+check("TextInput: autoFocus + placeholder + caret on mount", () => {
+  const texts = lastPresent().ops.filter((o) => o.type === "text");
+  const ph = texts.find((o) => o.text === "type a command");
+  assert.ok(ph, "placeholder shown");
+  assert.equal(ph.color, "#6b7280", "placeholder is dimmed");
+  assert.ok(caret(), "caret drawn for the focused input");
+});
+
+check("TextInput: typing appends, Shift uppercases", () => {
+  key(30); // a
+  assert.equal(inputValue, "a");
+  key(30, true); // A
+  assert.equal(inputValue, "aA");
+  key(53); // /
+  key(32); // d
+  assert.equal(inputValue, "aA/d");
+  assert.ok(lastTexts().includes("aA/d"), "typed text is presented");
+  assert.ok(caret(), "caret still drawn after typing");
+});
+
+check("TextInput: Space types a space, Backspace deletes", () => {
+  key(57); // space
+  assert.equal(inputValue, "aA/d ");
+  key(14); // Backspace
+  assert.equal(inputValue, "aA/d");
+  key(14);
+  assert.equal(inputValue, "aA/");
+});
+
+check("TextInput: Enter submits, arrows do not move focus", () => {
+  key(106); // Right — swallowed, focus stays in the input
+  assert.equal(inputValue, "aA/");
+  key(28); // Enter
+  assert.deepEqual(submitted, ["aA/"], "submitted the current value");
+  assert.ok(caret(), "still focused after submit");
+});
+
+check("TextInput: Tab moves focus to the button, Enter activates it", () => {
+  key(15); // Tab
+  assert.equal(caret(), undefined, "caret gone once focus leaves");
+  key(28); // Enter
+  assert.deepEqual(inputClicks, ["go"], "button activated");
+});
+
+check("TextInput: clicking the input focuses it again", () => {
+  const hit = lastPresent().ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      o.h === 32 &&
+      o.color === "#1f2937",
+  );
+  assert.ok(hit, "input hit rect exists");
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: hit.x + 1,
+    y: hit.y + 1,
+    button: 1,
+    pressed: true,
+    nodeId: hit.nodeId,
+  });
+  assert.ok(caret(), "caret back after click-focus");
+  assert.equal(inputClicks.length, 1, "click did not fire the button");
+});
+
+// Restore the shell tree for a clean end state.
+renderer.update(h(App));
+
 console.log(`\n${passed} renderer checks passed`);

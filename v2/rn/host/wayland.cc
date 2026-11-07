@@ -429,8 +429,19 @@ void Wayland::onKeyboardKey(void* data, wl_keyboard* keyboard, uint32_t serial,
   (void)keyboard;
   (void)serial;
   (void)time;
+  // Shift keys (evdev 42 left, 54 right) are modifiers, not input:
+  // track the state and do not forward them as key events.
+  if (key == 42 || key == 54) {
+    bool down = (state == WL_KEYBOARD_KEY_STATE_PRESSED);
+    if (key == 42)
+      self->shiftLeft_ = down;
+    else
+      self->shiftRight_ = down;
+    return;
+  }
   if (self->keyHandler_)
-    self->keyHandler_(key, state == WL_KEYBOARD_KEY_STATE_PRESSED);
+    self->keyHandler_(key, state == WL_KEYBOARD_KEY_STATE_PRESSED,
+                      self->shiftLeft_ || self->shiftRight_);
 }
 
 void Wayland::onKeyboardModifiers(void* data, wl_keyboard* keyboard,
