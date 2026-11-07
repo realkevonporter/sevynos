@@ -366,6 +366,7 @@ static jval_t *parse_value(parser_t *ps)
         return new_val(J_NULL);
     }
     if (c == '-' || (c >= '0' && c <= '9')) {
+        const char *start = ps->p;
         char *end = NULL;
         double d = strtod(ps->p, &end);
         if (end == ps->p) {
@@ -374,8 +375,16 @@ static jval_t *parse_value(parser_t *ps)
         }
         ps->p = end;
         jval_t *v = new_val(J_NUM);
-        if (v)
+        if (v) {
             v->number = d;
+            /* Keep the exact lexeme for byte-exact re-serialization. */
+            size_t n = (size_t)(end - start);
+            v->numraw = (char *)malloc(n + 1);
+            if (v->numraw) {
+                memcpy(v->numraw, start, n);
+                v->numraw[n] = '\0';
+            }
+        }
         return v;
     }
     fail(ps, "unexpected character");
@@ -415,6 +424,7 @@ void json_free(jval_t *v)
     if (!v)
         return;
     free(v->string);
+    free(v->numraw);
     for (size_t i = 0; i < v->len; i++) {
         free(v->keys ? v->keys[i] : NULL);
         json_free(v->items[i]);

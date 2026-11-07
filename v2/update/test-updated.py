@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""Host-side tests for sevyn-updated (M8) + the sevyn CLI + the
+canonical feed serializer.
+
+Builds the daemon, the CLI and a canonical-printing test main with
+the host gcc, then drives the daemon against a local HTTP server
+serving signed update feeds (real wget, real Ed25519 via the repo's
+sign-feed.mjs — the same tooling the nightly uses).
+
+Coverage:
+  - canonical byte parity with tools/update-signing/canonical.mjs
+  - daemon start, boot-attempt counting, health good-mark
+  - STATUS / CHECK / APPLY / CHANNEL over the socket and the
+    control serial (pty)
+  - feed verification: unsigned / unknown-key / tampered / bad-hash /
+    channel-mismatch / no-trusted-keys — all refused (fail-closed)
+  - apply: verified artifacts land in the idle slot, state flips,
+    reboot requested; a bad-hash apply changes nothing
+  - the sevyn CLI (status / check / channel / apply)
+  - no-data-disk degradation
+
+Run: python3 v2/update/test-updated.py
+"""
+import hashlib
+import json
+import os
+import pty
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent  # repo root
+LOADER = HERE.parent / "loader"
+UPDATE = HERE
+SIGN_FEED = ROOT / "tools" / "update-signing" / "sign-feed.mjs"
+CANONICAL = ROOT / "tools" / "update-signing" / "canonical.mjs"
+GEN_KEY = ROOT / "tools" / "update-signing" / "generate-key.mjs"
+
+CHECKS = []
+
+
+def check(name, ok, detail=""):
+    CHECKS.append((name, bool(ok), detail))
+    print(f"  {'ok' if ok else 'FAIL'}: {name}" +
+          (f" ({detail})" if detail and not ok else ""))
+
+
+class LogWatcher(threading.Thread):
+    """Reads a process's stderr into a list; wait_for polls it."""
+
+    def __init__(self, stream):
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.lines = []
+        self.lock = threading.Lock()
+
+    def run(self):
+        for raw in self.stream:
+            line = raw.decode("utf-8", "replace").rstrip("\n")
+            with self.lock:
+                self.lines.append(line)
+
+    def wait_for(self, needle, timeout=10.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            with self.lock:
+                for line in self.lines:
+                    if needle in line:
+                        return True
+            time.sleep(0.05)
+        return False
+
+    def text(self):
+        with self.lock:
+            return "\n".join(self.lines)
+
+
+class Daemon:
+    def __init__(self, tmp, env_extra):
+        self.tmp = tmp
+        self.env = dict(os.environ)
+        self.env["PATH"] = str(tmp / "bin") + ":" + self.env["PATH"]
+        self.env.update(env_extra)
+        self.proc = None
+        self.watcher = None
+        self.master_fd = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            [str(self.tmp / "sevyn-updated")],
+            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            env=self.env)
+        self.watcher = LogWatcher(self.proc.stderr)
+        self.watcher.start()
+        return self.watcher.wait_for("UPDATE ready", timeout=15)
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+        self.proc = None
+
+    def sock(self, verb, timeout=10.0):
+        """Send one verb on the socket, return the first reply line."""
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(self.env["SEVYN_UPDATE_SOCK"])
+        s.sendall((verb + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        return buf.decode().strip()
+
+    def sock_lines(self, verbs, timeout=30.0, want=10):
+        """Send verbs, return up to `want` reply lines."""
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(self.env["SEVYN_UPDATE_SOCK"])
+        for v in verbs:
+            s.sendall((v + "\n").encode())
+        lines = []
+        buf = b""
+        try:
+            while len(lines) < want:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    lines.append(line.decode().strip())
+        except socket.timeout:
+            pass
+        s.close()
+        return lines
+
+
+def sha256_file(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+def write_feed(server_dir, key_file, version, channel, artifacts,
+               sign=True, tamper_after_sign=False):
+    """Write updates.json in server_dir (signed with sign-feed.mjs
+    unless sign=False). artifacts: list of dicts. Returns the feed."""
+    feed = {
+        "version": version,
+        "channel": channel,
+        "publishedAt": "2026-11-07T05:00:00.000Z",
+        "releaseNotes": f"SevynOS nightly {version}.",
+        "artifacts": artifacts,
+    }
+    path = server_dir / "updates.json"
+    path.write_text(json.dumps(feed, indent=2) + "\n")
+    if sign:
+        r = subprocess.run(
+            ["node", str(SIGN_FEED), "--feed", str(path),
+             "--key-file", str(key_file)],
+            capture_output=True, text=True)
+        assert r.returncode == 0, f"sign-feed failed: {r.stderr}"
+        feed = json.loads(path.read_text())
+    if tamper_after_sign:
+        # Change a hash without re-signing: the signature must fail.
+        feed["artifacts"][0]["sha256"] = "0" * 64
+        path.write_text(json.dumps(feed, indent=2) + "\n")
+    return feed
+
+
+def make_keypair(tmp, key_id, name):
+    key_path = tmp / f"{name}.json"
+    r = subprocess.run(
+        ["node", str(GEN_KEY), "--key-id", key_id, "--out",
+         str(key_path)],
+        capture_output=True, text=True)
+    assert r.returncode == 0, f"generate-key failed: {r.stderr}"
+    # stdout is the public trusted-update-keys.json fragment.
+    anchor = tmp / f"{name}-anchor.json"
+    anchor.write_text(r.stdout)
+    return key_path, anchor
+
+
+def main():
+    tmp = Path(tempfile.mkdtemp(prefix="sevyn-update-test-"))
+    print(f"work dir: {tmp}")
+    data = tmp / "data"
+    (data / "slots" / "A").mkdir(parents=True)
+    (data / "slots" / "B").mkdir(parents=True)
+    server_dir = tmp / "server"
+    server_dir.mkdir()
+    (tmp / "bin").mkdir()
+    (tmp / "dl").mkdir()
+
+    # --- build ------------------------------------------------------
+    daemon_bin = tmp / "sevyn-updated"
+    cli_bin = tmp / "sevyn"
+    canon_bin = tmp / "canon"
+    canon_main = tmp / "canon-main.c"
+    canon_main.write_text(
+        '#include <stdio.h>\n#include <stdlib.h>\n#include "canonical.h"\n'
+        "int main(int argc, char **argv) {\n"
+        "  if (argc != 2) return 2;\n"
+        "  FILE *f = fopen(argv[1], \"rb\"); if (!f) return 2;\n"
+        "  fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);\n"
+        "  char *t = malloc(n + 1);\n"
+        "  if (fread(t, 1, n, f) != (size_t)n) return 2;\n"
+        "  t[n] = 0; fclose(f);\n"
+        "  char err[256]; jval_t *v = json_parse(t, err, sizeof(err));\n"
+        "  if (!v) { fprintf(stderr, \"parse: %s\\n\", err); return 1; }\n"
+        "  char *c = canonical_feed_body(v);\n"
+        "  if (!c) return 1;\n"
+        "  printf(\"%s\", c); free(c); json_free(v); free(t); return 0;\n"
+        "}\n")
+    builds = [
+        (["gcc", "-O2", "-Wall", "-Wextra", "-o", str(daemon_bin),
+          str(HERE / "sevyn-updated.c"), str(HERE / "canonical.c"),
+          str(LOADER / "json.c"), str(LOADER / "verify.c"), "-lcrypto"],
+         "daemon"),
+        (["gcc", "-O2", "-Wall", "-Wextra", "-o", str(cli_bin),
+          str(HERE / "sevyn.c")], "cli"),
+        (["gcc", "-O2", "-Wall", "-Wextra", "-I", str(HERE), "-o",
+          str(canon_bin), str(canon_main), str(HERE / "canonical.c"),
+          str(LOADER / "json.c")], "canonical test main"),
+    ]
+    for cmd, name in builds:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        check(f"{name} builds clean (-Wall -Wextra)", r.returncode == 0,
+              r.stderr[:400])
+        if r.returncode != 0:
+            print("FAIL: build failed, aborting")
+            return 1
+
+    # --- canonical byte parity vs node ------------------------------
+    feed_js = {
+        "version": "abc1234", "channel": "nightly",
+        "publishedAt": "2026-11-07T05:00:00.000Z",
+        "releaseNotes": "Line one.\nLine \"two\" with a tab\there.",
+        "artifacts": [
+            {"kind": "vmlinuz", "url": "https://example.com/vmlinuz",
+             "sha256": "a" * 64, "sizeBytes": 15859712},
+            {"kind": "initramfs",
+             "url": "https://example.com/initramfs.cpio.gz",
+             "sha256": "b" * 64, "sizeBytes": 47823456}],
+        "signatures": {"nightly": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="},
+    }
+    feed_path = tmp / "parity.json"
+    feed_path.write_text(json.dumps(feed_js, indent=2) + "\n")
+    node = subprocess.run(
+        ["node", "-e",
+         "import('" + str(CANONICAL).replace("'", "\\'") + "').then(async m=>{"
+         "const fs=await import('node:fs');"
+         "const j=JSON.parse(fs.readFileSync('" +
+         str(feed_path).replace("'", "\\'") + "','utf8'));"
+         "process.stdout.write(m.canonicalFeedBody(j));})"],
+        capture_output=True, text=True)
+    c = subprocess.run([str(canon_bin), str(feed_path)],
+                       capture_output=True, text=True)
+    check("canonical body byte-identical to canonical.mjs",
+          node.returncode == 0 and c.returncode == 0 and
+          node.stdout == c.stdout,
+          f"node={node.stdout[:80]!r} c={c.stdout[:80]!r}")
+
+    # --- keys, anchor, fake images ----------------------------------
+    key_file, anchor = make_keypair(tmp, "nightly-test", "nightly-test")
+    bad_key_file, _bad_anchor = make_keypair(tmp, "attacker", "attacker")
+    (tmp / "trusted-update-keys.json").write_text(anchor.read_text())
+    (tmp / "os-version").write_text("m8-test-1\n")
+
+    def fake_image(name, marker):
+        p = server_dir / name
+        p.write_bytes(marker.encode() + os.urandom(8192))
+        return p
+
+    kern_v2 = fake_image("vmlinuz-v2", "VMLINUZ-V2\n")
+    init_v2 = fake_image("initramfs-v2.cpio.gz", "INITRAMFS-V2\n")
+    kern_bad = fake_image("vmlinuz-bad", "VMLINUZ-BAD\n")
+    init_bad = fake_image("initramfs-bad.cpio.gz", "INITRAMFS-BAD\n")
+
+    # --- HTTP server -------------------------------------------------
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(server_dir), **kw)
+
+        def log_message(self, *a):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    feed_url = f"http://127.0.0.1:{port}/updates.json"
+
+    # --- reboot stub -------------------------------------------------
+    reboot_marker = tmp / "rebooted"
+    (tmp / "bin" / "reboot").write_text(
+        "#!/bin/sh\necho \"REBOOT $@\" >> " + str(reboot_marker) + "\n")
+    (tmp / "bin" / "reboot").chmod(0o755)
+
+    # --- initial data-disk state ------------------------------------
+    (data / "slot-state.json").write_text(json.dumps(
+        {"active": "A", "good": "A", "attempts": 0,
+         "version": "m8-test-1"}, indent=2) + "\n")
+    (data / "update-config.json").write_text(json.dumps(
+        {"channel": "nightly", "url": feed_url}, indent=2) + "\n")
+    (tmp / "health.log").write_text("")
+
+    def artifacts_for(kern, init):
+        return [
+            {"kind": "vmlinuz",
+             "url": f"http://127.0.0.1:{port}/{kern.name}",
+             "sha256": sha256_file(kern),
+             "sizeBytes": kern.stat().st_size},
+            {"kind": "initramfs",
+             "url": f"http://127.0.0.1:{port}/{init.name}",
+             "sha256": sha256_file(init),
+             "sizeBytes": init.stat().st_size},
+        ]
+
+    def state():
+        return json.loads((data / "slot-state.json").read_text())
+
+    def base_env(slot="A"):
+        return {
+            "SEVYN_UPDATE_SOCK": str(tmp / "update.sock"),
+            "SEVYN_UPDATE_DATA": str(data),
+            "SEVYN_UPDATE_TRUSTED_KEYS":
+                str(tmp / "trusted-update-keys.json"),
+            "SEVYN_UPDATE_VERSION_FILE": str(tmp / "os-version"),
+            "SEVYN_UPDATE_TMP": str(tmp / "dl"),
+            "SEVYN_UPDATE_HEALTH_FILE": str(tmp / "health.log"),
+            "SEVYN_UPDATE_SLOT": slot,
+        }
+
+    # --- daemon 1: version m8-test-1, slot A -------------------------
+    master_fd, slave_fd = pty.openpty()
+    slave_name = os.ttyname(slave_fd)
+    env = base_env("A")
+    env["SEVYN_UPDATE_CTL"] = slave_name
+    d = Daemon(tmp, env)
+    check("daemon starts", d.start())
+    check("boot attempt recorded (attempts 0 -> 1)",
+          state()["attempts"] == 1 and state()["active"] == "A",
+          str(state()))
+    check("STATUS reports slot A, version m8-test-1",
+          d.sock("STATUS") ==
+          "OK version=m8-test-1 channel=nightly active=A good=A "
+          "attempts=1 applying=no available=unknown",
+          d.sock("STATUS"))
+    check("PING", d.sock("PING") == "OK pong")
+    check("unknown verb rejected",
+          d.sock("BOGUS") == "ERR unknown verb")
+
+    # Control serial: send STATUS through the pty, reply lands in the log.
+    os.write(master_fd, b"STATUS\n")
+    check("control serial STATUS answered",
+          d.watcher.wait_for("UPDATE STATUS version=m8-test-1", timeout=5))
+
+    # CHECK, no feed yet (404: updates.json does not exist).
+    check("CHECK with no feed -> download failed",
+          d.sock("CHECK").startswith("ERR download failed"))
+
+    # CHECK, signed v2 feed -> available.
+    write_feed(server_dir, key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2))
+    check("CHECK signed v2 feed -> available m8-test-2",
+          d.sock("CHECK") == "OK available m8-test-2")
+
+    # CHECK, same-version feed -> none.
+    write_feed(server_dir, key_file, "m8-test-1", "nightly",
+               artifacts_for(kern_v2, init_v2))
+    check("CHECK same version -> none",
+          d.sock("CHECK") == "OK none m8-test-1")
+
+    # CHECK, unsigned feed -> refused.
+    write_feed(server_dir, key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2), sign=False)
+    check("CHECK unsigned feed refused",
+          "not signed" in d.sock("CHECK"))
+
+    # CHECK, unknown-key signature -> refused.
+    write_feed(server_dir, bad_key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2))
+    check("CHECK unknown-key signature refused",
+          "no signature from a trusted key" in d.sock("CHECK"))
+
+    # CHECK, tampered after signing -> refused.
+    write_feed(server_dir, key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2), tamper_after_sign=True)
+    check("CHECK tampered feed refused",
+          "does not verify" in d.sock("CHECK"))
+
+    # CHECK, no trusted keys (bad anchor) -> refused.
+    (tmp / "trusted-update-keys.json").write_text(
+        json.dumps({"keys": [{"keyId": "nightly-test",
+                              "publicKeyJwk": {"kty": "OKP",
+                                               "crv": "Ed25519",
+                                               "x": "!!!"}}]}))
+    write_feed(server_dir, key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2))
+    check("CHECK with malformed trust anchor refused",
+          "no trusted update keys" in d.sock("CHECK"))
+    (tmp / "trusted-update-keys.json").write_text(anchor.read_text())
+
+    # CHANNEL: stable -> nightly feed is a mismatch; back to nightly.
+    check("CHANNEL stable",
+          d.sock("CHANNEL stable") == "OK channel stable")
+    write_feed(server_dir, key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2))
+    check("CHECK nightly feed on stable channel refused",
+          "channel mismatch" in d.sock("CHECK"))
+    check("CHANNEL nightly",
+          d.sock("CHANNEL nightly") == "OK channel nightly")
+    check("CHANNEL bogus rejected",
+          d.sock("CHANNEL beta").startswith("ERR usage"))
+
+    # --- CLI apply: v2 feed -> idle slot B, reboot ------------------
+    write_feed(server_dir, key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2))
+    cli_env = dict(os.environ)
+    cli_env["SEVYN_UPDATE_SOCK"] = str(tmp / "update.sock")
+    r = subprocess.run([str(cli_bin), "update", "apply"],
+                       capture_output=True, text=True, env=cli_env,
+                       timeout=120)
+    check("CLI apply exits 0", r.returncode == 0, r.stderr[:300])
+    check("CLI apply prints applied",
+          "applied m8-test-2 B" in r.stdout, r.stdout[:200])
+    check("reboot requested", reboot_marker.exists(),
+          "no reboot marker")
+    check("slot B holds the verified v2 images",
+          sha256_file(data / "slots" / "B" / "vmlinuz") ==
+          sha256_file(kern_v2) and
+          sha256_file(data / "slots" / "B" / "initramfs.cpio.gz") ==
+          sha256_file(init_v2))
+    st = state()
+    check("state flipped to B (good stays A, attempts 0)",
+          st["active"] == "B" and st["good"] == "A" and
+          st["attempts"] == 0 and st["version"] == "m8-test-2",
+          str(st))
+    d.stop()
+
+    # --- daemon 2: rebooted into slot B, version m8-test-2 ----------
+    (tmp / "os-version").write_text("m8-test-2\n")
+    d2 = Daemon(tmp, base_env("B"))
+    check("daemon restarts on slot B", d2.start())
+    check("boot attempt on B recorded",
+          state()["attempts"] == 1 and state()["active"] == "B",
+          str(state()))
+    # Shell reaches READY -> slot B marked good.
+    (tmp / "health.log").write_text("SEVYNOS_M2_READY\n")
+    check("health READY marks slot B good",
+          d2.watcher.wait_for("UPDATE SLOT GOOD B", timeout=5) and
+          state()["good"] == "B" and state()["attempts"] == 0,
+          str(state()))
+    write_feed(server_dir, key_file, "m8-test-2", "nightly",
+               artifacts_for(kern_v2, init_v2))
+    check("CHECK on m8-test-2 -> none",
+          d2.sock("CHECK") == "OK none m8-test-2")
+    check("APPLY when already on version refused",
+          d2.sock("APPLY") == "ERR already on m8-test-2")
+
+    # APPLY with a correctly-signed feed whose initramfs hash is wrong
+    # -> the download check refuses it, nothing changes.
+    arts = artifacts_for(kern_v2, init_v2)
+    arts[1]["sha256"] = "0" * 64
+    write_feed(server_dir, key_file, "m8-test-3", "nightly", arts)
+    check("CHECK bad-hash feed -> available (signature is valid)",
+          d2.sock("CHECK") == "OK available m8-test-3")
+    lines = d2.sock_lines(["SUBSCRIBE", "APPLY"], want=5)
+    check("APPLY bad-hash refused at download",
+          lines[0] == "OK subscribed" and
+          lines[1] == "EVENT APPLY STARTED m8-test-3" and
+          lines[2] == "OK applying m8-test-3" and
+          any("APPLY FAILED" in ln for ln in lines),
+          str(lines))
+    check("bad-hash apply leaves state untouched",
+          state()["active"] == "B" and state()["version"] == "m8-test-2",
+          str(state()))
+    check("APPLY FAIL logged with the hash reason",
+          d2.watcher.wait_for("sha256 mismatch", timeout=5))
+
+    # APPLY the bad (boot-failing) image: it verifies fine, lands in
+    # the idle slot A, flips state, reboots. (QEMU proves the fallback.)
+    n_reboots = len(reboot_marker.read_text().splitlines()) \
+        if reboot_marker.exists() else 0
+    write_feed(server_dir, key_file, "m8-test-bad", "nightly",
+               artifacts_for(kern_bad, init_bad))
+    check("APPLY bad image accepted (it verifies; boot proves it)",
+          d2.sock("APPLY") == "OK applying m8-test-bad")
+    ok_reboot = False
+    for _ in range(100):
+        if reboot_marker.exists() and \
+                len(reboot_marker.read_text().splitlines()) > n_reboots:
+            ok_reboot = True
+            break
+        time.sleep(0.1)
+    check("bad apply requested a reboot", ok_reboot)
+    st = state()
+    check("bad apply flipped state to A",
+          st["active"] == "A" and st["version"] == "m8-test-bad",
+          str(st))
+    check("slot A holds the bad images",
+          sha256_file(data / "slots" / "A" / "vmlinuz") ==
+          sha256_file(kern_bad))
+    d2.stop()
+
+    # --- CLI: status / check / channel / usage -----------------------
+    # Simulate the reboot into the bad slot: the booted image's
+    # os-version is now m8-test-bad.
+    (tmp / "os-version").write_text("m8-test-bad\n")
+    d3 = Daemon(tmp, base_env("A"))
+    check("daemon restarts for CLI checks", d3.start())
+    env3 = dict(os.environ)
+    env3["SEVYN_UPDATE_SOCK"] = str(tmp / "update.sock")
+    r = subprocess.run([str(cli_bin), "update", "status"],
+                       capture_output=True, text=True, env=env3)
+    check("CLI status prints the slot line",
+          r.returncode == 0 and "active=A" in r.stdout, r.stdout[:200])
+    r = subprocess.run([str(cli_bin), "update", "check"],
+                       capture_output=True, text=True, env=env3)
+    check("CLI check reports none (bad feed is current)",
+          r.returncode == 0 and r.stdout.strip() == "none m8-test-bad",
+          r.stdout[:200] + r.stderr[:200])
+    r = subprocess.run([str(cli_bin), "update", "channel", "stable"],
+                       capture_output=True, text=True, env=env3)
+    check("CLI channel stable",
+          r.returncode == 0 and r.stdout.strip() == "channel stable")
+    r = subprocess.run([str(cli_bin), "update", "channel", "stable"],
+                       capture_output=True, text=True, env=env3)
+    check("CLI channel persists (config round-trips)",
+          r.returncode == 0 and
+          json.loads((data / "update-config.json").read_text())
+          ["channel"] == "stable")
+    r = subprocess.run([str(cli_bin), "update"],
+                       capture_output=True, text=True, env=env3)
+    check("CLI with no verb prints usage, exit 1",
+          r.returncode == 1 and "usage:" in r.stderr)
+    r = subprocess.run([str(cli_bin), "bogus"],
+                       capture_output=True, text=True, env=env3)
+    check("CLI with a bogus verb prints usage, exit 1",
+          r.returncode == 1 and "usage:" in r.stderr)
+    d3.stop()
+
+    # --- no data disk -------------------------------------------------
+    nodata = Daemon(tmp, {
+        "SEVYN_UPDATE_SOCK": str(tmp / "update-nodata.sock"),
+        "SEVYN_UPDATE_DATA": str(tmp / "no-such-data-dir"),
+        "SEVYN_UPDATE_TRUSTED_KEYS":
+            str(tmp / "trusted-update-keys.json"),
+        "SEVYN_UPDATE_VERSION_FILE": str(tmp / "os-version"),
+        "SEVYN_UPDATE_TMP": str(tmp / "dl"),
+        "SEVYN_UPDATE_HEALTH_FILE": str(tmp / "health.log"),
+        "SEVYN_UPDATE_SLOT": "A",
+    })
+    check("daemon starts with no data disk", nodata.start())
+    check("STATUS with no data disk reports it",
+          "no-data-disk" in nodata.sock("STATUS"))
+    check("CHECK with no data disk refused",
+          nodata.sock("CHECK") == "ERR no-data-disk")
+    check("APPLY with no data disk refused",
+          nodata.sock("APPLY") == "ERR no-data-disk")
+    nodata.stop()
+
+    server.shutdown()
+    os.close(master_fd)
+    os.close(slave_fd)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    failed = [c for c in CHECKS if not c[1]]
+    print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")
+    if failed:
+        print("FAILURES:")
+        for name, _, detail in failed:
+            print(f"  - {name} {detail}")
+        return 1
+    print("\nALL UPDATE TESTS PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

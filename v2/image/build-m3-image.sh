@@ -95,7 +95,8 @@ gcc -O2 -Wall -o "$BUILD_TMP/sevyn-status-client" "$ROOT/services/status-client.
 # spawn one sandboxed host per running app. The loader links OpenSSL
 # for Ed25519 signature verification (libssl-dev).
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-loader" \
-  "$ROOT/loader/sevyn-loader.c" "$ROOT/loader/json.c" -lcrypto
+  "$ROOT/loader/sevyn-loader.c" "$ROOT/loader/json.c" \
+  "$ROOT/loader/verify.c" -lcrypto
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-appd" \
   "$ROOT/loader/sevyn-appd.c" "$ROOT/loader/json.c"
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/ed25519-sign" \

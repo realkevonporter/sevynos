@@ -99,7 +99,7 @@ def main():
     loader_bin = tmp / "sevyn-loader"
     appd_bin = tmp / "sevyn-appd"
     sign_bin = tmp / "ed25519-sign"
-    for src, out in (([LOADER_C, JSON_C], loader_bin),
+    for src, out in (([LOADER_C, JSON_C, HERE / "verify.c"], loader_bin),
                      ([APPD_C], appd_bin),
                      ([SIGN_C], sign_bin)):
         build = subprocess.run(
