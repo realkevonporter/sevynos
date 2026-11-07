@@ -819,9 +819,14 @@ async function main() {
   const beforeNightly = logLines(b.logPath).length;
   let clickedNightly = false;
   if (nightlyHeader) {
-    const bx = nightlyHeader.left + 76;
-    const by = nightlyHeader.top + 135;
-    const i = (by * shotNightly.width + bx) * 3;
+    // Verify at the button's TOP EDGE (+30, +120), not its centre:
+    // the centre is covered by the "Nightly" label text (dark glyphs),
+    // so sampling there never matches the inactive background and the
+    // check silently fell back to Tabs. The top edge is pure button
+    // background (the label sits ~7 px lower).
+    const vx = nightlyHeader.left + 30;
+    const vy = nightlyHeader.top + 120;
+    const i = (vy * shotNightly.width + vx) * 3;
     const [pr, pg, pb] = [
       shotNightly.pixels[i],
       shotNightly.pixels[i + 1],
@@ -830,7 +835,14 @@ async function main() {
     const isNightlyButton =
       Math.abs(pr - 229) <= 10 && Math.abs(pg - 231) <= 10 && Math.abs(pb - 235) <= 10;
     if (isNightlyButton) {
-      await moveTo(bx, by, shotNightly.width, shotNightly.height);
+      // Click the button's centre (+76, +135): a press on the label
+      // still hits the Pressable.
+      await moveTo(
+        nightlyHeader.left + 76,
+        nightlyHeader.top + 135,
+        shotNightly.width,
+        shotNightly.height,
+      );
       await sleep(300);
       await click();
       await sleep(300);
