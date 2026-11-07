@@ -332,21 +332,26 @@ void RnHost::applyStyle(jsi::Runtime& rt, int nodeId,
 }
 
 void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
-  jsi::Object yoga = jsi::Object(rt);
+  // Contract (v2/rn/README.md): FLAT `yoga*` functions on `Sevyn`
+  // itself — not a nested `Sevyn.Yoga` object. The renderer calls
+  // Sevyn.yogaCreateNode() etc.; installing them nested (as this
+  // function used to) leaves every one undefined and the shell dies
+  // at the first render with "undefined is not a function"
+  // (verified in CI run 42339511336, stack shell.js:10369).
   auto hostFn = [&](const char* name, unsigned params,
                     jsi::HostFunctionType fn) {
-    yoga.setProperty(
+    sevyn.setProperty(
         rt, name,
         jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, name), params, fn));
   };
-  hostFn("createNode", 0,
+  hostFn("yogaCreateNode", 0,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
                 size_t) {
            (void)rt;
            return jsi::Value(yoga_->createNode());
          });
-  hostFn("freeNode", 1,
+  hostFn("yogaFreeNode", 1,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 1)
@@ -354,7 +359,7 @@ void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
            (void)rt;
            return jsi::Value::undefined();
          });
-  hostFn("setChildren", 2,
+  hostFn("yogaSetChildren", 2,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 2) {
@@ -368,14 +373,14 @@ void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
            }
            return jsi::Value::undefined();
          });
-  hostFn("setStyle", 2,
+  hostFn("yogaSetStyle", 2,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 2 && args[1].isObject())
              applyStyle(rt, (int)args[0].asNumber(), args[1].asObject(rt));
            return jsi::Value::undefined();
          });
-  hostFn("setMeasureFunc", 2,
+  hostFn("yogaSetMeasureFunc", 2,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 2 && args[1].isObject()) {
@@ -408,7 +413,7 @@ void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
            }
            return jsi::Value::undefined();
          });
-  hostFn("clearMeasureFunc", 1,
+  hostFn("yogaClearMeasureFunc", 1,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 1) {
@@ -419,7 +424,7 @@ void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
            (void)rt;
            return jsi::Value::undefined();
          });
-  hostFn("calculateLayout", 3,
+  hostFn("yogaCalculateLayout", 3,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 3)
@@ -429,7 +434,7 @@ void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
            (void)rt;
            return jsi::Value::undefined();
          });
-  hostFn("getLayout", 1,
+  hostFn("yogaGetLayout", 1,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            jsi::Object o(rt);
@@ -442,7 +447,6 @@ void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
            o.setProperty(rt, "height", h);
            return o;
          });
-  sevyn.setProperty(rt, "Yoga", yoga);
 }
 
 std::vector<DrawOp> RnHost::parseOps(jsi::Runtime& rt,
@@ -582,7 +586,9 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            }
            return jsi::Value::undefined();
          });
-  hostFn("setPointerHandler", 1,
+  // Contract (v2/rn/README.md): the renderer registers handlers as
+  // Sevyn.onPointer/onKey/onStatus — not set*Handler.
+  hostFn("onPointer", 1,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 1 && args[0].isObject()) {
@@ -592,7 +598,7 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            }
            return jsi::Value::undefined();
          });
-  hostFn("setKeyHandler", 1,
+  hostFn("onKey", 1,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 1 && args[0].isObject()) {
@@ -601,7 +607,7 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            }
            return jsi::Value::undefined();
          });
-  hostFn("setStatusHandler", 1,
+  hostFn("onStatus", 1,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
                 size_t count) {
            if (count >= 1 && args[0].isObject()) {
