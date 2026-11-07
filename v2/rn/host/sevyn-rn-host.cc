@@ -256,16 +256,26 @@ void RnHost::applyStyle(jsi::Runtime& rt, int nodeId,
         return (int)i;
     return fallback;
   };
-  // flexDirection: row, row-reverse, column, column-reverse
+  // Enum lists below MUST be in Yoga's declaration order (YGEnums.h,
+  // pinned Yoga 41118bd: YG_ENUM_DECL lists values from 0 up), because
+  // enumVal returns the list index as the Yoga enum value. The old
+  // flexDirection list {"row", ...} mapped row->0 (Yoga Column) and
+  // column->2 (Yoga Row): every direction in the shell was swapped,
+  // so the root laid out as a row, the top bar measured 112px wide,
+  // the dock stacked at the top-right, and nothing was where the
+  // check looks for it (CI failure #18). Same off-by-one in
+  // justifyContent (the list omitted "auto") and position (omitted
+  // "static"): "center" mapped to FlexStart, "absolute" to Relative.
+  // flexDirection: column, column-reverse, row, row-reverse
   yoga_->setFlexDirection(
-      nodeId, enumVal("flexDirection", {"row", "row-reverse", "column",
-                                        "column-reverse"},
-                      2));
+      nodeId, enumVal("flexDirection", {"column", "column-reverse", "row",
+                                        "row-reverse"},
+                      0));
   yoga_->setJustifyContent(
       nodeId, enumVal("justifyContent",
-                      {"flex-start", "center", "flex-end", "space-between",
-                       "space-around", "space-evenly"},
-                      0));
+                      {"auto", "flex-start", "center", "flex-end",
+                       "space-between", "space-around", "space-evenly"},
+                      1));
   auto alignEnum = [&](const char* key, int fallback) {
     return enumVal(key,
                    {"auto", "flex-start", "center", "flex-end", "stretch",
@@ -278,8 +288,9 @@ void RnHost::applyStyle(jsi::Runtime& rt, int nodeId,
   yoga_->setFlexWrap(nodeId, enumVal("flexWrap", {"nowrap", "wrap",
                                                   "wrap-reverse"},
                                      0));
-  yoga_->setPositionType(nodeId, enumVal("position", {"relative", "absolute"},
-                                         0));
+  yoga_->setPositionType(nodeId, enumVal("position", {"static", "relative",
+                                                      "absolute"},
+                                         1));
   yoga_->setDisplay(nodeId, enumVal("display", {"flex", "none"}, 0));
   yoga_->setOverflow(nodeId,
                      enumVal("overflow", {"visible", "hidden", "scroll"}, 0));
