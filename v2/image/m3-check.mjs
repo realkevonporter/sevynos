@@ -511,8 +511,18 @@ async function main() {
   // 3. Keyboard: Tab from no-focus lands on the first tile; Enter
   // launches it. The app's own host must report ready — the window
   // opened in its own Hermes runtime.
+  // Weston only delivers keys to an ACTIVATED surface: the shell has
+  // keyboard focus at boot but no activation until a pointer button
+  // press lands on it, so a bare Tab+Enter goes nowhere (the first CI
+  // run of this PR failed exactly here — no LAUNCH, no window). Click
+  // the main area first: it has no pressable, so nothing launches and
+  // focus stays unset, and Tab still lands on the first tile.
   {
     const before = logLines().length;
+    await moveTo(512, 300, W, H); // main area (welcome text), no pressable
+    await sleep(300);
+    await click();
+    await sleep(300);
     await key("tab");
     await sleep(300);
     await key("ret");

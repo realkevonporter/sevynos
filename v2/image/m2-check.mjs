@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 // M2 check: boot the SevynOS v2 M2 image in QEMU and prove the milestone.
 //
+// NOTE (M3): the dock order and launching changed with the M3 app
+// runtime, so this check tracks M3 reality: the dock is registry-driven
+// (alphabetical seed order — the first tile is Browser, not Files) and
+// a dock click opens a real window, which moves Weston's keyboard focus
+// to the app. The keyboard test therefore runs BEFORE the click test
+// (Tab from no-focus lands on the first tile), and the click test uses
+// the second tile (Calculator). The shot-1 settle loop is untouched —
+// the render-timing flake fix belongs here separately, not in M3.
+//
 // What it proves, in order:
 //   1. The image boots and the shell mounts (SEVYNOS_M2_READY on serial).
 //   2. The shell surface is on screen: top bar, main area, and dock
@@ -8,12 +17,13 @@
 //   3. The dock never overflows: with 12 apps the first tile is fully
 //      visible and the dock's right edge is the scroll chevron, not a
 //      half-cut tile.
-//   4. Click lands on the intended control: clicking the Files tile logs
-//      LAUNCH files and the main area changes (Welcome -> Starting…).
-//   5. Status is live: SETs injected on the host control serial change
+//   4. Keys reach the focused control: after a main-area click activates
+//      the shell, Tab moves focus to the first tile (Browser) and Enter
+//      launches it (LAUNCH browser).
+//   5. Click lands on the intended control: clicking the Calculator tile
+//      logs LAUNCH calculator and the main area changes (a window opens).
+//   6. Status is live: SETs injected on the host control serial change
 //      the tray (pixel diff in the tray region).
-//   6. Keys reach the focused control: after clicking Files, Tab moves
-//      focus to Terminal and Enter launches it (LAUNCH terminal).
 //
 // Input is driven with QMP input-send-event (usb-tablet for absolute
 // pointer, PS/2 keyboard). Screendumps use QMP screendump in PPM format.
@@ -362,10 +372,11 @@ async function main() {
     `topBar=${topBar} dockBg=${dockBg}`,
   );
 
-  // 3. Dock never overflows at 12 apps: the first tile (Files, #3b82f6)
-  // is fully visible, and the dock's right edge is the scroll chevron
-  // (#1f2937), not a half-cut tile.
-  const filesBlue = countColor(img, 59, 130, 246, 12, {
+  // 3. Dock never overflows at 12 apps: the first tile (Browser,
+  // #0ea5e9 — the dock is registry-driven since M3, alphabetical seed
+  // order) is fully visible, and the dock's right edge is the scroll
+  // chevron (#1f2937), not a half-cut tile.
+  const browserBlue = countColor(img, 14, 165, 233, 12, {
     x0: 44,
     y0: 680,
     x1: 124,
@@ -378,9 +389,9 @@ async function main() {
     y1: 760,
   });
   check(
-    "dock: first tile fully visible (Files blue)",
-    filesBlue > 1000,
-    `blue pixels=${filesBlue}`,
+    "dock: first tile fully visible (Browser blue)",
+    browserBlue > 1000,
+    `blue pixels=${browserBlue}`,
   );
   check(
     "dock: right edge is the scroll chevron, not a cut tile",
@@ -388,27 +399,59 @@ async function main() {
     `chevron pixels=${rightChevron}`,
   );
 
-  // 4. Click the Files tile: LAUNCH files in the log + the main area
-  // changes (Welcome -> Starting Files…).
+  // 4. Keyboard: Weston only delivers keys to an ACTIVATED surface, so
+  // click the main area first (welcome text — no pressable, nothing
+  // launches, focus stays unset); Tab then lands on the first tile
+  // (Browser) and Enter launches it. This runs BEFORE the click test:
+  // a dock click opens a real window since M3, which moves Weston's
+  // keyboard focus to the app.
+  {
+    const before = logLines().length;
+    await moveTo(512, 300, W, H); // main area, no pressable
+    await sleep(300);
+    await click();
+    await sleep(300);
+    await qmp.input([
+      { type: "key", data: { down: true, key: { type: "qcode", data: "tab" } } },
+    ]);
+    await sleep(120);
+    await qmp.input([
+      { type: "key", data: { down: false, key: { type: "qcode", data: "tab" } } },
+    ]);
+    await sleep(300);
+    await qmp.input([
+      { type: "key", data: { down: true, key: { type: "qcode", data: "ret" } } },
+    ]);
+    await sleep(120);
+    await qmp.input([
+      { type: "key", data: { down: false, key: { type: "qcode", data: "ret" } } },
+    ]);
+    const hit = await waitForLog(/LAUNCH browser/, 10000, before);
+    check("input: Tab + Enter launches the first app (Browser)", !!hit);
+  }
+
+  // 5. Click the Calculator tile (second tile — Browser is already
+  // running from the keyboard test): LAUNCH calculator in the log +
+  // the main area changes (a window opens).
   const shotBefore = await shot(qmp, join(OUT, "m2-shot-before-click.ppm"));
   {
     const before = logLines().length;
-    await moveTo(84, 720, W, H); // Files tile centre (44..124, 680..760).
+    await moveTo(172, 720, W, H); // Calculator tile centre (132..212, 680..760).
     await sleep(300);
     await click();
-    const hit = await waitForLog(/LAUNCH files/, 10000, before);
-    check("input: click Files tile logs LAUNCH files", !!hit);
+    const hit = await waitForLog(/LAUNCH calculator/, 10000, before);
+    check("input: click Calculator tile logs LAUNCH calculator", !!hit);
   }
   await sleep(500);
   const shotAfter = await shot(qmp, join(OUT, "m2-shot-after-click.ppm"));
   const mainDiff = diffBox(shotBefore, shotAfter, { x0: 0, y0: 48, x1: W, y1: 672 });
   check(
-    "screen: main area changes after launch click (Starting…)",
+    "screen: main area changes after launch click (window opens)",
     mainDiff > 100,
     `differing pixels=${mainDiff}`,
   );
 
-  // 5. Status is live: push battery/wifi/volume; the tray (top-right)
+  // 6. Status is live: push battery/wifi/volume; the tray (top-right)
   // must repaint.
   const shotTrayBefore = await shot(qmp, join(OUT, "m2-shot-tray-before.ppm"));
   ctl.write("SET battery 87\n");
@@ -429,29 +472,6 @@ async function main() {
     trayDiff > 20,
     `tray differing pixels=${trayDiff}`,
   );
-
-  // 6. Keyboard: focus is on Files (clicked above); Tab moves focus to
-  // Terminal, Enter launches it.
-  {
-    const before = logLines().length;
-    await qmp.input([
-      { type: "key", data: { down: true, key: { type: "qcode", data: "tab" } } },
-    ]);
-    await sleep(120);
-    await qmp.input([
-      { type: "key", data: { down: false, key: { type: "qcode", data: "tab" } } },
-    ]);
-    await sleep(300);
-    await qmp.input([
-      { type: "key", data: { down: true, key: { type: "qcode", data: "ret" } } },
-    ]);
-    await sleep(120);
-    await qmp.input([
-      { type: "key", data: { down: false, key: { type: "qcode", data: "ret" } } },
-    ]);
-    const hit = await waitForLog(/LAUNCH terminal/, 10000, before);
-    check("input: Tab + Enter launches the focused app (Terminal)", !!hit);
-  }
 
   // 7. Final frame still shows the shell, then clean poweroff.
   const shotFinal = join(OUT, "m2-shot-final.ppm");
