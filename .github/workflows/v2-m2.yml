@@ -34,6 +34,13 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          # setup-node v5 defaults package-manager-cache to true and
+          # auto-detects pnpm from the repo root's packageManager field —
+          # but this job uses npm only (v2/rn/renderer, v2/shell) and
+          # never installs pnpm, so the cache step fails with "Unable to
+          # locate executable file: pnpm". The Hermes/Yoga deps cache is
+          # handled by the actions/cache step below.
+          package-manager-cache: false
 
       - name: Install build + boot dependencies
         run: |
