@@ -391,15 +391,21 @@ void Wayland::requestFrame() {
 void Wayland::doPresent() {
   if (!configured_ || !surface_)
     return;
-  int idx = -1;
-  if (!busy_[back_])
-    idx = back_;
-  else if (!busy_[1 - back_])
-    idx = 1 - back_;
-  if (idx < 0) {
-    havePending_ = true; // both buffers busy; retry on release/frame
-    return;
-  }
+  // Present into the back buffer unconditionally and alternate.
+  // Weston never releases these SHM buffers in this guest and
+  // stops sending frame callbacks after the first frames (0
+  // releases, 1 frame callback across a whole M2 run), so waiting
+  // for a free buffer — or for a frame callback to free one —
+  // freezes the screen after two frames: the frame-free fix
+  // unblocked exactly one invisible present and then re-froze.
+  // Presents here are seconds apart while a repaint takes ~400ms,
+  // so by the time a buffer is repainted the compositor has
+  // finished with it; the residual tear risk (a paint landing in
+  // the few-ms window while the compositor reads the buffer) is
+  // one transient torn frame. busy_/havePending_ are kept as
+  // bookkeeping (releases and frame callbacks still clear them)
+  // but no longer gate presents.
+  int idx = back_;
   Painter& p = *painters_[idx];
   p.beginFrame(pendingBg_);
   p.paint(pendingOps_);
