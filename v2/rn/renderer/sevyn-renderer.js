@@ -295,6 +295,15 @@ let rootHeight = 768;
 let backgroundColor = "#0b0b0f";
 
 function syncYogaChildren(inst) {
+  // Text is a MEASURED LEAF in Yoga: its measure function reads the
+  // concatenated descendant text (installTextMeasure). Yoga forbids
+  // children on measured nodes ("Cannot add child: Nodes with measure
+  // functions cannot have children"), so a Text's instance children
+  // (nested Text / #text leaves) are draw data only — never Yoga
+  // children. The parent Text draws the concatenated text itself in
+  // emitInstance; the #text leaves draw nothing. Same for #text
+  // leaves themselves (they never have children).
+  if (inst.type === "Text" || inst.type === "#text") return;
   Sevyn.yogaSetChildren(
     inst.yogaId,
     inst.children.map((c) => c.yogaId),

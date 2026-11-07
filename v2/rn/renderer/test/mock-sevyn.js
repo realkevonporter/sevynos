@@ -96,7 +96,16 @@ const Sevyn = {
   },
   yogaSetChildren(id, kids) {
     const n = nodes.get(id);
-    if (n) n.children = kids.slice();
+    if (!n) return;
+    // Mirror Yoga's real invariant (YGNodeInsertChild): a node with a
+    // measure function cannot have children. The mock used to accept
+    // anything, which hid exactly this bug until CI/QEMU hit real Yoga.
+    if (n.measure && kids.length > 0) {
+      throw new Error(
+        "Cannot add child: Nodes with measure functions cannot have children.",
+      );
+    }
+    n.children = kids.slice();
   },
   yogaCalculateLayout(id, w, h) {
     layoutNode(id, 0, 0, w, h);
