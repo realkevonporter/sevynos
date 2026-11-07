@@ -798,15 +798,61 @@ async function main() {
     const st = await updCmd(b, "STATUS", /UPDATE STATUS .* channel=stable /);
     check("settings: persisted channel reads back as stable", !!st, st || "");
   }
-  // Tab from Stable wraps through the AI buttons to X, then Nightly.
-  await key("tab");
-  await key("tab");
-  await key("tab");
-  await key("tab");
-  {
-    const before = logLines(b.logPath).length;
+  // Back to nightly — by CLICKING the Nightly button, not by counting
+  // four Tabs across the wrap. The Tab path flaked in CI (PR #91's
+  // standalone M4 run): one Tab was lost under TCG load, focus landed
+  // on X, and Enter closed the window instead of applying nightly —
+  // no SETTINGS line at all, and the CLOSE after it failed because
+  // the window was already gone. A pointer click cannot land on the
+  // wrong button: the channel buttons sit at fixed window-relative
+  // offsets (Nightly centre ≈ +76, +135 from the window's top-left;
+  // measured on a real frame), and the click is verified by sampling
+  // the pixel first — after Stable applies, Nightly is the inactive
+  // #e5e7eb button and Stable is the active #111827 one. If the pixel
+  // is not the inactive button, fall back to the Tab path.
+  const shotNightly = await shot(b.qmp, join(OUT, "m4-shot-settings-nightly.ppm"));
+  const nightlyHeader = findWindowHeader(shotNightly, 107, 113, 128);
+  check("settings: Settings window still up for the nightly step", !!nightlyHeader);
+  // Capture `before` BEFORE the click: the exec + log line can land
+  // within a few hundred ms of the press, and a `before` taken after
+  // it would miss the line.
+  const beforeNightly = logLines(b.logPath).length;
+  let clickedNightly = false;
+  if (nightlyHeader) {
+    const bx = nightlyHeader.left + 76;
+    const by = nightlyHeader.top + 135;
+    const i = (by * shotNightly.width + bx) * 3;
+    const [pr, pg, pb] = [
+      shotNightly.pixels[i],
+      shotNightly.pixels[i + 1],
+      shotNightly.pixels[i + 2],
+    ];
+    const isNightlyButton =
+      Math.abs(pr - 229) <= 10 && Math.abs(pg - 231) <= 10 && Math.abs(pb - 235) <= 10;
+    if (isNightlyButton) {
+      await moveTo(bx, by, shotNightly.width, shotNightly.height);
+      await sleep(300);
+      await click();
+      await sleep(300);
+      clickedNightly = true;
+    }
+  }
+  if (!clickedNightly) {
+    // Fallback: Tab from Stable wraps through the AI buttons to X,
+    // then Nightly.
+    await key("tab");
+    await key("tab");
+    await key("tab");
+    await key("tab");
     await key("ret");
-    const hit = await waitForLog(b.logPath, /SETTINGS channel=nightly/, 15000, before);
+  }
+  {
+    const hit = await waitForLog(
+      b.logPath,
+      /SETTINGS channel=nightly/,
+      15000,
+      beforeNightly,
+    );
     check("settings: Nightly applies (SETTINGS channel=nightly)", !!hit, hit || "");
     const st = await updCmd(b, "STATUS", /UPDATE STATUS .* channel=nightly /);
     check("settings: persisted channel reads back as nightly", !!st, st || "");
