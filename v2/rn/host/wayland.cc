@@ -208,6 +208,10 @@ void Wayland::onBufferRelease(int index) {
   if (index < 0 || index > 1)
     return;
   busy_[index] = false;
+  // TEMP DIAGNOSTIC (CI #19 freeze hunt): log releases so the boot
+  // log shows whether the compositor ever frees a buffer.
+  logLine("DIAG RELEASE idx=%d busy=[%d,%d] havePending=%d", index,
+          (int)busy_[0], (int)busy_[1], (int)havePending_);
   flushPending();
 }
 
@@ -221,6 +225,8 @@ void Wayland::onFrameDoneCb(void* data, wl_callback* callback,
 
 void Wayland::onFrameDone() {
   framePending_ = false;
+  // TEMP DIAGNOSTIC (CI #19 freeze hunt).
+  logLine("DIAG FRAME done havePending=%d", (int)havePending_);
   flushPending();
   if (frameHandler_)
     frameHandler_();
@@ -386,9 +392,15 @@ void Wayland::doPresent() {
   else if (!busy_[1 - back_])
     idx = 1 - back_;
   if (idx < 0) {
+    // TEMP DIAGNOSTIC (CI #19 freeze hunt).
+    logLine("DIAG PRESENT STALL both busy back=%d havePending=%d", back_,
+            (int)havePending_);
     havePending_ = true; // both buffers busy; retry on release/frame
     return;
   }
+  // TEMP DIAGNOSTIC (CI #19 freeze hunt).
+  logLine("DIAG PRESENT idx=%d ops=%zu busy=[%d,%d]", idx, pendingOps_.size(),
+          (int)busy_[0], (int)busy_[1]);
   Painter& p = *painters_[idx];
   p.beginFrame(pendingBg_);
   p.paint(pendingOps_);
@@ -421,6 +433,9 @@ void Wayland::flushPending() {
 void Wayland::present(const std::vector<DrawOp>& ops, uint32_t bg) {
   pendingOps_ = ops;
   pendingBg_ = bg;
+  // TEMP DIAGNOSTIC (CI #19 freeze hunt).
+  logLine("DIAG PRESENT called ops=%zu configured=%d", ops.size(),
+          (int)configured_);
   if (!configured_) {
     havePending_ = true; // first configure will flush
     return;
