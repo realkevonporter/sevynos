@@ -86,17 +86,24 @@ int main(void)
             (void)!write(fd, "SUBSCRIBE\n", 10);
             char buf[256];
             ssize_t n;
+            /* Accumulate bytes into a line buffer: a STATUS line can
+             * arrive split across reads (or coalesced with the next
+             * one). The old loop discarded a trailing partial line,
+             * so one broadcast in N silently vanished — the volume
+             * push on the first green CI M1 run (statusd broadcast
+             * it, the client never logged it, battery/wifi right
+             * after worked fine). Only complete lines log. */
+            char linebuf[512];
+            size_t line_len = 0;
             while ((n = read(fd, buf, sizeof(buf))) > 0) {
-                /* Lines may arrive coalesced; split on \n. */
-                char *p = buf;
-                char *end = buf + n;
-                while (p < end) {
-                    char *nl = memchr(p, '\n', (size_t)(end - p));
-                    if (!nl)
-                        break;
-                    *nl = '\0';
-                    log_line("STATUS %s", p);
-                    p = nl + 1;
+                for (ssize_t i = 0; i < n; i++) {
+                    if (buf[i] == '\n') {
+                        linebuf[line_len] = '\0';
+                        log_line("STATUS %s", linebuf);
+                        line_len = 0;
+                    } else if (line_len < sizeof(linebuf) - 1) {
+                        linebuf[line_len++] = buf[i];
+                    }
                 }
             }
             log_line("STATUSCLIENT disconnected (%s), reconnecting",
