@@ -1,6 +1,7 @@
 // SevynOS v2 M2 — Wayland client (see wayland.h).
 #include "wayland.h"
 
+#include <cerrno>
 #include <poll.h>
 #include <unistd.h>
 #include <cstring>
@@ -428,14 +429,23 @@ bool Wayland::dispatch(int timeoutMs) {
   int fd = wl_display_get_fd(display_);
   pollfd pfd{fd, POLLIN, 0};
   int r = poll(&pfd, 1, timeoutMs);
-  if (r < 0)
+  if (r < 0) {
+    logLine("WAYLAND dispatch poll failed (errno=%d %s)", errno,
+            strerror(errno));
     return false;
-  if (pfd.revents & POLLIN) {
-    if (wl_display_dispatch(display_) < 0)
-      return false;
   }
-  if (wl_display_dispatch_pending(display_) < 0)
+  if (pfd.revents & POLLIN) {
+    if (wl_display_dispatch(display_) < 0) {
+      logLine("WAYLAND dispatch failed (display_error=%d errno=%d %s)",
+              wl_display_get_error(display_), errno, strerror(errno));
+      return false;
+    }
+  }
+  if (wl_display_dispatch_pending(display_) < 0) {
+    logLine("WAYLAND dispatch_pending failed (display_error=%d errno=%d %s)",
+            wl_display_get_error(display_), errno, strerror(errno));
     return false;
+  }
   wl_display_flush(display_);
   return true;
 }

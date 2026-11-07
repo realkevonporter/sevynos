@@ -35,6 +35,9 @@ class StatusClient {
   Handler handler_;
   std::thread thread_;
   std::atomic<bool> stopping_{false};
+  // Connected socket, so stop() can wake the blocking read in run()
+  // with shutdown() instead of joining until the next broadcast.
+  std::atomic<int> fd_{-1};
 };
 
 } // namespace sevyn

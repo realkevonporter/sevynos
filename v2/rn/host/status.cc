@@ -27,6 +27,12 @@ void StatusClient::start() {
 
 void StatusClient::stop() {
   stopping_ = true;
+  // The reader thread blocks in read() on the socket; a plain join
+  // would wait until the next STATUS broadcast (or forever). Shut the
+  // socket down so read() returns at once and the thread exits.
+  int fd = fd_.load();
+  if (fd >= 0)
+    shutdown(fd, SHUT_RDWR);
   if (thread_.joinable())
     thread_.join();
 }
@@ -47,6 +53,7 @@ void StatusClient::run() {
       continue;
     }
     (void)!write(fd, "SUBSCRIBE\n", 10);
+    fd_.store(fd);
     char buf[256];
     char linebuf[512];
     size_t lineLen = 0;
@@ -71,6 +78,7 @@ void StatusClient::run() {
       }
     }
     close(fd);
+    fd_.store(-1);
     if (!stopping_)
       sleep(1);
   }

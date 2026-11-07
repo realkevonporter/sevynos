@@ -264,6 +264,16 @@ fi
 # stderr is captured to a file for the READY wait while the serial keeps
 # the live stream (LAUNCH lines, errors).
 /usr/local/bin/sevyn-rn-host 2>/tmp/sevyn-host.log &
+HOST_PID=$!
+# If the host dies, dump weston + host logs to the console (the serial
+# the harness captures) so a blank screen is diagnosable from the
+# artifacts instead of a silent exit: libwayland prints the protocol
+# error to the host's stderr, Weston prints its side to weston.log.
+(while kill -0 "$HOST_PID" 2>/dev/null; do sleep 0.5; done
+ echo "--- sevyn-host died; weston.log ---"
+ cat /tmp/weston.log 2>/dev/null || echo "(no weston log)"
+ echo "--- sevyn-host.log ---"
+ cat /tmp/sevyn-host.log 2>/dev/null || echo "(no host log)") > /dev/console 2>&1 &
 # Wait for the shell to mount (the host logs SEVYNOS_M2_READY after the
 # bundle evaluates).
 i=0

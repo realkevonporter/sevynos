@@ -76,6 +76,17 @@ class RnHost {
   RnHost(int width, int height, std::string bundle)
       : width_(width), height_(height), bundle_(std::move(bundle)) {}
 
+  // Stop the status subscriber thread FIRST, while every member its
+  // handler touches (statusMutex_/statusQueue_/statusSnapshot_) is
+  // still alive. Members are destroyed in reverse declaration order,
+  // so without this the thread could fire its handler on already
+  // destroyed members during teardown — seen in CI as a segfault when
+  // a STATUS broadcast arrived while the host was exiting.
+  ~RnHost() {
+    if (status_)
+      status_->stop();
+  }
+
   int run();
 
  private:
