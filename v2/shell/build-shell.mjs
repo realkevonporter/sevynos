@@ -44,6 +44,13 @@ await build({
   platform: "neutral",
   target: "es2019",
   jsx: "automatic",
+  // The host runs the bundle in Hermes, where there is NO Node `process`
+  // global. React's entry does `process.env.NODE_ENV === 'production'`
+  // to pick its build — without this define esbuild leaves a bare
+  // `process` reference in the output and the host fails the bundle with
+  // "Property 'process' doesn't exist" (verified in CI run 42334471009).
+  // Inlining it also pins the production React build into the shell.
+  define: { "process.env.NODE_ENV": '"production"' },
   outfile: jsOut,
   logLevel: "info",
 });
