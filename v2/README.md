@@ -1,6 +1,8 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M1 (foundation).** M0 merged 2026-11-06 (PR #81). This directory
+**Status: M1 done (verified locally 2026-11-07).** M0 merged 2026-11-06
+(PR #81). M1 passes its full check locally — 15/15, ~30 s under
+QEMU/TCG, twice in a row — and is in PR for CI confirmation. This directory
 is the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never
@@ -118,12 +120,14 @@ artifact.
 - **M0 — Groundwork (merged, PR #81).** Repo skeleton + CI pipeline that
   builds a bootable image. Done when an empty image builds in CI and boots
   to a blank screen in QEMU.
-- **M1 — Boots and proves the foundation (this milestone).** Kernel boots,
-  compositor up, input proven end to end with a click-target test harness,
-  live system status (battery/wifi/volume) as an event feed. Done when:
-  boot → cursor moves → click lands on the intended surface → status
-  values change live. Proven in CI under QEMU (screendumps + serial log);
-  real-hardware proof is Kevon's M2 boot of the nightly.
+- **M1 — Boots and proves the foundation (done, verified locally
+  2026-11-07).** Kernel boots, compositor up, input proven end to end
+  with a click-target test harness, live system status
+  (battery/wifi/volume) as an event feed. Done when: boot → cursor
+  moves → click lands on the intended surface → status values change
+  live. Proven locally under QEMU (screendumps + serial log, 15/15
+  checks); CI runs the same check on the PR; real-hardware proof is
+  Kevon's M2 boot of the nightly.
 - **M2 — Shell (Kevon's checkpoint).** RN shell: dock/taskbar (no overflow
   by design), launcher, system status. Design pass from the start, not a
   later polish phase. When M2 merges, Kevon downloads the nightly and

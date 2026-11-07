@@ -58,7 +58,14 @@ jobs:
         run: sudo sh v2/image/build-m1-image.sh
 
       - name: Run the M1 check in QEMU
-        run: node v2/image/m1-check.mjs
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create m1-boot.log (EACCES — the CI failure on the
+          # first M1 PR run). Locally everything already runs as root,
+          # so this only matters on CI.
+          sudo chown -R "$USER" v2/image/build
+          node v2/image/m1-check.mjs
 
       - name: Upload M1 artifacts
         if: always()
