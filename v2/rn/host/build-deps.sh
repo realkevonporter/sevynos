@@ -147,7 +147,13 @@ YOGA_BUILD="$BUILD_DIR/yoga"
 cmake -S "$YOGA_SRC" -B "$YOGA_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
-cmake --build "$YOGA_BUILD" --target yogacore --parallel "$JOBS"
+# Yoga's top-level CMake unconditionally adds tests/, which FetchContents
+# googletest — and `cmake --install` then tries to install libgmock.a /
+# libgtest.a (+ _main variants) even though only yogacore was built, so
+# the install dies on the missing archives. Build the four googletest
+# libs too (small, ~30s); they live in the Yoga build dir, so they add
+# nothing the host link picks up (it only scans the Hermes build dir).
+cmake --build "$YOGA_BUILD" --target yogacore gtest gtest_main gmock gmock_main --parallel "$JOBS"
 cmake --install "$YOGA_BUILD"
 
 # --- verify + mark ---------------------------------------------------------
