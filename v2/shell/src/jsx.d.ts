@@ -1,5 +1,5 @@
 // SevynOS host components (react-reconciler host config).
-// The renderer implements exactly these five; anything else is a bug.
+// The renderer implements exactly these six; anything else is a bug.
 // Styles are the subset the host's applyStyle understands (see
 // v2/rn/README.md): Yoga layout props + backgroundColor, color,
 // fontSize, fontWeight, textAlign, borderRadius.
@@ -17,6 +17,7 @@ declare module "react" {
       Image: any;
       Pressable: any;
       ScrollView: any;
+      TextInput: any;
     }
   }
 }
@@ -67,6 +68,9 @@ declare global {
     appColor: string;
     appGlyph: string;
     hasPermission(name: string): boolean;
+    // One-shot run of /usr/local/bin/sevyn only; returns
+    // "<exit-code>\n<output>". Gated by the cli.exec permission.
+    exec(cmdline: string): string;
     listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
     onAppEvent(fn: (line: string) => void): void;

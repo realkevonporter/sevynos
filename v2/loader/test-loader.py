@@ -288,6 +288,15 @@ def main():
     p2 = [a for a in reg["apps"] if a["id"] == "perm2"][0]
     check("permission recorded", p2["permissions"] == ["status.read"])
 
+    # 16b. cli.exec (M4) is a known permission too.
+    b10b = tmp / "perm3.sevyn"
+    make_bundle(b10b, app_id="perm3", permissions=["cli.exec"])
+    rc, out = run_loader(env, "install", str(b10b))
+    check("cli.exec installs", rc == 0, out)
+    reg = json.loads((apps / "registry.json").read_text())
+    p3 = [a for a in reg["apps"] if a["id"] == "perm3"][0]
+    check("cli.exec recorded", p3["permissions"] == ["cli.exec"])
+
     # 17. reserved id "shell" is refused.
     b11 = tmp / "shell.sevyn"
     make_bundle(b11, app_id="shell")
@@ -311,7 +320,7 @@ def main():
     # 20. registry survives a reload: list after a fresh process.
     rc, out = run_loader(env, "list")
     ids = {line.split("|")[0] for line in out.strip().splitlines()}
-    check("registry persists", ids == {"files", "self", "terminal", "perm2"}, out)
+    check("registry persists", ids == {"files", "self", "terminal", "perm2", "perm3"}, out)
 
     print()
     if FAILURES:

@@ -408,6 +408,22 @@ const Sevyn = {
     logs.push("CLOSEAPP");
     return true;
   },
+  // One-shot `sevyn` CLI run (M4). Records the call; tests answer
+  // through _execHandler (a function of cmdline -> "code\noutput"),
+  // defaulting to a bare success so template tests never see it.
+  // Mirrors the real host's gate: without cli.exec the call is
+  // refused before it reaches the handler.
+  _execHandler: null,
+  exec(cmdline) {
+    logs.push("EXEC " + cmdline);
+    if (!Sevyn.hasPermission("cli.exec")) {
+      return "ERR permission denied: cli.exec";
+    }
+    if (typeof Sevyn._execHandler === "function") {
+      return Sevyn._execHandler(cmdline);
+    }
+    return "0\n";
+  },
   launchApp(appId) {
     logs.push("LAUNCH " + appId);
     return true;
@@ -422,6 +438,7 @@ const Sevyn = {
   _logs: logs,
   _reset() {
     Sevyn._status = { battery: "87", wifi: "on", volume: "43" };
+    Sevyn._execHandler = null;
     nodes.clear();
     nextId = 1;
     presents.length = 0;

@@ -1,8 +1,8 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M3 merged (PR #87, 2026-11-07). M8 in progress (this PR).**
+**Status: M8 merged (PR #88, 2026-11-07). M4 in progress (this PR).**
 M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
-#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). This directory is
+#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never
@@ -113,7 +113,7 @@ v2/
     test-appd.py       #   38 appd checks (fake host, no QEMU)
   update/              # M8: the system update daemon + CLI (C)
     sevyn-updated.c    #   feed check/download/apply, A/B slots, slot state
-    sevyn.c            #   the `sevyn` CLI seed (update verbs only; M4 grows it)
+    sevyn.c            #   the `sevyn` CLI (M4: update + shell + files + code verbs, REPL mode)
     canonical.{h,c}    #   canonical feed body (byte-identical to canonical.mjs)
     test-updated.py    #   50 updater + CLI checks (no QEMU)
   apps/                # M3: the stock-app template (one RN screen)

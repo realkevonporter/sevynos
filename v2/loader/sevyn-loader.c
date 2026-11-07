@@ -277,7 +277,11 @@ static int write_file_atomic(const char *path, const char *data, size_t len)
 
 /* --- manifest --- */
 
-static const char *kKnownPermissions[] = { "status.read", NULL };
+/* Known permissions (M3: status.read; M4: cli.exec — run the `sevyn`
+ * CLI via the host's Sevyn.exec bridge. The host enforces the same
+ * set; an app without cli.exec gets an ERR from Sevyn.exec. */
+static const char *kKnownPermissions[] = { "status.read", "cli.exec",
+                                           NULL };
 
 static int permission_known(const char *p)
 {

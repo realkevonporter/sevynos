@@ -47,7 +47,11 @@ The host installs a `Sevyn` global before running the bundle:
   broadcasts. Pointer events: `{type:'move'|'button'|'axis', x, y,
 button, pressed, nodeId?}` — `nodeId` is set on button-press only:
   the host hit-tests the last presented ops, topmost first. Key
-  events: `{key: <linux evdev keycode>, pressed}`. Status events:
+  events: `{key: <linux evdev keycode>, pressed, shift}` — `shift` is
+  true while either Shift key is held (M4: the host tracks evdev 42/54
+  and consumes the Shift keys themselves, so they never arrive as
+  `key` events; the renderer maps the shifted character from the
+  keycode + `shift`). Status events:
   `{key, value}`. There is exactly one handler of each kind, owned by
   the renderer — the shell must not register its own.
 - `Sevyn.getStatus()` — last known `{battery, wifi, volume}` snapshot.
@@ -74,6 +78,16 @@ CRASHED / INSTALLED / UNINSTALLED <id>` lines. The renderer keeps an
   STOPPED). The shell returns false (it is not closable; the
   compositor's close button does the same thing for apps).
 - `Sevyn.log(msg)` — to `/dev/console` and the host log.
+- `Sevyn.exec(cmdline)` — M4: one-shot fork/exec of
+  `/usr/local/bin/sevyn` only (the first token must be `sevyn`; at most
+  16 whitespace-split args). Stdout+stderr are captured (64 KB cap);
+  a 10 s timeout kills the child and returns code 124. Returns
+  `"<code>\n<output>"` and logs `EXEC <cmdline> -> <code>` to the
+  console. Gated by the `cli.exec` permission — an app without it gets
+  `ERR permission denied: cli.exec` (the Terminal/Settings/Files
+  manifests grant it). This is the ONLY way an app runs a command:
+  there is no shell, no bash, no escape hatch — the Terminal app is a
+  `sevyn` CLI prompt, nothing more.
 
 The bundle's top-level code starts the app (the shell calls the
 renderer's `render`). The host just runs the bundle and drives frames
@@ -105,6 +119,18 @@ newProps`, and `commitUpdate` is called as
   element is a React no-op (bailout), so the store is the only correct
   trigger. The snapshot object is replaced (new identity) only on a
   push.
+- `TextInput` (M4) is a host component, not a native view: a
+  controlled, single-line input. It measures via the displayed text
+  (value, or the placeholder when empty), draws the placeholder dimmed
+  (`#6b7280`), a 2 px white caret when focused, and a focus ring;
+  click-to-focus via its hit rect. Keys reach it through
+  `handleTextInputKey`: typing (a US keycode map with Shift variants),
+  Backspace (evdev 14), Enter (evdev 28) submits via `onSubmitEditing`,
+  Tab/Escape fall through to the focus cycle, arrows are swallowed (no
+  cursor in M4). It is focusable (in `focusables()`, after the header
+  X) and `autoFocus` takes focus when nothing is focused.
+  `detachDeletedInstance` + `unmount()` clear a dead focused instance
+  so focus never points at a freed Yoga node.
 
 ## Pinned native deps
 
@@ -161,9 +187,29 @@ newProps`, and `commitUpdate` is called as
    deleted (LIST no longer shows it), and reinstalls offline from
    pristine (LIST shows it again) and relaunches.
 
+## What M4 proves (m4-check.mjs)
+
+1. Boot: the shell mounts, code-server is serving
+   (`SEVYNOS_M4_READY`), the slot is marked good, and appd answers
+   PING (the M3 stack still works in the M4 image).
+2. Terminal (the recovery path): typing `code status` proves Sevyn
+   Code is present and serving with its terminal defaulting to the
+   Sevyn CLI; `files cat` on the code-server settings.json proves the
+   terminal profile; `update status` proves the CLI reaches the
+   updater.
+3. Shell recovery: `shell kill` from the Terminal drops the top bar +
+   dock from the screen; `shell start` brings the shell back.
+4. Settings changes a real, persisted system value: switching the
+   update channel to stable (and back to nightly) reads back over the
+   updater's control serial, not just the UI.
+5. Files opens a real directory: a directory + file created from the
+   Terminal are listed by the Files app, and navigating into the
+   directory lists its one file.
+
 ## What M3 does NOT do
 
-- The Terminal/Settings/Files apps (M4), networking/browser (M5),
-  Tokrah (M6). The stock apps are one shared template screen — real
-  app content arrives with M4.
+- The AI connector (M4.5), networking/browser (M5), Tokrah (M6).
+  The remaining stock apps are one shared template screen — real app
+  content beyond Terminal/Settings/Files arrives with later
+  milestones.
 - A GPU renderer. CPU raster only, by design.

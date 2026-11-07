@@ -6,20 +6,34 @@
 //   1. a Yoga layout tree (via the Sevyn.yoga* host functions), then
 //   2. a flat draw-op list per commit (via Sevyn.present).
 //
-// Host component types: View, Text, Image, Pressable, ScrollView.
-// The shell app is written against these five; nothing else exists yet.
+// Host component types: View, Text, Image, Pressable, ScrollView,
+// TextInput (M4 — single-line text entry; see below).
+// The shell app is written against these; nothing else exists yet.
 //
 // Event flow (host -> JS):
 //   Sevyn.onPointer(ev)  ev = {type:'move'|'button'|'axis', x, y,
 //                               button, pressed, nodeId?}
 //     nodeId is set on button-press only: the yoga id of the topmost
 //     hit op (host hit-tests the last presented ops).
-//   Sevyn.onKey(ev)      ev = {key: <linux keycode>, pressed: bool}
+//   Sevyn.onKey(ev)      ev = {key: <linux keycode>, pressed: bool,
+//                               shift: bool}
+//     shift is the state of either Shift key at the moment of the
+//     event (tracked by keycode in the host — it reads no xkb keymap).
 //   Sevyn.onStatus(ev)   ev = {key, value} — statusd push.
 //   Sevyn.onAppEvent(line) line = "EVENT LAUNCHED files" — appd push.
 //   Sevyn.listApps()     -> [{id, name, version, color, glyph,
 //                          system, protected, permissions}] — appd LIST.
 //   Sevyn.launchApp(id)  -> bool — appd LAUNCH.
+//   Sevyn.exec(cmdline)  -> "<exit-code>\n<output>" — one-shot run of
+//                          /usr/local/bin/sevyn only; gated by the
+//                          cli.exec permission (ERR string otherwise).
+//
+// TextInput (M4): a controlled single-line input. Props: value,
+// onChangeText, onSubmitEditing, placeholder, autoFocus. The focused
+// input eats printable keys (US keycode map below, Shift-aware),
+// Backspace, and Enter (submit); Tab moves focus, Escape blurs. It
+// draws its value (or the placeholder, dimmed) plus a caret when
+// focused. No cursor movement, no multiline, no selection — M4 scope.
 //
 // The renderer keeps a yoga-id -> instance map for hit routing and a
 // focus list for keyboard activation. ScrollView scrolls only via
@@ -124,6 +138,24 @@ function installImageMeasure(inst) {
   // Images have no intrinsic size in M2: they must carry width/height
   // in style. Without them the node measures 0x0.
   Sevyn.yogaSetMeasureFunc(inst.yogaId, () => ({ width: 0, height: 0 }));
+}
+
+// Install the Yoga measure function for a TextInput: one line, sized
+// to the displayed text (value, or the placeholder when empty).
+function installTextInputMeasure(inst) {
+  Sevyn.yogaSetMeasureFunc(inst.yogaId, (w, wm, h, hm) => {
+    const font = fontOf(inst);
+    const value =
+      inst.props && typeof inst.props.value === "string" ? inst.props.value : "";
+    const display =
+      value ||
+      (inst.props && typeof inst.props.placeholder === "string"
+        ? inst.props.placeholder
+        : "");
+    const m = Sevyn.measureText(display, font.size, font.bold, 0);
+    const width = wm === 1 ? w : m.width;
+    return { width, height: font.size * 1.25 };
+  });
 }
 
 // ------------------------------------------------------------ draw emission
@@ -231,10 +263,58 @@ function emitInstance(inst, ox, oy, ops, clip) {
     if (src) {
       ops.push({ type: "image", x, y, w, h, asset: String(src), nodeId });
     }
+  } else if (inst.type === "TextInput") {
+    const font = fontOf(inst);
+    const value =
+      inst.props && typeof inst.props.value === "string" ? inst.props.value : "";
+    const showingPlaceholder =
+      !value && inst.props && typeof inst.props.placeholder === "string";
+    const display = showingPlaceholder ? inst.props.placeholder : value;
+    // Hit rect (background or transparent) so a click focuses the input.
+    ops.push({
+      type: "rect",
+      x,
+      y,
+      w,
+      h,
+      color: st.backgroundColor || "#00000000",
+      radius: st.borderRadius || 0,
+      nodeId: inst.yogaId,
+    });
+    if (display) {
+      ops.push({
+        type: "text",
+        x,
+        y,
+        w,
+        h,
+        text: display,
+        fontSize: font.size,
+        bold: font.bold,
+        color: showingPlaceholder ? "#6b7280" : font.color,
+        align: font.align,
+        nodeId: -1,
+      });
+    }
+    // Caret after the displayed text while focused.
+    if (focusedInstance === inst) {
+      const textW = display
+        ? Sevyn.measureText(display, font.size, font.bold, 0).width
+        : 0;
+      ops.push({
+        type: "rect",
+        x: x + textW + 1,
+        y: y + 1,
+        w: 2,
+        h: Math.max(1, font.size * 1.25 - 2),
+        color: font.color,
+        nodeId: -1,
+      });
+    }
   }
 
-  // Focus ring: a thin outline around the focused pressable.
-  if (focusedInstance === inst && pressable) {
+  // Focus ring: a thin outline around the focused pressable / input.
+  if (focusedInstance === inst && (pressable || inst.type === "TextInput")) {
     const c = "#f5c518";
     const t = 2;
     ops.push({
@@ -317,6 +397,14 @@ function syncYogaChildren(inst) {
 
 function presentRoot() {
   if (!rootContainer) return;
+  // autoFocus: with nothing focused, the first autoFocus input takes
+  // focus (the Terminal prompt). Once the user focuses anything else,
+  // this never steals it back; Escape blurs, and the next present
+  // re-focuses the input — that is the Terminal's home state.
+  if (!focusedInstance) {
+    const auto = firstAutoFocusInput();
+    if (auto) focusedInstance = auto;
+  }
   syncYogaChildren(rootContainer);
   Sevyn.yogaCalculateLayout(rootContainer.yogaId, rootWidth, rootHeight);
   const ops = [];
@@ -331,13 +419,32 @@ function focusables() {
   const out = [];
   function walk(inst) {
     if (inst.hidden) return;
-    if (inst.type === "Pressable" || (inst.props && inst.props.onPress)) {
+    if (
+      inst.type === "Pressable" ||
+      inst.type === "TextInput" ||
+      (inst.props && inst.props.onPress)
+    ) {
       out.push(inst);
     }
     for (const c of inst.children) walk(c);
   }
   if (rootContainer) for (const c of rootContainer.children) walk(c);
   return out;
+}
+
+// First autoFocus TextInput in tree order, if any.
+function firstAutoFocusInput() {
+  let found = null;
+  function walk(inst) {
+    if (found || inst.hidden) return;
+    if (inst.type === "TextInput" && inst.props && inst.props.autoFocus) {
+      found = inst;
+      return;
+    }
+    for (const c of inst.children) walk(c);
+  }
+  if (rootContainer) for (const c of rootContainer.children) walk(c);
+  return found;
 }
 
 function moveFocus(dir) {
@@ -355,10 +462,108 @@ function activateFocused() {
   }
 }
 
+// US keycode map (evdev codes -> [plain, shift]). Space is 57.
+// Letters, digits, and the punctuation row a terminal needs for paths
+// and flags. Keypad / function / media keys are intentionally absent.
+const KEYMAP = {
+  2: ["1", "!"],
+  3: ["2", "@"],
+  4: ["3", "#"],
+  5: ["4", "$"],
+  6: ["5", "%"],
+  7: ["6", "^"],
+  8: ["7", "&"],
+  9: ["8", "*"],
+  10: ["9", "("],
+  11: ["0", ")"],
+  12: ["-", "_"],
+  13: ["=", "+"],
+  16: ["q", "Q"],
+  17: ["w", "W"],
+  18: ["e", "E"],
+  19: ["r", "R"],
+  20: ["t", "T"],
+  21: ["y", "Y"],
+  22: ["u", "U"],
+  23: ["i", "I"],
+  24: ["o", "O"],
+  25: ["p", "P"],
+  26: ["[", "{"],
+  27: ["]", "}"],
+  30: ["a", "A"],
+  31: ["s", "S"],
+  32: ["d", "D"],
+  33: ["f", "F"],
+  34: ["g", "G"],
+  35: ["h", "H"],
+  36: ["j", "J"],
+  37: ["k", "K"],
+  38: ["l", "L"],
+  39: [";", ":"],
+  40: ["'", '"'],
+  41: ["`", "~"],
+  43: ["\\", "|"],
+  44: ["z", "Z"],
+  45: ["x", "X"],
+  46: ["c", "C"],
+  47: ["v", "V"],
+  48: ["b", "B"],
+  49: ["n", "N"],
+  50: ["m", "M"],
+  51: [",", "<"],
+  52: [".", ">"],
+  53: ["/", "?"],
+  57: [" ", " "],
+};
+
+// Keys for the focused TextInput. Returns true when the key is
+// consumed (no focus movement), false for Tab/Escape, which fall
+// through to the focus handling below.
+function handleTextInputKey(inst, ev) {
+  const props = inst.props || {};
+  const value = typeof props.value === "string" ? props.value : "";
+  switch (ev.key) {
+    case 15: // Tab — move focus.
+    case 1: // Escape — blur.
+      return false;
+    case 28: // Enter — submit (single-line: never a newline).
+      if (typeof props.onSubmitEditing === "function") {
+        props.onSubmitEditing();
+      }
+      return true;
+    case 14: // Backspace.
+      if (typeof props.onChangeText === "function" && value.length > 0) {
+        props.onChangeText(value.slice(0, -1));
+      }
+      return true;
+    case 103: // Up
+    case 105: // Left
+    case 106: // Right
+    case 108: // Down — no cursor in M4; swallow, do not move focus.
+      return true;
+    default: {
+      const pair = KEYMAP[ev.key];
+      if (pair && typeof props.onChangeText === "function") {
+        props.onChangeText(value + (ev.shift ? pair[1] : pair[0]));
+      }
+      return true;
+    }
+  }
+}
+
 // Linux keycodes (evdev): Enter 28, Space 57, Tab 15, Left 105,
 // Right 106, Up 103, Down 108, Escape 1.
 function handleKey(ev) {
   if (!ev.pressed) return;
+  // Typing into the focused TextInput takes precedence over the
+  // focus keys below (Space types a space here; Enter submits).
+  if (focusedInstance && focusedInstance.type === "TextInput") {
+    if (handleTextInputKey(focusedInstance, ev)) {
+      SevynReconciler.flushSyncWork();
+      presentRoot();
+      return;
+    }
+  }
   switch (ev.key) {
     case 28: // Enter
     case 57: // Space
@@ -562,6 +767,7 @@ const hostConfig = {
     applyStyleToNode(inst);
     if (type === "Text") installTextMeasure(inst);
     if (type === "Image") installImageMeasure(inst);
+    if (type === "TextInput") installTextInputMeasure(inst);
     return inst;
   },
   createTextInstance(text, rootContainerInstance, hostContext, internalHandle) {
@@ -633,6 +839,11 @@ const hostConfig = {
   commitUpdate(instance, type, prevProps, nextProps, internalInstanceHandle) {
     instance.props = nextProps;
     applyStyleToNode(instance);
+    // A value change must re-measure the input: re-installing the
+    // measure function marks the Yoga node dirty, so the next layout
+    // reads the new value (style re-application alone may not dirty
+    // it when the style itself is unchanged).
+    if (type === "TextInput") installTextInputMeasure(instance);
   },
 
   hideInstance(instance) {
@@ -656,6 +867,10 @@ const hostConfig = {
       Sevyn.yogaFreeNode(node.yogaId);
       instancesByYogaId.delete(node.yogaId);
     }
+    // A deleted node cannot stay focused — otherwise a tree swap
+    // leaves focus pointing at a dead instance and autoFocus never
+    // engages for the new tree.
+    if (focusedInstance === node) focusedInstance = null;
   },
 
   scheduleTimeout(fn, delay) {
@@ -752,6 +967,7 @@ function unmount() {
   if (!currentRoot) return;
   SevynReconciler.updateContainerSync(null, currentRoot, null, null);
   SevynReconciler.flushSyncWork();
+  focusedInstance = null;
   if (rootContainer && rootContainer.yogaId != null) {
     Sevyn.yogaFreeNode(rootContainer.yogaId);
     instancesByYogaId.delete(rootContainer.yogaId);

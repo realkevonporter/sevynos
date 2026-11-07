@@ -18,14 +18,19 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <poll.h>
 #include <queue>
 #include <set>
 #include <sstream>
 #include <string>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
@@ -76,6 +81,106 @@ jsi::Value jsProp(jsi::Runtime& rt, const jsi::Object& obj, const char* name) {
 bool hasProp(jsi::Runtime& rt, const jsi::Object& obj, const char* name) {
   jsi::Value v = obj.getProperty(rt, name);
   return !v.isUndefined() && !v.isNull();
+}
+
+// --- Sevyn.exec: one-shot fork/exec of /usr/local/bin/sevyn only ---
+// The Terminal app's only way to run commands: the host forks, the
+// child execs the CLI (no shell, no pipes, no other binaries), the
+// parent reads stdout+stderr with a 10 s timeout. Runs synchronously
+// on the JS thread — commands are fast; a hung command blocks the UI
+// for at most the timeout. Returns "<exit-code>\n<output>" (output
+// capped at 64 KiB). Logs EXEC <cmdline> -> <code> to serial, which
+// is what the M4 harness asserts on.
+constexpr const char* kSevynCli = "/usr/local/bin/sevyn";
+
+std::string runSevyn(const std::string& cmdline) {
+  std::istringstream in(cmdline);
+  std::vector<std::string> tokens;
+  std::string tok;
+  while (tokens.size() < 16 && in >> tok)
+    tokens.push_back(tok);
+  if (tokens.empty() || tokens[0] != "sevyn")
+    return "ERR only the sevyn command is allowed";
+  std::vector<char*> argv;
+  for (auto& t : tokens)
+    argv.push_back(t.data());
+  argv.push_back(nullptr);
+  int pipefd[2];
+  if (pipe(pipefd) != 0)
+    return "ERR cannot create pipe";
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return "ERR fork failed";
+  }
+  if (pid == 0) {
+    // Child: async-signal-safe calls only, then exec.
+    close(pipefd[0]);
+    int nullfd = open("/dev/null", O_RDONLY);
+    if (nullfd >= 0)
+      dup2(nullfd, STDIN_FILENO);
+    dup2(pipefd[1], STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    if (pipefd[1] > STDERR_FILENO)
+      close(pipefd[1]);
+    execv(kSevynCli, argv.data());
+    const char* msg = "ERR cannot exec the sevyn CLI\n";
+    (void)!write(STDERR_FILENO, msg, strlen(msg));
+    _exit(127);
+  }
+  close(pipefd[1]);
+  std::string out;
+  char buf[4096];
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  int status = 0;
+  bool timedOut = false;
+  while (out.size() < 65536) {
+    struct pollfd pfd = { .fd = pipefd[0], .events = POLLIN };
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      timedOut = true;
+      break;
+    }
+    int timeoutMs =
+        (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now)
+            .count();
+    int pr = poll(&pfd, 1, timeoutMs);
+    if (pr < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    if (pr == 0) {
+      timedOut = true;
+      break;
+    }
+    ssize_t r = read(pipefd[0], buf, sizeof(buf));
+    if (r < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    if (r == 0)
+      break;
+    out.append(buf, (size_t)r);
+  }
+  if (timedOut)
+    kill(pid, SIGKILL);
+  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+  }
+  close(pipefd[0]);
+  int code = 124;
+  if (!timedOut) {
+    if (WIFEXITED(status))
+      code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+      code = 128 + WTERMSIG(status);
+  }
+  logLine("EXEC %s -> %d", cmdline.c_str(), code);
+  return std::to_string(code) + "\n" + out;
 }
 
 // --- the host ---
@@ -135,7 +240,7 @@ class RnHost {
   std::vector<DrawOp> parseOps(jsi::Runtime& rt, const jsi::Value& opsValue);
   void dispatchPointer(const std::string& type, double x, double y,
                        uint32_t button, bool pressed);
-  void dispatchKey(uint32_t key, bool pressed);
+  void dispatchKey(uint32_t key, bool pressed, bool shift);
   void drainStatusQueue();
   void drainAppEventQueue();
   bool hasPermission(const std::string& name) const {
@@ -722,6 +827,20 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
              return jsi::Value(hasPermission(jsString(rt, args[0])));
            return jsi::Value(false);
          });
+  hostFn("exec", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           // Permission gate: only apps with cli.exec may run the CLI.
+           // The shell (empty appId) is always allowed.
+           if (!hasPermission("cli.exec"))
+             return jsi::String::createFromUtf8(
+                 rt, "ERR permission denied: cli.exec");
+           if (count < 1)
+             return jsi::String::createFromUtf8(
+                 rt, "ERR usage: exec(cmdline)");
+           return jsi::String::createFromUtf8(
+               rt, runSevyn(jsString(rt, args[0])));
+         });
   hostFn("listApps", 0,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
                 size_t) {
@@ -899,7 +1018,7 @@ void RnHost::dispatchPointer(const std::string& type, double x, double y,
   }
 }
 
-void RnHost::dispatchKey(uint32_t key, bool pressed) {
+void RnHost::dispatchKey(uint32_t key, bool pressed, bool shift) {
   if (!hasKeyHandler_ || !runtime_)
     return;
   jsi::Runtime& rt = *runtime_;
@@ -907,6 +1026,7 @@ void RnHost::dispatchKey(uint32_t key, bool pressed) {
     jsi::Object ev(rt);
     ev.setProperty(rt, "key", (double)key);
     ev.setProperty(rt, "pressed", pressed);
+    ev.setProperty(rt, "shift", shift);
     keyHandler_->call(rt, ev);
     rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
@@ -1008,7 +1128,9 @@ int RnHost::run() {
       [this](const std::string& type, double x, double y, uint32_t button,
              bool pressed) { dispatchPointer(type, x, y, button, pressed); });
   wayland_->setKeyHandler(
-      [this](uint32_t key, bool pressed) { dispatchKey(key, pressed); });
+      [this](uint32_t key, bool pressed, bool shift) {
+        dispatchKey(key, pressed, shift);
+      });
 
   try {
     runtime_ = facebook::hermes::makeHermesRuntime();
@@ -1119,6 +1241,15 @@ int main(int argc, char** argv) {
     }
     permissions.insert(permissionsCsv.substr(start, comma - start));
     start = comma + 1;
+  }
+  // Shell mode (no --app) writes its pid file so `sevyn shell
+  // kill|status` can find it. App hosts do not: their lifecycle is
+  // appd's job. A stale file (dead pid) counts as not running — the
+  // CLI checks liveness, not just the file.
+  if (appId.empty()) {
+    std::ofstream pidFile("/run/sevyn-shell.pid");
+    if (pidFile)
+      pidFile << getpid() << "\n";
   }
   RnHost host(width, height, bundle, appId, appName, appColor, appGlyph,
               permissions);

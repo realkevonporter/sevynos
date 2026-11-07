@@ -1,6 +1,6 @@
 // SevynOS host components.
 //
-// The renderer implements five host component types, addressed by
+// The renderer implements six host component types, addressed by
 // string. esbuild's classic JSX transform turns <View> into
 // React.createElement(View) — so these constants must be the strings
 // themselves, not components. Import them wherever the shell writes JSX.
