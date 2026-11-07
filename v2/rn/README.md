@@ -90,7 +90,9 @@ newProps`, and `commitUpdate` is called as
   and cached in CI. `hermesc` from the same build compiles bundles.
 - **Yoga** at commit `41118bd3a86c637fdb43a90fd596e78375137d0f`
   (2026-11-02), tarball sha256
-  `c108661ae6e4688ebfca00241dfb38cce19f6deac9cd12b3a7c4c72ae836d185`.
+  `afddb3b7c273642223d4237f82a41a5bfe1ad865fff1317ef6c38eaf7c9026a4`
+  (verified against the codeload URL 2026-11-07; the earlier pinned
+  hash did not match what codeload serves and failed CI).
   The standalone `facebook/yoga` repo is the source; the npm
   `yoga-layout` package is only the WASM binding and does not carry the
   C++ sources. Built as `libyogacore.a` via its CMakeLists.

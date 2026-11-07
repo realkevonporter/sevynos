@@ -50,7 +50,7 @@ HERMES_VERSION="0.13.0"
 HERMES_SHA256="40ecd782552335126fdb91f63f6822a7f4bef71ef3ec980fe34a263fbf447c93"
 HERMES_URL="https://github.com/facebook/hermes/archive/refs/tags/v${HERMES_VERSION}.tar.gz"
 YOGA_COMMIT="41118bd3a86c637fdb43a90fd596e78375137d0f"
-YOGA_SHA256="c108661ae6e4688ebfca00241dfb38cce19f6deac9cd12b3a7c4c72ae836d185"
+YOGA_SHA256="afddb3b7c273642223d4237f82a41a5bfe1ad865fff1317ef6c38eaf7c9026a4"
 YOGA_URL="https://codeload.github.com/facebook/yoga/tar.gz/${YOGA_COMMIT}"
 
 MARKER_CONTENT="hermes=${HERMES_VERSION} yoga=${YOGA_COMMIT}"
