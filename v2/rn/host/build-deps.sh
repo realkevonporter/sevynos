@@ -40,7 +40,11 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEPS_DIR="${SEVYN_V2_DEPS_DIR:-$ROOT/rn/host/deps}"
+# ROOT is v2/rn (the script lives in v2/rn/host), so the deps dir is
+# $ROOT/host/deps = v2/rn/host/deps — NOT $ROOT/rn/host/deps (that
+# doubles the "rn" and disagrees with build-m2-image.sh + the CI cache,
+# which both expect v2/rn/host/deps).
+DEPS_DIR="${SEVYN_V2_DEPS_DIR:-$ROOT/host/deps}"
 SRC_DIR="$DEPS_DIR/src"
 BUILD_DIR="$DEPS_DIR/build"
 PREFIX="$DEPS_DIR/prefix"
@@ -113,6 +117,9 @@ echo "building with $JOBS parallel jobs"
 # --- Hermes ---------------------------------------------------------------
 # Build only the targets the host needs (libhermes + hermesc) so the
 # build dir holds no lean/test archives that would clash at link time.
+# The `hermes` CLI target is built too — NOT because the host needs it,
+# but because `cmake --install` unconditionally installs the hermes
+# binary and fails the whole install when it was never built.
 HERMES_SRC="$SRC_DIR/hermes-${HERMES_VERSION}"
 HERMES_BUILD="$BUILD_DIR/hermes"
 # -include string: Hermes 0.13.0's API/hermes/cdp/DomainState.h uses
@@ -129,7 +136,7 @@ cmake -S "$HERMES_SRC" -B "$HERMES_BUILD" \
   -DHERMES_ENABLE_TEST_SUITE=OFF \
   -DCMAKE_CXX_FLAGS="-include string" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
-cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi --parallel "$JOBS"
+cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi hermes --parallel "$JOBS"
 cmake --install "$HERMES_BUILD"
 
 # --- Yoga ------------------------------------------------------------------
