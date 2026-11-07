@@ -19,7 +19,12 @@
 //      half-cut tile.
 //   4. Click lands on the intended control: clicking the Files tile logs
 //      LAUNCH files, and the main area does NOT change (no "Starting…"
-//      without a real launch — M3 behaviour, see note above).
+//      without a real launch — M3 behaviour, see note above). Moving
+//      the pointer onto the tile first makes the shell set the pointer
+//      cursor (WAYLAND cursor set on the serial log) — the cursor is a
+//      hardware plane, so screendumps can't prove it; the log line is
+//      the proof. Without it the mouse is invisible even though clicks
+//      land.
 //   5. Status is live: SETs injected on the host control serial change
 //      the tray (pixel diff in the tray region).
 //   6. Keys reach the focused control: after clicking Files, Tab moves
@@ -408,6 +413,13 @@ async function main() {
     const before = logLines().length;
     await moveTo(84, 720, W, H); // Files tile centre (44..124, 680..760).
     await sleep(300);
+    // The pointer entering the shell surface must make the host set
+    // the cursor (enter serial → wl_pointer_set_cursor). The cursor
+    // lives on Weston's hardware plane, so no screendump can show it
+    // — the host's log line is the proof. Without this the mouse is
+    // invisible even though clicks land.
+    const cursor = await waitForLog(/WAYLAND cursor set \(left_ptr/, 10000, before);
+    check("pointer: shell sets the cursor on enter", !!cursor, cursor || "");
     await click();
     const hit = await waitForLog(/LAUNCH files/, 10000, before);
     check("input: click Files tile logs LAUNCH files", !!hit);

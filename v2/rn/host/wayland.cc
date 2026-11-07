@@ -89,6 +89,10 @@ Wayland::~Wayland() {
     xdg_surface_destroy(xdgSurface_);
   if (surface_)
     wl_surface_destroy(surface_);
+  if (cursorSurface_)
+    wl_surface_destroy(cursorSurface_);
+  if (cursorTheme_)
+    wl_cursor_theme_destroy(cursorTheme_);
   if (pointer_)
     wl_pointer_destroy(pointer_);
   if (keyboard_)
@@ -258,12 +262,68 @@ void Wayland::onPointerEnter(void* data, wl_pointer* pointer, uint32_t serial,
                              wl_fixed_t sy) {
   Wayland* self = static_cast<Wayland*>(data);
   (void)pointer;
-  (void)serial;
   (void)surface;
   self->pointerX_ = wl_fixed_to_double(sx);
   self->pointerY_ = wl_fixed_to_double(sy);
+  // The enter serial is the only one wl_pointer_set_cursor accepts:
+  // without it Weston shows no cursor at all (the invisible-cursor
+  // bug — nothing in the guest ever set one).
+  self->setCursor(serial);
   if (self->pointerHandler_)
     self->pointerHandler_("enter", self->pointerX_, self->pointerY_, 0, false);
+}
+
+// Load the default arrow cursor and hand it to the compositor for
+// this pointer enter. One static arrow for the whole shell/apps —
+// no per-surface cursors. Loads lazily: shm_ is bound by the first
+// enter, and a failed theme load is logged once, not retried every
+// enter (a missing theme would otherwise spam the serial log).
+void Wayland::setCursor(uint32_t serial) {
+  if (!pointer_ || !shm_ || !compositor_)
+    return;
+  if (!cursorTried_) {
+    cursorTried_ = true;
+    // Load "Adwaita" by name, not the default theme: the image's
+    // default theme (usr/share/icons/default/index.theme) is a
+    // dangling symlink to /etc/alternatives/x-cursor-theme, which
+    // does not exist in the image — so the default lookup finds no
+    // cursor and Weston shows nothing. Adwaita's cursors (including
+    // left_ptr) are staged in the image.
+    cursorTheme_ = wl_cursor_theme_load("Adwaita", 24, shm_);
+    if (!cursorTheme_) {
+      logLine("WAYLAND cursor theme load failed (Adwaita)");
+      return;
+    }
+    cursor_ = wl_cursor_theme_get_cursor(cursorTheme_, "left_ptr");
+    if (!cursor_ || cursor_->image_count < 1) {
+      logLine("WAYLAND cursor left_ptr not found in theme");
+      return;
+    }
+    cursorSurface_ = wl_compositor_create_surface(compositor_);
+    if (!cursorSurface_) {
+      logLine("WAYLAND cursor surface creation failed");
+      return;
+    }
+    wl_cursor_image* image = cursor_->images[0];
+    wl_buffer* buffer = wl_cursor_image_get_buffer(image);
+    if (!buffer) {
+      logLine("WAYLAND cursor image has no buffer");
+      return;
+    }
+    wl_surface_attach(cursorSurface_, buffer, 0, 0);
+    wl_surface_damage(cursorSurface_, 0, 0, image->width, image->height);
+    wl_surface_commit(cursorSurface_);
+  }
+  if (!cursor_ || !cursorSurface_)
+    return;
+  wl_cursor_image* image = cursor_->images[0];
+  wl_pointer_set_cursor(pointer_, serial, cursorSurface_, image->hotspot_x,
+                        image->hotspot_y);
+  if (!cursorLogged_) {
+    cursorLogged_ = true;
+    logLine("WAYLAND cursor set (left_ptr %dx%d hotspot %d,%d)", image->width,
+            image->height, image->hotspot_x, image->hotspot_y);
+  }
 }
 
 void Wayland::onPointerLeave(void* data, wl_pointer* pointer, uint32_t serial,
