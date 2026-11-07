@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -1062,6 +1063,13 @@ int RnHost::run() {
 } // namespace
 
 int main(int argc, char** argv) {
+  // A peer closing a socket must never kill the shell (or an app):
+  // socket writes then fail with EPIPE and the client's retry /
+  // reconnect logic handles it. appd and statusd already do this;
+  // the host was the one process that did not, and a write to appd
+  // during first contact could kill the shell silently (SIGPIPE
+  // leaves no kernel log). See v2-m3 CI run 42360955143.
+  signal(SIGPIPE, SIG_IGN);
   std::string bundle = kDefaultBundle;
   int width = kDefaultWidth, height = kDefaultHeight;
   std::string appId, appName, appColor, appGlyph, permissionsCsv;
