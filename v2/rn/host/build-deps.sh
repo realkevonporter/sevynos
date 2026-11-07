@@ -132,11 +132,17 @@ HERMES_BUILD="$BUILD_DIR/hermes"
 # this file and any other latent instance in the tree, without patching
 # vendored sources. Harmless for TUs that already compile (<string> is
 # idempotent). Verified the failure in CI run 42326585817.
+# -DBUILD_SHARED_LIBS=OFF: on Linux, Hermes defaults shared libs ON, so
+# libhermes/jsi build as .so — but the host links STATIC archives from
+# the build dir (and the verify step below expects libhermes.a/libjsi.a
+# in the prefix). Static also keeps the image free of .so runtime deps.
+# Verified the .so install in CI run 42330696308.
 cmake -S "$HERMES_SRC" -B "$HERMES_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DHERMES_BUILD_APPLE_FRAMEWORK=OFF \
   -DHERMES_ENABLE_TEST_SUITE=OFF \
   -DCMAKE_CXX_FLAGS="-include string" \
+  -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
 cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi hermes hdb hbcdump hvm hcdp --parallel "$JOBS"
 cmake --install "$HERMES_BUILD"
