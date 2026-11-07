@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <wayland-client.h>
+#include <wayland-cursor.h>
 
 #include "common.h"
 #include "painter.h"
@@ -78,6 +79,9 @@ class Wayland {
   void doPresent();
   void requestFrame();
   void flushPending();
+  // Set the pointer cursor (default arrow) from the enter serial.
+  // Loads the theme lazily on first enter; a no-op until then.
+  void setCursor(uint32_t serial);
 
   // Listener entry points (static so they can be C callbacks).
   static void onRegistryGlobal(void* data, wl_registry* registry,
@@ -151,6 +155,14 @@ class Wayland {
   xdg_toplevel* xdgToplevel_ = nullptr;
   wl_pointer* pointer_ = nullptr;
   wl_keyboard* keyboard_ = nullptr;
+  // Pointer cursor: one static arrow for the whole shell/apps. The
+  // theme is loaded lazily on first pointer enter (shm_ is bound by
+  // then); cursor_ is owned by the theme, not by us.
+  wl_cursor_theme* cursorTheme_ = nullptr;
+  wl_cursor* cursor_ = nullptr;
+  wl_surface* cursorSurface_ = nullptr;
+  bool cursorTried_ = false;
+  bool cursorLogged_ = false;
 
   std::unique_ptr<Painter> painters_[2];
   wl_buffer* buffers_[2] = {nullptr, nullptr};

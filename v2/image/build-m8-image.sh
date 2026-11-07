@@ -173,7 +173,7 @@ HERMES_LIBS="$(find "$HERMES_BUILD" -name '*.a' ! -name '*lean*' ! -path '*unitt
 g++ -O2 -std=c++17 -Wall -Wextra \
   -I"$ROOT/rn/host" -I"$BUILD_TMP" \
   -I"$PREFIX/include" -I"$HERMES_SRC/public" \
-  $(pkg-config --cflags wayland-client freetype2 libpng) \
+  $(pkg-config --cflags wayland-client wayland-cursor freetype2 libpng) \
   -o "$BUILD_TMP/sevyn-rn-host" \
   "$ROOT/rn/host/common.cc" "$ROOT/rn/host/painter.cc" \
   "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
@@ -181,7 +181,7 @@ g++ -O2 -std=c++17 -Wall -Wextra \
   "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
   "$BUILD_TMP/xdg-shell-protocol.o" \
   -Wl,--start-group $HERMES_LIBS "$PREFIX/lib/libyogacore.a" -Wl,--end-group \
-  $(pkg-config --libs wayland-client freetype2 libpng) $(pkg-config --libs icu-uc icu-i18n) -lpthread -ldl
+  $(pkg-config --libs wayland-client wayland-cursor freetype2 libpng) $(pkg-config --libs icu-uc icu-i18n) -lpthread -ldl
 
 # --- build the shell bundle ------------------------------------------------
 # npm ci (frozen lockfile) + esbuild bundle + hermesc bytecode. The
