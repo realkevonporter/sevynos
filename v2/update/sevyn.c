@@ -104,6 +104,10 @@ static void print_usage(FILE *f)
             "  sevyn files mkdir <path>    create a directory\n"
             "  sevyn files write <path> <text...>\n"
             "                              write text to a file\n"
+            "  sevyn ai list               list the plugged-in AIs\n"
+            "  sevyn ai select <id>        plug in a different AI\n"
+            "  sevyn ai status             show the selected AI + grant\n"
+            "  sevyn ai ask <task...>      ask the AI to do something\n"
             "  sevyn code status           Sevyn Code: running, serving,\n"
             "                              version, terminal shell\n");
 }
@@ -150,11 +154,12 @@ static char *json_string_after(const char *text, const char *from,
 /* update (M8, unchanged)                                              */
 /* ------------------------------------------------------------------ */
 
-static int connect_daemon(void)
+/* Connect to a daemon's Unix socket (env override, else default). */
+static int connect_sock(const char *env_name, const char *dflt)
 {
-    const char *path = getenv("SEVYN_UPDATE_SOCK");
+    const char *path = getenv(env_name);
     if (!path || !*path)
-        path = DEFAULT_SOCK;
+        path = dflt;
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
@@ -171,6 +176,18 @@ static int connect_daemon(void)
         return -1;
     }
     return fd;
+}
+
+static int connect_daemon(void)
+{
+    return connect_sock("SEVYN_UPDATE_SOCK", DEFAULT_SOCK);
+}
+
+#define AI_SOCK "/run/sevyn-ai.sock"
+
+static int connect_ai(void)
+{
+    return connect_sock("SEVYN_AI_SOCK", AI_SOCK);
 }
 
 /* Send one line (with trailing newline). Returns 0 on success. */
@@ -699,6 +716,64 @@ static int cmd_code(int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ */
+/* ai (M4.5) — the AI connector CLI                                    */
+/* ------------------------------------------------------------------ */
+
+/* Talk to sevyn-aid (the AI daemon). list/select/status/ask map
+ * straight onto the daemon's socket verbs; ask joins the task words
+ * with spaces (no quoting — same rule as the exec bridge). */
+static int cmd_ai(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    const char *verb = argv[2];
+
+    if (strcmp(verb, "list") != 0 && strcmp(verb, "select") != 0 &&
+        strcmp(verb, "status") != 0 && strcmp(verb, "ask") != 0)
+        return usage();
+    if (strcmp(verb, "select") == 0 && argc != 4)
+        return usage();
+    if (strcmp(verb, "ask") == 0 && argc < 4)
+        return usage();
+    if ((strcmp(verb, "list") == 0 || strcmp(verb, "status") == 0) &&
+        argc != 3)
+        return usage();
+
+    int fd = connect_ai();
+    if (fd < 0) {
+        fprintf(stderr, "error: cannot reach the AI daemon\n");
+        return 1;
+    }
+
+    char cmd[2048];
+    if (strcmp(verb, "select") == 0)
+        snprintf(cmd, sizeof(cmd), "SELECT %s", argv[3]);
+    else if (strcmp(verb, "ask") == 0) {
+        size_t n = 0;
+        n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, "ASK");
+        for (int i = 3; i < argc && n < sizeof(cmd) - 1; i++)
+            n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " %s",
+                                  argv[i]);
+    } else if (strcmp(verb, "list") == 0)
+        snprintf(cmd, sizeof(cmd), "LIST");
+    else
+        snprintf(cmd, sizeof(cmd), "STATUS");
+    if (send_line(fd, cmd) != 0) {
+        fprintf(stderr, "error: cannot talk to the AI daemon\n");
+        close(fd);
+        return 1;
+    }
+    char line[2048];
+    int n = read_line(fd, line, sizeof(line));
+    close(fd);
+    if (n <= 0) {
+        fprintf(stderr, "error: no reply from the AI daemon\n");
+        return 1;
+    }
+    return print_reply(line);
+}
+
+/* ------------------------------------------------------------------ */
 /* dispatch + REPL                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -712,6 +787,8 @@ static int dispatch(int argc, char **argv)
     }
     if (strcmp(argv[1], "update") == 0)
         return cmd_update(argc, argv);
+    if (strcmp(argv[1], "ai") == 0)
+        return cmd_ai(argc, argv);
     if (strcmp(argv[1], "shell") == 0)
         return cmd_shell(argc, argv);
     if (strcmp(argv[1], "files") == 0)

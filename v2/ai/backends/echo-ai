@@ -1,0 +1,46 @@
+#!/bin/sh
+# echo-ai — the default AI backend (stub for the M4.5 proof).
+#
+# Keyword parsing, one task line on stdin, action lines on stdout,
+# then END. Understands:
+#   "launch <id>"      -> LAUNCH <id>
+#   "close <id>"       -> CLOSE <id>
+#   "set <key> <value>" -> SET <key> <value>
+#   "list"             -> LIST
+#   "uninstall <id>"   -> UNINSTALL <id>   (NOT in the grant: refused)
+#   "install <path>"   -> INSTALL <path>   (NOT in the grant: refused)
+#   "reboot"           -> REBOOT           (NOT in the grant: refused)
+# Multiple actions per task, in the order the keywords appear.
+# Runs under busybox sh in the image; no bashisms, no jq.
+IFS= read -r task || exit 0
+task=$(printf '%s' "$task" | tr 'A-Z' 'a-z')
+set -- $task
+while [ $# -gt 0 ]; do
+  case "$1" in
+    launch|close|uninstall|install)
+      if [ -n "$2" ]; then
+        case "$1" in
+          launch) echo "LAUNCH $2" ;;
+          close) echo "CLOSE $2" ;;
+          uninstall) echo "UNINSTALL $2" ;;
+          install) echo "INSTALL $2" ;;
+        esac
+        shift
+      fi
+      ;;
+    set)
+      if [ -n "$2" ] && [ -n "$3" ]; then
+        echo "SET $2 $3"
+        shift 2
+      fi
+      ;;
+    list)
+      echo "LIST"
+      ;;
+    reboot)
+      echo "REBOOT"
+      ;;
+  esac
+  shift
+done
+echo "END"

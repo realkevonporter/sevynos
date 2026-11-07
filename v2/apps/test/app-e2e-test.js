@@ -6,7 +6,7 @@
 // (no permission) — and drives the close X. The crash bundle must
 // throw during evaluation. The M4 apps load with cli.exec and a
 // canned exec handler, and drive their real flows (terminal typing,
-// settings channel switch, files navigation).
+// settings channel switch + AI selection, files navigation).
 //
 // Run: node test/app-e2e-test.js   (from v2/apps, after npm run build)
 const assert = require("node:assert/strict");
@@ -217,6 +217,10 @@ check("terminal: help on mount, typing runs sevyn commands", () => {
       );
     if (cmd === "sevyn files cat /root/.local/share/code-server/User/settings.json")
       return "0\n" + SETTINGS_JSON;
+    if (cmd === "sevyn ai status")
+      return "0\nselected=echo-ai backends=echo-ai,plan-ai\n";
+    if (cmd === "sevyn ai ask launch files")
+      return "0\nbackend=echo-ai allowed=1 denied=0 failed=0\n";
     return "0\n";
   };
   loadAs(
@@ -264,6 +268,18 @@ check("terminal: help on mount, typing runs sevyn commands", () => {
     Sevyn._logs.includes("TERMINAL settings-json defaultProfile=sevyn"),
     "settings-json marker logged",
   );
+  type("ai status");
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("TERMINAL ai-status selected=echo-ai"),
+    "ai-status marker logged",
+  );
+  type("ai ask launch files");
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("TERMINAL ai-ask allowed=1 denied=0"),
+    "ai-ask marker logged",
+  );
 });
 
 check("terminal: without cli.exec the command is refused", () => {
@@ -291,6 +307,7 @@ check("terminal: without cli.exec the command is refused", () => {
 
 check("settings: channel switch applies and logs", () => {
   let channel = "nightly";
+  let aiSelected = "echo-ai";
   const handler = (cmd) => {
     if (cmd === "sevyn update status")
       return `0\nversion=1 channel=${channel} active=A\n`;
@@ -301,6 +318,16 @@ check("settings: channel switch applies and logs", () => {
     if (cmd === "sevyn update channel nightly") {
       channel = "nightly";
       return "0\n";
+    }
+    if (cmd === "sevyn ai list")
+      return `0\nselected=${aiSelected} backends=echo-ai,plan-ai\n`;
+    if (cmd === "sevyn ai select plan-ai") {
+      aiSelected = "plan-ai";
+      return "0\nselected plan-ai\n";
+    }
+    if (cmd === "sevyn ai select echo-ai") {
+      aiSelected = "echo-ai";
+      return "0\nselected echo-ai\n";
     }
     if (cmd === "sevyn code status")
       return "0\nrunning: yes\nserving: yes\nversion: 4.105.0\nterminal-shell: /usr/local/bin/sevyn\n";
@@ -323,10 +350,9 @@ check("settings: channel switch applies and logs", () => {
     texts.some((t) => t.includes("running: yes")),
     "code status shown",
   );
-  assert.ok(
-    texts.some((t) => t.includes("coming in M4.5")),
-    "AI placeholder shown",
-  );
+  assert.ok(texts.includes("AI: echo-ai"), "current AI shown");
+  assert.ok(texts.includes("echo-ai"), "echo-ai button shown");
+  assert.ok(texts.includes("plan-ai"), "plan-ai button shown");
   pressTab(3); // X, Nightly, Stable
   pressEnter();
   assert.ok(
@@ -339,9 +365,25 @@ check("settings: channel switch applies and logs", () => {
     texts.some((t) => t.includes("Channel set to stable.")),
     "confirmation shown",
   );
-  pressTab(2); // Stable -> X -> Nightly
+  // Focus order is now [X, Nightly, Stable, echo-ai, plan-ai]:
+  // Stable -> echo-ai -> plan-ai -> X -> Nightly.
+  pressTab(4);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
+  // Nightly -> Stable -> echo-ai -> plan-ai: swap the AI through the
+  // same Settings surface, no code change.
+  pressTab(3);
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("SETTINGS ai=plan-ai"),
+    "AI select logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("AI: plan-ai"), "new AI shown");
+  assert.ok(
+    texts.some((t) => t.includes("AI set to plan-ai.")),
+    "AI confirmation shown",
+  );
 });
 
 check("files: lists a real directory, navigates into it", () => {

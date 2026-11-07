@@ -65,17 +65,17 @@ jobs:
             sevynos-v2-deps-
       - name: Build v2 native deps
         run: sh v2/rn/host/build-deps.sh
-      - name: Build v2 (M4 system apps) image
+      - name: Build v2 (M4.5 AI connector) image
         run: |
-          sudo sh v2/image/build-m4-image.sh
+          sudo sh v2/image/build-m4.5-image.sh
           sudo chown -R "$USER" v2/image/build
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
           sha256sum vmlinuz initramfs.cpio.gz > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
-          SevynOS v2 (M4 system apps) — bootable image
-          ===========================================
+          SevynOS v2 (M4.5 AI connector) — bootable image
+          ==============================================
           Kernel + initramfs for QEMU (x86_64). Boots to the SevynOS shell:
           top bar with live status, main area, dock with 12 apps — and
           dock clicks now open the app in its own window (one sandboxed
@@ -89,6 +89,11 @@ jobs:
           Terminal); Settings changes the update channel for real;
           Files opens real directories. Sevyn Code is baked in and
           serving on the machine; its terminal defaults to `sevyn`.
+          AI is baked in through the connector: any AI plugs in via
+          `sevyn ai` (echo-ai and plan-ai ship as stubs) and drives
+          the system through permissions — launch apps, change system
+          values. Pick the AI in Settings; an action outside its
+          grant is refused, never executed.
 
           Boot it (2 GB RAM: Sevyn Code runs in the image):
             qemu-system-x86_64 -machine q35 -m 2048 -kernel vmlinuz \
@@ -138,11 +143,14 @@ jobs:
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
 
-            SevynOS v2 (M4 system apps) image: vmlinuz + initramfs.cpio.gz
+            SevynOS v2 (M4.5 AI connector) image: vmlinuz + initramfs.cpio.gz
             (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
             status tray, dock with 12 apps — and dock clicks open apps
             in their own windows. Terminal, Settings, and Files are real
             system apps now, and Sevyn Code is baked into the image.
+            AI is baked in through the connector: `sevyn ai` plugs an
+            AI in (echo-ai and plan-ai ship as stubs) and drives the
+            system through permissions; pick the AI in Settings.
             The v1 ISO below is the old
             tree's image. updates-v2.json is the v2 update feed: an
             installed v2 system checks it and updates in place (A/B
@@ -153,5 +161,5 @@ jobs:
           removeArtifacts: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
-          # The v2-* files are the M4 system-apps image (kernel + initramfs).
+          # The v2-* files are the M4.5 AI-connector image (kernel + initramfs).
           artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"
