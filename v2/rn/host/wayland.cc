@@ -107,8 +107,15 @@ void Wayland::onRegistryGlobal(void* data, wl_registry* registry,
   static const xdg_wm_base_listener kXdgWmBaseListener = {
       &Wayland::onXdgWmBasePing};
   if (strcmp(interface, wl_compositor_interface.name) == 0) {
+    // doPresent() calls wl_surface_damage_buffer, which needs a
+    // wl_surface of version >= 4. Binding the compositor at 1 made
+    // every surface version 1, so Weston killed the client with
+    // "invalid method 9 (since 1 < 4)" and the host exited before
+    // ever presenting a frame. Bind at min(advertised, 4): enough
+    // for damage_buffer, nothing newer used.
+    uint32_t v = version < 4 ? version : 4;
     self->compositor_ = static_cast<wl_compositor*>(
-        wl_registry_bind(registry, name, &wl_compositor_interface, 1));
+        wl_registry_bind(registry, name, &wl_compositor_interface, v));
   } else if (strcmp(interface, wl_shm_interface.name) == 0) {
     self->shm_ = static_cast<wl_shm*>(
         wl_registry_bind(registry, name, &wl_shm_interface, 1));
@@ -121,7 +128,6 @@ void Wayland::onRegistryGlobal(void* data, wl_registry* registry,
         wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
     xdg_wm_base_add_listener(self->xdgWmBase_, &kXdgWmBaseListener, self);
   }
-  (void)version;
 }
 
 void Wayland::onRegistryGlobalRemove(void* data, wl_registry* registry,
