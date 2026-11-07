@@ -208,10 +208,6 @@ void Wayland::onBufferRelease(int index) {
   if (index < 0 || index > 1)
     return;
   busy_[index] = false;
-  // TEMP DIAGNOSTIC (CI #19 freeze hunt): log releases so the boot
-  // log shows whether the compositor ever frees a buffer.
-  logLine("DIAG RELEASE idx=%d busy=[%d,%d] havePending=%d", index,
-          (int)busy_[0], (int)busy_[1], (int)havePending_);
   flushPending();
 }
 
@@ -225,8 +221,17 @@ void Wayland::onFrameDoneCb(void* data, wl_callback* callback,
 
 void Wayland::onFrameDone() {
   framePending_ = false;
-  // TEMP DIAGNOSTIC (CI #19 freeze hunt).
-  logLine("DIAG FRAME done havePending=%d", (int)havePending_);
+  // The compositor presented a frame, which always shows the latest
+  // committed buffer — so the OTHER buffer is off-screen now and
+  // reusable. This is what unblocks presents when wl_buffer.release
+  // never arrives (this guest: Weston never releases these SHM
+  // buffers — zero releases across a whole M2 run while every
+  // present after the second stalled). The presented frame includes
+  // the latest commit: the frame callback was requested after it,
+  // and presents here are seconds apart while the callback lands
+  // within ~400ms of the commit.
+  if (lastCommitted_ >= 0)
+    busy_[1 - lastCommitted_] = false;
   flushPending();
   if (frameHandler_)
     frameHandler_();
@@ -392,15 +397,9 @@ void Wayland::doPresent() {
   else if (!busy_[1 - back_])
     idx = 1 - back_;
   if (idx < 0) {
-    // TEMP DIAGNOSTIC (CI #19 freeze hunt).
-    logLine("DIAG PRESENT STALL both busy back=%d havePending=%d", back_,
-            (int)havePending_);
     havePending_ = true; // both buffers busy; retry on release/frame
     return;
   }
-  // TEMP DIAGNOSTIC (CI #19 freeze hunt).
-  logLine("DIAG PRESENT idx=%d ops=%zu busy=[%d,%d]", idx, pendingOps_.size(),
-          (int)busy_[0], (int)busy_[1]);
   Painter& p = *painters_[idx];
   p.beginFrame(pendingBg_);
   p.paint(pendingOps_);
@@ -420,6 +419,7 @@ void Wayland::doPresent() {
   wl_surface_damage_buffer(surface_, 0, 0, width_, height_);
   wl_surface_commit(surface_);
   busy_[idx] = true;
+  lastCommitted_ = idx;
   back_ = 1 - idx;
   havePending_ = false;
   requestFrame();
@@ -433,9 +433,6 @@ void Wayland::flushPending() {
 void Wayland::present(const std::vector<DrawOp>& ops, uint32_t bg) {
   pendingOps_ = ops;
   pendingBg_ = bg;
-  // TEMP DIAGNOSTIC (CI #19 freeze hunt).
-  logLine("DIAG PRESENT called ops=%zu configured=%d", ops.size(),
-          (int)configured_);
   if (!configured_) {
     havePending_ = true; // first configure will flush
     return;

@@ -142,6 +142,15 @@ class Wayland {
   wl_buffer* buffers_[2] = {nullptr, nullptr};
   bool busy_[2] = {false, false};
   int back_ = 0;
+  // Index of the most recently committed buffer (-1 if none). A frame
+  // callback proves the compositor presented a frame, which always
+  // shows the latest committed buffer — so on frame-done the OTHER
+  // buffer is off-screen and reusable. This is the release path the
+  // client can rely on: Weston does not send wl_buffer.release for
+  // these SHM buffers in this guest (verified: zero releases across
+  // a whole M2 run while presents stalled), so depending on releases
+  // alone freezes the screen after two frames.
+  int lastCommitted_ = -1;
 
   bool havePending_ = false;
   std::vector<DrawOp> pendingOps_;
