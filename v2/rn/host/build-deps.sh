@@ -146,6 +146,15 @@ cmake -S "$HERMES_SRC" -B "$HERMES_BUILD" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
 cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi hermes hdb hbcdump hvm hcdp --parallel "$JOBS"
 cmake --install "$HERMES_BUILD"
+# libjsi.a is NOT installed by `cmake --install` — Hermes's jsi
+# CMakeLists installs only the headers (no install(TARGETS jsi) rule),
+# so the archive only exists in the build dir. The host links jsi from
+# the build dir (see build-m2-image.sh), but the prefix layout documents
+# lib/libjsi.a, so copy it over to keep the layout — and the verify step
+# below — true.
+JSI_A="$(find "$HERMES_BUILD" -name 'libjsi.a' | head -n 1)"
+[ -n "$JSI_A" ] || { echo "error: libjsi.a not found in $HERMES_BUILD" >&2; exit 1; }
+cp "$JSI_A" "$PREFIX/lib/libjsi.a"
 
 # --- Yoga ------------------------------------------------------------------
 YOGA_SRC="$SRC_DIR/yoga-${YOGA_COMMIT}"
