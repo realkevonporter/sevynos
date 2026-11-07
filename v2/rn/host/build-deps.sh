@@ -117,9 +117,11 @@ echo "building with $JOBS parallel jobs"
 # --- Hermes ---------------------------------------------------------------
 # Build only the targets the host needs (libhermes + hermesc) so the
 # build dir holds no lean/test archives that would clash at link time.
-# The `hermes` CLI target is built too — NOT because the host needs it,
-# but because `cmake --install` unconditionally installs the hermes
-# binary and fails the whole install when it was never built.
+# The tool targets (hermes, hdb, hbcdump, hvm, hcdp) are built too —
+# NOT because the host needs them, but because `cmake --install`
+# unconditionally installs all six tool binaries and fails the whole
+# install when any was never built (hermes bit us, then hdb). They are
+# executables, not archives, so they add nothing the host link picks up.
 HERMES_SRC="$SRC_DIR/hermes-${HERMES_VERSION}"
 HERMES_BUILD="$BUILD_DIR/hermes"
 # -include string: Hermes 0.13.0's API/hermes/cdp/DomainState.h uses
@@ -136,7 +138,7 @@ cmake -S "$HERMES_SRC" -B "$HERMES_BUILD" \
   -DHERMES_ENABLE_TEST_SUITE=OFF \
   -DCMAKE_CXX_FLAGS="-include string" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
-cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi hermes --parallel "$JOBS"
+cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi hermes hdb hbcdump hvm hcdp --parallel "$JOBS"
 cmake --install "$HERMES_BUILD"
 
 # --- Yoga ------------------------------------------------------------------
