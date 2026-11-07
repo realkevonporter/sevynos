@@ -1,9 +1,9 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M1 done (verified locally 2026-11-07).** M0 merged 2026-11-06
-(PR #81). M1 passes its full check locally — 15/15, ~30 s under
-QEMU/TCG, twice in a row — and is in PR for CI confirmation. This directory
-is the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
+**Status: M1 merged (PR #82, 2026-11-06). M2 in progress (this PR).**
+M0 merged 2026-11-06 (PR #81). M1 passes its full check locally — 15/15,
+~30 s under QEMU/TCG, twice in a row — and is merged. This directory is
+the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never
 silently breaks another.
@@ -82,13 +82,34 @@ v2/
   services/
     statusd.c          # M1: status daemon (battery/wifi/volume event feed)
     status-client.c    # M1: status subscriber (the feed's proof client)
+  rn/
+    README.md          # M2: host design + host↔JS contract + pinned deps
+    host/              # M2: the native host (Hermes + Yoga + Wayland + painter)
+      sevyn-rn-host.cc #   Hermes embed, JSI Sevyn global, main loop
+      common.{h,cc}    #   draw ops, colour parsing, logging
+      painter.{h,cc}   #   CPU raster: rects, FreeType text, PNG images
+      wayland.{h,cc}   #   fullscreen xdg_toplevel, pointer/keyboard
+      status.{h,cc}    #   statusd subscriber thread
+      yoga-bridge.{h,cc} # Yoga C API wrapper (integer node ids)
+      build-deps.sh    #   fetch + build Hermes 0.13.0 + Yoga into deps/
+    renderer/
+      sevyn-renderer.js  # M2: react-reconciler host config (View/Text/…)
+      test/              #   Node smoke tests (mock Sevyn host)
+    shell/             # M2: the shell app (TSX: top bar, tray, dock)
+      src/Shell.tsx    #   layout + "Starting…" state
+      src/Dock.tsx     #   12-app dock, never overflows (scrolls)
+      src/StatusTray.tsx # live status via the renderer status store
+      src/apps.ts      #   app registry
+      build-shell.mjs  #   esbuild bundle + hermesc -> shell.hbc
   image/
     build-empty-image.sh  # M0: kernel + minimal initramfs ("empty image")
     boot-check.sh         # M0: boot the empty image in QEMU, assert the marker
     build-m1-image.sh     # M1: kernel + initramfs with Weston + test client + statusd
+    build-m2-image.sh     # M2: kernel + initramfs with Weston + RN host + shell
     copy-closure.py       # M1: copy binaries + shared-library closure into the rootfs
     weston.ini            # M1: Weston configuration (DRM backend, dark background)
     m1-check.mjs          # M1: QMP harness — boot, cursor, clicks, keys, status
+    m2-check.mjs          # M2: QMP harness — shell, dock, launch, tray, keys
     build/                # build outputs (git-ignored): vmlinuz, initramfs, logs, shots
 ```
 
@@ -108,29 +129,36 @@ layer Kevon can replace later without touching the shell.
 ## Nightly
 
 The `nightly` release (published by the `Public build` workflow on every
-push to main) still ships the **old tree's image**. The v2 image is
-currently a CI artifact only (`SevynOS v2 M1` workflow). **M2 must wire
-the v2 image into the nightly release** — that is the checkpoint
-requirement: when M2 merges, Kevon downloads the nightly and boots it, so
-the nightly has to be a real, bootable v2 image by then, not just a CI
-artifact.
+push to main) ships the **old tree's ISO and the v2 image side by side**:
+`vmlinuz` + `initramfs.cpio.gz` + `v2-SHA256SUMS` + `v2-BOOT-NOTES.txt`
+are the M2 shell image — boot it in QEMU with the command in the boot
+notes. The v2 image is also a CI artifact of the `SevynOS v2 M2`
+workflow on every PR. **M2 is Kevon's checkpoint** — when it merges, he
+downloads the nightly himself and boots it.
 
 ## Milestones
 
 - **M0 — Groundwork (merged, PR #81).** Repo skeleton + CI pipeline that
   builds a bootable image. Done when an empty image builds in CI and boots
   to a blank screen in QEMU.
-- **M1 — Boots and proves the foundation (done, verified locally
-  2026-11-07).** Kernel boots, compositor up, input proven end to end
-  with a click-target test harness, live system status
-  (battery/wifi/volume) as an event feed. Done when: boot → cursor
-  moves → click lands on the intended surface → status values change
-  live. Proven locally under QEMU (screendumps + serial log, 15/15
-  checks); CI runs the same check on the PR; real-hardware proof is
-  Kevon's M2 boot of the nightly.
-- **M2 — Shell (Kevon's checkpoint).** RN shell: dock/taskbar (no overflow
-  by design), launcher, system status. Design pass from the start, not a
-  later polish phase. When M2 merges, Kevon downloads the nightly and
+- **M1 — Boots and proves the foundation (merged, PR #82).** Kernel
+  boots, compositor up, input proven end to end with a click-target test
+  harness, live system status (battery/wifi/volume) as an event feed.
+  Done when: boot → cursor moves → click lands on the intended surface
+  → status values change live. Proven locally under QEMU (screendumps +
+  serial log, 15/15 checks); CI runs the same check on the PR; real-
+  hardware proof is Kevon's M2 boot of the nightly.
+- **M2 — Shell (Kevon's checkpoint, in progress).** RN shell: top bar
+  with live status tray, main area, dock with 12 apps that never
+  overflows (scrolls with chevrons). Design pass from the start, not a
+  later polish phase. The shell is a real React Native app on a
+  purpose-built native host: Hermes embeds the JS, Yoga lays it out,
+  a CPU raster paints it to a Weston surface — no Electron, no web
+  view, no Node in the image (see `rn/README.md`). Done when: the
+  shell surface is on screen → the dock never overflows at 12 apps →
+  clicking a launcher logs `LAUNCH <appId>` and shows "Starting…" →
+  a pushed status change repaints the tray → Tab/Enter activates the
+  focused control. When M2 merges, Kevon downloads the nightly and
   boots it himself.
 - **M3 — App runtime.** `.sevyn` loader, registry, permissions,
   signatures.
@@ -183,6 +211,35 @@ moves by diffing two screendumps taken with the pointer at two different
 points. CI runs the same build + check on every push and pull request
 touching `v2/` (see `.github/workflows/v2-m1.yml`); screendumps, the
 serial log, and `m1-check.json` are kept as artifacts.
+
+## Build + check the M2 image
+
+```sh
+# Needs (on top of the M1 list): g++, cmake, node, libfreetype-dev,
+# libpng-dev. The Hermes build is the slow part (10-20 min first run);
+# it is cached in v2/rn/host/deps — CI caches that dir.
+sh v2/rn/host/build-deps.sh  # Hermes 0.13.0 + Yoga -> v2/rn/host/deps
+sh v2/image/build-m2-image.sh   # writes v2/image/build/
+node v2/image/m2-check.mjs      # boots in QEMU, proves M2, writes m2-check.json
+```
+
+The JS side is checked without QEMU first (Node, mock host):
+
+```sh
+cd v2/rn/renderer && npm ci && npm test        # 8 renderer checks
+cd ../../shell && npm ci && npm run typecheck && npm run build && npm test  # tsc + bundle + 5 shell e2e checks
+```
+
+The M2 harness boots the image, asserts the shell surface (top bar +
+dock colours), the dock never overflowing at 12 apps (first tile fully
+visible, right edge is the scroll chevron), a Files-tile click logging
+`LAUNCH files` and changing the main area, a pushed battery/wifi/volume
+change repainting the tray, and Tab + Enter launching the focused app
+(Terminal). CI runs the same build + check on every push and pull request
+touching `v2/` (see `.github/workflows/v2-m2.yml`); screendumps, the
+serial log, and `m2-check.json` are kept as artifacts. The v2 image is
+also published to the `nightly` release by the `Public build` workflow
+(see "Nightly" above).
 
 ## The old tree
 

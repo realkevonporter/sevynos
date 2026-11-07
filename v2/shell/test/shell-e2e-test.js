@@ -1,0 +1,131 @@
+"use strict";
+// End-to-end Node test for the built shell bundle (dist/shell.js).
+// Loads the bundle with the mock Sevyn host and drives it like the real
+// host would: mount -> present, pointer click on a dock tile -> LAUNCH
+// + "Starting …" state, status push -> tray re-render, chevron -> scroll.
+//
+// Run: node test/shell-e2e-test.js   (from v2/shell, after npm run build)
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+global.Sevyn = require("../../rn/renderer/test/mock-sevyn");
+// Hermes has no setTimeout-driven microtask queue issues here; the
+// bundle only needs the globals the host provides.
+global.queueMicrotask = global.queueMicrotask || ((fn) => Promise.resolve().then(fn));
+
+const bundle = fs.readFileSync(path.join(__dirname, "..", "dist", "shell.js"), "utf8");
+
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed++;
+  console.log("ok - " + name);
+}
+
+vm.runInThisContext(bundle, { filename: "shell.js" });
+
+check("shell mounts and presents the full frame", () => {
+  assert.ok(Sevyn._presents.length >= 1, "at least one present");
+  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(texts.includes("SevynOS"), "wordmark");
+  assert.ok(texts.includes("Welcome to SevynOS"), "welcome");
+  assert.ok(
+    texts.some((t) => t.includes("87%")),
+    "battery in tray",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("Wi-Fi")),
+    "wifi in tray",
+  );
+});
+
+check("dock shows 12 tiles and both chevrons (overflow by design)", () => {
+  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(texts.includes("‹"), "left chevron");
+  assert.ok(texts.includes("›"), "right chevron");
+  // 12 app glyphs: F > B S M P C N = O M S (two Ms, two Ss — count tiles
+  // by their pressable rects instead).
+  const hits = last.ops.filter((o) => o.nodeId != null && o.nodeId >= 0);
+  // 12 tiles + 2 chevrons = 14 pressables.
+  assert.equal(hits.length, 14, "14 pressable rects, got " + hits.length);
+});
+
+check("clicking a dock tile logs LAUNCH and shows Starting…", () => {
+  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  // The first tile is Files (glyph F). Find its pressable rect: the
+  // leftmost tile rect (x just past the left chevron).
+  const tiles = last.ops
+    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect")
+    .sort((a, b) => a.x - b.x);
+  const filesTile = tiles[1]; // [0] is the left chevron
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: filesTile.x + 2,
+    y: filesTile.y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: filesTile.nodeId,
+  });
+  assert.ok(
+    Sevyn._logs.some((l) => l === "LAUNCH files"),
+    "LAUNCH files logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  const after = Sevyn._presents[Sevyn._presents.length - 1];
+  const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(
+    texts.some((t) => t.includes("Starting Files")),
+    "Starting… state shown",
+  );
+});
+
+check("status push re-renders the tray", () => {
+  Sevyn._status.battery = "42";
+  Sevyn._status.volume = "10";
+  Sevyn._handlers.status({ key: "battery", value: "42" });
+  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(
+    texts.some((t) => t.includes("42%")),
+    "tray shows new battery",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("Vol 10")),
+    "tray shows new volume",
+  );
+});
+
+check("right chevron scrolls the tray (scroll offset changes)", () => {
+  const before = Sevyn._presents[Sevyn._presents.length - 1];
+  const chevron = before.ops
+    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect")
+    .sort((a, b) => b.x - a.x)[0]; // rightmost = right chevron
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: chevron.x + 2,
+    y: chevron.y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: chevron.nodeId,
+  });
+  const after = Sevyn._presents[Sevyn._presents.length - 1];
+  // After scrolling, the first tile's x must have moved left (clipped).
+  const firstTileBefore = before.ops
+    .filter((o) => o.nodeId != null && o.nodeId >= 0)
+    .sort((a, b) => a.x - b.x)[1];
+  const firstTileAfter = after.ops
+    .filter((o) => o.nodeId != null && o.nodeId >= 0)
+    .sort((a, b) => a.x - b.x)[1];
+  assert.ok(
+    firstTileAfter.x < firstTileBefore.x,
+    "first tile moved left after scroll: " +
+      firstTileBefore.x +
+      " -> " +
+      firstTileAfter.x,
+  );
+});
+
+console.log(`\n${passed} shell e2e checks passed`);

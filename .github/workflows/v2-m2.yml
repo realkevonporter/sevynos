@@ -1,0 +1,107 @@
+# SevynOS v2 M2 — build the RN shell image and prove it in QEMU.
+#
+# Runs on pushes and PRs touching v2/ (the fresh build). The job builds
+# the native deps (Hermes + Yoga, cached), the shell bundle, and the M2
+# image, then runs the QMP harness: boot, shell surface on screen, dock
+# never overflows at 12 apps and scrolls, clicks launch apps, the status
+# tray updates on a push, keyboard Tab/Enter activates the focused
+# control. Screendumps, the serial log, and the JSON result are kept as
+# artifacts.
+#
+# The Hermes build is the slow step (10-20 min on a 2-core runner); the
+# deps dir is cached on the pinned versions + build-deps.sh hash, so a
+# warm cache makes this job about as fast as M1.
+name: SevynOS v2 M2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m2.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m2.yml"
+
+jobs:
+  m2-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          # setup-node v5 defaults package-manager-cache to true and
+          # auto-detects pnpm from the repo root's packageManager field —
+          # but this job uses npm only (v2/rn/renderer, v2/shell) and
+          # never installs pnpm, so the cache step fails with "Unable to
+          # locate executable file: pnpm". The Hermes/Yoga deps cache is
+          # handled by the actions/cache step below.
+          package-manager-cache: false
+
+      - name: Install build + boot dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            g++ \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwayland-dev \
+            wayland-protocols \
+            libfreetype-dev \
+            libpng-dev \
+            weston \
+            seatd \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data
+
+      - name: Cache native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevynos-v2-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}-hermes-0.13.0-yoga-41118bd
+          restore-keys: |
+            sevynos-v2-deps-
+
+      - name: Build native deps
+        run: sh v2/rn/host/build-deps.sh
+
+      - name: Renderer + shell JS checks
+        run: |
+          cd v2/rn/renderer && npm ci --no-audit --no-fund && npm test
+          cd ../../shell && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+
+      - name: Build the M2 image
+        run: sudo sh v2/image/build-m2-image.sh
+
+      - name: Run the M2 check in QEMU
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create m2-boot.log (EACCES — the M1 failure mode).
+          sudo chown -R "$USER" v2/image/build
+          node v2/image/m2-check.mjs
+
+      - name: Upload M2 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-m2
+          path: |
+            v2/image/build/m2-boot.log
+            v2/image/build/m2-check.json
+            v2/image/build/m2-shot-*.ppm
+          if-no-files-found: warn

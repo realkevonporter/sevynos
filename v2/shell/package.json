@@ -1,0 +1,21 @@
+{
+  "dependencies": {
+    "react": "19.3.1",
+    "react-reconciler": "0.34.0"
+  },
+  "description": "SevynOS v2 M2 \u2014 the shell (React Native UI for the Sevyn host)",
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  },
+  "name": "@sevynos/shell",
+  "private": true,
+  "scripts": {
+    "build": "node build-shell.mjs",
+    "test": "node test/shell-e2e-test.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "version": "0.2.0"
+}
