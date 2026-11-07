@@ -529,7 +529,7 @@ async function main() {
     await key("tab");
     await sleep(300);
     await key("ret");
-    const hit = await waitForLog(/LAUNCH browser/, 10000, before);
+    const hit = await waitForLog(/LAUNCH browser ok/, 10000, before);
     check("input: Tab + Enter launches the first app (Browser)", !!hit);
     const appReady = await waitForLog(
       /HOST app running \(SEVYNOS_M3_APP_READY\) browser/,

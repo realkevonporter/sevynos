@@ -1010,6 +1010,15 @@ int main(int argc, char **argv)
                 continue;
             break;
         }
+        /* Clients accepted below were NOT in this poll() set: their
+         * pfds slots (idx + i for i >= nclients_polled) were never
+         * written by poll(), so reading revents there is uninitialized
+         * stack — stale POLLHUP bits can spuriously close a fresh
+         * connection before it is ever read (this killed the shell's
+         * socket LAUNCH in v2-m3 CI run 42362154681 while the control
+         * serial path worked). Only service the clients that were
+         * polled; new ones are read on the next iteration (<=100ms). */
+        size_t nclients_polled = g_nclients;
         int idx = 0;
         /* Listener. */
         if (pfds[idx].revents & POLLIN) {
@@ -1051,8 +1060,11 @@ int main(int argc, char **argv)
             idx++;
         /* Clients. The pollfd array was built from g_clients in the
          * same order, and closing only marks a slot dead (no shifting),
-         * so pfds[idx + i] stays aligned with g_clients[i]. */
-        for (size_t i = 0; i < g_nclients; i++) {
+         * so pfds[idx + i] stays aligned with g_clients[i] — but only
+         * for the clients that were polled (i < nclients_polled).
+         * Clients accepted this iteration are skipped here and read
+         * next iteration; their pfds slots hold stale revents. */
+        for (size_t i = 0; i < nclients_polled; i++) {
             struct client *c = &g_clients[i];
             if (c->dead)
                 continue;
