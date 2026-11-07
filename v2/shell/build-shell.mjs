@@ -9,7 +9,7 @@
 
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,6 +56,33 @@ await build({
 });
 
 console.log("wrote " + jsOut);
+
+// Hermes-safe CJS interop: esbuild's __copyProps defines each copied
+// export as a GETTER closing over the loop variable (`get: () => from[key]`
+// inside `for (let key of ...)`). Hermes 0.13.0 (via hermesc) shares that
+// binding across iterations, so every getter reads the LAST export —
+// React's `version` ("19.3.1") — and the shell dies at load with
+// "'19.3.1' is not a function" at React.createElement (verified in CI
+// run 42337894586, stack shell.js:10724, and reproduced locally by
+// changing `let` to `var` in the same helper). Read the value EAGERLY
+// as a data property instead: the CJS exports (React, jsx-runtime,
+// react-reconciler) never mutate after load, so the getter adds nothing.
+// Fail loudly if esbuild ever changes the helper text, so this never
+// silently stops applying.
+{
+  const src = readFileSync(jsOut, "utf8");
+  const needle = "get: () => from[key]";
+  const hits = src.split(needle).length - 1;
+  if (hits !== 1) {
+    console.error(
+      `expected exactly 1 __copyProps getter in ${jsOut}, found ${hits} — ` +
+        "esbuild helper changed; update the Hermes-safe rewrite",
+    );
+    process.exit(1);
+  }
+  writeFileSync(jsOut, src.replace(needle, "value: from[key]"));
+  console.log("rewrote __copyProps to eager data properties (Hermes-safe)");
+}
 
 if (hermesc) {
   if (!existsSync(hermesc)) {
