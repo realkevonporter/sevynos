@@ -115,10 +115,19 @@ echo "building with $JOBS parallel jobs"
 # build dir holds no lean/test archives that would clash at link time.
 HERMES_SRC="$SRC_DIR/hermes-${HERMES_VERSION}"
 HERMES_BUILD="$BUILD_DIR/hermes"
+# -include string: Hermes 0.13.0's API/hermes/cdp/DomainState.h uses
+# std::string (unordered_map<string, …>) but never #includes <string> —
+# it relied on a transitive include that GCC 13's libstdc++ no longer
+# provides, so the libhermes build dies at 98% with "incomplete type
+# std::__cxx11::basic_string". Forcing the include for every TU covers
+# this file and any other latent instance in the tree, without patching
+# vendored sources. Harmless for TUs that already compile (<string> is
+# idempotent). Verified the failure in CI run 42326585817.
 cmake -S "$HERMES_SRC" -B "$HERMES_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DHERMES_BUILD_APPLE_FRAMEWORK=OFF \
   -DHERMES_ENABLE_TEST_SUITE=OFF \
+  -DCMAKE_CXX_FLAGS="-include string" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
 cmake --build "$HERMES_BUILD" --target hermesc libhermes jsi --parallel "$JOBS"
 cmake --install "$HERMES_BUILD"
