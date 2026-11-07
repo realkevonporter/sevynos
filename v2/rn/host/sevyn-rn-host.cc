@@ -8,7 +8,9 @@
 // Usage: sevyn-rn-host [--bundle <path>] [--width <px>] [--height <px>]
 //   bundle default: /usr/share/sevyn/shell/shell.hbc
 //   size default: 1024x768 (the Weston output mode)
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -78,6 +80,9 @@ class RnHost {
 
  private:
   void installSevyn(jsi::Runtime& rt);
+  void installTimers(jsi::Runtime& rt);
+  void fireDueTimers(jsi::Runtime& rt);
+  double nowMs() const;
   void installYoga(jsi::Runtime& rt, jsi::Object& sevyn);
   void applyStyle(jsi::Runtime& rt, int nodeId, const jsi::Object& style);
   void applyDimension(jsi::Runtime& rt, int nodeId, const char* key,
@@ -118,6 +123,21 @@ class RnHost {
   bool hasPointerHandler_ = false;
   bool hasKeyHandler_ = false;
   bool hasStatusHandler_ = false;
+
+  // setTimeout/clearTimeout timers. Hermes has no timers of its own,
+  // and React's scheduler falls back to setTimeout when neither
+  // setImmediate nor MessageChannel exists — without it the first
+  // commit dies calling a null localSetTimeout (verified locally:
+  // the bundle fails in a no-setTimeout vm). Timers fire on the
+  // host's main-loop tick; the JS function is kept alive in the list
+  // until it fires or is cleared.
+  struct Timer {
+    uint32_t id;
+    double fireAtMs;  // steady_clock ms
+    jsi::Function fn;
+  };
+  std::vector<Timer> timers_;
+  uint32_t nextTimerId_ = 1;
 
   // Yoga measure callbacks, by node id (JS functions). shared_ptr
   // because jsi::Function is move-only and the Yoga measure lambda
@@ -612,6 +632,72 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
   rt.global().setProperty(rt, "Sevyn", sevyn);
 }
 
+double RnHost::nowMs() const {
+  using namespace std::chrono;
+  return duration<double, std::milli>(steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void RnHost::installTimers(jsi::Runtime& rt) {
+  auto hostFn = [&](const char* name, unsigned params,
+                    jsi::HostFunctionType fn) {
+    rt.global().setProperty(
+        rt, name,
+        jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, name), params, fn));
+  };
+  hostFn("setTimeout", 2,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count < 1 || !args[0].isObject())
+             return jsi::Value::undefined();
+           double ms = count >= 2 ? jsNumber(rt, args[1], 0) : 0;
+           if (ms < 0)
+             ms = 0;
+           uint32_t id = nextTimerId_++;
+           timers_.push_back(Timer{id, nowMs() + ms,
+                                   args[0].asObject(rt).asFunction(rt)});
+           return jsi::Value((double)id);
+         });
+  hostFn("clearTimeout", 1,
+         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count >= 1 && args[0].isNumber()) {
+             uint32_t id = (uint32_t)args[0].asNumber();
+             timers_.erase(std::remove_if(timers_.begin(), timers_.end(),
+                                          [id](const Timer& t) {
+                                            return t.id == id;
+                                          }),
+                           timers_.end());
+           }
+           return jsi::Value::undefined();
+         });
+}
+
+void RnHost::fireDueTimers(jsi::Runtime& rt) {
+  double now = nowMs();
+  std::vector<Timer> due;
+  auto it = timers_.begin();
+  while (it != timers_.end()) {
+    if (it->fireAtMs <= now) {
+      due.push_back(std::move(*it));
+      it = timers_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (auto& t : due) {
+    try {
+      t.fn.call(rt);
+    } catch (const jsi::JSError& e) {
+      logLine("HOST timer callback failed: %s", e.getMessage().c_str());
+      logLine("HOST timer stack: %s", e.getStack().c_str());
+    }
+  }
+  if (!due.empty())
+    rt.drainMicrotasks();
+}
+
 void RnHost::dispatchPointer(const std::string& type, double x, double y,
                              uint32_t button, bool pressed) {
   if (!hasPointerHandler_ || !runtime_)
@@ -718,6 +804,7 @@ int RnHost::run() {
   }
   jsi::Runtime& rt = *runtime_;
   installSevyn(rt);
+  installTimers(rt);
 
   // Load the shell bundle (Hermes bytecode).
   std::ifstream in(bundle_, std::ios::binary);
@@ -737,6 +824,7 @@ int RnHost::run() {
     rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
     logLine("HOST bundle failed: %s", e.getMessage().c_str());
+    logLine("HOST bundle stack: %s", e.getStack().c_str());
     return 1;
   }
   logLine("HOST shell running (SEVYNOS_M2_READY)");
@@ -747,6 +835,7 @@ int RnHost::run() {
       logLine("HOST Wayland display lost, exiting");
       return 1;
     }
+    fireDueTimers(rt);
     rt.drainMicrotasks();
     drainStatusQueue();
   }
