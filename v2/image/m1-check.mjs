@@ -58,7 +58,16 @@ function readLog() {
 }
 
 function logLines() {
-  return readLog().split("\n");
+  // Drop the trailing "" from a file ending in "\n": without this,
+  // logLines().length counts a phantom line, and waitForLog(..., before)
+  // skips the FIRST line appended after `before` was captured (it lands
+  // on the phantom's index). The status/click/key checks only passed
+  // because intermediate lines (statusd SET/broadcast, PTR ENTER) padded
+  // the index past the hole — if one of those console lines ever drops,
+  // the target line becomes invisible and the check fails spuriously.
+  const lines = readLog().split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
 }
 
 // Surface currently under the pointer, from the client's PTR ENTER/LEAVE
