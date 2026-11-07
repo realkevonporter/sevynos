@@ -131,6 +131,14 @@ class RnHost {
   // the bundle fails in a no-setTimeout vm). Timers fire on the
   // host's main-loop tick; the JS function is kept alive in the list
   // until it fires or is cleared.
+  //
+  // setImmediate is the SAME function: Hermes's own Promise
+  // implementation (lib/InternalBytecode/01-Promise.js handleResolved)
+  // schedules already-resolved reactions via the global `setImmediate`
+  // when the engine queue is off, and Hermes's own ConsoleHost does
+  // exactly this ("Define `setImmediate` to be the same as
+  // `setTimeout`"). Without it, `Promise.resolve().then(fn)` throws
+  // ReferenceError 'setImmediate' (verified in CI run 42340892796).
   struct Timer {
     uint32_t id;
     double fireAtMs;  // steady_clock ms
@@ -652,32 +660,36 @@ void RnHost::installTimers(jsi::Runtime& rt) {
         jsi::Function::createFromHostFunction(
             rt, jsi::PropNameID::forAscii(rt, name), params, fn));
   };
-  hostFn("setTimeout", 2,
-         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
-                size_t count) {
-           if (count < 1 || !args[0].isObject())
-             return jsi::Value::undefined();
-           double ms = count >= 2 ? jsNumber(rt, args[1], 0) : 0;
-           if (ms < 0)
-             ms = 0;
-           uint32_t id = nextTimerId_++;
-           timers_.push_back(Timer{id, nowMs() + ms,
-                                   args[0].asObject(rt).asFunction(rt)});
-           return jsi::Value((double)id);
-         });
-  hostFn("clearTimeout", 1,
-         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value* args,
-                size_t count) {
-           if (count >= 1 && args[0].isNumber()) {
-             uint32_t id = (uint32_t)args[0].asNumber();
-             timers_.erase(std::remove_if(timers_.begin(), timers_.end(),
-                                          [id](const Timer& t) {
-                                            return t.id == id;
-                                          }),
-                           timers_.end());
-           }
-           return jsi::Value::undefined();
-         });
+  jsi::HostFunctionType setTimer =
+      [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+             size_t count) {
+        if (count < 1 || !args[0].isObject())
+          return jsi::Value::undefined();
+        double ms = count >= 2 ? jsNumber(rt, args[1], 0) : 0;
+        if (ms < 0)
+          ms = 0;
+        uint32_t id = nextTimerId_++;
+        timers_.push_back(Timer{id, nowMs() + ms,
+                                args[0].asObject(rt).asFunction(rt)});
+        return jsi::Value((double)id);
+      };
+  jsi::HostFunctionType clearTimer =
+      [this](jsi::Runtime&, const jsi::Value&, const jsi::Value* args,
+             size_t count) {
+        if (count >= 1 && args[0].isNumber()) {
+          uint32_t id = (uint32_t)args[0].asNumber();
+          timers_.erase(std::remove_if(timers_.begin(), timers_.end(),
+                                       [id](const Timer& t) {
+                                         return t.id == id;
+                                       }),
+                        timers_.end());
+        }
+        return jsi::Value::undefined();
+      };
+  hostFn("setTimeout", 2, setTimer);
+  hostFn("setImmediate", 1, setTimer);
+  hostFn("clearTimeout", 1, clearTimer);
+  hostFn("clearImmediate", 1, clearTimer);
 }
 
 void RnHost::fireDueTimers(jsi::Runtime& rt) {
