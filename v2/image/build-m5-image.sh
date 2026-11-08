@@ -388,11 +388,28 @@ cp -r "$CHROMIUM_DIR/." "$STAGE/usr/share/sevyn/chromium/"
 # /etc/ssl/certs) and the fontconfig tree (so Chromium finds DejaVu)
 # come from the sysroot; libnssckbi.so is the NSS built-in-roots
 # module, dlopened by libnss3, so ldd never sees it either.
+# libsoftokn3.so is the NSS softoken (the crypto token behind the
+# sql: NSS database) — also dlopened by libnss3, also invisible to
+# ldd. Without it, NSS init fails with -5925 and Chromium FATAL-aborts
+# (SIGABRT) the first time it does any TLS — which is why the CI guest
+# (which has internet, so Chromium does background HTTPS fetches)
+# crashed while the sandbox guest (no internet, no TLS) never did.
+# libsqlite3.so.0 is softokn's SQL backend; libplc4/libplds4/libnspr4
+# are already in the closure via chrome's own deps.
+# libfreebl3.so / libfreeblpriv3.so are the NSS crypto primitives,
+# dlopened by softokn — without them NSS init fails with -8023 even
+# though softokn itself loads. libnssdbm3.so is the legacy DBM backend
+# (same dlopen class). All three are invisible to ldd.
 [ -f "$SYSROOT/etc/ssl/certs/ca-certificates.crt" ] || { echo "error: sysroot has no CA bundle (install ca-certificates)" >&2; exit 1; }
 mkdir -p "$STAGE/etc/ssl" "$STAGE/etc/fonts"
 cp -r "$SYSROOT/etc/ssl/certs" "$STAGE/etc/ssl/certs"
 cp -r "$SYSROOT/etc/fonts/." "$STAGE/etc/fonts/"
 [ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssckbi.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssckbi.so" "$STAGE/usr/lib/x86_64-linux-gnu/libnssckbi.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libsoftokn3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libsoftokn3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libsoftokn3.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libsqlite3.so.0" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libsqlite3.so.0" "$STAGE/usr/lib/x86_64-linux-gnu/libsqlite3.so.0"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreebl3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreebl3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libfreebl3.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreeblpriv3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreeblpriv3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libfreeblpriv3.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssdbm3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssdbm3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libnssdbm3.so"
 
 # DNS for QEMU user networking: slirp answers at 10.0.2.3. On real
 # hardware the resolver comes from DHCP instead (a later milestone).
