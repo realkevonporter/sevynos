@@ -109,7 +109,7 @@ jobs:
             libxext6 \
             libfontconfig1 \
             libfreetype6 \
-            libharfbuzz0 \
+            libharfbuzz0b \
             libudev1 \
             libglib2.0-0 \
             libx11-6 \
