@@ -1239,6 +1239,13 @@ async function main() {
     check("browser-app: the green page renders in Chromium", false, "no Browser window");
   }
 
+  // Persist the Chromium log onto the data disk before poweroff, so a
+  // CI Chromium crash is diagnosable from the uploaded m5-data.img
+  // (the log lives on the guest's tmpfs otherwise). Best-effort: the
+  // copy failing must not fail the check.
+  await refocusTerminal();
+  await termCmd("sevyn files cp /tmp/chromium.log /data/chromium.log");
+
   // Final frame + clean poweroff.
   const shotFinal = join(OUT, "m5-shot-final.ppm");
   const imgFinal = await shot(b.qmp, shotFinal);

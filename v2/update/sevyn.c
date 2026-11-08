@@ -17,8 +17,8 @@
  *   sevyn files list [path]     list a real directory (default /data)
  *   sevyn files cat <path>      print a file (64 KB cap)
  *   sevyn files mkdir <path>    create a directory
- *   sevyn files write <path> <text...>
- *                               write text to a file (create/truncate)
+ *   sevyn files write <path> <text...>  write text to a file (create/truncate)
+ *   sevyn files cp <src> <dst>  copy a file
  *   sevyn code status           Sevyn Code: running, serving, version,
  *                               terminal shell
  *   sevyn browser open [url]    open a URL (launch Chromium if needed).
@@ -134,6 +134,7 @@ static void print_usage(FILE *f)
             "  sevyn files mkdir <path>    create a directory\n"
             "  sevyn files write <path> <text...>\n"
             "                              write text to a file\n"
+            "  sevyn files cp <src> <dst>  copy a file\n"
             "  sevyn ai list               list the plugged-in AIs\n"
             "  sevyn ai select <id>        plug in a different AI\n"
             "  sevyn ai status             show the selected AI + grant\n"
@@ -755,6 +756,42 @@ static int cmd_files(int argc, char **argv)
         total += 1;
         fclose(f);
         printf("wrote %zu bytes to %s\n", total, argv[3]);
+        return 0;
+    }
+    if (strcmp(argv[2], "cp") == 0) {
+        /* Copy a file (binary-safe). Used by the M5 check to persist
+         * /tmp/chromium.log onto /data/ before poweroff, so a CI
+         * Chromium crash is diagnosable from the uploaded data disk. */
+        if (argc != 5)
+            return usage();
+        FILE *in = fopen(argv[3], "rb");
+        if (!in) {
+            fprintf(stderr, "error: cannot read %s: %s\n", argv[3],
+                    strerror(errno));
+            return 1;
+        }
+        FILE *out = fopen(argv[4], "wb");
+        if (!out) {
+            fprintf(stderr, "error: cannot write %s: %s\n", argv[4],
+                    strerror(errno));
+            fclose(in);
+            return 1;
+        }
+        char buf[8192];
+        size_t total = 0, n;
+        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+            if (fwrite(buf, 1, n, out) != n) {
+                fprintf(stderr, "error: cannot write %s: %s\n", argv[4],
+                        strerror(errno));
+                fclose(in);
+                fclose(out);
+                return 1;
+            }
+            total += n;
+        }
+        fclose(in);
+        fclose(out);
+        printf("copied %zu bytes to %s\n", total, argv[4]);
         return 0;
     }
     return usage();
