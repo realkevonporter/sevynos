@@ -1061,22 +1061,9 @@ async function main() {
       const { exec } = await termCmd("browser open https://example.com");
       check("browser: `browser open` example.com runs (EXEC 0)", !!exec, exec || "");
     }
-    {
-      const found = await pollPixels(
-        b,
-        "example",
-        (img) => {
-          const n = countColor(img, 255, 255, 255);
-          return n > 100000 ? n : 0;
-        },
-        180000,
-      );
-      check(
-        "browser: example.com renders (white page on screen)",
-        !!found?.img,
-        found?.img ? `white=${found.count}px` : `white=${found?.count ?? 0}px after 180s`,
-      );
-    }
+    // The page loads over the internet — give it time, then confirm
+    // the title over CDP before looking at pixels.
+    await sleep(15000);
     await refocusTerminal();
     {
       const marker = await pollTabsTitle(
@@ -1086,6 +1073,42 @@ async function main() {
         "browser: CDP sees the Example Domain title",
         !!marker,
         marker || "(no tabs marker with the title)",
+      );
+    }
+    // Opening a new tab in an already-running Chromium does not raise
+    // its window above the Terminal, so a full-screen white poll sees
+    // the Terminal instead of the page. Click the visible left strip
+    // of Chromium's viewport (left of the Terminal window) to raise
+    // it, then count white inside the viewport (same pattern as the
+    // IDE step below).
+    if (chromiumViewport && termPos) {
+      const stripX = Math.round((chromiumViewport.x0 + termPos.left) / 2);
+      const stripY = Math.round((chromiumViewport.y0 + chromiumViewport.y1) / 2);
+      await moveTo(stripX, stripY, 1024, 768);
+      await sleep(300);
+      await click();
+      await sleep(1000);
+      const found = await pollPixels(
+        b,
+        "example",
+        (img) => {
+          const n = countColorInRect(img, 255, 255, 255, 15, chromiumViewport);
+          return n > 100000 ? n : 0;
+        },
+        180000,
+      );
+      check(
+        "browser: example.com renders (white page on screen)",
+        !!found?.img,
+        found?.img
+          ? `white=${found.count}px in viewport ${JSON.stringify(chromiumViewport)}`
+          : `white=${found?.count ?? 0}px after 180s`,
+      );
+    } else {
+      check(
+        "browser: example.com renders (white page on screen)",
+        false,
+        "no recorded Chromium viewport (the red page never rendered)",
       );
     }
   } else {
