@@ -10,9 +10,10 @@ it), then for each app writes <id>.sevyn (zip: manifest.json + app.hbc
     generated for this image build; the public key lands in the
     trusted-keys dir as <keyId>.pub so the loader trusts it. The
     private key is kept in the build temp dir and never shipped.
-  - terminal, settings, files: permission cli.exec (they run the
-    `sevyn` CLI through the host's Sevyn.exec bridge) and each ships
-    its OWN bundle (M4: terminal.hbc, settings.hbc, files.hbc).
+  - terminal, settings, files, browser: permission cli.exec (they run
+    the `sevyn` CLI through the host's Sevyn.exec bridge) and each
+    ships its OWN bundle (M4: terminal.hbc, settings.hbc, files.hbc;
+    M5: browser.hbc).
   - every other stock app: unsigned, no permissions, the template hbc.
 
 Also writes the harness fixtures to the test-bundles dir:
@@ -26,7 +27,7 @@ Also writes the harness fixtures to the test-bundles dir:
 Usage:
   python3 make-bundles.py --hbc <app.hbc> --crash-hbc <crash.hbc>
       [--terminal-hbc <terminal.hbc>] [--settings-hbc <settings.hbc>]
-      [--files-hbc <files.hbc>]
+      [--files-hbc <files.hbc>] [--browser-hbc <browser.hbc>]
       --out <bundles-dir> --trusted-keys-dir <dir>
       [--test-bundles-dir <dir>]
 
@@ -65,6 +66,7 @@ OVERRIDES = {
     },
     "settings": {"permissions": ["cli.exec"]},
     "files": {"permissions": ["status.read", "cli.exec"]},
+    "browser": {"permissions": ["cli.exec"]},
 }
 
 
@@ -144,6 +146,8 @@ def main():
                     help="settings app.hbc (defaults to the template)")
     ap.add_argument("--files-hbc", default=None,
                     help="files app.hbc (defaults to the template)")
+    ap.add_argument("--browser-hbc", default=None,
+                    help="browser app.hbc (defaults to the template)")
     ap.add_argument("--out", required=True, help="stock bundles dir")
     ap.add_argument("--trusted-keys-dir", required=True)
     ap.add_argument("--test-bundles-dir", default=None)
@@ -152,7 +156,7 @@ def main():
     hbc = Path(args.hbc).read_bytes()
     crash_hbc = Path(args.crash_hbc).read_bytes()
     # M4 real apps ship their own bundles; anything without one falls
-    # back to the template (the other nine stock apps).
+    # back to the template (the other eight stock apps).
     hbc_for = {
         "terminal": (Path(args.terminal_hbc).read_bytes()
                      if args.terminal_hbc else hbc),
@@ -160,6 +164,8 @@ def main():
                      if args.settings_hbc else hbc),
         "files": (Path(args.files_hbc).read_bytes()
                   if args.files_hbc else hbc),
+        "browser": (Path(args.browser_hbc).read_bytes()
+                    if args.browser_hbc else hbc),
     }
     out_dir = Path(args.out)
     trusted_dir = Path(args.trusted_keys_dir)

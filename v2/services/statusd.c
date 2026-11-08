@@ -220,7 +220,11 @@ static void setup_sysfs_watches(void)
             break;
         }
     }
-    /* Wifi: first wireless interface's operstate. */
+    /* Wifi: first wireless interface's operstate. The tray shows
+     * "Wi-Fi" only for "on" (see StatusTray.tsx), so the raw
+     * operstate is mapped onto the tray contract — "up" means
+     * connected, anything else means off (same mapping as the
+     * inotify handler below). */
     const char *ifs[] = { "wlan0", "wlp0s0", "wlp2s0", "wlan1", NULL };
     for (int i = 0; ifs[i]; i++) {
         char path[256];
@@ -229,7 +233,7 @@ static void setup_sysfs_watches(void)
         if (stat(path, &st) == 0) {
             char val[64];
             if (read_sysfs(path, val, sizeof(val)))
-                set_value("wifi", val);
+                set_value("wifi", strcmp(val, "up") == 0 ? "on" : "off");
             add_watch(path, "wifi");
             break;
         }
@@ -247,7 +251,19 @@ static void handle_inotify(void)
             for (int i = 0; i < nwatches; i++) {
                 if (watches[i].wd == ev->wd) {
                     char val[64];
-                    if (read_sysfs(watches[i].path, val, sizeof(val)))
+                    if (!read_sysfs(watches[i].path, val, sizeof(val)))
+                        break;
+                    /* Wifi: the tray shows "Wi-Fi" only for the
+                     * value "on" (see StatusTray.tsx), so the
+                     * sysfs operstate is mapped onto the tray
+                     * contract here — "up" means connected, anything
+                     * else means off. The SET path stays raw (the
+                     * M1 harness SETs "up" and asserts the
+                     * broadcast verbatim). */
+                    if (strcmp(watches[i].key, "wifi") == 0)
+                        set_value("wifi",
+                                  strcmp(val, "up") == 0 ? "on" : "off");
+                    else
                         set_value(watches[i].key, val);
                 }
             }

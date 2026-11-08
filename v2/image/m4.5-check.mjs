@@ -281,7 +281,11 @@ async function boot(tag) {
       "-machine",
       "q35",
       "-m",
-      "2048",
+      // 4096 (was 2048): the M5 image carries Chromium + code-server,
+      // so its initramfs cannot decompress in 2 GB — the guest
+      // panics with 'VFS: Unable to mount root fs'. The m5-check
+      // already boots the same image at -m 4096.
+      "4096",
       "-smp",
       "2",
       "-kernel",

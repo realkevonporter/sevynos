@@ -6,11 +6,11 @@
 // appColor/appGlyph), so make-bundles.py packages the same app.hbc
 // under twelve different manifests.
 //
-// Usage: node build-app.mjs [--entry app|crash|terminal|settings|files]
+// Usage: node build-app.mjs [--entry app|crash|terminal|settings|files|browser]
 //                            [--hermesc <path>] [--out <dir>]
 //   --entry: app (default) builds src/main.tsx -> app.hbc;
 //            crash builds src/crash-main.tsx -> crash.hbc;
-//            terminal|settings|files build src/<entry>-main.tsx ->
+//            terminal|settings|files|browser build src/<entry>-main.tsx ->
 //            <entry>.hbc.
 //   --hermesc: path to hermesc (from the Hermes build in build-deps.sh).
 //              Without it, only the .js is produced (hermesc runs in CI).
@@ -31,7 +31,7 @@ const getArg = (name, dflt) => {
 const outDir = getArg("--out", join(root, "dist"));
 const hermesc = getArg("--hermesc", "");
 const entry = getArg("--entry", "app");
-const ENTRIES = ["app", "crash", "terminal", "settings", "files"];
+const ENTRIES = ["app", "crash", "terminal", "settings", "files", "browser"];
 if (!ENTRIES.includes(entry)) {
   console.error("--entry must be one of " + ENTRIES.join("|") + ", got " + entry);
   process.exit(1);

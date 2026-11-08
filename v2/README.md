@@ -1,6 +1,6 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M4 merged (PR #90, 2026-11-07). M4.5 in progress (this PR).**
+**Status: M4.5 merged (PR #91, 2026-11-07). M5 in progress (this PR).**
 M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
 #84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
