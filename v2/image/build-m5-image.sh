@@ -251,7 +251,7 @@ CODE_SERVER_VERSION="4.105.0"
 CODE_SERVER_TARBALL="${CODE_SERVER_TARBALL:-}"
 if [ -z "$CODE_SERVER_TARBALL" ]; then
   CODE_SERVER_TARBALL="$BUILD_TMP/code-server.tar.gz"
-  curl -fsSL -o "$CODE_SERVER_TARBALL" \
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$CODE_SERVER_TARBALL" \
     "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" \
     || { echo "error: code-server download failed" >&2; exit 1; }
 fi
@@ -276,7 +276,7 @@ CHROMIUM_VERSION="159.0.8150.0"
 CHROMIUM_TARBALL="${CHROMIUM_TARBALL:-}"
 if [ -z "$CHROMIUM_TARBALL" ]; then
   CHROMIUM_TARBALL="$BUILD_TMP/chrome-linux.zip"
-  curl -fsSL -o "$CHROMIUM_TARBALL" \
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$CHROMIUM_TARBALL" \
     "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Linux_x64/${CHROMIUM_SNAPSHOT}/chrome-linux.zip" \
     || { echo "error: Chromium download failed" >&2; exit 1; }
 fi
