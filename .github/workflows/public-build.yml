@@ -65,16 +65,16 @@ jobs:
             sevynos-v2-deps-
       - name: Build v2 native deps
         run: sh v2/rn/host/build-deps.sh
-      - name: Build v2 (M4.5 AI connector) image
+      - name: Build v2 (M5 connectivity + Chromium) image
         run: |
-          sudo sh v2/image/build-m4.5-image.sh
+          sudo sh v2/image/build-m5-image.sh
           sudo chown -R "$USER" v2/image/build
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
           sha256sum vmlinuz initramfs.cpio.gz > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
-          SevynOS v2 (M4.5 AI connector) — bootable image
+          SevynOS v2 (M5 connectivity + Chromium browser) — bootable image
           ==============================================
           Kernel + initramfs for QEMU (x86_64). Boots to the SevynOS shell:
           top bar with live status, main area, dock with 12 apps — and
@@ -94,12 +94,17 @@ jobs:
           the system through permissions — launch apps, change system
           values. Pick the AI in Settings; an action outside its
           grant is refused, never executed.
+          The Browser is a real app now: Chromium is baked in, and
+          the Browser (tabs + address bar) drives it over CDP —
+          `sevyn browser open <url>` from the Terminal does the same.
+          Sevyn Code finally paints in a window: open it from the
+          Browser at http://127.0.0.1:8080/.
 
-          Boot it (2 GB RAM: Sevyn Code runs in the image):
-            qemu-system-x86_64 -machine q35 -m 2048 -kernel vmlinuz \
+          Boot it (4 GB RAM: Chromium + Sevyn Code run in the image):
+            qemu-system-x86_64 -machine q35 -m 4096 -kernel vmlinuz \
               -initrd initramfs.cpio.gz -append "console=ttyS0" \
               -vga none -device virtio-gpu-pci -device qemu-xhci \
-              -device usb-tablet -nic none
+              -device usb-tablet -nic user,model=virtio-net-pci
 
           Verify the download with v2-SHA256SUMS.
           This is a development snapshot, not a stable release.
@@ -143,11 +148,12 @@ jobs:
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
 
-            SevynOS v2 (M4.5 AI connector) image: vmlinuz + initramfs.cpio.gz
+            SevynOS v2 (M5 connectivity + Chromium browser) image: vmlinuz + initramfs.cpio.gz
             (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
             status tray, dock with 12 apps — and dock clicks open apps
-            in their own windows. Terminal, Settings, and Files are real
-            system apps now, and Sevyn Code is baked into the image.
+            in their own windows. Terminal, Settings, Files, and the
+            Browser are real system apps now, and Sevyn Code is baked
+            into the image and paints in a window through Chromium.
             AI is baked in through the connector: `sevyn ai` plugs an
             AI in (echo-ai and plan-ai ship as stubs) and drives the
             system through permissions; pick the AI in Settings.
@@ -161,5 +167,5 @@ jobs:
           removeArtifacts: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
-          # The v2-* files are the M4.5 AI-connector image (kernel + initramfs).
+          # The v2-* files are the M5 connectivity + Chromium image (kernel + initramfs).
           artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"

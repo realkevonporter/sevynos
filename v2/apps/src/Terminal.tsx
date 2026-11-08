@@ -17,6 +17,15 @@
 //   TERMINAL ai-status selected=<id>     (after `ai status`)
 //   TERMINAL ai-ask allowed=<n> denied=<m>
 //                                        (after `ai ask ...`)
+//   TERMINAL browser-open title=<t> url=<u>
+//                                        (after `browser open <url>`)
+//   TERMINAL browser-tabs n=<n> titles=<t1|t2|...> ids=<id1|id2|...>
+//                                        (after `browser tabs`)
+//   TERMINAL browser-status running=<y/n> tabs=<n>
+//                                        (after `browser status`)
+//   TERMINAL net-status interface=<i> wifi=<w>
+//                                        (after `net status`)
+//   TERMINAL net-dns host=<h> ip=<ip>    (after `net dns <host>`)
 // The host logs every exec itself (EXEC <cmd> -> <code>); these
 // markers carry the parsed fields the harness asserts on.
 
@@ -40,6 +49,11 @@ const HELP_LINES: string[] = [
   "  sevyn ai list|status        which AI is plugged in",
   "  sevyn ai select <id>        plug in a different AI",
   "  sevyn ai ask <task...>      ask the AI to do something",
+  "  sevyn browser open [url]    open a page in Chromium",
+  "  sevyn browser tabs          list open tabs",
+  "  sevyn browser status        Chromium + CDP + tab count",
+  "  sevyn net status            link, address, gateway, DNS",
+  "  sevyn net dns <host>        resolve a name",
   "",
   "Type a command below and press Enter.",
 ];
@@ -73,6 +87,53 @@ function logMarkers(cmd: string, out: string): void {
         (parseField(out, "allowed") ?? "?") +
         " denied=" +
         (parseField(out, "denied") ?? "?"),
+    );
+  } else if (cmd === "browser open" || cmd.startsWith("browser open ")) {
+    const tabLine = out.split("\n").find((l) => l.startsWith("tab: "));
+    const parts = tabLine ? tabLine.slice(5).split("\t") : [];
+    Sevyn.log(
+      "TERMINAL browser-open title=" +
+        (parts[1] ?? "unknown") +
+        " url=" +
+        (parts[2] ?? "unknown"),
+    );
+  } else if (cmd === "browser tabs" || cmd.startsWith("browser tabs ")) {
+    const titles: string[] = [];
+    const ids: string[] = [];
+    for (const line of out.split("\n")) {
+      if (!line.startsWith("TAB ")) continue;
+      const parts = line.slice(4).split("\t");
+      if (parts.length >= 2) {
+        ids.push(parts[0]);
+        titles.push(parts[1]);
+      }
+    }
+    Sevyn.log(
+      "TERMINAL browser-tabs n=" +
+        titles.length +
+        " titles=" +
+        titles.join("|") +
+        " ids=" +
+        ids.join("|"),
+    );
+  } else if (cmd === "browser status" || cmd.startsWith("browser status ")) {
+    Sevyn.log(
+      "TERMINAL browser-status running=" +
+        (parseField(out, "running") ?? "unknown") +
+        " tabs=" +
+        (parseField(out, "tabs") ?? "?"),
+    );
+  } else if (cmd === "net status" || cmd.startsWith("net status ")) {
+    Sevyn.log(
+      "TERMINAL net-status interface=" +
+        (parseField(out, "interface") ?? "unknown") +
+        " wifi=" +
+        (parseField(out, "wifi") ?? "unknown"),
+    );
+  } else if (cmd === "net dns" || cmd.startsWith("net dns ")) {
+    const bits = out.trim().split(/\s+/);
+    Sevyn.log(
+      "TERMINAL net-dns host=" + (bits[0] ?? "unknown") + " ip=" + (bits[1] ?? "unknown"),
     );
   }
 }

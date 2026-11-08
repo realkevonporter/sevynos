@@ -1,12 +1,14 @@
 "use strict";
 // End-to-end Node test for the built app bundles (dist/app.js,
-// dist/terminal.js, dist/settings.js, dist/files.js) and the crash
-// bundle (dist/crash.js). Loads the app bundle with the mock Sevyn
-// host as two different apps — files (status.read granted) and notes
-// (no permission) — and drives the close X. The crash bundle must
-// throw during evaluation. The M4 apps load with cli.exec and a
+// dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js)
+// and the crash bundle (dist/crash.js). Loads the app bundle with the
+// mock Sevyn host as two different apps — files (status.read granted)
+// and notes (no permission) — and drives the close X. The crash bundle
+// must throw during evaluation. The M4 apps load with cli.exec and a
 // canned exec handler, and drive their real flows (terminal typing,
-// settings channel switch + AI selection, files navigation).
+// settings channel switch + AI selection, files navigation). The M5
+// Browser loads with cli.exec and a canned CDP-backed exec handler,
+// and drives its real flow (tabs on mount, address-bar navigation).
 //
 // Run: node test/app-e2e-test.js   (from v2/apps, after npm run build)
 const assert = require("node:assert/strict");
@@ -32,6 +34,10 @@ const settingsBundle = fs.readFileSync(
 );
 const filesBundle = fs.readFileSync(
   path.join(__dirname, "..", "dist", "files.js"),
+  "utf8",
+);
+const browserBundle = fs.readFileSync(
+  path.join(__dirname, "..", "dist", "browser.js"),
   "utf8",
 );
 const crashBundle = fs.readFileSync(
@@ -98,7 +104,18 @@ const KEY_FOR = {
   "/": [53, false],
   ".": [52, false],
   "-": [12, false],
+  ":": [39, true],
   _: [12, true],
+  0: [11, false],
+  1: [2, false],
+  2: [3, false],
+  3: [4, false],
+  4: [5, false],
+  5: [6, false],
+  6: [7, false],
+  7: [8, false],
+  8: [9, false],
+  9: [10, false],
 };
 function type(text) {
   for (const ch of text) {
@@ -421,6 +438,66 @@ check("files: lists a real directory, navigates into it", () => {
   texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
   assert.ok(texts.includes("/data/m4-files-test"), "path bar updated");
   assert.ok(texts.includes("hello.txt"), "file inside shown");
+});
+
+check("browser: tabs on mount, address-bar navigation opens a page", () => {
+  let tabCalls = 0;
+  const handler = (cmd) => {
+    if (cmd === "sevyn browser tabs") {
+      tabCalls++;
+      if (tabCalls === 1) {
+        return (
+          "0\nTAB AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tSevynOS M5 Test Page\t" +
+          "http://10.0.2.2:18080/m5-page.html\n"
+        );
+      }
+      return (
+        "0\nTAB AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tSevynOS M5 Test Page\t" +
+        "http://10.0.2.2:18080/m5-page.html\n" +
+        "TAB BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\tSecond Page\t" +
+        "http://10.0.2.2:18080/m5-page2.html\n"
+      );
+    }
+    if (cmd === "sevyn browser status")
+      return "0\nrunning: yes\ncdp: yes\ntabs: 1\nversion: Chrome/159.0.8150.0\n";
+    if (cmd === "sevyn browser open http://10.0.2.2:18080/m5-page2.html")
+      return (
+        "0\nopened: http://10.0.2.2:18080/m5-page2.html\n" +
+        "tab: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\tSecond Page\t" +
+        "http://10.0.2.2:18080/m5-page2.html\n"
+      );
+    return "0\n";
+  };
+  loadAs(
+    {
+      id: "browser",
+      name: "Browser",
+      color: "#0ea5e9",
+      glyph: "B",
+      permissions: ["cli.exec"],
+    },
+    browserBundle,
+    handler,
+  );
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("SevynOS M5 Test Page")),
+    "the open tab's title is shown",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("http://10.0.2.2:18080/m5-page.html")),
+    "the active tab's URL is shown",
+  );
+  assert.ok(Sevyn._logs.includes("BROWSER tabs 1"), "mount refresh logged");
+  type("http://10.0.2.2:18080/m5-page2.html");
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes(
+      "BROWSER open title=Second Page url=http://10.0.2.2:18080/m5-page2.html",
+    ),
+    "open marker logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.ok(Sevyn._logs.includes("BROWSER tabs 2"), "refresh after open logged");
 });
 
 console.log(`\n${passed} app e2e checks passed`);
