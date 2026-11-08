@@ -424,22 +424,6 @@ def main():
     finally:
         fake.close()
 
-    # files cp: copies a file (binary-safe); missing source exits 1.
-    with tempfile.TemporaryDirectory() as td:
-        src = Path(td) / "src.bin"
-        dst = Path(td) / "dst.bin"
-        src.write_bytes(bytes(range(256)) + b"sevyn-cp\n")
-        r = run_cli(binary, ["files", "cp", str(src), str(dst)], {})
-        check("files cp: copies and reports the byte count",
-              r.returncode == 0 and "copied 265 bytes" in r.stdout,
-              r.stdout + r.stderr)
-        check("files cp: destination is byte-identical",
-              dst.exists() and dst.read_bytes() == src.read_bytes(), "")
-        r = run_cli(binary, ["files", "cp", str(Path(td) / "nope"),
-                             str(dst)], {})
-        check("files cp: missing source exits 1", r.returncode == 1,
-              r.stdout + r.stderr)
-
     server.shutdown()
     server.server_close()
 

@@ -18,7 +18,6 @@
  *   sevyn files cat <path>      print a file (64 KB cap)
  *   sevyn files mkdir <path>    create a directory
  *   sevyn files write <path> <text...>  write text to a file (create/truncate)
- *   sevyn files cp <src> <dst>  copy a file
  *   sevyn code status           Sevyn Code: running, serving, version,
  *                               terminal shell
  *   sevyn browser open [url]    open a URL (launch Chromium if needed).
@@ -72,7 +71,13 @@
 #define CODE_URL "http://127.0.0.1:8080"
 #define CHROMIUM_BIN "/usr/share/sevyn/chromium/chrome"
 #define CHROMIUM_PROFILE "/tmp/chromium-profile"
-#define CHROMIUM_LOG "/tmp/chromium.log"
+/* Chromium's stdout/stderr. On /data (not /tmp) so the log survives
+ * poweroff and rides along in the uploaded m5-data.img artifact —
+ * the CI-only Chromium crash (M5, 2026-11-08) was undiagnosable
+ * while the log lived on the guest tmpfs. /data is the persistent
+ * data disk, mounted at boot, so it is writable whenever Chromium
+ * can launch. */
+#define CHROMIUM_LOG "/data/chromium.log"
 #define STATUS_SOCK "/run/sevyn-status.sock"
 
 /* ------------------------------------------------------------------ */
@@ -134,7 +139,6 @@ static void print_usage(FILE *f)
             "  sevyn files mkdir <path>    create a directory\n"
             "  sevyn files write <path> <text...>\n"
             "                              write text to a file\n"
-            "  sevyn files cp <src> <dst>  copy a file\n"
             "  sevyn ai list               list the plugged-in AIs\n"
             "  sevyn ai select <id>        plug in a different AI\n"
             "  sevyn ai status             show the selected AI + grant\n"
@@ -599,7 +603,7 @@ static int cmd_files_list(const char *path)
 /* Print a file, optionally a line range: cat <path> [start] [count]
  * (start is 1-based; count defaults to the rest of the file). The
  * Terminal only shows the last 21 lines, so a range is the only way
- * to page through a long file (e.g. /tmp/chromium.log). */
+ * to page through a long file (e.g. /data/chromium.log). */
 static int cmd_files_cat(const char *path, long start, long count)
 {
     char *text = read_file_cap(path, 65536);
@@ -756,42 +760,6 @@ static int cmd_files(int argc, char **argv)
         total += 1;
         fclose(f);
         printf("wrote %zu bytes to %s\n", total, argv[3]);
-        return 0;
-    }
-    if (strcmp(argv[2], "cp") == 0) {
-        /* Copy a file (binary-safe). Used by the M5 check to persist
-         * /tmp/chromium.log onto /data/ before poweroff, so a CI
-         * Chromium crash is diagnosable from the uploaded data disk. */
-        if (argc != 5)
-            return usage();
-        FILE *in = fopen(argv[3], "rb");
-        if (!in) {
-            fprintf(stderr, "error: cannot read %s: %s\n", argv[3],
-                    strerror(errno));
-            return 1;
-        }
-        FILE *out = fopen(argv[4], "wb");
-        if (!out) {
-            fprintf(stderr, "error: cannot write %s: %s\n", argv[4],
-                    strerror(errno));
-            fclose(in);
-            return 1;
-        }
-        char buf[8192];
-        size_t total = 0, n;
-        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-            if (fwrite(buf, 1, n, out) != n) {
-                fprintf(stderr, "error: cannot write %s: %s\n", argv[4],
-                        strerror(errno));
-                fclose(in);
-                fclose(out);
-                return 1;
-            }
-            total += n;
-        }
-        fclose(in);
-        fclose(out);
-        printf("copied %zu bytes to %s\n", total, argv[4]);
         return 0;
     }
     return usage();
@@ -1098,7 +1066,7 @@ static int browser_running(void)
  * Returns 0 when the launch was attempted (the fork succeeded), 1
  * when even the fork failed. Whether Chromium actually came up is
  * observable via `browser status` (running: yes + cdp: yes) and
- * via /tmp/chromium.log (Chromium's stdout/stderr). The URL (if
+ * via /data/chromium.log (Chromium's stdout/stderr). The URL (if
  * any) is the first tab; without one Chromium opens about:blank. */
 static int browser_launch(const char *url)
 {
@@ -1134,6 +1102,17 @@ static int browser_launch(const char *url)
         if (logfd >= 0) {
             dup2(logfd, STDOUT_FILENO);
             dup2(logfd, STDERR_FILENO);
+        } else {
+            /* The log path is on /data; if it cannot be opened (no data
+             * disk, or a host-side run with no /data), send output to
+             * /dev/null rather than inheriting the caller's pipes —
+             * otherwise the caller blocks on the pipes until Chromium
+             * exits, and the host exec would hang past its timeout. */
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+            }
         }
         int nullfd = open("/dev/null", O_RDWR);
         if (nullfd >= 0)
@@ -1152,14 +1131,14 @@ static int browser_launch(const char *url)
          * (/usr/lib/dri/virtio_gpu_dri.so is absent), so ANGLE's EGL
          * init fails, all EGL display types fail, and the GPU process
          * exits; the browser then never answers CDP (diagnosed
-         * 2026-11-07 via /tmp/chromium.log). Software rendering is
+         * 2026-11-07 via /data/chromium.log). Software rendering is
          * the right call anyway: the shell's compositor is the pixman
          * CPU renderer, so there is no GPU to use. */
         /* DBUS_SESSION_BUS_ADDRESS=/dev/null: the image runs no
          * D-Bus daemon, so Chromium's startup D-Bus calls (session
          * bus) otherwise block on a ~25s connect timeout each and
          * the browser never reaches CDP in time (diagnosed
-         * 2026-11-07 via /tmp/chromium.log — the log was full of
+         * 2026-11-07 via /data/chromium.log — the log was full of
          * dbus/object_proxy "Failed to call method" + "Failed to
          * connect to the bus" lines). /dev/null makes those calls
          * fail fast. The system bus already fails fast (its socket
@@ -1184,7 +1163,7 @@ static int browser_launch(const char *url)
                   "--window-size=800,500",
                   port, datadir, (char *)NULL);
         /* execl failed: stderr is the chromium log, so the reason
-         * lands there for `sevyn files cat /tmp/chromium.log`. */
+         * lands there for `sevyn files cat /data/chromium.log`. */
         fprintf(stderr, "error: exec %s failed: %s\n", bin,
                 strerror(errno));
         _exit(127);
