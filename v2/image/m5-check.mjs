@@ -1092,7 +1092,12 @@ async function main() {
         b,
         "example",
         (img) => {
-          const n = countColorInRect(img, 255, 255, 255, 15, chromiumViewport);
+          // example.com's background is #eeeeee (238,238,238), not
+          // pure white — count both and take the larger.
+          const n = Math.max(
+            countColorInRect(img, 255, 255, 255, 15, chromiumViewport),
+            countColorInRect(img, 238, 238, 238, 15, chromiumViewport),
+          );
           return n > 100000 ? n : 0;
         },
         180000,
@@ -1111,6 +1116,9 @@ async function main() {
         "no recorded Chromium viewport (the red page never rendered)",
       );
     }
+    // The strip-click above gave Chromium keyboard focus — hand it
+    // back to the Terminal so the IDE open below lands in its input.
+    await refocusTerminal();
   } else {
     check("browser: example.com open SKIPPED (SEVYN_V2_M5_INTERNET=0)", true, "skipped");
     check(
