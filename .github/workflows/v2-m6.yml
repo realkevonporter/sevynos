@@ -134,10 +134,12 @@ jobs:
           # pnpm@11.17.0) — corepack failed the same way, and
           # running from /tmp does not help. Install yarn
           # globally with npm, then run every yarn command from
-          # the Tokrah clone, whose package.json pins
-          # yarn@1.22.22. Sevynos itself stays pnpm.
+          # the Tokrah consumer app dir, whose package.json pins
+          # yarn@1.22.22. The clone ROOT has no package.json, so
+          # yarn walks up from there and hits sevynos's pnpm pin.
+          # Sevynos itself stays pnpm.
           npm install -g yarn@1.22.22
-          cd "$GITHUB_WORKSPACE/tokrah"
+          cd "$GITHUB_WORKSPACE/tokrah/tokrah"
           yarn config set registry https://registry.npmjs.org
 
       - name: Cache native deps (Hermes + Yoga)
