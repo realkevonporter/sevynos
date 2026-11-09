@@ -93,8 +93,17 @@ def copy_into(sysroot, stage, host_path):
             os.unlink(dest)
         os.symlink(target, dest)
         # Also copy the real file the link points to (same dir, same name
-        # the loader will resolve to).
-        real = os.path.realpath(host_path)
+        # the loader will resolve to). Resolve the target INSIDE the
+        # sysroot tree: a relative target lives next to the link, an
+        # absolute target is rooted at the sysroot. os.path.realpath
+        # would follow a host symlink that points outside the sysroot
+        # (e.g. /usr/lib/.../weston symlinked into another tree) and
+        # stage the real file at a wrong path, leaving the staged link
+        # dangling — the M6 weston failure (libexec_weston.so.0).
+        if os.path.isabs(target):
+            real = os.path.join(sysroot, target.lstrip("/"))
+        else:
+            real = os.path.join(os.path.dirname(host_path), target)
         if real != host_path:
             copy_into(sysroot, stage, real)
     else:
