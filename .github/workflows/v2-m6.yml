@@ -129,11 +129,12 @@ jobs:
 
       - name: Install yarn (Tokrah's pinned 1.22.22)
         run: |
-          corepack enable
-          # corepack refuses to activate a different manager than the
-          # one the current project's packageManager pins (sevynos
-          # pins pnpm), so prepare from outside the checkout.
-          (cd /tmp && corepack prepare yarn@1.22.22 --activate)
+          # corepack cannot activate yarn here: it refuses when the
+          # checkout's package.json pins a different manager (sevynos
+          # pins pnpm), and it detects the project even from /tmp.
+          # Install yarn globally with npm instead; sevynos itself
+          # stays pnpm.
+          npm install -g yarn@1.22.22
           yarn config set registry https://registry.npmjs.org
 
       - name: Cache native deps (Hermes + Yoga)
