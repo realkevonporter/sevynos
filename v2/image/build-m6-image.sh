@@ -1,0 +1,735 @@
+#!/bin/sh
+# Build the SevynOS v2 M6 image: everything in the M5 image, plus
+# Tokrah running as a third-party app.
+#
+# Tokrah (M6): the 100% React Native Tokrah app, bundled by Metro
+# against the SevynOS compat shim (v2/tokrah/), compiled to Hermes
+# bytecode, packaged as an unsigned third-party .sevyn bundle
+# (tokrah.sevyn, cli.exec permission) into pristine, with the raw hbc
+# staged at /usr/share/sevyn/tokrah/tokrah.hbc (what `sevyn tokrah
+# run` falls back to). The mock API server (v2/tokrah/harness/
+# mock-api.js + socket.io) is staged at /usr/share/sevyn/tokrah-mock/
+# for the check; init starts it ONLY when the kernel cmdline carries
+# sevyn.mockapi=1 (a test double, never a system service).
+#
+# Tokrah source: TOKRAH_SRC (a local checkout of realkevonporter/
+# tokrah) or, in CI, a clone authenticated with TOKRAH_READ_TOKEN (a
+# read-only repo-scoped PAT — Sevyn cannot create repo secrets). If
+# NEITHER is set the build FAILS LOUDLY: an M6 image without Tokrah
+# is not an M6 image. The built bundle is never committed to this
+# public repo (Tokrah's proprietary JS; Hermes bytecode is
+# decompilable).
+#
+# Structure mirrors build-m5-image.sh; the M5 image is untouched.
+# Networking: the guest uses QEMU user networking (virtio-net,
+# 10.0.2.15, gateway 10.0.2.2, slirp DNS 10.0.2.3 — see
+# /etc/resolv.conf staged below). On real hardware with real wifi the
+# resolver comes from DHCP instead; the QEMU path is the CI proof and
+# the real-hardware wifi demo is still owed (as M1). The old build's
+# "wifi connected, browser dead" failure is the named acceptance test:
+# the harness proves a real page actually renders, not just that the
+# interface is up.
+#
+# Browser: Chromium — LOCKED (Kevon, 2026-11-07). A from-source build
+# is infeasible in CI (hours, tens of GB), so the image ships a
+# prebuilt Chromium snapshot (pinned 1738523, Chromium 159.0.8150.0,
+# from the Chromium continuous-builds bucket — a real Chromium build,
+# not Chrome-branded). It runs as a real Wayland client
+# (--ozone-platform=wayland) with CDP on 127.0.0.1:9222; the RN
+# Browser app (tabs + address bar) drives it through `sevyn browser`
+# over CDP HTTP, and Sevyn Code renders through the same path (the
+# IDE finally paints in a window — M4 only proved it serves).
+# The snapshot zip is ~260 MB; the staged tree is stripped (the chrome
+# binary alone drops 546 MB -> 365 MB) and trimmed to en-US locales,
+# so the image grows by ~500 MB uncompressed. Boot with -m 4096.
+#
+# Chromium download: CHROMIUM_TARBALL overrides the download with a
+# local zip (used for local builds so the 260 MB download is not
+# repeated).
+#
+# OS version: SEVYN_V2_VERSION, or the git short sha. Written to
+# $OUT/os-version (so the nightly feed step can read it) and staged
+# into the image at /usr/share/sevyn/os-version (what the updater
+# compares the feed version against).
+#
+# Requirements (on top of the M5 list): yarn (Tokrah installs with its
+# pinned yarn 1.22.22).
+# Outputs (SEVYN_V2_BUILD_DIR, default v2/image/build/):
+#   vmlinuz, initramfs.cpio.gz, kernel-version.txt, os-version,
+#   update-signing-key.json (test mode only)
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SYSROOT="${SEVYN_V2_SYSROOT:-/}"
+OUT="${SEVYN_V2_BUILD_DIR:-$ROOT/image/build}"
+DEPS_DIR="${SEVYN_V2_DEPS_DIR:-$ROOT/rn/host/deps}"
+PREFIX="$DEPS_DIR/prefix"
+HERMES_BUILD="$DEPS_DIR/build/hermes"
+
+if [ "$SYSROOT" != "/" ]; then
+  PATH="$SYSROOT/usr/bin:$SYSROOT/bin:$SYSROOT/usr/sbin:$SYSROOT/sbin:$PATH"
+  export PATH
+fi
+
+if [ -n "${SEVYN_V2_KERNEL:-}" ]; then
+  kernel="$SEVYN_V2_KERNEL"
+else
+  kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -readable ! -name 'vmlinuz-*-azure' 2>/dev/null | sort -V | tail -n 1 || true)"
+fi
+if [ -z "$kernel" ]; then
+  echo "error: no readable kernel found in /boot (install linux-image-generic; sudo may be needed to read it)" >&2
+  exit 1
+fi
+kernel_version="$(basename "$kernel" | sed 's/^vmlinuz-//')"
+
+for tool in busybox cpio curl gcc g++ pkg-config wayland-scanner python3 zstd modinfo cmake node npm openssl unzip strip; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "error: $tool not found" >&2
+    exit 1
+  }
+done
+for f in "$SYSROOT/usr/bin/weston" "$SYSROOT/usr/sbin/seatd" \
+         "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"; do
+  if [ ! -f "$f" ]; then
+    echo "error: missing $f (install weston, seatd, wayland-protocols)" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$OUT"
+cp "$kernel" "$OUT/vmlinuz"
+chmod 644 "$OUT/vmlinuz"
+printf '%s\n' "$kernel_version" >"$OUT/kernel-version.txt"
+
+if [ -n "${SEVYN_V2_VERSION:-}" ]; then
+  os_version="$SEVYN_V2_VERSION"
+else
+  os_version="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+fi
+printf '%s\n' "$os_version" >"$OUT/os-version"
+echo "OS version: $os_version"
+
+BUILD_TMP="$(mktemp -d)"
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$BUILD_TMP" "$STAGE"' EXIT INT TERM
+
+# --- native deps (Hermes + Yoga) ------------------------------------------
+if [ ! -f "$DEPS_DIR/.sevyn-deps" ]; then
+  echo "building native deps (Hermes + Yoga) — first run takes a while"
+  sh "$ROOT/rn/host/build-deps.sh"
+fi
+HERMES_SRC="$(ls -d "$DEPS_DIR"/src/hermes-*/)"
+[ -x "$PREFIX/bin/hermesc" ] || { echo "error: $PREFIX/bin/hermesc missing" >&2; exit 1; }
+[ -f "$PREFIX/lib/libyogacore.a" ] || { echo "error: libyogacore.a missing" >&2; exit 1; }
+
+# --- compile the SevynOS programs -----------------------------------------
+wayland-scanner client-header \
+  "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
+  "$BUILD_TMP/xdg-shell-client-protocol.h"
+wayland-scanner private-code \
+  "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
+  "$BUILD_TMP/xdg-shell-protocol.c"
+
+gcc -O2 -Wall -o "$BUILD_TMP/sevyn-statusd" "$ROOT/services/statusd.c"
+gcc -O2 -Wall -o "$BUILD_TMP/sevyn-status-client" "$ROOT/services/status-client.c"
+
+# The loader + app daemon (M3): install/verify/uninstall .sevyn
+# bundles, own the registry, seed it from pristine at first boot, and
+# spawn one sandboxed host per running app. The loader links OpenSSL
+# for Ed25519 signature verification (libssl-dev).
+gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-loader" \
+  "$ROOT/loader/sevyn-loader.c" "$ROOT/loader/json.c" \
+  "$ROOT/loader/verify.c" -lcrypto
+gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-appd" \
+  "$ROOT/loader/sevyn-appd.c" "$ROOT/loader/json.c"
+gcc -O2 -Wall -Wextra -o "$BUILD_TMP/ed25519-sign" \
+  "$ROOT/loader/ed25519-sign.c" -lcrypto
+
+# The AI daemon (M4.5): sevyn-aid owns /run/sevyn-ai.sock, spawns
+# the selected backend per ASK, checks every proposed action against
+# the grant, and executes the allowed ones through appd (apps) and
+# statusd (system values). The grant is parsed with the M3 JSON
+# parser; a missing or unparseable grant is fatal (fail-closed).
+gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/sevyn-aid" \
+  "$ROOT/ai/sevyn-aid.c" "$ROOT/loader/json.c"
+
+# The update daemon + CLI (M8): sevyn-updated owns the A/B slots and
+# the feed check/download/apply flow; `sevyn` is the CLI (M4: update
+# + shell + files + code verbs, REPL mode). The daemon links OpenSSL
+# for Ed25519 feed verification.
+gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
+  "$ROOT/update/sevyn-updated.c" "$ROOT/update/canonical.c" \
+  "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lcrypto
+gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
+  "$ROOT/update/sevyn.c"
+
+# Update trust anchor (see the header): committed release anchor, or a
+# fresh per-image test keypair.
+mkdir -p "$BUILD_TMP/trusted-update-keys"
+if [ -f "$ROOT/update/trusted-update-keys.json" ]; then
+  python3 -c "import json,sys; d=json.load(open('$ROOT/update/trusted-update-keys.json')); assert isinstance(d.get('keys'), list) and len(d['keys']) > 0" \
+    || { echo "error: v2/update/trusted-update-keys.json is not a valid anchor (needs a non-empty keys array)" >&2; exit 1; }
+  cp "$ROOT/update/trusted-update-keys.json" "$BUILD_TMP/trusted-update-keys/trusted-update-keys.json"
+  echo "update trust anchor: committed release anchor staged"
+else
+  node "$ROOT/../tools/update-signing/generate-key.mjs" --key-id nightly-test --out "$OUT/update-signing-key.json" \
+    >"$BUILD_TMP/trusted-update-keys/trusted-update-keys.json" 2>"$BUILD_TMP/gen-key.log" \
+    || { echo "error: failed to generate the test update keypair" >&2; cat "$BUILD_TMP/gen-key.log" >&2; exit 1; }
+  echo "update trust anchor: fresh TEST keypair (nightly-test); private key at $OUT/update-signing-key.json"
+fi
+
+# wayland-scanner's private-code output is C: its `const struct
+# wl_interface` definitions have external linkage in C, but in C++
+# namespace-scope const has INTERNAL linkage — so passing the .c to g++
+# makes every interface invisible to wayland.cc (undefined reference to
+# xdg_wm_base_interface, verified in CI run 42333389196). M1 compiles
+# the same file with gcc (build-m1-image.sh). Compile it as C here too
+# and link the object.
+gcc -O2 -c $(pkg-config --cflags wayland-client) \
+  -I"$BUILD_TMP" \
+  -o "$BUILD_TMP/xdg-shell-protocol.o" \
+  "$BUILD_TMP/xdg-shell-protocol.c"
+
+# The RN host: Hermes embed + Yoga + Wayland + painter + status bridge.
+# Hermes's public headers (HermesExport.h, RuntimeConfig.h) are NOT
+# installed by cmake --install, so the source public/ dir is on the
+# include path too. Link: every Hermes build archive (except the lean
+# variants, which would duplicate libhermes's symbols) inside
+# --start-group/--end-group so order does not matter, plus yogacore.
+# ICU: Hermes's libhermesPlatformUnicode.a calls ICU (ucol_*/uloc_*/udat_*,
+# verified in CI run 42333389196) — link icui18n/icuuc/icudata. The host
+# binary is in the copy-closure list below, so the libicu*.so.74 runtime
+# closure is staged into the image with it.
+HERMES_LIBS="$(find "$HERMES_BUILD" -name '*.a' ! -name '*lean*' ! -path '*unittests*' ! -name '*Test*' | sort)"
+# shellcheck disable=SC2086
+g++ -O2 -std=c++17 -Wall -Wextra \
+  -I"$ROOT/rn/host" -I"$BUILD_TMP" \
+  -I"$PREFIX/include" -I"$HERMES_SRC/public" \
+  $(pkg-config --cflags wayland-client wayland-cursor freetype2 libpng) \
+  -o "$BUILD_TMP/sevyn-rn-host" \
+  "$ROOT/rn/host/common.cc" "$ROOT/rn/host/painter.cc" \
+  "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
+  "$ROOT/rn/host/appclient.cc" \
+  "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
+  "$BUILD_TMP/xdg-shell-protocol.o" \
+  -Wl,--start-group $HERMES_LIBS "$PREFIX/lib/libyogacore.a" -Wl,--end-group \
+  $(pkg-config --libs wayland-client wayland-cursor freetype2 libpng) $(pkg-config --libs icu-uc icu-i18n) -lpthread -ldl
+
+# --- build the shell bundle ------------------------------------------------
+# npm ci (frozen lockfile) + esbuild bundle + hermesc bytecode. The
+# bundle is the only JS in the image; there is no Node at runtime.
+SHELL_DIR="$ROOT/shell"
+if [ ! -d "$SHELL_DIR/node_modules" ]; then
+  (cd "$SHELL_DIR" && npm ci --no-audit --no-fund)
+fi
+(cd "$SHELL_DIR" && node build-shell.mjs --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/shell-dist")
+[ -f "$BUILD_TMP/shell-dist/shell.hbc" ] || { echo "error: shell.hbc not built" >&2; exit 1; }
+
+# --- build the app bundles (M4 + M5) --------------------------------------
+# Terminal, Settings, Files are real apps with their own .hbc (M4);
+# Browser is a real app with its own .hbc (M5); the other eight stock
+# apps share the one template .hbc (identity comes from the host at
+# runtime); the crash .hbc is the harness's crash fixture.
+# make-bundles.py signs terminal with a fresh per-image Ed25519
+# keypair and writes the public key into the trusted-keys dir; the
+# private key stays in the build temp dir and is never staged.
+APPS_DIR="$ROOT/apps"
+if [ ! -d "$APPS_DIR/node_modules" ]; then
+  (cd "$APPS_DIR" && npm ci --no-audit --no-fund)
+fi
+(cd "$APPS_DIR" && node build-app.mjs --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+(cd "$APPS_DIR" && node build-app.mjs --entry crash --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+(cd "$APPS_DIR" && node build-app.mjs --entry terminal --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+(cd "$APPS_DIR" && node build-app.mjs --entry settings --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+(cd "$APPS_DIR" && node build-app.mjs --entry files --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+(cd "$APPS_DIR" && node build-app.mjs --entry browser --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+[ -f "$BUILD_TMP/app-dist/app.hbc" ] || { echo "error: app.hbc not built" >&2; exit 1; }
+[ -f "$BUILD_TMP/app-dist/crash.hbc" ] || { echo "error: crash.hbc not built" >&2; exit 1; }
+[ -f "$BUILD_TMP/app-dist/terminal.hbc" ] || { echo "error: terminal.hbc not built" >&2; exit 1; }
+[ -f "$BUILD_TMP/app-dist/settings.hbc" ] || { echo "error: settings.hbc not built" >&2; exit 1; }
+[ -f "$BUILD_TMP/app-dist/files.hbc" ] || { echo "error: files.hbc not built" >&2; exit 1; }
+[ -f "$BUILD_TMP/app-dist/browser.hbc" ] || { echo "error: browser.hbc not built" >&2; exit 1; }
+python3 "$APPS_DIR/make-bundles.py" \
+  --hbc "$BUILD_TMP/app-dist/app.hbc" \
+  --crash-hbc "$BUILD_TMP/app-dist/crash.hbc" \
+  --terminal-hbc "$BUILD_TMP/app-dist/terminal.hbc" \
+  --settings-hbc "$BUILD_TMP/app-dist/settings.hbc" \
+  --files-hbc "$BUILD_TMP/app-dist/files.hbc" \
+  --browser-hbc "$BUILD_TMP/app-dist/browser.hbc" \
+  --out "$BUILD_TMP/pristine" \
+  --trusted-keys-dir "$BUILD_TMP/trusted-keys" \
+  --test-bundles-dir "$BUILD_TMP/test-bundles"
+
+# --- Tokrah (M6) ------------------------------------------------------------
+# Bundle Tokrah from a pinned source, compile to Hermes bytecode, and
+# package it as an unsigned third-party .sevyn bundle into pristine.
+# Source: TOKRAH_SRC, or a TOKRAH_READ_TOKEN clone in CI. If NEITHER
+# is set the build FAILS LOUDLY — an M6 image without Tokrah is not
+# an M6 image (see the header; the token is Kevon's one-time action).
+if [ -n "${TOKRAH_SRC:-}" ]; then
+  echo "Tokrah source: TOKRAH_SRC=$TOKRAH_SRC"
+elif [ -n "${TOKRAH_READ_TOKEN:-}" ]; then
+  TOKRAH_SRC="$BUILD_TMP/tokrah-src"
+  echo "Tokrah source: cloning realkevonporter/tokrah (read-only token)"
+  git clone --depth 1 "https://x-access-token:${TOKRAH_READ_TOKEN}@github.com/realkevonporter/tokrah.git" "$TOKRAH_SRC" \
+    || { echo "error: Tokrah clone failed (check TOKRAH_READ_TOKEN)" >&2; exit 1; }
+else
+  echo "error: M6 needs Tokrah source — set TOKRAH_SRC (local checkout) or TOKRAH_READ_TOKEN (CI: a read-only repo-scoped PAT on realkevonporter/tokrah; add it under Settings > Secrets and variables > Actions). Sevyn cannot create repo secrets." >&2
+  exit 1
+fi
+[ -d "$TOKRAH_SRC/tokrah" ] || { echo "error: TOKRAH_SRC has no tokrah/ dir: $TOKRAH_SRC" >&2; exit 1; }
+TOKRAH_VERSION="$(node -e "console.log(require('$TOKRAH_SRC/tokrah/package.json').version)")"
+echo "Tokrah version: $TOKRAH_VERSION"
+# Tokrah installs with its pinned yarn (packageManager yarn@1.22.22);
+# the app's node_modules are its own — nothing is hoisted into this
+# monorepo's pnpm catalog (the dogfooding rule).
+command -v yarn >/dev/null 2>&1 || { echo "error: yarn not found (Tokrah installs with yarn 1.22.22)" >&2; exit 1; }
+if [ ! -d "$TOKRAH_SRC/tokrah/node_modules" ]; then
+  (cd "$TOKRAH_SRC/tokrah" && yarn install --frozen-lockfile --non-interactive) \
+    || { echo "error: Tokrah yarn install failed" >&2; exit 1; }
+fi
+EXPO_PUBLIC_API_URL=http://127.0.0.1:7070 TOKRAH_SRC="$TOKRAH_SRC" \
+  node "$ROOT/tokrah/build-tokrah.mjs" "$ROOT/tokrah/entry-tokrah.js" \
+  "$BUILD_TMP/tokrah.bundle.js" ios \
+  || { echo "error: Tokrah Metro bundle failed" >&2; exit 1; }
+[ -f "$BUILD_TMP/tokrah.bundle.js" ] || { echo "error: tokrah.bundle.js not built" >&2; exit 1; }
+"$PREFIX/bin/hermesc" -emit-binary -out "$BUILD_TMP/tokrah.hbc" "$BUILD_TMP/tokrah.bundle.js" \
+  || { echo "error: tokrah.hbc compile failed" >&2; exit 1; }
+python3 "$ROOT/tokrah/make-tokrah-bundle.py" \
+  --hbc "$BUILD_TMP/tokrah.hbc" --version "$TOKRAH_VERSION" \
+  --out "$BUILD_TMP/pristine" \
+  --staged-hbc "$BUILD_TMP/tokrah-staged.hbc" \
+  || { echo "error: tokrah.sevyn packaging failed" >&2; exit 1; }
+# The mock API server for the check: the harness mock-api.js plus a
+# socket.io install next to it (mock-api.js prefers a sibling
+# node_modules/socket.io, so no Tokrah API install is needed here).
+mkdir -p "$BUILD_TMP/tokrah-mock/node_modules"
+cp "$ROOT/tokrah/harness/mock-api.js" "$BUILD_TMP/tokrah-mock/mock-api.js"
+(cd "$BUILD_TMP/tokrah-mock" && npm install --no-audit --no-fund socket.io@4.8.3) \
+  || { echo "error: mock server socket.io install failed" >&2; exit 1; }
+
+# --- Sevyn Code (code-server) ---------------------------------------------
+# code-server 4.105.0, linux-amd64. CI downloads the release tarball;
+# CODE_SERVER_TARBALL points at a local copy instead (used for local
+# builds so the 120 MB download is not repeated). Extracted into the
+# stage at /usr/share/sevyn/code-server/ (452 MB installed).
+CODE_SERVER_VERSION="4.105.0"
+CODE_SERVER_TARBALL="${CODE_SERVER_TARBALL:-}"
+if [ -z "$CODE_SERVER_TARBALL" ]; then
+  CODE_SERVER_TARBALL="$BUILD_TMP/code-server.tar.gz"
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$CODE_SERVER_TARBALL" \
+    "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" \
+    || { echo "error: code-server download failed" >&2; exit 1; }
+fi
+[ -f "$CODE_SERVER_TARBALL" ] || { echo "error: code-server tarball not found: $CODE_SERVER_TARBALL" >&2; exit 1; }
+mkdir -p "$BUILD_TMP/code-server"
+tar xzf "$CODE_SERVER_TARBALL" -C "$BUILD_TMP/code-server"
+CODE_SERVER_DIR="$BUILD_TMP/code-server/code-server-${CODE_SERVER_VERSION}-linux-amd64"
+[ -x "$CODE_SERVER_DIR/bin/code-server" ] || { echo "error: code-server tarball has no bin/code-server" >&2; exit 1; }
+echo "code-server $CODE_SERVER_VERSION staged ($(du -sh "$CODE_SERVER_DIR" | cut -f1))"
+
+# --- Chromium (M5) ---------------------------------------------------------
+# Prebuilt Chromium snapshot (pinned 1738523 = Chromium 159.0.8150.0,
+# Linux_x64, from the Chromium continuous-builds bucket). CI downloads
+# the 260 MB zip; CHROMIUM_TARBALL points at a local copy instead
+# (used for local builds so the download is not repeated).
+# Trim before staging: strip the chrome binary (546 MB -> 365 MB),
+# keep only en-US locales (123 MB -> ~1 MB), drop the crash handler,
+# the setuid sandbox helper and the crashpad preload lib (crash
+# reporting is disabled by the launch flags anyway).
+CHROMIUM_SNAPSHOT="1738523"
+CHROMIUM_VERSION="159.0.8150.0"
+CHROMIUM_TARBALL="${CHROMIUM_TARBALL:-}"
+if [ -z "$CHROMIUM_TARBALL" ]; then
+  CHROMIUM_TARBALL="$BUILD_TMP/chrome-linux.zip"
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$CHROMIUM_TARBALL" \
+    "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Linux_x64/${CHROMIUM_SNAPSHOT}/chrome-linux.zip" \
+    || { echo "error: Chromium download failed" >&2; exit 1; }
+fi
+[ -f "$CHROMIUM_TARBALL" ] || { echo "error: Chromium zip not found: $CHROMIUM_TARBALL" >&2; exit 1; }
+mkdir -p "$BUILD_TMP/chromium"
+unzip -q -o "$CHROMIUM_TARBALL" -d "$BUILD_TMP/chromium"
+CHROMIUM_DIR="$BUILD_TMP/chromium/chrome-linux"
+[ -x "$CHROMIUM_DIR/chrome" ] || { echo "error: Chromium zip has no chrome binary" >&2; exit 1; }
+strip --strip-all "$CHROMIUM_DIR/chrome" 2>/dev/null || true
+find "$CHROMIUM_DIR" -name '*.so' -exec strip --strip-all {} + 2>/dev/null || true
+find "$CHROMIUM_DIR/locales" -type f ! -name 'en-US.pak' ! -name 'en-US.pak.info' -delete 2>/dev/null || true
+# MEIPreload is a stray directory (a Python onefile artifact), not a
+# Chromium file — remove it. chrome_crashpad_handler MUST STAY:
+# Chromium FATAL-crashes at startup when it cannot spawn the
+# handler (posix_spawn .../chrome_crashpad_handler: No such file),
+# even with --disable-crash-reporter — proven 2026-11-07 by a
+# headless run of the staged closure (exit 2, stack trace in
+# crashpad/util/posix/spawn_subprocess.cc). chrome_sandbox stays
+# too (53 KB; --no-sandbox means it is unused, but removing it
+# risks the same class of surprise).
+rm -rf "$CHROMIUM_DIR/MEIPreload"
+echo "Chromium $CHROMIUM_VERSION staged ($(du -sh "$CHROMIUM_DIR" | cut -f1))"
+
+# --- stage the rootfs ------------------------------------------------------
+mkdir -p "$STAGE/bin" "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/run" \
+         "$STAGE/tmp" "$STAGE/data" "$STAGE/root/.local/share/code-server/User" \
+         "$STAGE/etc/xdg/weston" "$STAGE/usr/local/bin" \
+         "$STAGE/usr/share/sevyn/shell" "$STAGE/usr/share/sevyn/pristine" \
+         "$STAGE/usr/share/sevyn/code-server" \
+         "$STAGE/usr/share/sevyn/chromium" \
+         "$STAGE/usr/share/sevyn/ai/backends" \
+         "$STAGE/usr/share/sevyn/test-bundles" \
+         "$STAGE/usr/share/sevyn/tokrah" "$STAGE/usr/share/sevyn/tokrah-mock" \
+         "$STAGE/usr/share/sevyn/trusted-keys" "$STAGE/var/lib/sevyn/apps"
+
+if [ -x "$SYSROOT/bin/busybox" ]; then
+  busybox_bin="$SYSROOT/bin/busybox"
+elif [ -x "$SYSROOT/usr/bin/busybox" ]; then
+  busybox_bin="$SYSROOT/usr/bin/busybox"
+else
+  busybox_bin="$(command -v busybox)"
+fi
+cp "$busybox_bin" "$STAGE/bin/busybox"
+ln -s busybox "$STAGE/bin/sh"
+ln -s busybox "$STAGE/bin/poweroff"
+ln -s busybox "$STAGE/bin/reboot"
+ln -s busybox "$STAGE/bin/wget"
+
+# Binaries + their shared-library closure (from the sysroot). The host
+# binary is included so its runtime libs (wayland-client, freetype,
+# libpng) are staged with it. code-server's bundled node is included
+# too, so its runtime libs (libstdc++ et al.) are staged with it.
+python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
+  "$SYSROOT/usr/bin/weston:/usr/bin/weston" \
+  "$SYSROOT/usr/sbin/seatd:/usr/sbin/seatd" \
+  "$SYSROOT/usr/lib/systemd/systemd-udevd:/usr/lib/systemd/systemd-udevd" \
+  "$SYSROOT/usr/bin/udevadm:/usr/bin/udevadm" \
+  "$SYSROOT/usr/lib/x86_64-linux-gnu/libweston-13/drm-backend.so:/usr/lib/x86_64-linux-gnu/libweston-13/drm-backend.so" \
+  "$SYSROOT/usr/lib/x86_64-linux-gnu/weston/desktop-shell.so:/usr/lib/x86_64-linux-gnu/weston/desktop-shell.so" \
+  "$SYSROOT/usr/libexec/weston-desktop-shell:/usr/libexec/weston-desktop-shell" \
+  "$SYSROOT/usr/libexec/weston-keyboard:/usr/libexec/weston-keyboard" \
+  "$BUILD_TMP/sevyn-statusd:/usr/local/bin/sevyn-statusd" \
+  "$BUILD_TMP/sevyn-status-client:/usr/local/bin/sevyn-status-client" \
+  "$BUILD_TMP/sevyn-loader:/usr/local/bin/sevyn-loader" \
+  "$BUILD_TMP/sevyn-appd:/usr/local/bin/sevyn-appd" \
+  "$BUILD_TMP/sevyn-aid:/usr/local/bin/sevyn-aid" \
+  "$BUILD_TMP/sevyn-updated:/usr/local/bin/sevyn-updated" \
+  "$BUILD_TMP/sevyn:/usr/local/bin/sevyn" \
+  "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
+  "$CODE_SERVER_DIR/lib/node:/usr/share/sevyn/code-server/lib/node" \
+  "$CHROMIUM_DIR/chrome:/usr/share/sevyn/chromium/chrome"
+
+cp "$BUILD_TMP/shell-dist/shell.hbc" "$STAGE/usr/share/sevyn/shell/shell.hbc"
+cp "$BUILD_TMP/pristine/"*.sevyn "$STAGE/usr/share/sevyn/pristine/"
+cp "$BUILD_TMP/test-bundles/"*.sevyn "$STAGE/usr/share/sevyn/test-bundles/"
+cp "$BUILD_TMP/trusted-keys/"*.pub "$STAGE/usr/share/sevyn/trusted-keys/"
+cp "$BUILD_TMP/trusted-update-keys/trusted-update-keys.json" "$STAGE/usr/share/sevyn/trusted-update-keys.json"
+cp "$OUT/os-version" "$STAGE/usr/share/sevyn/os-version"
+# Tokrah (M6): the raw hbc (what `sevyn tokrah run` falls back to) and
+# the mock API server for the check (started by init only with
+# sevyn.mockapi=1 on the kernel cmdline).
+cp "$BUILD_TMP/tokrah-staged.hbc" "$STAGE/usr/share/sevyn/tokrah/tokrah.hbc"
+cp "$BUILD_TMP/tokrah-mock/mock-api.js" "$STAGE/usr/share/sevyn/tokrah-mock/mock-api.js"
+cp -r "$BUILD_TMP/tokrah-mock/node_modules" "$STAGE/usr/share/sevyn/tokrah-mock/node_modules"
+
+# The AI connector (M4.5): the grant + the stub backends. The
+# backends are plain executables; their ids are their filenames.
+# (cp -a keeps the +x bit the daemon's scan requires.)
+cp -a "$ROOT/ai/backends/"* "$STAGE/usr/share/sevyn/ai/backends/"
+cp "$ROOT/ai/grant.json" "$STAGE/usr/share/sevyn/ai/grant.json"
+
+# Sevyn Code: the extracted code-server tree, plus the terminal
+# default (the integrated terminal spawns `sevyn` with no args, so
+# the REPL mode is what it gets). The settings file is the config the
+# M4 harness reads back through `sevyn files cat`.
+cp -a "$CODE_SERVER_DIR/." "$STAGE/usr/share/sevyn/code-server/"
+cat >"$STAGE/root/.local/share/code-server/User/settings.json" <<'EOF'
+{
+  "terminal.integrated.defaultProfile.linux": "sevyn",
+  "terminal.integrated.profiles.linux": {
+    "sevyn": { "path": "/usr/local/bin/sevyn" }
+  }
+}
+EOF
+
+# The browser (M5): the trimmed Chromium tree. The chrome binary
+# itself came in through the copy-closure above (with its system
+# libs); this copies the support files — pak files, icudtl.dat, the
+# $ORIGIN libs (libEGL, libGLESv2, libvk_swiftshader — dlopened, so
+# ldd never sees them), resources, en-US locale. cp -r, not cp -a:
+# the sandbox cannot chown the extracted tree's directories, and
+# ownership is irrelevant inside the initramfs.
+cp -r "$CHROMIUM_DIR/." "$STAGE/usr/share/sevyn/chromium/"
+
+# TLS + fonts for Chromium. The CA bundle (libnss3 verifies against
+# /etc/ssl/certs) and the fontconfig tree (so Chromium finds DejaVu)
+# come from the sysroot; libnssckbi.so is the NSS built-in-roots
+# module, dlopened by libnss3, so ldd never sees it either.
+# libsoftokn3.so is the NSS softoken (the crypto token behind the
+# sql: NSS database) — also dlopened by libnss3, also invisible to
+# ldd. Without it, NSS init fails with -5925 and Chromium FATAL-aborts
+# (SIGABRT) the first time it does any TLS — which is why the CI guest
+# (which has internet, so Chromium does background HTTPS fetches)
+# crashed while the sandbox guest (no internet, no TLS) never did.
+# libsqlite3.so.0 is softokn's SQL backend; libplc4/libplds4/libnspr4
+# are already in the closure via chrome's own deps.
+# libfreebl3.so / libfreeblpriv3.so are the NSS crypto primitives,
+# dlopened by softokn — without them NSS init fails with -8023 even
+# though softokn itself loads. libnssdbm3.so is the legacy DBM backend
+# (same dlopen class). All three are invisible to ldd.
+[ -f "$SYSROOT/etc/ssl/certs/ca-certificates.crt" ] || { echo "error: sysroot has no CA bundle (install ca-certificates)" >&2; exit 1; }
+mkdir -p "$STAGE/etc/ssl" "$STAGE/etc/fonts"
+cp -r "$SYSROOT/etc/ssl/certs" "$STAGE/etc/ssl/certs"
+cp -r "$SYSROOT/etc/fonts/." "$STAGE/etc/fonts/"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssckbi.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssckbi.so" "$STAGE/usr/lib/x86_64-linux-gnu/libnssckbi.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libsoftokn3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libsoftokn3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libsoftokn3.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libsqlite3.so.0" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libsqlite3.so.0" "$STAGE/usr/lib/x86_64-linux-gnu/libsqlite3.so.0"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreebl3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreebl3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libfreebl3.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreeblpriv3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libfreeblpriv3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libfreeblpriv3.so"
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssdbm3.so" ] && cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libnssdbm3.so" "$STAGE/usr/lib/x86_64-linux-gnu/libnssdbm3.so"
+
+# DNS for QEMU user networking: slirp answers at 10.0.2.3. On real
+# hardware the resolver comes from DHCP instead (a later milestone).
+printf 'nameserver 10.0.2.3\n' >"$STAGE/etc/resolv.conf"
+# localhost resolves via /etc/hosts (files first in nsswitch), never
+# over the network — without this, `sevyn net dns localhost` (and any
+# loopback client) asks the slirp DNS, which is slow to answer and
+# unreachable where the guest has no internet.
+printf '127.0.0.1 localhost\n::1 localhost\n' >"$STAGE/etc/hosts"
+
+# Data Weston and its stack load with dlopen / by path (not via ldd).
+for d in \
+  "usr/lib/x86_64-linux-gnu/weston" \
+  "usr/lib/x86_64-linux-gnu/gbm" \
+  "usr/lib/x86_64-linux-gnu/dri" \
+  "usr/lib/udev/rules.d" \
+  "usr/share/weston" \
+  "usr/share/libinput" \
+  "usr/share/X11/xkb" \
+  "usr/share/fonts/truetype/dejavu" ; do
+  if [ -d "$SYSROOT/$d" ]; then
+    mkdir -p "$STAGE/$(dirname "$d")"
+    cp -a "$SYSROOT/$d" "$STAGE/$d"
+  else
+    echo "warning: $SYSROOT/$d not found, skipping" >&2
+  fi
+done
+for d in "$SYSROOT"/usr/lib/x86_64-linux-gnu/libweston-*; do
+  if [ -d "$d" ]; then
+    rel="usr/lib/x86_64-linux-gnu/$(basename "$d")"
+    mkdir -p "$STAGE/usr/lib/x86_64-linux-gnu"
+    cp -a "$d" "$STAGE/$rel"
+  fi
+done
+mkdir -p "$STAGE/usr/share/icons"
+if [ -d "$SYSROOT/usr/share/icons/Adwaita" ]; then
+  mkdir -p "$STAGE/usr/share/icons/Adwaita"
+  cp -a "$SYSROOT/usr/share/icons/Adwaita/cursors" "$STAGE/usr/share/icons/Adwaita/" 2>/dev/null || true
+  cp -a "$SYSROOT/usr/share/icons/Adwaita/index.theme" "$STAGE/usr/share/icons/Adwaita/" 2>/dev/null || true
+fi
+if [ -f "$SYSROOT/usr/share/icons/default/index.theme" ]; then
+  mkdir -p "$STAGE/usr/share/icons/default"
+  cp -a "$SYSROOT/usr/share/icons/default/index.theme" "$STAGE/usr/share/icons/default/"
+fi
+
+python3 "$ROOT/image/stage-modules.py" "$SYSROOT" "$kernel_version" "$STAGE" \
+  virtio-gpu usbhid hid-generic xhci-pci virtio-blk virtio-net ext4
+
+mkdir -p "$STAGE/etc/ld.so.conf.d"
+cp -a "$SYSROOT/etc/ld.so.conf" "$STAGE/etc/" 2>/dev/null || true
+cp -a "$SYSROOT/etc/ld.so.conf.d/"*.conf "$STAGE/etc/ld.so.conf.d/" 2>/dev/null || true
+ldconfig -r "$STAGE" 2>/dev/null || echo "warning: ldconfig -r failed (continuing)" >&2
+
+cp "$ROOT/image/weston.ini" "$STAGE/etc/xdg/weston/weston.ini"
+
+cat >"$STAGE/init" <<'EOF'
+#!/bin/busybox sh
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox mount -t tmpfs tmpfs /run
+mkdir -p /run /tmp
+# Chromium uses /dev/shm for shared memory (even with
+# --disable-dev-shm-usage the renderer maps small shm files).
+mkdir -p /dev/shm
+/bin/busybox mount -t tmpfs -o size=256M tmpfs /dev/shm 2>/dev/null || echo "M5 init: /dev/shm mount failed"
+echo "SevynOS v2 - M5 image (compositor + RN shell + app runtime + system updates + system apps + Sevyn Code + AI connector + connectivity + Chromium browser)"
+export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
+export XDG_RUNTIME_DIR=/run
+export WAYLAND_DISPLAY=wayland-0
+echo "M4 init: modules start @ $(cut -d" " -f1 /proc/uptime)s"
+for mod in $(cat "/lib/modules/$(uname -r)/sevyn-modules.txt" 2>/dev/null); do
+  /bin/busybox insmod "$mod" || echo "M4 init: insmod $mod failed"
+done
+echo "M4 init: modules done @ $(cut -d" " -f1 /proc/uptime)s"
+ls /dev/dri/ 2>/dev/null || echo "M4 init: no /dev/dri (virtio-gpu module missing?)"
+# A/B slots live on the persistent data disk (/dev/vda, ext4). Wait
+# for it, mount it, and log the booted slot + version for the harness.
+# No disk is fine on a first boot without one (the updater degrades to
+# STATUS-only); the image still boots.
+SLOT=""
+for a in $(cat /proc/cmdline); do case "$a" in sevyn.slot=*) SLOT=${a#sevyn.slot=};; esac; done
+VERSION=$(cat /usr/share/sevyn/os-version 2>/dev/null || echo unknown)
+echo "M4 init: boot slot=${SLOT:-?} version=$VERSION"
+i=0
+while [ ! -e /dev/vda ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+if [ -e /dev/vda ]; then
+  /bin/busybox mount -t ext4 /dev/vda /data 2>/dev/null && echo "M4 init: data disk mounted" || echo "M4 init: data disk mount failed (continuing without it)"
+else
+  echo "M4 init: no data disk (/dev/vda absent)"
+fi
+# Network for the updater + the browser: static QEMU
+# user-networking address (host 10.0.2.2 serves the update feed in
+# the harness and the test page in the M5 harness; on a real desktop
+# this becomes DHCP in a later milestone). Loopback first:
+# code-server serves on 127.0.0.1 and the serving checks connect to
+# it — without `lo` up, 127.0.0.1 is unreachable even though the
+# server is listening (the M4 local-run failure mode).
+/bin/busybox ifconfig lo 127.0.0.1 up 2>/dev/null && echo "M4 init: lo up" || echo "M4 init: lo up failed (code-server checks will fail)"
+/bin/busybox ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up 2>/dev/null && echo "M4 init: eth0 up" || echo "M4 init: eth0 up failed (updates need a network)"
+/bin/busybox route add default gw 10.0.2.2 2>/dev/null || true
+# Update daemon first among the services: it records the boot attempt
+# for the booted slot before Weston or the shell can fail, and marks
+# the slot good once the shell reaches READY.
+# (The update URL comes from the kernel cmdline sevyn.update_url= when
+# set; otherwise the daemon uses its config file / the nightly feed.)
+/usr/local/bin/sevyn-updated &
+/usr/lib/systemd/systemd-udevd &
+echo "M4 init: udevd started @ $(cut -d" " -f1 /proc/uptime)s"
+i=0
+while [ ! -e /dev/input/event2 ] && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+echo "M4 init: event2 seen @ $(cut -d" " -f1 /proc/uptime)s"
+/usr/bin/udevadm trigger --action=add 2>/dev/null || echo "M4 init: udevadm trigger failed"
+echo "M4 init: trigger done @ $(cut -d" " -f1 /proc/uptime)s"
+/usr/bin/udevadm settle --timeout=10 2>/dev/null || echo "M4 init: udevadm settle timed out"
+echo "M4 init: settle done @ $(cut -d" " -f1 /proc/uptime)s"
+ls -la /dev/input/ 2>/dev/null || echo "M4 init: no /dev/input (no input devices?)"
+# Status service first: the shell subscribes to it.
+/usr/local/bin/sevyn-statusd &
+# Tell statusd the link state (M5): `net announce` reads eth0's
+# operstate and SETs wifi on/off, so the shell's tray shows Wi-Fi
+# when the link is up. It runs AFTER statusd starts — the earlier
+# position (before the daemons) could not reach statusd at all, so
+# the SET was lost and the tray stayed on the "unknown" default. A
+# failure here does NOT fail the boot — the M5 check asserts
+# `sevyn net status` separately.
+sleep 1
+WIFI=$(/usr/local/bin/sevyn net announce 2>/dev/null || echo "wifi: off")
+echo "M5 init: $WIFI"
+# App daemon next: seeds the registry from pristine on first boot and
+# owns /run/sevyn-apps.sock. The shell connects to it for its dock
+# list and launches; the harness drives it over /dev/ttyS2.
+# Tokrah mock API (M6): a test double, never a system service — it
+# starts ONLY when the kernel cmdline carries sevyn.mockapi=1 (the
+# M6 check boots with it). It serves the M6 mock Tokrah API on
+# 127.0.0.1:7070 from the code-server node binary, logging every
+# request/socket event to the console (MOCK_LOG=1) so the harness can
+# grep the serial log for the wire.
+for a in $(cat /proc/cmdline); do case "$a" in sevyn.mockapi=*) MOCKAPI=${a#sevyn.mockapi=};; esac; done
+if [ "${MOCKAPI:-0}" = "1" ]; then
+  MOCK_LOG=1 /usr/share/sevyn/code-server/lib/node /usr/share/sevyn/tokrah-mock/mock-api.js >/dev/console 2>&1 &
+  echo "M6 init: tokrah mock API started (sevyn.mockapi=1)"
+fi
+/usr/local/bin/sevyn-appd &
+# AI daemon (M4.5): owns /run/sevyn-ai.sock. Starts after appd +
+# statusd so its first ASK can reach both. The harness drives it over
+# /dev/ttyS4; the Terminal and Settings drive it through `sevyn ai`.
+/usr/local/bin/sevyn-aid &
+# Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
+# (localhost only — the browser that paints it arrives in M5). It
+# needs HOME for its user-data dir (the staged settings file lives
+# under /root/.local/share/code-server). --auth none: the IDE is local
+# only; auth arrives with the browser milestone. The pid file is what
+# `sevyn code status` reads for "running".
+export HOME=/root
+/usr/share/sevyn/code-server/bin/code-server --auth none --disable-telemetry --disable-update-check --bind-addr 127.0.0.1:8080 >/tmp/code-server.log 2>&1 &
+echo $! > /run/code-server.pid
+# Seat daemon: Weston (as root) opens DRM + input devices through it.
+/usr/sbin/seatd &
+echo "M4 init: starting weston @ $(cut -d" " -f1 /proc/uptime)s"
+# --socket=wayland-0 is REQUIRED, not cosmetic: without --socket Weston
+# ignores WAYLAND_DISPLAY and picks the first free wayland-N name starting
+# at wayland-1, so the socket would land at /run/wayland-1 while this init
+# and the shell host both wait on /run/wayland-0 (the M1 failure mode).
+/usr/bin/weston --backend=drm-backend.so --renderer=pixman --socket=wayland-0 \
+  --config=/etc/xdg/weston/weston.ini --log=/tmp/weston.log &
+i=0
+while [ ! -S /run/wayland-0 ] && [ "$i" -lt 1800 ]; do sleep 0.1; i=$((i + 1)); done
+if [ ! -S /run/wayland-0 ]; then
+  echo "M4 init: Wayland socket never appeared; weston log:"
+  cat /tmp/weston.log 2>/dev/null || echo "(no weston log)"
+  exec /bin/busybox poweroff -f
+fi
+# The shell host: Hermes + Yoga + Wayland + CPU raster. Its logLine
+# writes to /dev/console (the serial the harness reads) AND stderr, so
+# stderr is captured to a file for the READY wait while the serial keeps
+# the live stream (LAUNCH lines, errors).
+/usr/local/bin/sevyn-rn-host 2>/tmp/sevyn-host.log &
+HOST_PID=$!
+# If the host dies, dump weston + host logs to the console (the serial
+# the harness captures) so a blank screen is diagnosable from the
+# artifacts instead of a silent exit: libwayland prints the protocol
+# error to the host's stderr, Weston prints its side to weston.log.
+(while kill -0 "$HOST_PID" 2>/dev/null; do sleep 0.5; done
+ echo "--- sevyn-host died; weston.log ---"
+ cat /tmp/weston.log 2>/dev/null || echo "(no weston log)"
+ echo "--- sevyn-host.log ---"
+ cat /tmp/sevyn-host.log 2>/dev/null || echo "(no host log)") > /dev/console 2>&1 &
+# Wait for the shell to mount (the host logs SEVYNOS_M2_READY after the
+# bundle evaluates). Exit the wait early if the host process died: a dead
+# shell can never become ready, and powering off promptly lets the
+# bootloader fall back to the good slot instead of burning the full
+# 60 s wait on a broken image.
+i=0
+while ! grep -q "SEVYNOS_M2_READY" /tmp/sevyn-host.log 2>/dev/null && kill -0 "$HOST_PID" 2>/dev/null && [ "$i" -lt 600 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+if ! grep -q "SEVYNOS_M2_READY" /tmp/sevyn-host.log 2>/dev/null; then
+  echo "M4 init: shell host never became ready; host log:"
+  cat /tmp/sevyn-host.log 2>/dev/null || echo "(no host log)"
+  exec /bin/busybox poweroff -f
+fi
+echo "SEVYNOS_M2_READY"
+# Sevyn Code must be serving before the harness starts driving the
+# Terminal: give it up to 10 s to answer on its port. A failure here
+# does NOT fail the boot — the M4 check asserts code status
+# separately, with the server log as the diagnostic.
+CODE_OK=0
+i=0
+while [ "$i" -lt 100 ]; do
+  if wget -qO- http://127.0.0.1:8080/ 2>/dev/null | grep -q codeServerVersion; then CODE_OK=1; break; fi
+  sleep 0.1
+  i=$((i + 1))
+done
+if [ "$CODE_OK" = "1" ]; then echo "M4 init: code-server serving"; else echo "M4 init: code-server NOT serving (see /tmp/code-server.log)"; echo "--- code-server.log ---"; cat /tmp/code-server.log 2>/dev/null || echo "(no code-server log)"; echo "--- end code-server.log ---"; fi
+echo "SEVYNOS_M4_READY"
+echo "SEVYNOS_M4_SLOT ${SLOT:-?} VERSION $VERSION"
+# The AI daemon must answer before the harness starts driving it:
+# give it up to 10 s to answer `sevyn ai status` on its socket. A
+# failure here does NOT fail the boot — the M4.5 check asserts the
+# AID READY line + this probe separately, with the aid log as the
+# diagnostic (the daemon logs to the console + stderr).
+AID_OK=0
+i=0
+while [ "$i" -lt 100 ]; do
+  if /usr/local/bin/sevyn ai status >/dev/null 2>&1; then AID_OK=1; break; fi
+  sleep 0.1
+  i=$((i + 1))
+done
+if [ "$AID_OK" = "1" ]; then echo "M4.5 init: AI daemon ready"; else echo "M4.5 init: AI daemon NOT ready"; fi
+echo "SEVYNOS_M4_5_READY"
+# Connectivity + Chromium must answer before the harness starts
+# driving the browser: `sevyn net status` reads the link, and
+# `sevyn browser status` must report Chromium down (it only starts
+# on demand via `browser open`) without erroring. A failure here does
+# NOT fail the boot — the M5 check asserts net + browser status
+# separately, with the console as the diagnostic.
+NET_IF=$(/usr/local/bin/sevyn net status 2>/dev/null | grep '^interface:' || echo "interface: unknown")
+echo "M5 init: $NET_IF"
+echo "SEVYNOS_M5_READY"
+# Stay alive; the harness powers us off via the status daemon.
+while true; do sleep 3600; done
+EOF
+chmod +x "$STAGE/init"
+
+(cd "$STAGE" && find . | cpio -o -H newc 2>/dev/null | gzip -9 >"$OUT/initramfs.cpio.gz")
+
+echo "Built M5 image in $OUT (kernel $kernel_version, OS version $os_version)"
+ls -l "$OUT"

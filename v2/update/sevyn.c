@@ -157,7 +157,15 @@ static void print_usage(FILE *f)
             "                              wifi\n"
             "  sevyn net dns <host>        resolve a name (guest DNS)\n"
             "  sevyn net announce          announce the link state to\n"
-            "                              statusd (wifi on/off)\n");
+            "                              statusd (wifi on/off)\n"
+            "  sevyn net fetch --method <m> <url> [--header <N:V>] [--data <b>]\n"
+            "                              one plain HTTP request; prints\n"
+            "                              status, headers JSON, body\n"
+            "                              (http only; the host fetch bridge)\n"
+            "  sevyn tokrah run [--seconds N] [--width W] [--height H]\n"
+            "                   [--input <f>] [--out <f>]\n"
+            "                              run Tokrah headless (M6 bring-up:\n"
+            "                              mounts + presents with no window)\n");
 }
 
 static int usage(void)
@@ -1562,6 +1570,309 @@ static int cmd_net_status(void)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* net fetch — the host fetch bridge (M6).                              */
+/*                                                                      */
+/* `sevyn net fetch <method> <url> [body]` performs one plain HTTP/1.1 */
+/* request and prints:                                                  */
+/*   <status>\n<headers-json>\n<body>                                  */
+/* The JS shim (v2/tokrah/shim/env.js) calls this through Sevyn.exec   */
+/* whenever Tokrah code uses fetch/XHR, so Tokrah's real axios and     */
+/* socket.io-client run against an in-guest server (the M6 mock API)   */
+/* with no WebSocket and no TLS in the host.                            */
+/*                                                                      */
+/* http:// only: the image has no TLS stack for a C client yet, so     */
+/* https:// fails loudly instead of silently. The M6 proof is http     */
+/* (mock API on 127.0.0.1); a TLS transport is a follow-up, not a      */
+/* silent fallback. Body + headers cap: 64 KB (the exec bridge cap).   */
+/* Exit 0 on any HTTP response (even 4xx/5xx — the caller decides);    */
+/* exit 1 on transport errors.                                          */
+/* ------------------------------------------------------------------ */
+
+static void json_escape_into(char *dst, size_t dstsz, const char *src)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 2 < dstsz; p++) {
+        if (*p == '"' || *p == '\\') {
+            dst[o++] = '\\';
+            dst[o++] = *p;
+        } else if (*p == '\n') {
+            dst[o++] = '\\';
+            dst[o++] = 'n';
+        } else if (*p == '\r') {
+            dst[o++] = '\\';
+            dst[o++] = 'r';
+        } else if (*p == '\t') {
+            dst[o++] = '\\';
+            dst[o++] = 't';
+        } else if ((unsigned char)*p < 0x20) {
+            if (o + 7 < dstsz)
+                o += (size_t)snprintf(dst + o, dstsz - o, "\\u%04x",
+                                      (unsigned char)*p);
+        } else {
+            dst[o++] = *p;
+        }
+    }
+    dst[o] = '\0';
+}
+
+static void percent_decode(char *dst, size_t dstsz, const char *src)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 1 < dstsz; p++) {
+        if (*p == '%' && p[1] && p[2]) {
+            char hex[3] = { p[1], p[2], '\0' };
+            char *end = NULL;
+            long v = strtol(hex, &end, 16);
+            if (end && *end == '\0' && v >= 0 && v <= 255) {
+                dst[o++] = (char)v;
+                p += 2;
+                continue;
+            }
+        }
+        dst[o++] = *p;
+    }
+    dst[o] = '\0';
+}
+
+static int cmd_net_fetch(int argc, char **argv)
+{
+    /* sevyn net fetch --method <m> <url> [--header <Name:value>]...
+     *   [--data <body>]
+     * The host exec bridge splits the command line on whitespace with
+     * no quoting, so the JS shim percent-encodes header values and the
+     * body (encodeURIComponent) before passing them; this verb decodes
+     * %XX sequences in --header values and --data. A plain body with
+     * no %XX sequences passes through unchanged, so the verb stays
+     * usable by hand. */
+    const char *method = NULL;
+    const char *url = NULL;
+    const char *data = NULL;
+    char headers[4096];
+    headers[0] = '\0';
+    size_t hlen = 0;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--method") == 0 && i + 1 < argc) {
+            method = argv[++i];
+        } else if (strcmp(argv[i], "--header") == 0 && i + 1 < argc) {
+            const char *hv = argv[++i];
+            /* "Name:encoded-value" — decode the value after the colon. */
+            const char *colon = strchr(hv, ':');
+            if (!colon) {
+                fprintf(stderr, "error: net fetch: bad --header %s\n", hv);
+                return 1;
+            }
+            char dec[1024];
+            percent_decode(dec, sizeof(dec), colon + 1);
+            size_t nlen = (size_t)(colon - hv);
+            if (nlen >= 128 || hlen + nlen + strlen(dec) + 4 >= sizeof(headers)) {
+                fprintf(stderr, "error: net fetch: header too long\n");
+                return 1;
+            }
+            if (hlen > 0) {
+                /* CRLF, not bare LF: Node's HTTP parser 400s a
+                 * request whose headers are LF-separated (the login
+                 * POST carries two headers; single-header requests
+                 * never showed it). */
+                headers[hlen++] = '\r';
+                headers[hlen++] = '\n';
+            }
+            memcpy(headers + hlen, hv, nlen);
+            hlen += nlen;
+            headers[hlen++] = ':';
+            headers[hlen++] = ' ';
+            strcpy(headers + hlen, dec);
+            hlen += strlen(dec);
+            headers[hlen] = '\0';
+        } else if (strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
+            data = argv[++i];
+        } else if (argv[i][0] != '-' && !url) {
+            url = argv[i];
+        } else {
+            return usage();
+        }
+    }
+    if (!method || !url) {
+        fprintf(stderr,
+                "error: usage: sevyn net fetch --method <m> <url> "
+                "[--header <Name:value>]... [--data <body>]\n");
+        return 1;
+    }
+    char body_dec[65536];
+    const char *body = "";
+    if (data) {
+        percent_decode(body_dec, sizeof(body_dec), data);
+        body = body_dec;
+    }
+
+    if (strncmp(url, "http://", 7) != 0) {
+        fprintf(stderr,
+                "error: net fetch supports http:// only (got %.16s); "
+                "https needs a TLS transport (not built yet)\n",
+                url);
+        return 1;
+    }
+    const char *rest = url + 7;
+    const char *slash = strchr(rest, '/');
+    char hostport[256];
+    const char *path = "/";
+    if (slash) {
+        size_t hlen = (size_t)(slash - rest);
+        if (hlen >= sizeof(hostport)) {
+            fprintf(stderr, "error: net fetch: host too long\n");
+            return 1;
+        }
+        memcpy(hostport, rest, hlen);
+        hostport[hlen] = '\0';
+        path = slash;
+    } else {
+        snprintf(hostport, sizeof(hostport), "%s", rest);
+    }
+    char host[256];
+    char portstr[16] = "80";
+    const char *colon = strrchr(hostport, ':');
+    if (colon && colon != hostport) {
+        size_t hlen = (size_t)(colon - hostport);
+        if (hlen >= sizeof(host)) {
+            fprintf(stderr, "error: net fetch: host too long\n");
+            return 1;
+        }
+        memcpy(host, hostport, hlen);
+        host[hlen] = '\0';
+        snprintf(portstr, sizeof(portstr), "%s", colon + 1);
+    } else {
+        snprintf(host, sizeof(host), "%s", hostport);
+    }
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) {
+        fprintf(stderr, "error: net fetch: cannot resolve %s\n", host);
+        return 1;
+    }
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        fprintf(stderr, "error: net fetch: socket failed\n");
+        return 1;
+    }
+    struct timeval tv = { .tv_sec = 8, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
+        fprintf(stderr, "error: net fetch: cannot connect to %s:%s\n",
+                host, portstr);
+        close(fd);
+        freeaddrinfo(res);
+        return 1;
+    }
+    freeaddrinfo(res);
+
+    char req[8192];
+    int reqlen = snprintf(
+        req, sizeof(req),
+        "%s %s HTTP/1.1\r\nHost: %s\r\n"
+        "%s%s"
+        "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+        method, path, hostport,
+        headers[0] ? headers : "", headers[0] ? "\r\n" : "",
+        strlen(body), body);
+    if (reqlen < 0 || (size_t)reqlen >= sizeof(req)) {
+        fprintf(stderr, "error: net fetch: request too long\n");
+        close(fd);
+        return 1;
+    }
+    size_t sent = 0;
+    while (sent < (size_t)reqlen) {
+        ssize_t n = send(fd, req + sent, (size_t)reqlen - sent, 0);
+        if (n <= 0) {
+            fprintf(stderr, "error: net fetch: send failed\n");
+            close(fd);
+            return 1;
+        }
+        sent += (size_t)n;
+    }
+    /* 64 KB cap, matching the exec bridge. */
+    static char resp[65536 + 1];
+    size_t got = 0;
+    for (;;) {
+        if (got >= sizeof(resp) - 1)
+            break;
+        ssize_t n = recv(fd, resp + got, sizeof(resp) - 1 - got, 0);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (n == 0)
+            break;
+        got += (size_t)n;
+    }
+    close(fd);
+    resp[got] = '\0';
+
+    /* Split status line / headers / body. */
+    char *hdr_end = strstr(resp, "\r\n\r\n");
+    size_t hdr_len = hdr_end ? (size_t)(hdr_end - resp) : got;
+    char *body_start = hdr_end ? hdr_end + 4 : resp + got;
+    int status = 0;
+    sscanf(resp, "HTTP/%*d.%*d %d", &status);
+    if (status == 0)
+        sscanf(resp, "HTTP %d", &status);
+
+    /* Headers -> one JSON object (names lowercased, first wins). */
+    char headers_json[8192];
+    size_t hj = 0;
+    hj += (size_t)snprintf(headers_json + hj, sizeof(headers_json) - hj,
+                           "{");
+    int first_hdr = 1;
+    char *line = resp;
+    int is_first_line = 1;
+    while (line < resp + (ptrdiff_t)hdr_len) {
+        char *eol = strstr(line, "\r\n");
+        if (!eol)
+            eol = resp + (ptrdiff_t)hdr_len;
+        size_t llen = (size_t)(eol - line);
+        if (is_first_line) {
+            is_first_line = 0;
+        } else if (llen > 0) {
+            char *colon2 = memchr(line, ':', llen);
+            if (colon2) {
+                size_t nlen = (size_t)(colon2 - line);
+                const char *v = colon2 + 1;
+                while (v < line + (ptrdiff_t)llen && (*v == ' ' || *v == '\t'))
+                    v++;
+                size_t vlen = (size_t)(line + (ptrdiff_t)llen - v);
+                if (nlen < 128 && vlen < 1024 && hj + 2048 < sizeof(headers_json)) {
+                    char name[128], val[1024], esc[2048];
+                    memcpy(name, line, nlen);
+                    name[nlen] = '\0';
+                    for (size_t i = 0; name[i]; i++)
+                        if (name[i] >= 'A' && name[i] <= 'Z')
+                            name[i] = (char)(name[i] + 32);
+                    memcpy(val, v, vlen);
+                    val[vlen] = '\0';
+                    json_escape_into(esc, sizeof(esc), val);
+                    hj += (size_t)snprintf(
+                        headers_json + hj, sizeof(headers_json) - hj,
+                        "%s\"%s\":\"%s\"", first_hdr ? "" : ",", name, esc);
+                    first_hdr = 0;
+                }
+            }
+        }
+        line = eol + 2;
+    }
+    snprintf(headers_json + hj, sizeof(headers_json) - hj, "}");
+
+    /* Chunked transfer: the mock API sends Content-Length, but be
+     * honest — a chunked body is printed raw rather than mis-decoded. */
+    printf("%d\n%s\n%s", status, headers_json, body_start);
+    return 0;
+}
+
 static int cmd_net_dns(const char *host)
 {
     struct addrinfo hints;
@@ -1627,6 +1938,9 @@ static int cmd_net(int argc, char **argv)
             return usage();
         return cmd_net_announce();
     }
+    if (strcmp(argv[2], "fetch") == 0) {
+        return cmd_net_fetch(argc, argv);
+    }
     if (strcmp(argv[2], "tcp") == 0) {
         /* net tcp <host> <port>: is anything listening? A plain TCP
          * connect (no HTTP) — separates "nothing listening" from
@@ -1662,6 +1976,122 @@ static int cmd_net(int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ */
+/* tokrah — the M6 third-party bring-up.                                */
+/*                                                                      */
+/* `sevyn tokrah run [--seconds N] [--input <path>] [--out <path>]`    */
+/* launches Tokrah headless in the RN host: no window, the bundle       */
+/* still mounts and presents, ops go to --out as JSON, input arrives    */
+/* from --input. The M6 check drives a full live session through it.    */
+/* The host runs DETACHED: a headless run outlasts the exec bridge's    */
+/* 10 s synchronous window, so the CLI forks, the parent returns at    */
+/* once, and the child logs to the console until the run ends.          */
+/*                                                                      */
+/* Bundle lookup: the installed registry copy first, then the image's   */
+/* staged copy, then the pristine bundle (which the loader would        */
+/* install — here we just point at the staged hbc the image build      */
+/* leaves next to it). A missing bundle is a plain error, not a        */
+/* silent no-op: Tokrah is a third-party app, not part of the image.   */
+/* ------------------------------------------------------------------ */
+
+#define TOKRAH_REGISTRY_HBC "/var/lib/sevyn/apps/tokrah/app.hbc"
+#define TOKRAH_STAGED_HBC "/usr/share/sevyn/tokrah/tokrah.hbc"
+
+static int cmd_tokrah(int argc, char **argv)
+{
+    if (argc < 3 || strcmp(argv[2], "run") != 0)
+        return usage();
+    int seconds = 30;
+    int width = 800;
+    int height = 500;
+    const char *input = NULL;
+    const char *out = NULL;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
+            seconds = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
+            width = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
+            height = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
+            input = argv[++i];
+        } else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        } else {
+            return usage();
+        }
+    }
+    const char *bundle = NULL;
+    struct stat st;
+    if (stat(TOKRAH_REGISTRY_HBC, &st) == 0)
+        bundle = TOKRAH_REGISTRY_HBC;
+    else if (stat(TOKRAH_STAGED_HBC, &st) == 0)
+        bundle = TOKRAH_STAGED_HBC;
+    if (!bundle) {
+        fprintf(stderr,
+                "error: Tokrah is not installed (no %s and no %s); "
+                "install the .sevyn bundle first\n",
+                TOKRAH_REGISTRY_HBC, TOKRAH_STAGED_HBC);
+        return 1;
+    }
+    char secs[16], wbuf[16], hbuf[16];
+    snprintf(secs, sizeof(secs), "%d", seconds);
+    snprintf(wbuf, sizeof(wbuf), "%d", width);
+    snprintf(hbuf, sizeof(hbuf), "%d", height);
+    const char *args[] = {
+        SHELL_BIN,      "--bundle",   bundle,
+        "--width",      wbuf,         "--height",
+        hbuf,           "--app",      "tokrah",
+        "--name",       "Tokrah",     "--color",
+        "#E52B42",      "--glyph",    "T",
+        "--permissions", "cli.exec",  "--headless",
+        "--headless-seconds", secs,  NULL,
+        NULL,           NULL,         NULL,
+        NULL,           NULL,         NULL,
+    };
+    /* The host runs detached: a headless run lasts longer than the
+     * exec bridge's 10 s synchronous window, so the CLI forks and
+     * the parent returns at once. The child takes a new session,
+     * points stdin at /dev/null and stdout/stderr at the console
+     * (so its HOST lines still reach the serial log and it no
+     * longer holds the bridge's pipe), then execs the host. The
+     * ops JSON lands in --out when the run finishes. */
+    int n = 0;
+    while (args[n])
+        n++;
+    if (input) {
+        args[n++] = "--headless-input";
+        args[n++] = input;
+    }
+    if (out) {
+        args[n++] = "--headless-out";
+        args[n++] = out;
+    }
+    args[n] = NULL;
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "error: cannot fork for the headless host\n");
+        return 1;
+    }
+    if (pid == 0) {
+        setsid();
+        int nullfd = open("/dev/null", O_RDONLY);
+        if (nullfd >= 0)
+            dup2(nullfd, STDIN_FILENO);
+        int consolefd = open("/dev/console", O_WRONLY);
+        if (consolefd >= 0) {
+            dup2(consolefd, STDOUT_FILENO);
+            dup2(consolefd, STDERR_FILENO);
+        }
+        execv(SHELL_BIN, (char *const *)args);
+        fprintf(stderr, "error: cannot exec %s\n", SHELL_BIN);
+        _exit(1);
+    }
+    printf("tokrah run started (pid %d, %ds, detached)\n", (int)pid,
+           seconds);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* dispatch + REPL                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -1687,6 +2117,8 @@ static int dispatch(int argc, char **argv)
         return cmd_browser(argc, argv);
     if (strcmp(argv[1], "net") == 0)
         return cmd_net(argc, argv);
+    if (strcmp(argv[1], "tokrah") == 0)
+        return cmd_tokrah(argc, argv);
     return usage();
 }
 

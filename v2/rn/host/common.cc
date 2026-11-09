@@ -27,7 +27,10 @@ int consoleFd() {
 } // namespace
 
 void logLine(const char* fmt, ...) {
-  char buf[1024];
+  // 32 KB: headless mode logs a compact ops JSON per screen (M6),
+  // which does not fit the old 1 KB buffer (texts + pressables +
+  // coloured rects on a busy feed).
+  char buf[32768];
   int n = snprintf(buf, sizeof(buf), "[%lld] ", nowMs());
   va_list ap;
   va_start(ap, fmt);

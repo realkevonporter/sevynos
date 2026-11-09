@@ -1,0 +1,190 @@
+# SevynOS v2 M6 — build the Tokrah bring-up image and prove it in
+# QEMU.
+#
+# Runs on pushes and PRs touching v2/ (the fresh build). The job builds
+# the native deps (Hermes + Yoga, cached), the shell + app bundles, the
+# loader + app daemon + update daemon + CLI + AI daemon, and the M6
+# image (the M5 image plus the Tokrah bundle staged as a third-party
+# .sevyn package and the in-guest mock Tokrah API), then runs the
+# m6-check harness: first the Node harness gate on the host (build the
+# Tokrah bundle from v2/tokrah and run drive-live.js — login → home
+# feed → go-live → start live → socket live:join → host screen → end
+# live against the mock API); then boot the image with sevyn.mockapi=1
+# and prove the same flow in the real Hermes host in-guest through
+# `sevyn tokrah run` with scripted input, asserting each step on the
+# mock server's serial log; then launch Tokrah from the dock and prove
+# the login screen paints in its own window. Boot logs, screendumps,
+# the data disk, and the JSON result are kept as artifacts.
+#
+# Tokrah is a PRIVATE repo — CI clones it with the TOKRAH_READ_TOKEN
+# secret (a read-only repo-scoped PAT; Kevon's one-time action). If
+# the secret is absent the job fails loudly with instructions instead
+# of silently skipping the Tokrah proof. The built Tokrah bundle is
+# NEVER committed to this repo (it would publish Tokrah's proprietary
+# JS); it is built fresh in the job and lives only in the build dir.
+#
+# No M5 regression run here: m5-check expects the m5 data disk and
+# the m5 version marker, and the M6 check already asserts the M5
+# stack markers (SEVYNOS_M5_READY, M4.5, M4) on boot.
+name: SevynOS v2 M6
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m6.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m6.yml"
+
+jobs:
+  m6-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          # setup-node v5 defaults package-manager-cache to true and
+          # auto-detects pnpm from the repo root's packageManager field —
+          # but this job uses npm only (v2/rn/renderer, v2/shell) and
+          # never installs pnpm, so the cache step fails with "Unable to
+          # locate executable file: pnpm". The Hermes/Yoga deps cache is
+          # handled by the actions/cache step below.
+          package-manager-cache: false
+
+      - name: Install build + boot dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            g++ \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwayland-dev \
+            wayland-protocols \
+            libfreetype-dev \
+            libpng-dev \
+            libssl-dev \
+            weston \
+            seatd \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data \
+            e2fsprogs \
+            curl \
+            unzip \
+            ca-certificates \
+            fontconfig \
+            libnss3 \
+            libnspr4 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libatspi2.0-0 \
+            libcups2 \
+            libasound2t64 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libdbus-1-3 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr1 \
+            libxfixes3 \
+            libgbm1 \
+            libdrm2 \
+            libxkbcommon0 \
+            libexpat1 \
+            libxcb1 \
+            libxext6 \
+            libfontconfig1 \
+            libfreetype6 \
+            libharfbuzz0b \
+            libudev1 \
+            libglib2.0-0 \
+            libx11-6 \
+            libxi6 \
+            libxrender1 \
+            libxtst6 \
+            libxss1
+
+      - name: Clone Tokrah (private — read-only PAT)
+        run: |
+          if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
+            echo "::error::TOKRAH_READ_TOKEN is not set. Add a read-only repo-scoped PAT as the TOKRAH_READ_TOKEN secret on realkevonporter/sevynos (Kevon's one-time action) — the M6 check cannot clone the private Tokrah repo without it, and the Tokrah proof must not be skipped silently."
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
+
+      - name: Install yarn (Tokrah's pinned 1.22.22)
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn config set registry https://registry.npmjs.org
+
+      - name: Cache native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevynos-v2-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}-hermes-0.13.0-yoga-41118bd
+          restore-keys: |
+            sevynos-v2-deps-
+
+      - name: Build native deps
+        run: sh v2/rn/host/build-deps.sh
+
+      - name: Renderer + shell + apps JS checks
+        run: |
+          cd v2/rn/renderer && npm ci --no-audit --no-fund && npm test
+          cd ../../shell && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+          cd ../apps && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+
+      - name: Loader + appd + updater checks
+        run: |
+          python3 v2/loader/test-loader.py
+          python3 v2/loader/test-appd.py
+          python3 v2/ai/test-aid.py
+          python3 v2/update/test-updated.py
+          python3 v2/update/test-browser.py
+
+      - name: Build the M6 image
+        env:
+          TOKRAH_SRC: ${{ github.workspace }}/tokrah
+        run: |
+          # The harness boots the built image as version m6-test-1,
+          # so the image and the check agree on the version string.
+          sudo env SEVYN_V2_VERSION=m6-test-1 TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m6-image.sh
+
+      - name: Run the M6 check in QEMU
+        env:
+          TOKRAH_SRC: ${{ github.workspace }}/tokrah
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create m6-boot-*.log (EACCES — the M1 failure mode).
+          sudo chown -R "$USER" v2/image/build
+          node v2/image/m6-check.mjs
+
+      - name: Upload M6 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-m6
+          path: |
+            v2/image/build/m6-boot-*.log
+            v2/image/build/m6-check.json
+            v2/image/build/m6-shot-*.ppm
+            v2/image/build/m6-data.img
+            v2/image/build/m6-tokrah.bundle.js
+          if-no-files-found: warn

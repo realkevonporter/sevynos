@@ -11,8 +11,14 @@
 // Usage: sevyn-rn-host [--bundle <path>] [--width <px>] [--height <px>]
 //                      [--app <id>] [--name <name>] [--color <#rrggbb>]
 //                      [--glyph <letter>] [--permissions <csv>]
+//                      [--headless] [--headless-seconds <n>]
+//                      [--headless-out <path>] [--headless-input <path>]
 //   bundle default: /usr/share/sevyn/shell/shell.hbc
 //   size default: 1024x768 (the Weston output mode); apps use 800x500
+//   headless (M6): no Wayland surface — the bundle still runs and
+//   presents, but ops go to a JSON dump (--headless-out) and input
+//   arrives from a timed event file (--headless-input); the run ends
+//   after --headless-seconds (exit 0).
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -30,6 +36,7 @@
 #include <string>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -88,16 +95,21 @@ bool hasProp(jsi::Runtime& rt, const jsi::Object& obj, const char* name) {
 // child execs the CLI (no shell, no pipes, no other binaries), the
 // parent reads stdout+stderr with a 10 s timeout. Runs synchronously
 // on the JS thread — commands are fast; a hung command blocks the UI
-// for at most the timeout. Returns "<exit-code>\n<output>" (output
-// capped at 64 KiB). Logs EXEC <cmdline> -> <code> to serial, which
-// is what the M4 harness asserts on.
+// for at most the timeout. The command line is split on whitespace
+// (no quoting) with a 64-token cap. Returns "<exit-code>\n<output>"
+// (output capped at 64 KiB). Logs EXEC <cmdline> -> <code> to serial,
+// which is what the M4 harness asserts on.
 constexpr const char* kSevynCli = "/usr/local/bin/sevyn";
 
 std::string runSevyn(const std::string& cmdline) {
   std::istringstream in(cmdline);
   std::vector<std::string> tokens;
   std::string tok;
-  while (tokens.size() < 16 && in >> tok)
+  // 64 tokens: the M6 check writes long headless input files through
+  // `sevyn files write` (18+ whitespace-separated tokens); a 16-token
+  // cap silently dropped the last tap's coordinates, so the login
+  // submit never fired and the failure looked like a dead button.
+  while (tokens.size() < 64 && in >> tok)
     tokens.push_back(tok);
   if (tokens.empty() || tokens[0] != "sevyn")
     return "ERR only the sevyn command is allowed";
@@ -183,12 +195,31 @@ std::string runSevyn(const std::string& cmdline) {
   return std::to_string(code) + "\n" + out;
 }
 
-// --- the host ---
+// --- Sevyn.execAsync: the same CLI run, off the JS thread ---------
+// Sevyn.exec is synchronous: a 5 s socket.io long-poll blocks the JS
+// thread for 5 s, and back-to-back polls starve the app (the feed
+// never paints, taps land on stale layouts). execAsync returns a JS
+// Promise instead: a worker thread runs runSevyn (self-contained,
+// fork/exec/wait) and posts {resolve, result} to a completion queue
+// the main loop drains on the JS thread, where resolve is called.
+// The resolve function stays alive via the Promise the JS side holds
+// (the shim's request chain), so the C++ copy is only an alias.
+// The queue is file-static (one host per process) so a worker never
+// captures the RnHost — a detached thread must not dangle `this` if
+// the host exits while a command is still running.
+struct ExecCompletion {
+  jsi::Function resolve;
+  std::string result;
+};
+std::mutex g_execMutex;
+std::queue<ExecCompletion> g_execCompletions;
 class RnHost {
  public:
   RnHost(int width, int height, std::string bundle, std::string appId,
          std::string appName, std::string appColor, std::string appGlyph,
-         std::set<std::string> permissions)
+         std::set<std::string> permissions, bool headless = false,
+         int headlessSeconds = 0, std::string headlessOut = "",
+         std::string headlessInput = "")
       : width_(width),
         height_(height),
         bundle_(std::move(bundle)),
@@ -196,7 +227,11 @@ class RnHost {
         appName_(std::move(appName)),
         appColor_(std::move(appColor)),
         appGlyph_(std::move(appGlyph)),
-        permissions_(std::move(permissions)) {}
+        permissions_(std::move(permissions)),
+        headless_(headless),
+        headlessSeconds_(headlessSeconds),
+        headlessOut_(std::move(headlessOut)),
+        headlessInput_(std::move(headlessInput)) {}
 
   // Stop the subscriber threads FIRST, while every member their
   // handlers touch (statusMutex_/statusQueue_/statusSnapshot_,
@@ -240,9 +275,18 @@ class RnHost {
   std::vector<DrawOp> parseOps(jsi::Runtime& rt, const jsi::Value& opsValue);
   void dispatchPointer(const std::string& type, double x, double y,
                        uint32_t button, bool pressed);
+  void dispatchScroll(double x, double y, double dx, double dy);
   void dispatchKey(uint32_t key, bool pressed, bool shift);
   void drainStatusQueue();
   void drainAppEventQueue();
+  void drainExecCompletions(jsi::Runtime& rt);
+  // Headless helpers: write the latest present's ops as JSON, log the
+  // compact ops (texts + pressable rects) when the screen changes,
+  // load the timed input file, fire the events whose time has come.
+  void dumpHeadlessOps(const std::vector<DrawOp>& ops, uint32_t bg);
+  void logHeadlessOps(const std::vector<DrawOp>& ops);
+  void loadHeadlessInput();
+  void fireDueHeadlessInput();
   bool hasPermission(const std::string& name) const {
     // The shell is trusted: it always has every permission. An app
     // has only what its manifest granted (passed on the command line
@@ -260,6 +304,43 @@ class RnHost {
   std::string appColor_;
   std::string appGlyph_;
   std::set<std::string> permissions_;
+  // Headless mode (M6): no Wayland surface at all. The bundle still
+  // executes, the reconciler still commits, and present() still runs —
+  // but the ops go to a JSON dump (--headless-out) instead of a
+  // window, and input arrives from a timed event file
+  // (--headless-input) instead of a compositor. The M6 check drives
+  // Tokrah end to end through this mode: the check reads the ops dump
+  // to find buttons, writes the next input file, and runs again.
+  bool headless_ = false;
+  int headlessSeconds_ = 0;
+  std::string headlessOut_;
+  std::string headlessInput_;
+  // One timed input event from the headless input file. Events are
+  // separated by ';' (the file is written through the Terminal's
+  // single-line input, so it is one line):
+  //   <ms> pointer <down|up|move> <x> <y>
+  //   <ms> tap <x> <y>            (down + up 120 ms apart)
+  //   <ms> key <evdev-code> <down|up> <shift 0|1>
+  //   <ms> type <text>   (expands to key down/up pairs, 30 ms/char)
+  struct HeadlessEvent {
+    long long atMs = 0;
+    bool isPointer = true;
+    bool isScroll = false;
+    std::string type;  // down/up/move (pointer) — key uses pressed
+    double x = 0, y = 0;
+    double dx = 0, dy = 0;  // scroll delta (scroll events)
+    uint32_t code = 0;
+    bool pressed = false;
+    bool shift = false;
+  };
+  std::vector<HeadlessEvent> headlessEvents_;
+  size_t headlessEventIdx_ = 0;
+  long long headlessStartMs_ = 0;
+  long long headlessPresents_ = 0;
+  // Signature of the last logged compact ops (the texts, joined): the
+  // host logs the compact ops only when the screen's text changes, so
+  // a steady screen does not spam the console once per commit.
+  std::string headlessLastOpsSig_;
   std::unique_ptr<Wayland> wayland_;
   std::unique_ptr<YogaBridge> yoga_;
   std::unique_ptr<StatusClient> status_;
@@ -289,10 +370,12 @@ class RnHost {
   std::optional<jsi::Function> keyHandler_;
   std::optional<jsi::Function> statusHandler_;
   std::optional<jsi::Function> appEventHandler_;
+  std::optional<jsi::Function> scrollHandler_;
   bool hasPointerHandler_ = false;
   bool hasKeyHandler_ = false;
   bool hasStatusHandler_ = false;
   bool hasAppEventHandler_ = false;
+  bool hasScrollHandler_ = false;
 
   // setTimeout/clearTimeout timers. Hermes has no timers of its own,
   // and React's scheduler falls back to setTimeout when neither
@@ -518,6 +601,31 @@ void RnHost::applyStyle(jsi::Runtime& rt, int nodeId,
         yoga_->setMargin(nodeId, kPadEdges[i], (float)v.asNumber());
     }
   }
+  // Position offsets (top/left/bottom/right) for absolute and
+  // relative nodes. These were never applied: an absolute node kept
+  // its static position, so floating buttons (Tokrah's Go Live
+  // button, bottom:92 right:24) landed on top of the first story
+  // tile instead of bottom-right.
+  static const char* kPosKeys[] = {"top", "left", "bottom", "right"};
+  static const int kPosEdges[] = {1, 0, 3, 2}; // YGEdgeTop/Left/Bottom/Right
+  for (size_t i = 0; i < 4; i++) {
+    if (!hasProp(rt, style, kPosKeys[i]))
+      continue;
+    jsi::Value v = jsProp(rt, style, kPosKeys[i]);
+    if (v.isNumber())
+      yoga_->setPosition(nodeId, kPosEdges[i], (float)v.asNumber());
+    else if (v.isString()) {
+      std::string s = v.asString(rt).utf8(rt);
+      if (!s.empty() && s.back() == '%') {
+        try {
+          yoga_->setPositionPercent(
+              nodeId, kPosEdges[i],
+              std::stof(s.substr(0, s.size() - 1)));
+        } catch (...) {
+        }
+      }
+    }
+  }
 }
 
 void RnHost::installYoga(jsi::Runtime& rt, jsi::Object& sevyn) {
@@ -720,9 +828,19 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
              float size = (float)args[1].asNumber();
              bool bold = count >= 3 && jsBool(rt, args[2], false);
              float maxW = count >= 4 ? (float)args[3].asNumber() : 0;
-             w = wayland_->painter().measureTextWidth(text, size, bold);
-             h = wayland_->painter().measureTextHeight(text, size, bold,
-                                                       maxW);
+             if (headless_ || !wayland_) {
+               // No painter without a surface: approximate with the
+               // average glyph width the mock harness uses (0.6em).
+               // Headless text is measured for layout, never drawn.
+               w = (float)text.size() * size * 0.6f;
+               if (maxW > 0 && w > maxW)
+                 w = maxW;
+               h = size * 1.2f;
+             } else {
+               w = wayland_->painter().measureTextWidth(text, size, bold);
+               h = wayland_->painter().measureTextHeight(text, size, bold,
+                                                         maxW);
+             }
            }
            o.setProperty(rt, "width", w);
            o.setProperty(rt, "height", h);
@@ -771,7 +889,20 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
                  hits_.push_back(hit);
                }
              }
-             wayland_->present(ops, bg);
+             if (headless_) {
+               // No surface: the ops go to the JSON dump for the
+               // check harness instead of a window. Log only the
+               // first present (every commit would spam the console);
+               // the compact ops log below fires once per screen.
+               headlessPresents_++;
+               if (headlessPresents_ == 1)
+                 logLine("HOST headless first present: %zu ops",
+                         ops.size());
+               dumpHeadlessOps(ops, bg);
+               logHeadlessOps(ops);
+             } else {
+               wayland_->present(ops, bg);
+             }
            }
            return jsi::Value::undefined();
          });
@@ -793,6 +924,16 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            if (count >= 1 && args[0].isObject()) {
              keyHandler_ = std::move(args[0].asObject(rt).asFunction(rt));
              hasKeyHandler_ = true;
+           }
+           return jsi::Value::undefined();
+         });
+  hostFn("onScroll", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count >= 1 && args[0].isObject()) {
+             scrollHandler_ =
+                 std::move(args[0].asObject(rt).asFunction(rt));
+             hasScrollHandler_ = true;
            }
            return jsi::Value::undefined();
          });
@@ -840,6 +981,53 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
                  rt, "ERR usage: exec(cmdline)");
            return jsi::String::createFromUtf8(
                rt, runSevyn(jsString(rt, args[0])));
+         });
+  // Sevyn.execAsync: the same CLI run, off the JS thread (see the
+  // comment above the ExecCompletion queue). The network path (the
+  // shim's XHR/fetch) uses this; the Terminal keeps the synchronous
+  // exec above. Returns a Promise<string> with the same
+  // "<exit-code>\n<output>" shape.
+  hostFn("execAsync", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           auto promiseCtor =
+               rt.global().getPropertyAsFunction(rt, "Promise");
+           if (!hasPermission("cli.exec")) {
+             auto rejectFn = promiseCtor.getPropertyAsFunction(rt, "reject");
+             return rejectFn.call(
+                 rt, jsi::String::createFromUtf8(
+                         rt, "ERR permission denied: cli.exec"));
+           }
+           if (count < 1) {
+             auto rejectFn = promiseCtor.getPropertyAsFunction(rt, "reject");
+             return rejectFn.call(
+                 rt, jsi::String::createFromUtf8(
+                         rt, "ERR usage: execAsync(cmdline)"));
+           }
+           std::string cmdline = jsString(rt, args[0]);
+           auto executor = jsi::Function::createFromHostFunction(
+               rt, jsi::PropNameID::forAscii(rt, "sevynExecAsyncExecutor"), 2,
+               [cmdline](jsi::Runtime& rt2, const jsi::Value&,
+                         const jsi::Value* eargs, size_t ecount) {
+                 if (ecount < 1)
+                   return jsi::Value::undefined();
+                 jsi::Function resolve =
+                     eargs[0].asObject(rt2).asFunction(rt2);
+                 // Detached worker: runSevyn blocks up to 10 s. It
+                 // never touches the runtime, and the completion
+                 // queue is file-static, so nothing here can dangle.
+                 std::thread([cmdline, resolve = std::move(resolve)]() mutable {
+                   std::string result = runSevyn(cmdline);
+                   std::lock_guard<std::mutex> lk(g_execMutex);
+                   g_execCompletions.push(
+                       ExecCompletion{std::move(resolve), std::move(result)});
+                 }).detach();
+                 return jsi::Value::undefined();
+               });
+           // Construct (not call): Promise(...) without `new` throws
+           // "Promises must be constructed via new" in Hermes.
+           jsi::Value executorValue(std::move(executor));
+           return promiseCtor.callAsConstructor(rt, {std::move(executorValue)});
          });
   hostFn("listApps", 0,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
@@ -910,6 +1098,11 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
                     appColor_.empty() ? "#111827" : appColor_.c_str());
   sevyn.setProperty(rt, "appGlyph",
                     appGlyph_.empty() ? "S" : appGlyph_.c_str());
+  // Window size, so apps lay out to the real window: the headless
+  // Tokrah runs use a taller window so the login screen fits
+  // without scrolling; the default app window is 800x500.
+  sevyn.setProperty(rt, "width", (double)width_);
+  sevyn.setProperty(rt, "height", (double)height_);
   rt.global().setProperty(rt, "Sevyn", sevyn);
 }
 
@@ -1010,6 +1203,10 @@ void RnHost::dispatchPointer(const std::string& type, double x, double y,
         break;
       }
       ev.setProperty(rt, "nodeId", hit);
+      // The hit result is the only evidence a tap landed where the
+      // driver aimed (M6: a tap on Tokrah's Sign In button silently
+      // missed until the viewport grew past the button).
+      logLine("HOST pointer down (%.0f,%.0f) -> nodeId %d", x, y, hit);
     }
     pointerHandler_->call(rt, ev);
     rt.drainMicrotasks();
@@ -1031,6 +1228,23 @@ void RnHost::dispatchKey(uint32_t key, bool pressed, bool shift) {
     rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
     logLine("JS key handler failed: %s", e.getMessage().c_str());
+  }
+}
+
+void RnHost::dispatchScroll(double x, double y, double dx, double dy) {
+  if (!hasScrollHandler_ || !runtime_)
+    return;
+  jsi::Runtime& rt = *runtime_;
+  try {
+    jsi::Object ev(rt);
+    ev.setProperty(rt, "x", x);
+    ev.setProperty(rt, "y", y);
+    ev.setProperty(rt, "dx", dx);
+    ev.setProperty(rt, "dy", dy);
+    scrollHandler_->call(rt, ev);
+    rt.drainMicrotasks();
+  } catch (const jsi::JSError& e) {
+    logLine("JS scroll handler failed: %s", e.getMessage().c_str());
   }
 }
 
@@ -1083,8 +1297,367 @@ void RnHost::drainAppEventQueue() {
   }
 }
 
+void RnHost::drainExecCompletions(jsi::Runtime& rt) {
+  std::queue<ExecCompletion> done;
+  {
+    std::lock_guard<std::mutex> lk(g_execMutex);
+    done.swap(g_execCompletions);
+  }
+  while (!done.empty()) {
+    ExecCompletion c = std::move(done.front());
+    done.pop();
+    try {
+      c.resolve.call(rt, jsi::String::createFromUtf8(rt, c.result));
+      rt.drainMicrotasks();
+    } catch (const jsi::JSError& e) {
+      logLine("HOST execAsync resolve failed: %s", e.getMessage().c_str());
+    }
+  }
+}
+
+static std::string jsonEscape(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if ((unsigned char)c < 0x20) {
+          char buf[8];
+          snprintf(buf, sizeof(buf), "\\u%04x", c);
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
+void RnHost::dumpHeadlessOps(const std::vector<DrawOp>& ops, uint32_t bg) {
+  if (headlessOut_.empty())
+    return;
+  std::ostringstream j;
+  j << "{\"width\":" << width_ << ",\"height\":" << height_ << ",\"bg\":\"#";
+  char bgbuf[16];
+  snprintf(bgbuf, sizeof(bgbuf), "%02x%02x%02x", (bg >> 24) & 0xff,
+           (bg >> 16) & 0xff, (bg >> 8) & 0xff);
+  j << bgbuf << "\",\"ops\":[";
+  bool first = true;
+  for (const auto& op : ops) {
+    if (!first)
+      j << ",";
+    first = false;
+    const char* kind = "rect";
+    if (op.kind == DrawOp::Kind::Text)
+      kind = "text";
+    else if (op.kind == DrawOp::Kind::Image)
+      kind = "image";
+    else if (op.kind == DrawOp::Kind::PushClip)
+      kind = "pushClip";
+    else if (op.kind == DrawOp::Kind::PopClip)
+      kind = "popClip";
+    j << "{\"type\":\"" << kind << "\",\"x\":" << op.x << ",\"y\":" << op.y
+      << ",\"w\":" << op.w << ",\"h\":" << op.h << ",\"nodeId\":" << op.nodeId;
+    if (op.kind == DrawOp::Kind::Rect || op.kind == DrawOp::Kind::Text) {
+      char cbuf[16];
+      snprintf(cbuf, sizeof(cbuf), "%02x%02x%02x", (op.color >> 24) & 0xff,
+               (op.color >> 16) & 0xff, (op.color >> 8) & 0xff);
+      j << ",\"color\":\"#" << cbuf << "\"";
+    }
+    if (op.kind == DrawOp::Kind::Text) {
+      j << ",\"text\":\"" << jsonEscape(op.text)
+        << "\",\"fontSize\":" << op.fontSize;
+    }
+    if (op.kind == DrawOp::Kind::Image)
+      j << ",\"asset\":\"" << jsonEscape(op.asset) << "\"";
+    j << "}";
+  }
+  j << "]}";
+  std::ofstream out(headlessOut_, std::ios::trunc);
+  if (out)
+    out << j.str() << "\n";
+}
+
+void RnHost::logHeadlessOps(const std::vector<DrawOp>& ops) {
+  // Compact ops for the check harness: every text (string + box),
+  // every pressable rect (nodeId + box + colour), and every visible
+  // coloured rect that is NOT a pressable (a button's colour often
+  // lives on an outer View while its Pressable is transparent — the
+  // go-live button's #E52B42 is on the Animated.View wrapping the
+  // Pressable, so the press list alone never shows it; the check
+  // clicks the rect's centre and the hit-test resolves to the
+  // Pressable on top). Logged only when the screen's text changes,
+  // so the serial log carries one line per screen instead of one
+  // per commit. Rects are capped: the log line buffer is 32 KB.
+  std::string sig;
+  for (const auto& op : ops) {
+    if (op.kind == DrawOp::Kind::Text) {
+      sig += op.text;
+      sig += '\n';
+    }
+  }
+  if (sig == headlessLastOpsSig_)
+    return;
+  headlessLastOpsSig_ = sig;
+  std::ostringstream j;
+  j << "{\"texts\":[";
+  bool first = true;
+  for (const auto& op : ops) {
+    if (op.kind != DrawOp::Kind::Text)
+      continue;
+    if (!first)
+      j << ",";
+    first = false;
+    j << "{\"t\":\"" << jsonEscape(op.text) << "\",\"x\":" << (int)op.x
+      << ",\"y\":" << (int)op.y << ",\"w\":" << (int)op.w
+      << ",\"h\":" << (int)op.h << "}";
+  }
+  j << "],\"press\":[";
+  first = true;
+  for (const auto& op : ops) {
+    if (op.nodeId < 0)
+      continue;
+    if (!first)
+      j << ",";
+    first = false;
+    char cbuf[16];
+    snprintf(cbuf, sizeof(cbuf), "%02x%02x%02x", (op.color >> 24) & 0xff,
+             (op.color >> 16) & 0xff, (op.color >> 8) & 0xff);
+    j << "{\"nodeId\":" << op.nodeId << ",\"x\":" << (int)op.x
+      << ",\"y\":" << (int)op.y << ",\"w\":" << (int)op.w
+      << ",\"h\":" << (int)op.h << ",\"color\":\"#" << cbuf << "\"}";
+  }
+  j << "],\"rects\":[";
+  first = true;
+  int rectCount = 0;
+  for (const auto& op : ops) {
+    if (op.kind != DrawOp::Kind::Rect || op.nodeId >= 0)
+      continue;
+    if (((op.color >> 0) & 0xff) == 0)
+      continue; // fully transparent
+    if (rectCount >= 48)
+      break;
+    rectCount++;
+    if (!first)
+      j << ",";
+    first = false;
+    char cbuf[16];
+    snprintf(cbuf, sizeof(cbuf), "%02x%02x%02x", (op.color >> 24) & 0xff,
+             (op.color >> 16) & 0xff, (op.color >> 8) & 0xff);
+    j << "{\"x\":" << (int)op.x << ",\"y\":" << (int)op.y
+      << ",\"w\":" << (int)op.w << ",\"h\":" << (int)op.h
+      << ",\"color\":\"#" << cbuf << "\"}";
+  }
+  j << "]}";
+  logLine("HOST headless ops %s", j.str().c_str());
+}
+
+// US-layout char -> (evdev keycode, shift). The renderer's key handler
+// maps evdev codes back to characters with the same table.
+static bool charToKey(char c, uint32_t& code, bool& shift) {
+  shift = false;
+  if (c >= 'a' && c <= 'z') {
+    static const uint32_t map[26] = {30, 48, 46, 32, 18, 33, 34, 35, 23, 36,
+                                     37, 38, 50, 49, 24, 25, 16, 19, 31, 20,
+                                     22, 47, 17, 45, 21, 44};
+    code = map[c - 'a'];
+    return true;
+  }
+  if (c >= 'A' && c <= 'Z') {
+    if (!charToKey((char)(c - 'A' + 'a'), code, shift))
+      return false;
+    shift = true;
+    return true;
+  }
+  if (c >= '1' && c <= '9') {
+    code = (uint32_t)(c - '1' + 2);
+    return true;
+  }
+  switch (c) {
+    case '0': code = 11; return true;
+    case ' ': code = 57; return true;
+    case '.': code = 52; return true;
+    case ',': code = 51; return true;
+    case '/': code = 53; return true;
+    case '-': code = 12; return true;
+    case '=': code = 13; return true;
+    case ';': code = 39; return true;
+    case '\'': code = 40; return true;
+    case '[': code = 26; return true;
+    case ']': code = 27; return true;
+    case '\\': code = 43; return true;
+    case '`': code = 41; return true;
+    case '!': shift = true; code = 2; return true;
+    case '@': shift = true; code = 3; return true;
+    case '#': shift = true; code = 4; return true;
+    case '$': shift = true; code = 5; return true;
+    case '%': shift = true; code = 6; return true;
+    case '^': shift = true; code = 7; return true;
+    case '&': shift = true; code = 8; return true;
+    case '*': shift = true; code = 9; return true;
+    case '(': shift = true; code = 10; return true;
+    case ')': shift = true; code = 11; return true;
+    case '_': shift = true; code = 12; return true;
+    case '+': shift = true; code = 13; return true;
+    case ':': shift = true; code = 39; return true;
+    case '"': shift = true; code = 40; return true;
+    case '?': shift = true; code = 53; return true;
+    case '<': shift = true; code = 51; return true;
+    case '>': shift = true; code = 52; return true;
+    default: return false;
+  }
+}
+
+void RnHost::loadHeadlessInput() {
+  headlessEvents_.clear();
+  headlessEventIdx_ = 0;
+  if (headlessInput_.empty())
+    return;
+  std::ifstream in(headlessInput_);
+  if (!in) {
+    logLine("HOST cannot open headless input %s", headlessInput_.c_str());
+    return;
+  }
+  // The file is one line per `sevyn files write` (the check writes it
+  // through the Terminal, which is single-line): events are separated
+  // by ';' (and newlines). A `type` event expands into key down/up
+  // pairs, one char per 30 ms, so the check types whole strings in a
+  // single event instead of one event per key.
+  std::stringstream ss;
+  ss << in.rdbuf();
+  std::string content = ss.str();
+  size_t pos = 0;
+  while (pos < content.size()) {
+    size_t end = content.find_first_of(";\n", pos);
+    std::string ev = content.substr(
+        pos, end == std::string::npos ? std::string::npos : end - pos);
+    pos = end == std::string::npos ? content.size() : end + 1;
+    // Trim leading whitespace.
+    size_t first = ev.find_first_not_of(" \t\r");
+    if (first == std::string::npos)
+      continue;
+    ev = ev.substr(first);
+    std::istringstream es(ev);
+    HeadlessEvent hev;
+    std::string kind;
+    if (!(es >> hev.atMs >> kind))
+      continue;
+    if (kind == "pointer") {
+      std::string action;
+      if (!(es >> action >> hev.x >> hev.y))
+        continue;
+      hev.isPointer = true;
+      // The renderer's pointer handler expects type "button" with
+      // pressed=true for a tap; "move" for motion.
+      hev.type = action == "move" ? "move" : "button";
+      hev.pressed = action == "down";
+      headlessEvents_.push_back(hev);
+    } else if (kind == "tap") {
+      // A tap is a down + an up 120 ms apart (one event, not two).
+      double x = 0, y = 0;
+      if (!(es >> x >> y))
+        continue;
+      HeadlessEvent down, up;
+      down.atMs = hev.atMs;
+      down.isPointer = true;
+      down.type = "button";
+      down.x = x;
+      down.y = y;
+      down.pressed = true;
+      up.atMs = hev.atMs + 120;
+      up.isPointer = true;
+      up.type = "button";
+      up.x = x;
+      up.y = y;
+      up.pressed = false;
+      headlessEvents_.push_back(down);
+      headlessEvents_.push_back(up);
+    } else if (kind == "scroll") {
+      // Scroll the ScrollView under (x, y) by (dx, dy) — the driver's
+      // way to reach below-the-fold controls (Tokrah's Go Live
+      // screen flexes its preview, so its Start button is always
+      // below the fold). The renderer clamps at the content edge.
+      if (!(es >> hev.x >> hev.y >> hev.dx >> hev.dy))
+        continue;
+      hev.isPointer = false;
+      hev.isScroll = true;
+      headlessEvents_.push_back(hev);
+    } else if (kind == "key") {
+      std::string action;
+      int shift = 0;
+      if (!(es >> hev.code >> action >> shift))
+        continue;
+      hev.isPointer = false;
+      hev.pressed = action == "down";
+      hev.shift = shift != 0;
+      headlessEvents_.push_back(hev);
+    } else if (kind == "type") {
+      // The rest of the event (up to ';' or end of line) is the text.
+      std::string text;
+      std::getline(es, text);
+      size_t tfirst = text.find_first_not_of(" \t\r");
+      if (tfirst != std::string::npos)
+        text = text.substr(tfirst);
+      long long t = hev.atMs;
+      for (char c : text) {
+        uint32_t code = 0;
+        bool shift = false;
+        if (!charToKey(c, code, shift)) {
+          logLine("HOST headless input: no key for %c, skipping", c);
+          continue;
+        }
+        HeadlessEvent down, up;
+        down.atMs = t;
+        down.isPointer = false;
+        down.code = code;
+        down.pressed = true;
+        down.shift = shift;
+        up.atMs = t + 15;
+        up.isPointer = false;
+        up.code = code;
+        up.pressed = false;
+        up.shift = shift;
+        headlessEvents_.push_back(down);
+        headlessEvents_.push_back(up);
+        t += 30;
+      }
+    }
+  }
+  std::sort(headlessEvents_.begin(), headlessEvents_.end(),
+            [](const HeadlessEvent& a, const HeadlessEvent& b) {
+              return a.atMs < b.atMs;
+            });
+  logLine("HOST headless input: %zu events from %s", headlessEvents_.size(),
+          headlessInput_.c_str());
+}
+
+void RnHost::fireDueHeadlessInput() {
+  if (headlessEvents_.empty())
+    return;
+  long long elapsed = nowMs() - headlessStartMs_;
+  while (headlessEventIdx_ < headlessEvents_.size() &&
+         headlessEvents_[headlessEventIdx_].atMs <= elapsed) {
+    const HeadlessEvent& ev = headlessEvents_[headlessEventIdx_++];
+    if (ev.isScroll) {
+      dispatchScroll(ev.x, ev.y, ev.dx, ev.dy);
+    } else if (ev.isPointer) {
+      // A tap is a down + an up; the file carries both lines.
+      dispatchPointer(ev.type, ev.x, ev.y, /*button=*/1, ev.pressed);
+    } else {
+      dispatchKey(ev.code, ev.pressed, ev.shift);
+    }
+  }
+}
+
 int RnHost::run() {
   const bool isApp = !appId_.empty();
+  if (headless_) {
+    logLine("HOST headless mode: no Wayland surface");
+  } else {
   wayland_ = std::make_unique<Wayland>(
       width_, height_, /*fullscreen=*/!isApp,
       isApp ? appName_ : "SevynOS Shell",
@@ -1093,7 +1666,8 @@ int RnHost::run() {
     logLine("HOST Wayland setup failed");
     return 1;
   }
-  if (isApp) {
+  }
+  if (isApp && !headless_) {
     // The compositor's close request ends the app (the shell is not
     // closable). Exit code 0: appd reports STOPPED, not CRASHED.
     wayland_->setCloseHandler(
@@ -1124,6 +1698,7 @@ int RnHost::run() {
   });
   appClient_->start();
 
+  if (!headless_) {
   wayland_->setPointerHandler(
       [this](const std::string& type, double x, double y, uint32_t button,
              bool pressed) { dispatchPointer(type, x, y, button, pressed); });
@@ -1131,6 +1706,7 @@ int RnHost::run() {
       [this](uint32_t key, bool pressed, bool shift) {
         dispatchKey(key, pressed, shift);
       });
+  }
 
   try {
     runtime_ = facebook::hermes::makeHermesRuntime();
@@ -1170,6 +1746,58 @@ int RnHost::run() {
   else
     logLine("HOST shell running (SEVYNOS_M2_READY)");
 
+  if (headless_) {
+    // Headless main loop: no compositor to drive us. Timers, status
+    // and app-event updates drain each tick; input arrives from the
+    // timed event file. With --headless-seconds the run ends on
+    // schedule (exit 0); without it the host runs until killed or the
+    // bundle closes itself via Sevyn.closeApp().
+    headlessStartMs_ = nowMs();
+    loadHeadlessInput();
+    // Heartbeat every 5 s: proves the loop is alive even when the app
+    // logs nothing. If it stops, the loop is blocked inside a JS call
+    // (a spinning microtask/timer) or the process is dead — the two
+    // failure modes the navigate flake kept conflating.
+    long long lastBeatMs = 0;
+    while (true) {
+      if (exitRequested_.load()) {
+        logLine("HOST %s exiting (close requested)",
+                isApp ? "app" : "shell");
+        return 0;
+      }
+      if (headlessSeconds_ > 0 &&
+          nowMs() - headlessStartMs_ >= (long long)headlessSeconds_ * 1000) {
+        logLine("HOST headless run complete (%d seconds, %lld presents)",
+                headlessSeconds_, headlessPresents_);
+        return 0;
+      }
+      // A throwing microtask (e.g. an unhandled promise rejection
+      // from a navigation) must not kill the host: drainMicrotasks
+      // propagates it, and an uncaught JSError aborts the process
+      // with no log. Log it and keep the loop alive instead — the
+      // app stays up and the next input event can still land.
+      try {
+        fireDueHeadlessInput();
+        fireDueTimers(rt);
+        rt.drainMicrotasks();
+        drainStatusQueue();
+        drainAppEventQueue();
+        drainExecCompletions(rt);
+      } catch (const jsi::JSError& e) {
+        logLine("HOST headless tick failed: %s", e.getMessage().c_str());
+        logLine("HOST headless tick stack: %s", e.getStack().c_str());
+      }
+      long long elapsed = nowMs() - headlessStartMs_;
+      if (elapsed - lastBeatMs >= 5000) {
+        lastBeatMs = elapsed;
+        logLine("HOST headless beat %llds (%lld presents)", elapsed / 1000,
+                headlessPresents_);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+    return 0;
+  }
+
   // Main loop: Wayland events drive JS; status + app-event updates
   // drain each tick. A close request (window X or Sevyn.closeApp())
   // exits cleanly with code 0.
@@ -1183,10 +1811,18 @@ int RnHost::run() {
       logLine("HOST Wayland display lost, exiting");
       return 1;
     }
-    fireDueTimers(rt);
-    rt.drainMicrotasks();
-    drainStatusQueue();
-    drainAppEventQueue();
+    // Same guard as the headless loop: a throwing microtask must not
+    // kill the shell.
+    try {
+      fireDueTimers(rt);
+      rt.drainMicrotasks();
+      drainStatusQueue();
+      drainAppEventQueue();
+      drainExecCompletions(rt);
+    } catch (const jsi::JSError& e) {
+      logLine("HOST tick failed: %s", e.getMessage().c_str());
+      logLine("HOST tick stack: %s", e.getStack().c_str());
+    }
   }
   return 0;
 }
@@ -1204,6 +1840,9 @@ int main(int argc, char** argv) {
   std::string bundle = kDefaultBundle;
   int width = kDefaultWidth, height = kDefaultHeight;
   std::string appId, appName, appColor, appGlyph, permissionsCsv;
+  bool headless = false;
+  int headlessSeconds = 0;
+  std::string headlessOut, headlessInput;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--bundle" && i + 1 < argc)
@@ -1222,12 +1861,22 @@ int main(int argc, char** argv) {
       appGlyph = argv[++i];
     else if (a == "--permissions" && i + 1 < argc)
       permissionsCsv = argv[++i];
+    else if (a == "--headless")
+      headless = true;
+    else if (a == "--headless-seconds" && i + 1 < argc)
+      headlessSeconds = atoi(argv[++i]);
+    else if (a == "--headless-out" && i + 1 < argc)
+      headlessOut = argv[++i];
+    else if (a == "--headless-input" && i + 1 < argc)
+      headlessInput = argv[++i];
     else if (a == "--help" || a == "-h") {
       fprintf(stderr,
               "usage: sevyn-rn-host [--bundle <path>] [--width <px>] "
               "[--height <px>] [--app <id>] [--name <name>] "
               "[--color <#rrggbb>] [--glyph <letter>] "
-              "[--permissions <csv>]\n");
+              "[--permissions <csv>] [--headless] "
+              "[--headless-seconds <n>] [--headless-out <path>] "
+              "[--headless-input <path>]\n");
       return 0;
     }
   }
@@ -1252,6 +1901,7 @@ int main(int argc, char** argv) {
       pidFile << getpid() << "\n";
   }
   RnHost host(width, height, bundle, appId, appName, appColor, appGlyph,
-              permissions);
+              permissions, headless, headlessSeconds, headlessOut,
+              headlessInput);
   return host.run();
 }

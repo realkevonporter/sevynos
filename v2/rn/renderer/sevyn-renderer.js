@@ -82,7 +82,53 @@ function makeInstance(type, props) {
     contentHeight: 0,
   };
   instancesByYogaId.set(yogaId, inst);
+  // RN host-component measurement API (UIManager.measure et al.).
+  // expo-router's useFrameSize and several navigation/layout hooks call
+  // ref.measure() in an effect after mount; without it the frame never
+  // sizes and the navigator renders blank. Layout is computed in
+  // presentRoot() at commit, so by effect time the box is real.
+  inst.measure = (cb) => {
+    const b = measureBox(inst);
+    if (cb) cb(b.x, b.y, b.width, b.height, b.pageX, b.pageY);
+  };
+  inst.measureInWindow = (cb) => {
+    const b = measureBox(inst);
+    if (cb) cb(b.pageX, b.pageY, b.width, b.height);
+  };
+  inst.measureLayout = (relativeTo, onSuccess, onFail) => {
+    let node = inst;
+    let x = 0;
+    let y = 0;
+    while (node && node !== relativeTo) {
+      const l = Sevyn.yogaGetLayout(node.yogaId);
+      x += l.x;
+      y += l.y;
+      node = node.parent;
+    }
+    if (node !== relativeTo) {
+      if (onFail) onFail();
+      return;
+    }
+    const l = Sevyn.yogaGetLayout(inst.yogaId);
+    if (onSuccess) onSuccess(x, y, l.width, l.height);
+  };
   return inst;
+}
+
+// Layout box of an instance: parent-relative (x, y) plus root-relative
+// (pageX, pageY), matching RN's measure() callback order.
+function measureBox(inst) {
+  const l = Sevyn.yogaGetLayout(inst.yogaId);
+  let pageX = 0;
+  let pageY = 0;
+  let n = inst;
+  while (n) {
+    const a = Sevyn.yogaGetLayout(n.yogaId);
+    pageX += a.x;
+    pageY += a.y;
+    n = n.parent;
+  }
+  return { x: l.x, y: l.y, width: l.width, height: l.height, pageX, pageY };
 }
 
 function textContent(inst) {
@@ -205,14 +251,29 @@ function emitInstance(inst, ox, oy, ops, clip) {
         nodeId: -1,
       });
     }
-    // Content size = max child extent (for scroll clamping).
+    // Content size = max descendant extent (for scroll clamping).
+    // Must walk ALL descendants, not just direct children: a
+    // ScrollView often has a single wrapper child flex-constrained
+    // to the viewport height, while the real content (grandchildren)
+    // overflows it — Tokrah's Go Live screen's wrapper is 1200 tall
+    // but its content reaches 1387, and the direct-children extent
+    // clamped the scroll to 0. Stop at nested ScrollViews: their own
+    // content is clipped by them and must not count toward this one.
     let cw = 0;
     let ch = 0;
-    for (const c of inst.children) {
-      const cl = Sevyn.yogaGetLayout(c.yogaId);
-      cw = Math.max(cw, cl.x + cl.width);
-      ch = Math.max(ch, cl.y + cl.height);
+    function contentExtent(node, oy2, ox2) {
+      for (const c of node.children) {
+        const cl = Sevyn.yogaGetLayout(c.yogaId);
+        // Yoga returns NaN (YGUndefined) for unmeasured nodes; one
+        // NaN would poison the whole extent via Math.max.
+        const ex = ox2 + cl.x + cl.width;
+        const ey = oy2 + cl.y + cl.height;
+        if (Number.isFinite(ex)) cw = Math.max(cw, ex);
+        if (Number.isFinite(ey)) ch = Math.max(ch, ey);
+        if (c.type !== "ScrollView") contentExtent(c, oy2 + cl.y, ox2 + cl.x);
+      }
     }
+    contentExtent(inst, 0, 0);
     inst.contentWidth = cw;
     inst.contentHeight = ch;
     const horizontal = st.flexDirection === "row";
@@ -593,14 +654,34 @@ function handleKey(ev) {
 function handlePointer(ev) {
   if (ev.type !== "button" || !ev.pressed) return;
   const inst = instancesByYogaId.get(ev.nodeId);
+  // Pointer debug: which instance a tap resolved to (testID +
+  // accessibilityLabel disambiguate overlapping pressables). Kept
+  // permanently; one line per tap, headless runs only.
+  Sevyn.log(
+    "POINTER nodeId " +
+      ev.nodeId +
+      " inst " +
+      (inst ? inst.type : "none") +
+      " onPress " +
+      !!(inst && inst.props && inst.props.onPress) +
+      " testID " +
+      (inst && inst.props ? inst.props.testID || "" : "") +
+      " label " +
+      (inst && inst.props ? inst.props.accessibilityLabel || "" : ""),
+  );
   if (!inst) return;
   focusedInstance = inst;
   if (inst.props && inst.props.onPress) {
     inst.props.onPress();
+    // Pinpoint a stuck tap: if the loop wedges inside the navigation,
+    // the "onPress returned" line never appears; if it wedges in the
+    // flush (the go-live mount render), only that line appears.
+    Sevyn.log("POINTER onPress returned nodeId " + ev.nodeId);
   }
   // Force the state update out now (see handleKey) and present, so the
   // press result is visible on the very next frame.
   SevynReconciler.flushSyncWork();
+  Sevyn.log("POINTER flush returned nodeId " + ev.nodeId);
   presentRoot();
 }
 
@@ -920,13 +1001,18 @@ function render(element, options) {
   Sevyn.onPointer(handlePointer);
   Sevyn.onKey(handleKey);
   Sevyn.onStatus(handleStatus);
+  if (typeof Sevyn.onScroll === "function") Sevyn.onScroll(scrollAt);
   if (typeof Sevyn.onAppEvent === "function") Sevyn.onAppEvent(handleAppEvent);
 
   // NOTE: the onUncaughtError handler must log — a no-op here would
-  // silently swallow render throws and mount an empty tree.
+  // silently swallow render throws and mount an empty tree. Log the
+  // stack too: on-device the message alone rarely names the thrower
+  // (e.g. a missing native global referenced by a real-RN module).
   const onUncaughtError = (error) => {
     Sevyn.log(
-      "render error: " + (error && error.message ? error.message : String(error)),
+      "render error: " +
+        (error && error.message ? error.message : String(error)) +
+        (error && error.stack ? "\n" + error.stack : ""),
     );
   };
   const root = SevynReconciler.createContainer(
@@ -1007,6 +1093,88 @@ function scrollTo(instance, x, y) {
     instance.scrollY = Math.max(0, Math.min(instance.contentHeight - l.height, y));
   }
   presentRoot();
+}
+
+// Scroll the topmost ScrollView containing (ev.x, ev.y) — the
+// headless driver's way to reach below-the-fold controls (Tokrah's
+// Go Live screen flexes its preview with the viewport, so its Start
+// button is always below the fold). Walk mirrors emitInstance's
+// coordinate math; the last (topmost) match wins.
+function scrollAt(ev) {
+  if (!rootContainer) return;
+  // Collect every ScrollView containing the point, outermost first.
+  // The gesture goes to the INNERMOST one that can actually scroll
+  // in the requested direction: a nested scroller whose content fits
+  // (Tokrah's Go Live screen has a 740x549 nested ScrollView under
+  // the point) must not swallow the gesture — it bubbles to the
+  // outer screen scroller (content 1387) that can scroll. If none
+  // can scroll, the innermost still gets the (no-op) event.
+  const candidates = [];
+  function walk(inst, ox, oy) {
+    if (inst.hidden) return;
+    const l = Sevyn.yogaGetLayout(inst.yogaId);
+    const x = ox + l.x;
+    const y = oy + l.y;
+    if (ev.x < x || ev.y < y || ev.x >= x + l.width || ev.y >= y + l.height) return;
+    if (inst.type === "ScrollView") {
+      candidates.push(inst);
+      const horizontal = flattenStyle(inst.props.style).flexDirection === "row";
+      const dx = horizontal ? -inst.scrollX : 0;
+      const dy = horizontal ? 0 : -inst.scrollY;
+      for (const c of inst.children) walk(c, x + dx, y + dy);
+    } else {
+      for (const c of inst.children) walk(c, x, y);
+    }
+  }
+  for (const c of rootContainer.children) walk(c, 0, 0);
+  if (!candidates.length) return;
+  const dx = ev.dx || 0;
+  const dy = ev.dy || 0;
+  // Debug: which scrollers contain the point, and can they scroll?
+  // (One line per scroll event; the Go Live screen has a nested
+  // 740x549 scroller that must not swallow the outer gesture.)
+  const candStr = candidates
+    .map((inst) => {
+      const l = Sevyn.yogaGetLayout(inst.yogaId);
+      return (
+        inst.contentWidth + "x" + inst.contentHeight + "/" + l.width + "x" + l.height
+      );
+    })
+    .join(" ");
+  Sevyn.log("SCROLL candidates (" + ev.x + "," + ev.y + "): " + candStr);
+  let target = candidates[candidates.length - 1];
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const inst = candidates[i];
+    const l = Sevyn.yogaGetLayout(inst.yogaId);
+    const canScroll =
+      (dy !== 0 && inst.contentHeight > l.height) ||
+      (dx !== 0 && inst.contentWidth > l.width);
+    if (canScroll) {
+      target = inst;
+      break;
+    }
+  }
+  const before = target.scrollY;
+  scrollBy(target, ev.dx || 0, ev.dy || 0);
+  Sevyn.log(
+    "SCROLL (" +
+      ev.x +
+      "," +
+      ev.y +
+      ") by (" +
+      (ev.dx || 0) +
+      "," +
+      (ev.dy || 0) +
+      ") -> scrollY " +
+      before +
+      " -> " +
+      target.scrollY +
+      " (content " +
+      target.contentWidth +
+      "x" +
+      target.contentHeight +
+      ")",
+  );
 }
 
 module.exports = {

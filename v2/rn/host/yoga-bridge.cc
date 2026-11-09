@@ -154,6 +154,16 @@ void YogaBridge::setPositionType(int id, int v) {
   if (n)
     YGNodeStyleSetPositionType(n, (YGPositionType)v);
 }
+void YogaBridge::setPosition(int id, int edge, float v) {
+  YGNodeRef n = node(id);
+  if (n)
+    YGNodeStyleSetPosition(n, (YGEdge)edge, v);
+}
+void YogaBridge::setPositionPercent(int id, int edge, float v) {
+  YGNodeRef n = node(id);
+  if (n)
+    YGNodeStyleSetPositionPercent(n, (YGEdge)edge, v);
+}
 void YogaBridge::setDisplay(int id, int v) {
   YGNodeRef n = node(id);
   if (n)

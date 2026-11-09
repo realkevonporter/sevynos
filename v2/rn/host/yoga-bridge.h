@@ -41,6 +41,8 @@ class YogaBridge {
   void setAlignContent(int id, int v);
   void setFlexWrap(int id, int v);
   void setPositionType(int id, int v);
+  void setPosition(int id, int edge, float v);
+  void setPositionPercent(int id, int edge, float v);
   void setDisplay(int id, int v);
   void setOverflow(int id, int v);
   void setFlex(int id, float v);
