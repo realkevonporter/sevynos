@@ -175,6 +175,20 @@ jobs:
           # so the image and the check agree on the version string.
           sudo env SEVYN_V2_VERSION=m6-test-1 TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m6-image.sh
 
+      - name: Install Tokrah API deps (mock server needs socket.io)
+        run: |
+          # The host-side harness gate (m6-check step 0) runs
+          # drive-live.js against mock-api.js, which falls back to
+          # TOKRAH_SRC/api/node_modules/socket.io — the same server
+          # version the real API runs. Only the consumer app got a
+          # yarn install (inside the image build), so the fallback
+          # is missing in CI. Install the API deps here; the api
+          # package pins yarn@1.22.22 and has a yarn.lock. Run
+          # yarn from the api dir, never the sevynos checkout
+          # (yarn 1.22 refuses a pnpm-pinned package.json).
+          cd "$GITHUB_WORKSPACE/tokrah/api"
+          yarn install --frozen-lockfile --non-interactive
+
       - name: Run the M6 check in QEMU
         env:
           TOKRAH_SRC: ${{ github.workspace }}/tokrah
