@@ -129,12 +129,15 @@ jobs:
 
       - name: Install yarn (Tokrah's pinned 1.22.22)
         run: |
-          # corepack cannot activate yarn here: it refuses when the
-          # checkout's package.json pins a different manager (sevynos
-          # pins pnpm), and it detects the project even from /tmp.
-          # Install yarn globally with npm instead; sevynos itself
-          # stays pnpm.
+          # yarn 1.22 refuses to run inside a checkout whose
+          # package.json pins a different manager (sevynos pins
+          # pnpm@11.17.0) — corepack failed the same way, and
+          # running from /tmp does not help. Install yarn
+          # globally with npm, then run every yarn command from
+          # the Tokrah clone, whose package.json pins
+          # yarn@1.22.22. Sevynos itself stays pnpm.
           npm install -g yarn@1.22.22
+          cd "$GITHUB_WORKSPACE/tokrah"
           yarn config set registry https://registry.npmjs.org
 
       - name: Cache native deps (Hermes + Yoga)
