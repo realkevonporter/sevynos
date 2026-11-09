@@ -40,9 +40,11 @@
 import { spawn, execFile } from "node:child_process";
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   openSync,
   readFileSync,
+  statSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -55,6 +57,11 @@ const OUT = process.env.SEVYN_V2_BUILD_DIR || join(ROOT, "image", "build");
 const DISK = join(OUT, "m6-data.img");
 const TIMEOUT_S = Number(process.env.SEVYN_V2_M6_TIMEOUT || 3600);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
+// QEMU accelerator: "tcg" in the sandbox (no /dev/kvm), "kvm" on a
+// box with real KVM. The go-live mount flush is 727-956ms under TCG
+// and a retry tap landing mid-flush wedges it; under KVM the flush
+// is fast and the wedge should vanish.
+const ACCEL = process.env.SEVYN_V2_ACCEL || "tcg";
 const TOKRAH_SRC = process.env.TOKRAH_SRC || "";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -254,6 +261,16 @@ async function boot(tag) {
   const bootSlot = state.active;
   const { kern, initrd } = await dumpSlot(bootSlot, tag);
   const logPath = join(OUT, `m6-boot-${tag}.log`);
+  // Archive the previous run's log before overwriting: a failing
+  // run destroys its own evidence otherwise (the serial log is
+  // overwritten every check run). Timestamped so runs don't clobber
+  // each other.
+  try {
+    if (existsSync(logPath) && statSync(logPath).size > 0) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      copyFileSync(logPath, join(OUT, `m6-boot-${tag}-${stamp}.log`));
+    }
+  } catch {}
   writeFileSync(logPath, "");
   // Synchronous appends, not a piped write stream: a stream buffers
   // in userspace, so readFileSync (which waitForLog polls) could not
@@ -277,7 +294,7 @@ async function boot(tag) {
     QEMU,
     [
       "-machine",
-      "q35",
+      `q35,accel=${ACCEL}`,
       "-m",
       "4096",
       "-smp",
@@ -574,6 +591,19 @@ async function termCmd(b, cmd, timeoutMs = 180000) {
   );
   return hit;
 }
+// Write an input file and verify it by reading it back: termCmd's
+// EXEC-prefix match is a false negative when QMP drops a character
+// in the typed command, so confirm the file's content is actually on
+// disk via `files cat`. The login email is in every input file; the
+// wait is scoped after the cat, so the write command's own echo
+// (which also contains the email) can't satisfy it.
+async function writeInputFile(b, path, content) {
+  await termCmd(b, `files write ${path} ${content}`);
+  const beforeCat = logLines(b.logPath).length;
+  await termCmd(b, `files cat ${path}`);
+  return waitForLog(b.logPath, /m6@sevynos\.test/, 30000, beforeCat);
+}
+
 // --- compact ops log parsing ---
 // The headless host logs one `HOST headless ops {json}` line per
 // screen (texts + pressable rects). Return the latest one.
@@ -813,7 +843,7 @@ async function main() {
     `20000 tap 80 1177`,
   ].join(";");
   const beforeB = logLines(b.logPath).length;
-  const wroteB = await termCmd(b, `files write /tmp/m6-in-b.txt ${inB}`);
+  const wroteB = await writeInputFile(b, "/tmp/m6-in-b.txt", inB);
   note("headless B: input file written", !!wroteB);
   const runB = await termCmd(
     b,
@@ -862,15 +892,14 @@ async function main() {
     // Go-live at 28000, not 20000: the login navigation is still
     // settling at 20000 (home feed appears ~21000ms under TCG) and a
     // navigate fired mid-settle wedges flushSyncWork (check 42).
+    // SINGLE tap, no retries: the retry taps at +2s/+4s re-enter
+    // router.navigate + flushSyncWork while tap 1's mount flush is
+    // still running (727-956ms under TCG) and the update gets
+    // dropped — no error, feed stays on screen. The probe retry loop
+    // (fresh host process) is the fallback, not in-run re-taps.
     `28000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
-    // The go-live navigate is flaky in-guest (onPress fires, no
-    // navigation, no error — checks 22/23/29/35/36/37/39): tap again
-    // twice more. If an earlier tap already navigated, the retries
-    // land on the go-live screen's category area (a focus tap at worst).
-    `30000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
-    `32000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
   ].join(";");
-  const wroteC1 = await termCmd(b, `files write /tmp/m6-in-c1.txt ${inC1}`);
+  const wroteC1 = await writeInputFile(b, "/tmp/m6-in-c1.txt", inC1);
   note("headless C: probe input written", !!wroteC1);
   // Retry the probe once on a fresh host process: the go-live
   // navigate can wedge flushSyncWork under TCG (onPress fires, no
@@ -884,14 +913,14 @@ async function main() {
   let startT = null;
   for (let attempt = 0; attempt < 2 && !(titleT && ageT && startT); attempt++) {
     if (attempt > 0) {
-      await termCmd(b, `files write /tmp/m6-in-c1-retry.txt ${inC1}`);
+      await writeInputFile(b, "/tmp/m6-in-c1-retry.txt", inC1);
     }
     const beforeC1 = logLines(b.logPath).length;
     const runC1 = await termCmd(
       b,
       attempt === 0
-        ? "tokrah run --width 800 --height 1200 --seconds 40 --input /tmp/m6-in-c1.txt --out /tmp/m6-ops-c1.json"
-        : "tokrah run --width 800 --height 1200 --seconds 40 --input /tmp/m6-in-c1-retry.txt --out /tmp/m6-ops-c1-retry.json",
+        ? "tokrah run --width 800 --height 1200 --seconds 60 --input /tmp/m6-in-c1.txt --out /tmp/m6-ops-c1.json"
+        : "tokrah run --width 800 --height 1200 --seconds 60 --input /tmp/m6-in-c1-retry.txt --out /tmp/m6-ops-c1-retry.json",
       240000,
     );
     check(
@@ -905,7 +934,16 @@ async function main() {
       beforeC1,
     );
     check("headless C: login replayed in probe run", !!loginPostC);
-    await waitForLog(b.logPath, /What’s happening\?/, 120000, beforeC1);
+    // Log the wait's own outcome: a timeout here is "screen didn't
+    // appear in 120s", not "screen absent" — conflating the two hid
+    // the wedge (the run ended before the flush finished).
+    const goLiveSeen = await waitForLog(
+      b.logPath,
+      /What’s happening\?/,
+      120000,
+      beforeC1,
+    );
+    note("headless C: go-live screen text seen in log", !!goLiveSeen);
     opsC1 = latestOps(b);
     titleT = opsC1 ? textCenter(opsC1, "What’s happening?") : null;
     ageT = opsC1 ? textCenter(opsC1, "I confirm I’m at least 18 years old.") : null;
@@ -938,9 +976,8 @@ async function main() {
   const scrollDy = Math.min(Math.max(0, startT.y - 1100), maxScroll);
   const startLiveSeq = [
     `28000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
-    // Retries: the go-live navigate is flaky in-guest (see probe).
-    `30000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
-    `32000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
+    // Single go-live tap (same reasoning as the probe): retry taps
+    // re-enter navigate mid-flush and wedge it.
     `34000 tap ${Math.round(titleBtn.x)} ${Math.round(titleBtn.y)}`,
     `34500 type M6 test live`,
     // Scroll AT the title: the point must be inside the Go Live form's
@@ -955,7 +992,7 @@ async function main() {
     `39500 tap ${Math.round(startBtn.x)} ${Math.round(startBtn.y - scrollDy)}`,
   ];
   const inC = [...loginSeqC1, ...startLiveSeq].join(";");
-  const wroteC = await termCmd(b, `files write /tmp/m6-in-c.txt ${inC}`);
+  const wroteC = await writeInputFile(b, "/tmp/m6-in-c.txt", inC);
   note("headless C: start-live input written", !!wroteC);
   const beforeC = logLines(b.logPath).length;
   const runC = await termCmd(
@@ -983,7 +1020,8 @@ async function main() {
   // effect can re-run on a param change, dropping the single-use
   // remembered credentials and falling back to the joinLive network
   // call, which is slow under TCG (check 41).
-  await waitForLog(b.logPath, /"t":"End"/, 240000, beforeC);
+  const endSeen = await waitForLog(b.logPath, /"t":"End"/, 240000, beforeC);
+  note("headless C: End button text seen in log", !!endSeen);
   const opsC = latestOps(b);
   const endT = opsC ? textCenter(opsC, "End") : null;
   check(
@@ -1006,12 +1044,16 @@ async function main() {
     "net fetch --method POST http://127.0.0.1:7070/v1/live/reset",
   );
   check("headless C: mock live state reset", !!resetOk);
-  await waitForLog(
+  // Capture the wait: if the reset never landed, phase D's home
+  // feed shows "Resume your live" and the title tap joins the old
+  // live instead of starting a new one (run 53).
+  const resetSeen = await waitForLog(
     b.logPath,
     /MOCK \{"kind":"http","method":"POST","path":"\/v1\/live\/reset"/,
     60000,
     beforeReset,
   );
+  note("headless C: mock reset confirmed in log", !!resetSeen);
 
   // --- Phase D: end the live. ---
   // The End confirm modal's "End live" button: its coordinates are
@@ -1023,7 +1065,7 @@ async function main() {
     ...startLiveSeq,
     `55000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
   ].join(";");
-  const wroteD = await termCmd(b, `files write /tmp/m6-in-d.txt ${inD}`);
+  const wroteD = await writeInputFile(b, "/tmp/m6-in-d.txt", inD);
   note("headless D: end-live input written", !!wroteD);
   const runD = await termCmd(
     b,
@@ -1046,7 +1088,7 @@ async function main() {
       // matches the first 80 chars of the command, and an identical
       // command would "complete" on the first run's stale EXEC line
       // (check 47: the retry never actually ran).
-      await termCmd(b, `files write /tmp/m6-in-d-retry.txt ${inD}`);
+      await writeInputFile(b, "/tmp/m6-in-d-retry.txt", inD);
       const runD2try = await termCmd(
         b,
         "tokrah run --width 800 --height 1200 --seconds 65 --input /tmp/m6-in-d-retry.txt --out /tmp/m6-ops-d-retry.json",
@@ -1088,7 +1130,7 @@ async function main() {
     `55000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
     `60000 tap ${Math.round(endLiveBtn.x)} ${Math.round(endLiveBtn.y)}`,
   ].join(";");
-  const wroteD2 = await termCmd(b, `files write /tmp/m6-in-d2.txt ${inD2}`);
+  const wroteD2 = await writeInputFile(b, "/tmp/m6-in-d2.txt", inD2);
   note("headless D: confirm input written", !!wroteD2);
   const beforeD2 = logLines(b.logPath).length;
   const runD2 = await termCmd(
@@ -1169,6 +1211,16 @@ function finish(ok, extra = {}) {
   // the data disk's write lock for the next run.
   try {
     if (currentBoot) closeBoot(currentBoot);
+  } catch {}
+  // Snapshot this run's serial log before exiting: the next check
+  // run's boot() archives it, but a snapshot at the end is the
+  // primary evidence for this run.
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const src = join(OUT, "m6-boot-main.log");
+    if (existsSync(src) && statSync(src).size > 0) {
+      copyFileSync(src, join(OUT, `m6-boot-main-${stamp}.log`));
+    }
   } catch {}
   process.exit(ok ? 0 : 1);
 }
