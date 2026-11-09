@@ -1,8 +1,8 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M5 merged (PR #92, 2026-11-08). M6 in progress (this PR).**
+**Status: M6 merged (PR #93, 2026-11-09). M7 in progress (bare-metal boot).**
 M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
-#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). M4.5 merged 2026-11-07 (PR #91). M5 merged 2026-11-08 (PR #92). This directory is
+#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). M4.5 merged 2026-11-07 (PR #91). M5 merged 2026-11-08 (PR #92). M6 merged 2026-11-09 (PR #93). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never
@@ -236,8 +236,12 @@ feed ships unsigned and installed systems refuse it (fail-closed):
   is a named acceptance test.
 - **M6 — Tokrah bring-up (dogfood).** Tokrah runs as a third-party app —
   the "100% RN compatible" proof.
-- **M7 — Public milestone.** Image published, install guide written, first
-  external user boots it.
+- **M7 — Bare-metal boot (REDEFINED 2026-11-09, Kevon).** SevynOS boots
+  on real hardware, not QEMU, with a working shell — display, input,
+  network up. Target: his MSI GF65 Thin 9SD laptop. The GPT disk image
+  (sevynos.img) boots from USB under UEFI with Secure Boot ON. The old
+  public-milestone scope (image published, install guide, first
+  external user) is OUT of M7, deferred.
 
 ## Build + boot the empty image (M0)
 
