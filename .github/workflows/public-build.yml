@@ -55,7 +55,33 @@ jobs:
             libgl1-mesa-dri \
             adwaita-icon-theme \
             fonts-dejavu-core \
-            xkb-data
+            xkb-data \
+            ovmf \
+            grub-efi-amd64-signed \
+            grub-efi-amd64 \
+            shim-signed \
+            dosfstools \
+            gdisk \
+            mtools
+      - name: Clone Tokrah (private — read-only PAT)
+        run: |
+          if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
+            echo "::error::TOKRAH_READ_TOKEN is not set. Add a read-only repo-scoped PAT as the TOKRAH_READ_TOKEN secret on realkevonporter/sevynos (Kevon's one-time action) — the nightly M7 image includes Tokrah and cannot build without it."
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
+      - name: Install yarn (Tokrah's pinned 1.22.22)
+        run: |
+          # yarn 1.22 refuses to run inside a checkout whose
+          # package.json pins a different manager (sevynos pins
+          # pnpm@11.17.0). Install yarn globally with npm, then
+          # run every yarn command from the Tokrah consumer app
+          # dir, whose package.json pins yarn@1.22.22. The clone
+          # ROOT has no package.json, so yarn walks up from there
+          # and hits sevynos's pnpm pin. Sevynos itself stays pnpm.
+          npm install -g yarn@1.22.22
+          cd "$GITHUB_WORKSPACE/tokrah/tokrah"
+          yarn config set registry https://registry.npmjs.org
       - name: Cache v2 native deps (Hermes + Yoga)
         uses: actions/cache@v4
         with:
@@ -65,24 +91,28 @@ jobs:
             sevynos-v2-deps-
       - name: Build v2 native deps
         run: sh v2/rn/host/build-deps.sh
-      - name: Build v2 (M5 connectivity + Chromium) image
+      - name: Build v2 (M7 bare-metal boot) image
+        env:
+          TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
-          sudo sh v2/image/build-m5-image.sh
+          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m7-image.sh
           sudo chown -R "$USER" v2/image/build
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
-          sha256sum vmlinuz initramfs.cpio.gz > v2-SHA256SUMS
+          sha256sum vmlinuz initramfs.cpio.gz sevynos.img > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
-          SevynOS v2 (M5 connectivity + Chromium browser) — bootable image
+          SevynOS v2 (M7 bare-metal boot) — bootable image
           ==============================================
-          Kernel + initramfs for QEMU (x86_64). Boots to the SevynOS shell:
-          top bar with live status, main area, dock with 12 apps — and
-          dock clicks now open the app in its own window (one sandboxed
-          Hermes runtime per app). Stock apps install from pristine
-          bundles in the image; delete one and reinstall it offline.
-          The system now updates itself in place (A/B slots, signed
-          updates-v2.json feed) — no USB re-flash.
+          Kernel + initramfs for QEMU (x86_64), plus sevynos.img — a
+          GPT USB-boot disk image for real hardware. Boots to the
+          SevynOS shell: top bar with live status, main area, dock
+          with 12 apps — and dock clicks open the app in its own
+          window (one sandboxed Hermes runtime per app). Stock apps
+          install from pristine bundles in the image; delete one and
+          reinstall it offline. The system now updates itself in
+          place (A/B slots, signed updates-v2.json feed) — no USB
+          re-flash.
           Terminal, Settings, and Files are real system apps now:
           the Terminal runs only the `sevyn` CLI (no bash — it is the
           recovery path: kill the shell, start it back from the
@@ -99,17 +129,39 @@ jobs:
           `sevyn browser open <url>` from the Terminal does the same.
           Sevyn Code finally paints in a window: open it from the
           Browser at http://127.0.0.1:8080/.
+          Tokrah runs as a third-party app: `sevyn tokrah run` in the
+          Terminal, or from the dock.
+          M7: the image boots on real hardware — Intel i915 graphics,
+          Intel wifi (iwlwifi), NVMe storage, wired LAN, HDA audio —
+          and the network now comes from DHCP instead of a hardcoded
+          address. The GPT image boots under UEFI with Secure Boot ON
+          (Microsoft-signed shim + Canonical-signed GRUB).
 
-          Boot it (4 GB RAM: Chromium + Sevyn Code run in the image):
+          Boot it in QEMU (4 GB RAM: Chromium + Sevyn Code run in the image):
             qemu-system-x86_64 -machine q35 -m 4096 -kernel vmlinuz \
               -initrd initramfs.cpio.gz -append "console=ttyS0" \
               -vga none -device virtio-gpu-pci -device qemu-xhci \
               -device usb-tablet -nic user,model=virtio-net-pci
 
+          Boot it in QEMU the way real hardware does (UEFI + NVMe):
+            qemu-system-x86_64 -machine q35,accel=kvm -m 4096 \
+              -drive if=pflash,format=raw,unit=0,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd,readonly=on \
+              -drive if=pflash,format=raw,unit=1,file=<copy of OVMF_VARS_4M.ms.fd> \
+              -drive file=sevynos.img,format=raw,if=none,id=nvme0 \
+              -device nvme,drive=nvme0,serial=sevynos0 \
+              -device virtio-gpu-pci -device qemu-xhci \
+              -device usb-tablet -nic user,model=virtio-net-pci
+
+          Boot it on real hardware (MSI GF65 Thin 9SD and friends):
+            dd if=sevynos.img of=/dev/sdX bs=4M status=progress
+            (sdX is the USB stick — NOT the internal disk), then
+            boot from USB. It does not touch the internal disk;
+            M7 is "boot", not "install".
+
           Verify the download with v2-SHA256SUMS.
           This is a development snapshot, not a stable release.
           EOF
-          ls -l vmlinuz initramfs.cpio.gz v2-SHA256SUMS v2-BOOT-NOTES.txt
+          ls -l vmlinuz initramfs.cpio.gz sevynos.img v2-SHA256SUMS v2-BOOT-NOTES.txt
       - name: Generate the v2 update feed
         env:
           SEVYN_UPDATE_SIGNING_KEY: ${{ secrets.SEVYN_UPDATE_SIGNING_KEY }}
@@ -148,7 +200,7 @@ jobs:
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
 
-            SevynOS v2 (M5 connectivity + Chromium browser) image: vmlinuz + initramfs.cpio.gz
+            SevynOS v2 (M7 bare-metal boot) image: vmlinuz + initramfs.cpio.gz + sevynos.img
             (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
             status tray, dock with 12 apps — and dock clicks open apps
             in their own windows. Terminal, Settings, Files, and the
@@ -157,6 +209,9 @@ jobs:
             AI is baked in through the connector: `sevyn ai` plugs an
             AI in (echo-ai and plan-ai ship as stubs) and drives the
             system through permissions; pick the AI in Settings.
+            Tokrah runs as a third-party app. M7: the image boots on
+            real hardware — sevynos.img is a GPT USB-boot disk image
+            (UEFI, Secure Boot) for the MSI GF65 Thin 9SD and friends.
             The v1 ISO below is the old
             tree's image. updates-v2.json is the v2 update feed: an
             installed v2 system checks it and updates in place (A/B
@@ -167,5 +222,5 @@ jobs:
           removeArtifacts: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
-          # The v2-* files are the M5 connectivity + Chromium image (kernel + initramfs).
-          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"
+          # The v2-* files are the M7 bare-metal boot image (kernel + initramfs + GPT disk image).
+          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"

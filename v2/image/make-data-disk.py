@@ -4,6 +4,7 @@
 Usage:
   make-data-disk.py --kernel <vmlinuz> --initramfs <initramfs.cpio.gz>
                     --version <version> --out <disk.img> [--size-mb N]
+                    [--label LABEL]
 
 Layout (ext4, no partition table — the guest mounts /dev/vda directly):
   /slots/A/vmlinuz
@@ -15,6 +16,11 @@ Layout (ext4, no partition table — the guest mounts /dev/vda directly):
 Writes go through debugfs (no loop mount, no root needed beyond
 mkfs.ext4). The guest's init mounts the disk at /data; the updater
 reads/writes the slot state there.
+
+--label sets the filesystem label (M7: SEVYN_DATA). The M7 init mounts
+the data disk by label (/dev/disk/by-label/SEVYN_DATA) because on bare
+metal the device name varies by bus; the M6 data disk has no label and
+mounts by /dev/vda instead.
 """
 import argparse
 import json
@@ -40,6 +46,7 @@ def main():
     ap.add_argument("--version", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--size-mb", type=int, default=256)
+    ap.add_argument("--label", default=None)
     args = ap.parse_args()
 
     kernel = Path(args.kernel)
@@ -59,7 +66,10 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as f:
         f.truncate(size_mb * 1024 * 1024)
-    run(["mkfs.ext4", "-q", "-F", str(out)])
+    mkfs = ["mkfs.ext4", "-q", "-F"]
+    if args.label:
+        mkfs += ["-L", args.label]
+    run(mkfs + [str(out)])
 
     state = {"active": "A", "good": "A", "attempts": 0,
              "version": args.version}
