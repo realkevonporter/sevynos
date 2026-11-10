@@ -785,15 +785,55 @@ async function main() {
     await click();
     await sleep(300);
   }
-  // Focus order: [X, Nightly, Stable, echo-ai, plan-ai] (M4.5 adds
-  // the AI buttons after the channel buttons). Tab x3 -> Stable.
-  await key("tab");
-  await key("tab");
-  await key("tab");
-  {
-    const before = logLines(b.logPath).length;
+  // M9: the Wi-Fi section comes first in Settings, so its Scan button
+  // is focusable before the channel buttons — the focus order is now
+  // [X, Scan, Nightly, Stable, echo-ai, plan-ai], and Tab x3 lands on
+  // Nightly, not Stable. Click the Stable button directly (like the
+  // Nightly step below): it sits in the same row as Nightly, 132px
+  // right of it (120px button + 12px gap), centre (+208, +135) from
+  // the window's top-left. Verify the top edge first, fall back to
+  // Tab x4 if the pixel is not the inactive button.
+  const beforeStable = logLines(b.logPath).length;
+  let clickedStable = false;
+  if (settingsHeader) {
+    const vx = settingsHeader.left + 160;
+    const vy = settingsHeader.top + 120;
+    const i = (vy * shotSettings.width + vx) * 3;
+    const [pr, pg, pb] = [
+      shotSettings.pixels[i],
+      shotSettings.pixels[i + 1],
+      shotSettings.pixels[i + 2],
+    ];
+    const isStableButton =
+      Math.abs(pr - 229) <= 10 && Math.abs(pg - 231) <= 10 && Math.abs(pb - 235) <= 10;
+    if (isStableButton) {
+      await moveTo(
+        settingsHeader.left + 208,
+        settingsHeader.top + 135,
+        shotSettings.width,
+        shotSettings.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
+      clickedStable = true;
+    }
+  }
+  if (!clickedStable) {
+    // Fallback: Tab x4 -> Stable (X, Scan, Nightly, Stable).
+    await key("tab");
+    await key("tab");
+    await key("tab");
+    await key("tab");
     await key("ret");
-    const hit = await waitForLog(b.logPath, /SETTINGS channel=stable/, 15000, before);
+  }
+  {
+    const hit = await waitForLog(
+      b.logPath,
+      /SETTINGS channel=stable/,
+      15000,
+      beforeStable,
+    );
     check("settings: Stable applies (SETTINGS channel=stable)", !!hit, hit || "");
     const st = await updCmd(b, "STATUS", /UPDATE STATUS .* channel=stable /);
     check("settings: persisted channel reads back as stable", !!st, st || "");

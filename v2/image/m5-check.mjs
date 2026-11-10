@@ -1084,7 +1084,13 @@ async function main() {
     if (chromiumViewport && termPos) {
       const stripX = Math.round((chromiumViewport.x0 + termPos.left) / 2);
       const stripY = Math.round((chromiumViewport.y0 + chromiumViewport.y1) / 2);
-      await moveTo(stripX, stripY, 1024, 768);
+      // M9: the shell flex-sizes to the surface (no longer a fixed
+      // 1024x768), so the screen is 1280x800 here — a moveTo scaled
+      // for 1024x768 lands ~25% right of the strip and never raises
+      // Chromium, so the white poll sees the Terminal instead. Scale
+      // by the real frame size.
+      const shotStrip = await shot(b.qmp, join(OUT, "m5-shot-strip.ppm"));
+      await moveTo(stripX, stripY, shotStrip.width, shotStrip.height);
       await sleep(300);
       await click();
       await sleep(1000);
@@ -1159,9 +1165,12 @@ async function main() {
   if (chromiumViewport && termPos) {
     // Raise Chromium: click the visible left strip of its viewport
     // (left of the Terminal window) so the workbench comes forward.
+    // M9: scale by the real frame size (see the example.com strip
+    // click above) — the screen is 1280x800, not 1024x768.
     const stripX = Math.round((chromiumViewport.x0 + termPos.left) / 2);
     const stripY = Math.round((chromiumViewport.y0 + chromiumViewport.y1) / 2);
-    await moveTo(stripX, stripY, 1024, 768);
+    const shotStripIde = await shot(b.qmp, join(OUT, "m5-shot-strip-ide.ppm"));
+    await moveTo(stripX, stripY, shotStripIde.width, shotStripIde.height);
     await sleep(300);
     await click();
     await sleep(1000);

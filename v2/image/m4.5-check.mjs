@@ -916,7 +916,10 @@ async function main() {
     await click();
     await sleep(300);
   }
-  // Focus order: [X, Nightly, Stable, echo-ai, plan-ai]. Tab x5 -> plan-ai.
+  // M9: the Wi-Fi section comes first in Settings, so its Scan button
+  // is focusable before the channel buttons — the focus order is now
+  // [X, Scan, Nightly, Stable, echo-ai, plan-ai]. Tab x6 -> plan-ai.
+  await key("tab");
   await key("tab");
   await key("tab");
   await key("tab");
