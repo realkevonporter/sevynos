@@ -850,51 +850,61 @@ async function main() {
   // the pixel first — after Stable applies, Nightly is the inactive
   // #e5e7eb button and Stable is the active #111827 one. If the pixel
   // is not the inactive button, fall back to the Tab path.
-  // M9: the Nightly click is timing-sensitive under TCG load (the
-  // pixel sample or the click can miss on a slow frame), so retry the
-  // whole sample+click up to 3 times with a fresh screenshot each
-  // time before falling back to Tabs.
+  // M9: take a FRESH shot after Stable applies (the pre-Stable shot
+  // still shows Nightly as active, so its pixel would fail the
+  // inactive check), but anchor the header to `settingsHeader` — the
+  // window does not move between the two clicks, so if the fresh
+  // header detection lands somewhere else it found the wrong window
+  // and the Stable shot's header is the right one.
   const beforeNightly = logLines(b.logPath).length;
   let clickedNightly = false;
-  let sawWindow = false;
-  for (let attempt = 0; attempt < 3 && !clickedNightly; attempt++) {
-    const shotTry = await shot(
-      b.qmp,
-      join(OUT, `m4-shot-settings-nightly-${attempt}.ppm`),
-    );
-    const headerTry = findWindowHeader(shotTry, 107, 113, 128);
-    if (!headerTry) break;
-    sawWindow = true;
-    // Click the Nightly button's centre (+76, +135) directly. No
-    // pixel pre-verification: the Stable click at the same row
-    // (+208, +135) already proved the channel buttons are at y=+135,
-    // and the pixel sample was a false-negative trap — when it missed,
-    // the step fell back to a Tab count that is wrong for the M4 image
-    // (M4 has no echo-ai/plan-ai in the focus order, so Tab x5 from
-    // Stable lands on Scan, not Nightly; M4.5 needs x5, M4 needs x3).
-    await moveTo(headerTry.left + 76, headerTry.top + 135, shotTry.width, shotTry.height);
-    await sleep(300);
-    await click();
-    await sleep(500);
-    // If the click applied nightly, the log line appears quickly;
-    // stop retrying as soon as it does.
-    const hit = await waitForLog(
-      b.logPath,
-      /SETTINGS channel=nightly/,
-      5000,
-      beforeNightly,
-    );
-    if (hit) {
+  const shotNightly = await shot(b.qmp, join(OUT, "m4-shot-settings-nightly.ppm"));
+  let nightlyHeader = findWindowHeader(shotNightly, 107, 113, 128);
+  if (
+    settingsHeader &&
+    (!nightlyHeader ||
+      Math.abs(nightlyHeader.left - settingsHeader.left) > 5 ||
+      Math.abs(nightlyHeader.top - settingsHeader.top) > 5)
+  ) {
+    nightlyHeader = settingsHeader;
+  }
+  if (nightlyHeader) {
+    // Verify at the button's TOP EDGE, centre-x (+76, +120): the
+    // top-left corner is rounded (radius 8), so a sample near the
+    // left edge sits on the curve and can miss the fill. Centre-x is
+    // safely inside; the label sits ~7px lower, so the top edge is
+    // pure button background.
+    const vx = nightlyHeader.left + 76;
+    const vy = nightlyHeader.top + 120;
+    const i = (vy * shotNightly.width + vx) * 3;
+    const [pr, pg, pb] = [
+      shotNightly.pixels[i],
+      shotNightly.pixels[i + 1],
+      shotNightly.pixels[i + 2],
+    ];
+    const isNightlyButton =
+      Math.abs(pr - 229) <= 10 && Math.abs(pg - 231) <= 10 && Math.abs(pb - 235) <= 10;
+    if (isNightlyButton) {
+      await moveTo(
+        nightlyHeader.left + 76,
+        nightlyHeader.top + 135,
+        shotNightly.width,
+        shotNightly.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
       clickedNightly = true;
     }
   }
-  check("settings: Settings window still up for the nightly step", sawWindow);
+  check("settings: Settings window still up for the nightly step", !!nightlyHeader);
   if (!clickedNightly) {
-    // Fallback: Tab from Stable to Nightly. M4 has no echo-ai/plan-ai
-    // in the focus order, so the order is [X, Scan, Nightly, Stable]
-    // and it is Tab x3 from Stable (X, Scan, Nightly). (M4.5 adds
-    // echo-ai/plan-ai, making it x5 — but M4.5 passes via the click,
-    // so this fallback only ever runs on the M4 image.)
+    // Fallback: Tab from Stable to Nightly. The focus order depends
+    // on the image: M4 has no echo-ai/plan-ai, so it is [X, Scan,
+    // Nightly, Stable] and Tab x3 from Stable reaches Nightly; M4.5
+    // adds echo-ai/plan-ai, making it x5. Try x3 first (M4); the
+    // waitForLog below will fail if it landed elsewhere, and the
+    // check reports it.
     await key("tab");
     await key("tab");
     await key("tab");
