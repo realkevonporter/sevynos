@@ -891,7 +891,9 @@ async function main() {
   }
   if (!clickedNightly) {
     // Fallback: Tab from Stable wraps through the AI buttons to X,
-    // then Nightly.
+    // then Scan, then Nightly. M9: the Wi-Fi Scan button is in the
+    // focus order, so it is Tab x5 from Stable, not x4.
+    await key("tab");
     await key("tab");
     await key("tab");
     await key("tab");
