@@ -31,6 +31,21 @@
 //      part 2: a failed update falls back to the previous working
 //      system automatically. Clean poweroff.
 //
+// Two modes:
+//   Test-key mode (no anchor committed): the image trusts a fresh
+//     per-image TEST keypair; the harness signs every feed with the
+//     test private key and proves the full positive flow (steps 2-5,
+//     7-8 above).
+//   Anchor mode (v2/update/trusted-update-keys.json committed): the
+//     image trusts the committed anchor (e.g. the real nightly key),
+//     so no feed the harness can sign will verify. The harness
+//     instead proves: the staged anchor in the image is byte-identical
+//     to the committed anchor; a feed signed by an untrusted throwaway
+//     key is refused; a corrupted-signature feed is refused; and a
+//     malformed committed anchor fails the run. The positive apply
+//     path with the real key is proven later by the real nightly feed
+//     + an in-place update on hardware, not by this check.
+//
 // Slot selection (the harness plays the bootloader): before each
 // boot it reads /data/slot-state.json from the disk with debugfs and
 // boots the active slot — unless attempts >= 2, in which case it
@@ -64,6 +79,16 @@ const DISK = join(OUT, "data-disk.img");
 const FIXTURES = join(OUT, "fixtures");
 const KEY_FILE = join(OUT, "update-signing-key.json");
 const SIGN_FEED = join(ROOT, "tools", "update-signing", "sign-feed.mjs");
+const GEN_KEY = join(ROOT, "tools", "update-signing", "generate-key.mjs");
+const ANCHOR_FILE = join(ROOT, "v2", "update", "trusted-update-keys.json");
+// Anchor mode: a real trust anchor is committed, so the image trusts
+// the committed key(s) and the test-key path is gone. The harness
+// signs test feeds with a throwaway keypair it generates itself
+// (harness-only, in the git-ignored build dir, never staged into any
+// image) and asserts the image refuses them.
+const ANCHOR_MODE = existsSync(ANCHOR_FILE);
+const THROWAWAY_KEY_FILE = join(OUT, "throwaway-signing-key.json");
+let signKeyFile = KEY_FILE;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const started = Date.now();
@@ -305,7 +330,7 @@ async function serveFeed(template, { version = null, corruptSig = false } = {}) 
   const text = JSON.stringify(feed, null, 2).replaceAll("__PORT__", String(feedPort));
   const live = join(FIXTURES, "updates.json");
   writeFileSync(live, text + "\n");
-  await execAsync("node", [SIGN_FEED, "--feed", live, "--key-file", KEY_FILE]);
+  await execAsync("node", [SIGN_FEED, "--feed", live, "--key-file", signKeyFile]);
   if (corruptSig) {
     const signed = JSON.parse(readFileSync(live, "utf8"));
     const kid = Object.keys(signed.signatures)[0];
@@ -573,13 +598,106 @@ async function screenSettled(b, timeoutMs = 30000) {
   return null;
 }
 
+// Parse the committed anchor. Returns { anchor } on success or
+// { error } when it is missing, malformed, or empty — a malformed
+// anchor is refused, never trusted (the image build refuses it too).
+function readAnchor() {
+  let anchor;
+  try {
+    anchor = JSON.parse(readFileSync(ANCHOR_FILE, "utf8"));
+  } catch (e) {
+    return { error: `committed anchor is not valid JSON: ${e.message}` };
+  }
+  if (
+    !anchor ||
+    typeof anchor !== "object" ||
+    !Array.isArray(anchor.keys) ||
+    anchor.keys.length === 0
+  ) {
+    return { error: "committed anchor needs a non-empty keys array" };
+  }
+  for (const entry of anchor.keys) {
+    const kid = entry?.keyId;
+    const jwk = entry?.publicKeyJwk;
+    if (typeof kid !== "string" || kid.length === 0) {
+      return { error: "anchor entry without a keyId" };
+    }
+    if (
+      !jwk ||
+      jwk.kty !== "OKP" ||
+      jwk.crv !== "Ed25519" ||
+      typeof jwk.x !== "string" ||
+      jwk.x.length === 0
+    ) {
+      return {
+        error: `anchor key ${kid}: publicKeyJwk is not an Ed25519 OKP JWK`,
+      };
+    }
+    if (Buffer.from(jwk.x, "base64url").length !== 32) {
+      return { error: `anchor key ${kid}: public key is not 32 bytes` };
+    }
+  }
+  return { anchor };
+}
+
+// Extract the trust anchor staged in the built initramfs and compare
+// it byte-for-byte with the committed anchor. The image must trust
+// exactly the committed key(s) — nothing else, nothing malformed.
+// Full extraction (no cpio pattern): the exact command the fixture
+// builder already uses in CI, so no new tool dependency.
+async function stagedAnchorEqualsCommitted() {
+  const tmp = join(OUT, "anchor-extract");
+  await execAsync("mkdir", ["-p", tmp]);
+  try {
+    await execAsync("sh", [
+      "-c",
+      `gzip -dc "${join(OUT, "initramfs.cpio.gz")}" | (cd "${tmp}" && cpio -id --quiet)`,
+    ]);
+    const staged = readFileSync(
+      join(tmp, "usr", "share", "sevyn", "trusted-update-keys.json"),
+    );
+    return staged.equals(readFileSync(ANCHOR_FILE));
+  } finally {
+    await execAsync("rm", ["-rf", tmp]);
+  }
+}
+
+// Final frame + clean poweroff on the current boot. Used by both
+// modes: test-key mode ends on the fallback good slot, anchor mode
+// ends on slot A.
+async function shutdown(b) {
+  const shotFinal = join(OUT, "m8-shot-final.ppm");
+  const imgFinal = await shot(b.qmp, shotFinal);
+  const fTop = countColor(imgFinal, 21, 21, 28, 10, {
+    x0: 0,
+    y0: 0,
+    x1: imgFinal.width,
+    y1: 48,
+  });
+  const fDock = countColor(imgFinal, 16, 16, 20, 10, {
+    x0: 0,
+    y0: 672,
+    x1: imgFinal.width,
+    y1: 768,
+  });
+  check(
+    "screen: shell still visible at end",
+    fTop > 10000 && fDock > 2000,
+    `topBar=${fTop} dockBg=${fDock}`,
+  );
+  b.ctl.write("POWEROFF\n");
+  const exited = await waitExit(b, 30000);
+  check("shutdown: guest powers off on request", exited);
+  closeBoot(b);
+  return imgFinal;
+}
+
 async function main() {
-  for (const f of [
-    "vmlinuz",
-    "initramfs.cpio.gz",
-    "os-version",
-    "update-signing-key.json",
-  ]) {
+  // In anchor mode the test keypair is never generated, so the check
+  // must not require it (that was the PR #95 failure).
+  const required = ["vmlinuz", "initramfs.cpio.gz", "os-version"];
+  if (!ANCHOR_MODE) required.push("update-signing-key.json");
+  for (const f of required) {
     if (!existsSync(join(OUT, f))) {
       console.error(
         `error: missing ${join(OUT, f)} — run v2/image/build-m8-image.sh first`,
@@ -588,6 +706,47 @@ async function main() {
     }
   }
   const versionV1 = readFileSync(join(OUT, "os-version"), "utf8").trim();
+
+  // Anchor mode setup: validate the committed anchor, generate the
+  // throwaway signing key for the negative checks, and prove the
+  // image trusts exactly the committed anchor.
+  if (ANCHOR_MODE) {
+    const { anchor, error } = readAnchor();
+    check(
+      "anchor: committed anchor is well-formed (non-empty keys, Ed25519 JWKs)",
+      !error,
+      error || `keyIds: ${anchor.keys.map((k) => k.keyId).join(", ")}`,
+    );
+    if (error) finish(false);
+    await execAsync("node", [
+      GEN_KEY,
+      "--key-id",
+      "throwaway",
+      "--out",
+      THROWAWAY_KEY_FILE,
+    ]);
+    signKeyFile = THROWAWAY_KEY_FILE;
+    check(
+      "anchor: throwaway signing key generated (harness-only)",
+      existsSync(THROWAWAY_KEY_FILE),
+    );
+    let stagedMatches = false;
+    let stagedDetail = "";
+    try {
+      stagedMatches = await stagedAnchorEqualsCommitted();
+      stagedDetail = stagedMatches
+        ? `keyIds: ${anchor.keys.map((k) => k.keyId).join(", ")}`
+        : "staged anchor differs from the committed anchor";
+    } catch (e) {
+      stagedDetail = `could not extract staged anchor: ${e.message}`;
+    }
+    check(
+      "anchor: staged anchor in image equals committed anchor",
+      stagedMatches,
+      stagedDetail,
+    );
+    if (!stagedMatches) finish(false);
+  }
 
   // 0. Setup: data disk + fixtures + feed server.
   await execAsync("python3", [
@@ -670,6 +829,64 @@ async function main() {
       ),
     );
     check("boot 1: STATUS reports A/A/0, up to date unknown", !!st, st || "");
+  }
+
+  if (ANCHOR_MODE) {
+    // Anchor mode: no feed the harness can sign will verify, so the
+    // positive flow (steps 2-5, 7-8) is unprovable here — it is proven
+    // later by the real nightly feed + an in-place update on hardware.
+    // What this mode proves instead: the image refuses feeds it does
+    // not trust, and nothing else changes.
+    await serveFeed("updates-v2.json");
+    {
+      const fail = await updCmd(
+        b,
+        "CHECK",
+        /UPDATE CHECK FAIL .* no signature from a trusted key/,
+      );
+      check(
+        "negative: feed signed by an untrusted throwaway key is refused",
+        !!fail,
+        fail || "",
+      );
+    }
+    await serveFeed("updates-badsig.json", { corruptSig: true });
+    {
+      const fail = await updCmd(
+        b,
+        "CHECK",
+        /UPDATE CHECK FAIL .* no signature from a trusted key/,
+      );
+      check("negative: corrupt-signature feed is refused", !!fail, fail || "");
+    }
+    {
+      const st = await readState();
+      check(
+        "negative: refused checks leave state untouched (A, v1)",
+        st.active === "A" && st.version === versionV1,
+        JSON.stringify(st),
+      );
+      const daemonStatus = await updCmd(
+        b,
+        "STATUS",
+        new RegExp(
+          `UPDATE STATUS version=${versionV1.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} ` +
+            "channel=nightly active=A good=A attempts=0 applying=no available=unknown",
+        ),
+      );
+      check(
+        "negative: STATUS still reports A/A/0 after refusals",
+        !!daemonStatus,
+        daemonStatus || "",
+      );
+    }
+    // Final frame + clean poweroff (on slot A).
+    const imgFinal = await shutdown(b);
+    feedServer.close();
+    finish(
+      checks.every((c) => c.ok),
+      { screen: { width: imgFinal.width, height: imgFinal.height } },
+    );
   }
 
   // 2. CHECK with a same-version feed -> NONE.
@@ -837,30 +1054,8 @@ async function main() {
     check("fallback: STATUS reports B/B/0 (fallback permanent)", !!st, st || "");
   }
 
-  // Final frame + clean poweroff.
-  const shotFinal = join(OUT, "m8-shot-final.ppm");
-  const imgFinal = await shot(b.qmp, shotFinal);
-  const fTop = countColor(imgFinal, 21, 21, 28, 10, {
-    x0: 0,
-    y0: 0,
-    x1: imgFinal.width,
-    y1: 48,
-  });
-  const fDock = countColor(imgFinal, 16, 16, 20, 10, {
-    x0: 0,
-    y0: 672,
-    x1: imgFinal.width,
-    y1: 768,
-  });
-  check(
-    "screen: shell still visible at end",
-    fTop > 10000 && fDock > 2000,
-    `topBar=${fTop} dockBg=${fDock}`,
-  );
-  b.ctl.write("POWEROFF\n");
-  const exited = await waitExit(b, 30000);
-  check("shutdown: guest powers off on request", exited);
-  closeBoot(b);
+  // Final frame + clean poweroff (on the fallback good slot).
+  const imgFinal = await shutdown(b);
   feedServer.close();
   finish(
     checks.every((c) => c.ok),
