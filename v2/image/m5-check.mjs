@@ -1133,10 +1133,14 @@ async function main() {
         "example",
         (img) => {
           // example.com's background is #eeeeee (238,238,238), not
-          // pure white — count both and take the larger.
+          // pure white — count both and take the larger, across the
+          // FULL screen (not just the recorded viewport): the window
+          // can shift when Chromium is raised for the new tab, so a
+          // stale viewport rect would miss the rendered page even
+          // though it is on screen.
           const n = Math.max(
-            countColorInRect(img, 255, 255, 255, 15, chromiumViewport),
-            countColorInRect(img, 238, 238, 238, 15, chromiumViewport),
+            countColor(img, 255, 255, 255),
+            countColor(img, 238, 238, 238),
           );
           return n > 100000 ? n : 0;
         },
