@@ -865,53 +865,36 @@ async function main() {
     const headerTry = findWindowHeader(shotTry, 107, 113, 128);
     if (!headerTry) break;
     sawWindow = true;
-    // Verify at the button's TOP EDGE, centre-x (+76, +120), not the
-    // left edge: the top-left corner is rounded (radius 8), so a
-    // sample 14px from the left edge sits on the curve and can miss
-    // the fill. Centre-x is safely inside the button; the label sits
-    // ~7px lower, so the top edge is pure button background.
-    const vx = headerTry.left + 76;
-    const vy = headerTry.top + 120;
-    const i = (vy * shotTry.width + vx) * 3;
-    const [pr, pg, pb] = [
-      shotTry.pixels[i],
-      shotTry.pixels[i + 1],
-      shotTry.pixels[i + 2],
-    ];
-    const isNightlyButton =
-      Math.abs(pr - 229) <= 10 && Math.abs(pg - 231) <= 10 && Math.abs(pb - 235) <= 10;
-    if (isNightlyButton) {
-      // Click the button's centre (+76, +135): a press on the label
-      // still hits the Pressable.
-      await moveTo(
-        headerTry.left + 76,
-        headerTry.top + 135,
-        shotTry.width,
-        shotTry.height,
-      );
-      await sleep(300);
-      await click();
-      await sleep(500);
-      // If the click applied nightly, the log line appears quickly;
-      // stop retrying as soon as it does.
-      const hit = await waitForLog(
-        b.logPath,
-        /SETTINGS channel=nightly/,
-        5000,
-        beforeNightly,
-      );
-      if (hit) {
-        clickedNightly = true;
-      }
+    // Click the Nightly button's centre (+76, +135) directly. No
+    // pixel pre-verification: the Stable click at the same row
+    // (+208, +135) already proved the channel buttons are at y=+135,
+    // and the pixel sample was a false-negative trap — when it missed,
+    // the step fell back to a Tab count that is wrong for the M4 image
+    // (M4 has no echo-ai/plan-ai in the focus order, so Tab x5 from
+    // Stable lands on Scan, not Nightly; M4.5 needs x5, M4 needs x3).
+    await moveTo(headerTry.left + 76, headerTry.top + 135, shotTry.width, shotTry.height);
+    await sleep(300);
+    await click();
+    await sleep(500);
+    // If the click applied nightly, the log line appears quickly;
+    // stop retrying as soon as it does.
+    const hit = await waitForLog(
+      b.logPath,
+      /SETTINGS channel=nightly/,
+      5000,
+      beforeNightly,
+    );
+    if (hit) {
+      clickedNightly = true;
     }
   }
   check("settings: Settings window still up for the nightly step", sawWindow);
   if (!clickedNightly) {
-    // Fallback: Tab from Stable wraps through the AI buttons to X,
-    // then Scan, then Nightly. M9: the Wi-Fi Scan button is in the
-    // focus order, so it is Tab x5 from Stable, not x4.
-    await key("tab");
-    await key("tab");
+    // Fallback: Tab from Stable to Nightly. M4 has no echo-ai/plan-ai
+    // in the focus order, so the order is [X, Scan, Nightly, Stable]
+    // and it is Tab x3 from Stable (X, Scan, Nightly). (M4.5 adds
+    // echo-ai/plan-ai, making it x5 — but M4.5 passes via the click,
+    // so this fallback only ever runs on the M4 image.)
     await key("tab");
     await key("tab");
     await key("tab");
