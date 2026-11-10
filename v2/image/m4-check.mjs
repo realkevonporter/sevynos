@@ -181,14 +181,16 @@ function findWindowHeader(img, r, g, b) {
 // button centre {x, y} or null.
 function findInactiveChannelButton(img, header) {
   const { width: W, pixels } = img;
-  // The channel-buttons row sits ~90–170px below the window header
-  // (Wi-Fi section + "Update channel" heading + "Channel:" line
-  // above it). The AI buttons (M4.5) are further down, past the
-  // Sevyn Code section, so capping at +180 keeps them out of range.
-  // In QEMU no Wi-Fi is connected, so the Disconnect/Forget buttons
-  // (also #e5e7eb) do not render; the Scan button is dark #111827.
+  // The channel-buttons row sits below the Wi-Fi section +
+  // "Update channel" heading + "Channel:" line. Its exact y shifts
+  // between images (M4 vs M4.5 layout, ScrollView position, window
+  // size) — M4.5's extra AI section pushes it further down than M4's,
+  // so scan a generous band and take the TOPMOST button row: the
+  // channel buttons are always above the AI buttons. In QEMU no
+  // Wi-Fi is connected, so the Disconnect/Forget buttons (also
+  // #e5e7eb) do not render; the Scan button is dark #111827.
   const y0 = header.top + 90;
-  const y1 = header.top + 180;
+  const y1 = header.top + 320;
   const x0 = header.left + 8;
   const x1 = header.left + 300;
   // Collect the x-range of #e5e7eb pixels per row, then find the
