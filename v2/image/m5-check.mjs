@@ -1065,6 +1065,7 @@ async function main() {
     // the title over CDP before looking at pixels.
     await sleep(15000);
     await refocusTerminal();
+    let exampleTabId = null;
     {
       const marker = await pollTabsTitle(
         /TERMINAL browser-tabs n=\d+ titles=.*Example Domain/,
@@ -1074,6 +1075,25 @@ async function main() {
         !!marker,
         marker || "(no tabs marker with the title)",
       );
+      // Explicitly activate the example.com tab: `browser open` makes
+      // the new tab active, but if the red tab is still the active one
+      // (or the activation raced the load), raising Chromium would show
+      // red, not white, and the poll below would see 0 white pixels.
+      if (marker) {
+        const { titles, ids } = parseTabsMarker(marker);
+        const idx = titles.findIndex((t) => t.includes("Example Domain"));
+        if (idx >= 0 && ids[idx]) exampleTabId = ids[idx];
+      }
+    }
+    if (exampleTabId) {
+      const { exec } = await termCmd(`browser activate ${exampleTabId}`);
+      check(
+        "browser: `browser activate` the example.com tab runs (EXEC 0)",
+        !!exec,
+        exec || "",
+      );
+      await sleep(2000);
+      await refocusTerminal();
     }
     // Opening a new tab in an already-running Chromium does not raise
     // its window above the Terminal, so a full-screen white poll sees
