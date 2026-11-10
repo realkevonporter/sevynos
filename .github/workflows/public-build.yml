@@ -62,7 +62,9 @@ jobs:
             shim-signed \
             dosfstools \
             gdisk \
-            mtools
+            mtools \
+            wpasupplicant \
+            iw
       - name: Clone Tokrah (private — read-only PAT)
         run: |
           if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
