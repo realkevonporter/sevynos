@@ -58,8 +58,7 @@ export function Shell(): React.ReactElement {
   return (
     <View
       style={{
-        width: 1024,
-        height: 768,
+        flex: 1,
         flexDirection: "column",
         backgroundColor: "#0b0b0f",
       }}

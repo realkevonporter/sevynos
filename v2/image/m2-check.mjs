@@ -387,9 +387,13 @@ async function main() {
     y1: 760,
   });
   const rightChevron = countColor(img, 31, 41, 55, 10, {
-    x0: 988,
+    // M9: the shell flex-sizes to the surface (no longer a fixed
+    // 1024px), so the dock — and its right chevron — sit at the
+    // image's right edge, not at x988..1016. The chevron is 28px wide
+    // with 8px dock padding, so it spans img.width-36..img.width-8.
+    x0: img.width - 36,
     y0: 680,
-    x1: 1016,
+    x1: img.width - 8,
     y1: 760,
   });
   check(

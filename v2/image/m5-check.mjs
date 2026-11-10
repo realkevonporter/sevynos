@@ -1065,6 +1065,7 @@ async function main() {
     // the title over CDP before looking at pixels.
     await sleep(15000);
     await refocusTerminal();
+    let exampleTabId = null;
     {
       const marker = await pollTabsTitle(
         /TERMINAL browser-tabs n=\d+ titles=.*Example Domain/,
@@ -1074,6 +1075,25 @@ async function main() {
         !!marker,
         marker || "(no tabs marker with the title)",
       );
+      // Explicitly activate the example.com tab: `browser open` makes
+      // the new tab active, but if the red tab is still the active one
+      // (or the activation raced the load), raising Chromium would show
+      // red, not white, and the poll below would see 0 white pixels.
+      if (marker) {
+        const { titles, ids } = parseTabsMarker(marker);
+        const idx = titles.findIndex((t) => t.includes("Example Domain"));
+        if (idx >= 0 && ids[idx]) exampleTabId = ids[idx];
+      }
+    }
+    if (exampleTabId) {
+      const { exec } = await termCmd(`browser activate ${exampleTabId}`);
+      check(
+        "browser: `browser activate` the example.com tab runs (EXEC 0)",
+        !!exec,
+        exec || "",
+      );
+      await sleep(2000);
+      await refocusTerminal();
     }
     // Opening a new tab in an already-running Chromium does not raise
     // its window above the Terminal, so a full-screen white poll sees
@@ -1081,10 +1101,30 @@ async function main() {
     // of Chromium's viewport (left of the Terminal window) to raise
     // it, then count white inside the viewport (same pattern as the
     // IDE step below).
+    // M9: re-detect the Terminal header fresh before computing the
+    // strip — `termPos` was recorded when the Terminal launched, and
+    // the refocus clicks since can nudge the window; a stale left
+    // edge puts the strip click inside the Terminal instead of on
+    // Chromium, so the white poll sees the Terminal for 180s.
     if (chromiumViewport && termPos) {
+      const shotFresh = await shot(b.qmp, join(OUT, "m5-shot-strip-fresh.ppm"));
+      const termFresh = findWindowHeader(shotFresh, 17, 24, 39);
+      if (termFresh) termPos = termFresh;
       const stripX = Math.round((chromiumViewport.x0 + termPos.left) / 2);
       const stripY = Math.round((chromiumViewport.y0 + chromiumViewport.y1) / 2);
-      await moveTo(stripX, stripY, 1024, 768);
+      // M9: the shell flex-sizes to the surface (no longer a fixed
+      // 1024x768), so the screen is 1280x800 here — a moveTo scaled
+      // for 1024x768 lands ~25% right of the strip and never raises
+      // Chromium, so the white poll sees the Terminal instead. Scale
+      // by the real frame size.
+      const shotStrip = await shot(b.qmp, join(OUT, "m5-shot-strip.ppm"));
+      await moveTo(stripX, stripY, shotStrip.width, shotStrip.height);
+      await sleep(300);
+      await click();
+      await sleep(1000);
+      // If the first click only focused Chromium without raising it
+      // above the Terminal, click the strip once more.
+      await moveTo(stripX, stripY, shotStrip.width, shotStrip.height);
       await sleep(300);
       await click();
       await sleep(1000);
@@ -1093,10 +1133,14 @@ async function main() {
         "example",
         (img) => {
           // example.com's background is #eeeeee (238,238,238), not
-          // pure white — count both and take the larger.
+          // pure white — count both and take the larger, across the
+          // FULL screen (not just the recorded viewport): the window
+          // can shift when Chromium is raised for the new tab, so a
+          // stale viewport rect would miss the rendered page even
+          // though it is on screen.
           const n = Math.max(
-            countColorInRect(img, 255, 255, 255, 15, chromiumViewport),
-            countColorInRect(img, 238, 238, 238, 15, chromiumViewport),
+            countColor(img, 255, 255, 255),
+            countColor(img, 238, 238, 238),
           );
           return n > 100000 ? n : 0;
         },
@@ -1159,9 +1203,12 @@ async function main() {
   if (chromiumViewport && termPos) {
     // Raise Chromium: click the visible left strip of its viewport
     // (left of the Terminal window) so the workbench comes forward.
+    // M9: scale by the real frame size (see the example.com strip
+    // click above) — the screen is 1280x800, not 1024x768.
     const stripX = Math.round((chromiumViewport.x0 + termPos.left) / 2);
     const stripY = Math.round((chromiumViewport.y0 + chromiumViewport.y1) / 2);
-    await moveTo(stripX, stripY, 1024, 768);
+    const shotStripIde = await shot(b.qmp, join(OUT, "m5-shot-strip-ide.ppm"));
+    await moveTo(stripX, stripY, shotStripIde.width, shotStripIde.height);
     await sleep(300);
     await click();
     await sleep(1000);

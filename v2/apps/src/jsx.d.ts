@@ -63,6 +63,10 @@ declare global {
     onStatus(fn: (ev: any) => void): void;
     getStatus(): { [key: string]: string };
     // App identity (set by the host; the shell reads "shell" here).
+    // Window size in pixels (set by the host from the real surface;
+    // updated on resize — M9).
+    width: number;
+    height: number;
     appId: string;
     appName: string;
     appColor: string;
@@ -71,6 +75,11 @@ declare global {
     // One-shot run of /usr/local/bin/sevyn only; returns
     // "<exit-code>\n<output>". Gated by the cli.exec permission.
     exec(cmdline: string): string;
+    // Same run off the JS thread (M9 wifi scan/connect): a Promise
+    // of the same "<exit-code>\n<output>" shape.
+    execAsync(cmdline: string): Promise<string>;
+    // Surface resize (M9): the renderer subscribes in render().
+    onWindowResize(fn: (ev: { width: number; height: number }) => void): void;
     listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
     onAppEvent(fn: (line: string) => void): void;

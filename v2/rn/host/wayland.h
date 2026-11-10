@@ -1,10 +1,15 @@
 // SevynOS v2 M3 — Wayland client for the RN host.
 //
-// One xdg_toplevel surface. The shell runs fullscreen (1024x768, the
-// Weston output mode); an app runs windowed (800x500) with its own
-// title and app id, and the compositor's close request ends the app
-// (the shell is not closable). Double-buffered SHM: two Painters, each
-// with its own wl_buffer; a buffer is only reused after the compositor
+// One xdg_toplevel surface. The shell runs fullscreen at the output's
+// preferred mode (M9 — weston.ini no longer pins 1024x768); an app
+// runs windowed (800x500) with its own title and app id, and the
+// compositor's close request ends the app (the shell is not closable).
+// M9: the toplevel configure is honored — a resize drag or an output
+// mode change resizes the painters and fires the size handler; a
+// left-button press in the title bar (minus the close-X zone) starts
+// an interactive move, and in the 8px right/bottom edge strips an
+// interactive resize. Double-buffered SHM: two Painters, each with
+// its own wl_buffer; a buffer is only reused after the compositor
 // releases it, so frames never tear. Pointer + keyboard events are
 // forwarded to the host.
 #pragma once
@@ -46,6 +51,11 @@ class Wayland {
   // Close request from the compositor (window X / Alt-F4). Set for
   // app windows; the shell leaves it unset (not closable).
   using CloseHandler = std::function<void()>;
+  // Surface size changed (M9): the compositor's configure gave the
+  // surface a new size (app resize drag, or the fullscreen shell's
+  // output mode). The painters are already resized when this fires;
+  // the host re-lays out JS to the new size.
+  using SizeHandler = std::function<void(int width, int height)>;
 
   // fullscreen=false makes a windowed toplevel with the given title
   // and app id instead of a fullscreen shell surface.
@@ -76,6 +86,16 @@ class Wayland {
   void setKeyHandler(KeyHandler h) { keyHandler_ = h; }
   void setFrameHandler(FrameHandler h) { frameHandler_ = h; }
   void setCloseHandler(CloseHandler h) { closeHandler_ = h; }
+  void setSizeHandler(SizeHandler h) { sizeHandler_ = h; }
+
+  // Resize the surface to a new size (M9): destroy both wl_buffers
+  // (doPresent recreates them at the new size), resize both
+  // painters, and fire the size handler. A no-op for the current
+  // size. The output mode is the shell's size — see outputWidth().
+  void resize(int width, int height);
+  // Preferred output mode (0,0 when no wl_output mode arrived).
+  int outputWidth() const { return outputWidth_; }
+  int outputHeight() const { return outputHeight_; }
 
  private:
   void onFrameDone();
@@ -93,6 +113,17 @@ class Wayland {
                                uint32_t version);
   static void onRegistryGlobalRemove(void* data, wl_registry* registry,
                                      uint32_t name);
+  // wl_output events: the mode events carry the output's preferred
+  // (native) mode, which sizes the fullscreen shell (M9).
+  static void onOutputGeometry(void* data, wl_output* output, int32_t x,
+                               int32_t y, int32_t physicalWidth,
+                               int32_t physicalHeight, int32_t subpixel,
+                               const char* make, const char* model,
+                               int32_t transform);
+  static void onOutputMode(void* data, wl_output* output, uint32_t flags,
+                           int32_t width, int32_t height, int32_t refresh);
+  static void onOutputDone(void* data, wl_output* output);
+  static void onOutputScale(void* data, wl_output* output, int32_t factor);
   static void onSeatCapabilities(void* data, wl_seat* seat,
                                  uint32_t capabilities);
   static void onSeatName(void* data, wl_seat* seat, const char* name);
@@ -152,6 +183,15 @@ class Wayland {
   wl_registry* registry_ = nullptr;
   wl_compositor* compositor_ = nullptr;
   wl_shm* shm_ = nullptr;
+  wl_output* output_ = nullptr;
+  // Preferred output mode from wl_output (M9 fullscreen): 0,0 until
+  // a mode event arrives. The shell sizes its painters to this when
+  // known, so the desktop fills the panel at native resolution.
+  int outputWidth_ = 0;
+  int outputHeight_ = 0;
+  // True once a PREFERRED mode event arrived: preferred always wins
+  // over a merely CURRENT mode (they can differ).
+  bool outputPreferred_ = false;
   wl_seat* seat_ = nullptr;
   xdg_wm_base* xdgWmBase_ = nullptr;
   wl_surface* surface_ = nullptr;
@@ -200,6 +240,19 @@ class Wayland {
   KeyHandler keyHandler_;
   FrameHandler frameHandler_;
   CloseHandler closeHandler_;
+  SizeHandler sizeHandler_;
+
+  // M9 window geometry: the title bar is 44px on every app surface
+  // (template + Settings/Terminal/Files/Browser), and the close X
+  // lives in the rightmost ~40px of it. The move region is the title
+  // bar minus that close zone; the resize zones are 8px strips on
+  // the right and bottom edges (+ the bottom-right corner). Minimum
+  // window size after a resize drag.
+  static constexpr int kTitleBarHeight = 44;
+  static constexpr int kCloseZoneWidth = 48;
+  static constexpr int kResizeEdge = 8;
+  static constexpr int kMinWidth = 480;
+  static constexpr int kMinHeight = 320;
 
   double pointerX_ = 0, pointerY_ = 0;
 };

@@ -42,6 +42,7 @@
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -158,6 +159,14 @@ static void print_usage(FILE *f)
             "  sevyn net dns <host>        resolve a name (guest DNS)\n"
             "  sevyn net announce          announce the link state to\n"
             "                              statusd (wifi on/off)\n"
+            "  sevyn net wifi scan         scan for wireless networks\n"
+            "  sevyn net wifi status       association state, SSID,\n"
+            "                              address\n"
+            "  sevyn net wifi connect <ssid> [password]\n"
+            "                              join a network (WPA2 PSK or\n"
+            "                              open); saves it for later\n"
+            "  sevyn net wifi disconnect   drop the association\n"
+            "  sevyn net wifi forget <ssid> remove a saved network\n"
             "  sevyn net fetch --method <m> <url> [--header <N:V>] [--data <b>]\n"
             "                              one plain HTTP request; prints\n"
             "                              status, headers JSON, body\n"
@@ -165,7 +174,15 @@ static void print_usage(FILE *f)
             "  sevyn tokrah run [--seconds N] [--width W] [--height H]\n"
             "                   [--input <f>] [--out <f>]\n"
             "                              run Tokrah headless (M6 bring-up:\n"
-            "                              mounts + presents with no window)\n");
+            "                              mounts + presents with no window)\n"
+            "  sevyn app run <id> [--seconds N] [--width W] [--height H]\n"
+            "                   [--input <f>] [--out <f>] [--name <n>]\n"
+            "                   [--color <#hex>] [--glyph <g>]\n"
+            "                   [--permissions <csv>]\n"
+            "                              run an installed app headless\n"
+            "                              (M9: the check drives the app\n"
+            "                              screens through it, as tokrah run\n"
+            "                              does for Tokrah)\n");
 }
 
 static int usage(void)
@@ -1919,6 +1936,545 @@ static int cmd_net_announce(void)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* net wifi (M9) — wireless scan / connect via wpa_supplicant.        */
+/*                                                                      */
+/* The Settings wifi section drives these verbs. Credentials live     */
+/* only in /data/wifi/wpa_supplicant.conf (0600, root-only, on the    */
+/* data partition — never in the repo, never logged). The PSK travels  */
+/* to wpa_cli as an argv element (visible in ps for the milliseconds  */
+/* that call runs — the same exposure every wpa_cli-based tool has;    */
+/* the CLI never echoes it). QEMU has no wlan device, so scan/status  */
+/* there print the clean no-hardware state and exit 1.                  */
+
+#define WIFI_CONF_PATH "/data/wifi/wpa_supplicant.conf"
+#define WIFI_CTRL_DIR "/run/wpa_supplicant"
+#define WIFI_SCAN_MAX 32
+
+/* Run argv (NULL-terminated, no shell) and capture stdout. Returns
+ * the exit code, or -1 when the spawn failed; *out gets a malloc'd
+ * NUL-terminated stdout ("" when nothing was printed). Capped at
+ * 64 KiB — wpa_cli output is small. */
+static int run_capture(char *const argv[], char **out)
+{
+    *out = calloc(1, 1);
+    if (!*out)
+        return -1;
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        /* stderr goes to the console (wpa_cli errors are one-liners
+         * the user should see); stdout is the captured channel. */
+        close(pipefd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    size_t cap = 65536, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        close(pipefd[0]);
+        return -1;
+    }
+    for (;;) {
+        if (len + 4096 >= cap)
+            break;
+        ssize_t n = read(pipefd[0], buf + len, 4096);
+        if (n <= 0)
+            break;
+        len += (size_t)n;
+    }
+    close(pipefd[0]);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    buf[len] = '\0';
+    free(*out);
+    *out = buf;
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return -1;
+}
+
+/* First wireless interface (wlan* / wlp*) in /sys/class/net, or 0. */
+static int wifi_iface(char *name, size_t cap)
+{
+    DIR *d = opendir("/sys/class/net");
+    if (!d)
+        return 0;
+    struct dirent *e;
+    int found = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "wlan", 4) == 0 ||
+            strncmp(e->d_name, "wlp", 3) == 0) {
+            /* Interface names are at most IFNAMSIZ-1 chars; a
+             * truncation here means a bogus entry — skip it. */
+            if (snprintf(name, cap, "%s", e->d_name) >= (int)cap)
+                continue;
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Escape a value for wpa_cli's quoted-string syntax: \ and " only. */
+static void wifi_escape(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    for (size_t i = 0; in[i] && o + 2 < cap; i++) {
+        if (in[i] == '\\' || in[i] == '"')
+            out[o++] = '\\';
+        out[o++] = in[i];
+    }
+    out[o] = '\0';
+}
+
+/* `wpa_cli -i <iface> <args...>` with stdout captured. args is a
+ * NULL-terminated list of at most 5 extra arguments. */
+static int wpa_cli(const char *iface, char **out, const char **args)
+{
+    char *argv[9];
+    argv[0] = "wpa_cli";
+    argv[1] = "-i";
+    argv[2] = (char *)iface;
+    int n = 3;
+    for (int i = 0; args[i] && n < 8; i++)
+        argv[n++] = (char *)args[i];
+    argv[n] = NULL;
+    return run_capture(argv, out);
+}
+
+/* Make sure wpa_supplicant is running for this interface: write the
+ * minimal config (0600) when missing, start the daemon when a ping
+ * fails. Returns 0 when a ping answers, 1 otherwise. */
+static int wifi_ensure_supplicant(const char *iface)
+{
+    char *out = NULL;
+    if (wpa_cli(iface, &out, (const char *[]){"ping", NULL}) == 0 &&
+        out && strncmp(out, "PONG", 4) == 0) {
+        free(out);
+        return 0;
+    }
+    free(out);
+    out = NULL;
+    mkdir("/data/wifi", 0755);
+    mkdir(WIFI_CTRL_DIR, 0755);
+    FILE *f = fopen(WIFI_CONF_PATH, "a");
+    if (f) {
+        /* A fresh file gets the two lines the daemon needs; an
+         * existing file (with saved networks) is left alone. */
+        fseek(f, 0, SEEK_END);
+        if (ftell(f) == 0)
+            fprintf(f, "ctrl_interface=%s\nupdate_config=1\n",
+                    WIFI_CTRL_DIR);
+        fclose(f);
+        chmod(WIFI_CONF_PATH, 0600);
+    }
+    char *sargv[] = {"wpa_supplicant", "-B", "-i", (char *)iface,
+                     "-c", WIFI_CONF_PATH, "-Dnl80211", NULL};
+    char *discard = NULL;
+    if (run_capture(sargv, &discard) != 0) {
+        free(discard);
+        fprintf(stderr, "error: cannot start wpa_supplicant\n");
+        return 1;
+    }
+    free(discard);
+    for (int i = 0; i < 10; i++) {
+        sleep(1);
+        if (wpa_cli(iface, &out, (const char *[]){"ping", NULL}) == 0 &&
+            out && strncmp(out, "PONG", 4) == 0) {
+            free(out);
+            return 0;
+        }
+        free(out);
+        out = NULL;
+    }
+    fprintf(stderr, "error: wpa_supplicant did not answer\n");
+    return 1;
+}
+
+/* One scan hit, for the sort. */
+struct wifi_hit {
+    char ssid[64];
+    int signal;
+    int secured;
+};
+
+static int cmd_net_wifi_scan(void)
+{
+    char iface[IFNAMSIZ] = "";
+    if (!wifi_iface(iface, sizeof(iface))) {
+        printf("wifi: unavailable (no wireless interface)\n");
+        return 1;
+    }
+    if (wifi_ensure_supplicant(iface) != 0)
+        return 1;
+    char *out = NULL;
+    if (wpa_cli(iface, &out, (const char *[]){"scan", NULL}) != 0) {
+        free(out);
+        fprintf(stderr, "error: scan failed\n");
+        return 1;
+    }
+    free(out);
+    out = NULL;
+    sleep(3);
+    if (wpa_cli(iface, &out, (const char *[]){"scan_results", NULL}) != 0) {
+        free(out);
+        fprintf(stderr, "error: scan_results failed\n");
+        return 1;
+    }
+    struct wifi_hit hits[WIFI_SCAN_MAX];
+    int n = 0;
+    char *save = NULL;
+    char *line = strtok_r(out, "\n", &save);
+    while (line) {
+        if (strncmp(line, "bssid", 5) != 0 && n < WIFI_SCAN_MAX) {
+            /* bssid<TAB>frequency<TAB>signal<TAB>flags<TAB>ssid */
+            char *f1 = strchr(line, '\t');
+            char *f2 = f1 ? strchr(f1 + 1, '\t') : NULL;
+            char *f3 = f2 ? strchr(f2 + 1, '\t') : NULL;
+            char *f4 = f3 ? strchr(f3 + 1, '\t') : NULL;
+            if (f1 && f2 && f3 && f4 && f4[1]) {
+                struct wifi_hit *h = &hits[n];
+                snprintf(h->ssid, sizeof(h->ssid), "%s", f4 + 1);
+                h->signal = atoi(f2 + 1);
+                /* [WPA2-PSK-CCMP] / [WPA-PSK-...] / [RSN-...] mean
+                 * secured; bare [ESS] is an open network. */
+                char flags[256];
+                size_t flen = (size_t)(f4 - (f3 + 1));
+                if (flen >= sizeof(flags))
+                    flen = sizeof(flags) - 1;
+                memcpy(flags, f3 + 1, flen);
+                flags[flen] = '\0';
+                h->secured = strstr(flags, "WPA") != NULL ||
+                             strstr(flags, "RSN") != NULL;
+                n++;
+            }
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(out);
+    /* Strongest first — the list the Settings UI shows. */
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (hits[j].signal > hits[i].signal) {
+                struct wifi_hit t = hits[i];
+                hits[i] = hits[j];
+                hits[j] = t;
+            }
+    for (int i = 0; i < n; i++)
+        printf("%s\t%d\t%s\n", hits[i].ssid, hits[i].signal,
+               hits[i].secured ? "secured" : "open");
+    return 0;
+}
+
+/* `wpa_cli status` field, or NULL. */
+static const char *wpa_status_field(const char *out, const char *key)
+{
+    static char val[256];
+    size_t klen = strlen(key);
+    for (const char *p = out; *p; p++) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            const char *e = strchr(p + klen + 1, '\n');
+            size_t len = e ? (size_t)(e - (p + klen + 1))
+                           : strlen(p + klen + 1);
+            if (len >= sizeof(val))
+                len = sizeof(val) - 1;
+            memcpy(val, p + klen + 1, len);
+            val[len] = '\0';
+            return val;
+        }
+        p = strchr(p, '\n');
+        if (!p)
+            break;
+    }
+    return NULL;
+}
+
+static int cmd_net_wifi_status(void)
+{
+    char iface[IFNAMSIZ] = "";
+    if (!wifi_iface(iface, sizeof(iface))) {
+        printf("wifi: unavailable (no wireless interface)\n");
+        return 1;
+    }
+    if (wifi_ensure_supplicant(iface) != 0)
+        return 1;
+    char *out = NULL;
+    if (wpa_cli(iface, &out, (const char *[]){"status", NULL}) != 0) {
+        free(out);
+        fprintf(stderr, "error: status failed\n");
+        return 1;
+    }
+    const char *state = wpa_status_field(out, "wpa_state");
+    const char *ssid = wpa_status_field(out, "ssid");
+    const char *addr = wpa_status_field(out, "ip_address");
+    printf("state: %s\n", state ? state : "unknown");
+    printf("ssid: %s\n", ssid ? ssid : "none");
+    printf("address: %s\n", addr ? addr : "none");
+    free(out);
+    return 0;
+}
+
+static int cmd_net_wifi_connect(int argc, char **argv)
+{
+    if (argc < 4 || argc > 5)
+        return usage();
+    const char *ssid = argv[3];
+    const char *psk = argc == 5 ? argv[4] : NULL;
+    if (strlen(ssid) == 0 || strlen(ssid) > 32) {
+        fprintf(stderr, "error: ssid must be 1-32 characters\n");
+        return 1;
+    }
+    if (psk && (strlen(psk) < 8 || strlen(psk) > 63)) {
+        fprintf(stderr, "error: password must be 8-63 characters\n");
+        return 1;
+    }
+    char iface[IFNAMSIZ] = "";
+    if (!wifi_iface(iface, sizeof(iface))) {
+        printf("wifi: unavailable (no wireless interface)\n");
+        return 1;
+    }
+    if (wifi_ensure_supplicant(iface) != 0)
+        return 1;
+    char *out = NULL;
+    char id[16] = "";
+    /* Reuse the saved network when one exists for this SSID. */
+    if (wpa_cli(iface, &out,
+                (const char *[]){"list_networks", NULL}) == 0) {
+        char *save = NULL;
+        char *line = strtok_r(out, "\n", &save);
+        while (line) {
+            char *tab = strchr(line, '\t');
+            if (tab && tab[1] == '"') {
+                char *end = strchr(tab + 2, '"');
+                if (end && (size_t)(end - (tab + 2)) == strlen(ssid) &&
+                    strncmp(tab + 2, ssid, strlen(ssid)) == 0) {
+                    size_t idlen = (size_t)(tab - line);
+                    if (idlen < sizeof(id)) {
+                        memcpy(id, line, idlen);
+                        id[idlen] = '\0';
+                    }
+                    break;
+                }
+            }
+            line = strtok_r(NULL, "\n", &save);
+        }
+    }
+    free(out);
+    out = NULL;
+    if (!id[0]) {
+        if (wpa_cli(iface, &out, (const char *[]){"add_network", NULL}) != 0) {
+            free(out);
+            fprintf(stderr, "error: add_network failed\n");
+            return 1;
+        }
+        /* add_network prints the new id alone ("0"). */
+        char *nl = strchr(out, '\n');
+        size_t idlen = nl ? (size_t)(nl - out) : strlen(out);
+        if (idlen == 0 || idlen >= sizeof(id)) {
+            free(out);
+            fprintf(stderr, "error: add_network returned no id\n");
+            return 1;
+        }
+        memcpy(id, out, idlen);
+        id[idlen] = '\0';
+        free(out);
+        out = NULL;
+    }
+    char esc[128], val[256];
+    wifi_escape(ssid, esc, sizeof(esc));
+    snprintf(val, sizeof(val), "ssid \"%s\"", esc);
+    if (wpa_cli(iface, &out,
+                (const char *[]){"set_network", id, val, NULL}) != 0) {
+        free(out);
+        fprintf(stderr, "error: set ssid failed\n");
+        return 1;
+    }
+    free(out);
+    out = NULL;
+    if (psk) {
+        wifi_escape(psk, esc, sizeof(esc));
+        snprintf(val, sizeof(val), "psk \"%s\"", esc);
+    } else {
+        snprintf(val, sizeof(val), "key_mgmt NONE");
+    }
+    if (wpa_cli(iface, &out,
+                (const char *[]){"set_network", id, val, NULL}) != 0) {
+        free(out);
+        fprintf(stderr, "error: set key failed\n");
+        return 1;
+    }
+    free(out);
+    out = NULL;
+    wpa_cli(iface, &out, (const char *[]){"enable_network", id, NULL});
+    free(out);
+    out = NULL;
+    wpa_cli(iface, &out, (const char *[]){"save_config", NULL});
+    free(out);
+    out = NULL;
+    wpa_cli(iface, &out, (const char *[]){"select_network", id, NULL});
+    free(out);
+    out = NULL;
+    /* Wait for association (up to ~10 s), then DHCP on the wifi
+     * interface — association alone gives no address. */
+    int associated = 0;
+    for (int i = 0; i < 10; i++) {
+        sleep(1);
+        if (wpa_cli(iface, &out, (const char *[]){"status", NULL}) != 0) {
+            free(out);
+            out = NULL;
+            continue;
+        }
+        const char *state = wpa_status_field(out, "wpa_state");
+        if (state && strcmp(state, "COMPLETED") == 0) {
+            associated = 1;
+            free(out);
+            out = NULL;
+            break;
+        }
+        free(out);
+        out = NULL;
+    }
+    if (!associated) {
+        printf("error: association timed out (%s)\n", ssid);
+        return 1;
+    }
+    char *dhcp_out = NULL;
+    char *dhcp_argv[] = {"/bin/busybox", "udhcpc", "-i", iface,
+                         "-s", "/etc/udhcpc.script",
+                         "-q", "-t", "5", "-n", NULL};
+    if (run_capture(dhcp_argv, &dhcp_out) != 0) {
+        /* BusyBox multi-call binary not at /bin/busybox (dev host):
+         * try a standalone udhcpc. */
+        free(dhcp_out);
+        dhcp_out = NULL;
+        char *dhcp_argv2[] = {"udhcpc", "-i", iface,
+                              "-s", "/etc/udhcpc.script",
+                              "-q", "-t", "5", "-n", NULL};
+        run_capture(dhcp_argv2, &dhcp_out);
+    }
+    free(dhcp_out);
+    cmd_net_announce();
+    char name[IFNAMSIZ] = "";
+    char addr[INET_ADDRSTRLEN] = "";
+    first_up_iface(name, sizeof(name), addr, sizeof(addr));
+    printf("connected: %s\n", ssid);
+    printf("address: %s\n", addr[0] ? addr : "none");
+    return 0;
+}
+
+static int cmd_net_wifi_disconnect(void)
+{
+    char iface[IFNAMSIZ] = "";
+    if (!wifi_iface(iface, sizeof(iface))) {
+        printf("wifi: unavailable (no wireless interface)\n");
+        return 1;
+    }
+    if (wifi_ensure_supplicant(iface) != 0)
+        return 1;
+    char *out = NULL;
+    int rc = wpa_cli(iface, &out, (const char *[]){"disconnect", NULL});
+    free(out);
+    if (rc != 0) {
+        fprintf(stderr, "error: disconnect failed\n");
+        return 1;
+    }
+    cmd_net_announce();
+    printf("disconnected\n");
+    return 0;
+}
+
+static int cmd_net_wifi_forget(const char *ssid)
+{
+    char iface[IFNAMSIZ] = "";
+    if (!wifi_iface(iface, sizeof(iface))) {
+        printf("wifi: unavailable (no wireless interface)\n");
+        return 1;
+    }
+    if (wifi_ensure_supplicant(iface) != 0)
+        return 1;
+    char *out = NULL;
+    if (wpa_cli(iface, &out,
+                (const char *[]){"list_networks", NULL}) != 0) {
+        free(out);
+        fprintf(stderr, "error: list_networks failed\n");
+        return 1;
+    }
+    char id[16] = "";
+    char *save = NULL;
+    char *line = strtok_r(out, "\n", &save);
+    while (line) {
+        char *tab = strchr(line, '\t');
+        if (tab && tab[1] == '"') {
+            char *end = strchr(tab + 2, '"');
+            if (end && (size_t)(end - (tab + 2)) == strlen(ssid) &&
+                strncmp(tab + 2, ssid, strlen(ssid)) == 0) {
+                size_t idlen = (size_t)(tab - line);
+                if (idlen < sizeof(id)) {
+                    memcpy(id, line, idlen);
+                    id[idlen] = '\0';
+                }
+                break;
+            }
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(out);
+    out = NULL;
+    if (!id[0]) {
+        printf("error: no saved network %s\n", ssid);
+        return 1;
+    }
+    wpa_cli(iface, &out, (const char *[]){"remove_network", id, NULL});
+    free(out);
+    out = NULL;
+    wpa_cli(iface, &out, (const char *[]){"save_config", NULL});
+    free(out);
+    printf("forgotten: %s\n", ssid);
+    return 0;
+}
+
+static int cmd_net_wifi(int argc, char **argv)
+{
+    if (argc < 4)
+        return usage();
+    if (strcmp(argv[3], "scan") == 0) {
+        if (argc != 4)
+            return usage();
+        return cmd_net_wifi_scan();
+    }
+    if (strcmp(argv[3], "status") == 0) {
+        if (argc != 4)
+            return usage();
+        return cmd_net_wifi_status();
+    }
+    if (strcmp(argv[3], "connect") == 0)
+        return cmd_net_wifi_connect(argc, argv);
+    if (strcmp(argv[3], "disconnect") == 0) {
+        if (argc != 4)
+            return usage();
+        return cmd_net_wifi_disconnect();
+    }
+    if (strcmp(argv[3], "forget") == 0) {
+        if (argc != 5)
+            return usage();
+        return cmd_net_wifi_forget(argv[4]);
+    }
+    return usage();
+}
+
 static int cmd_net(int argc, char **argv)
 {
     if (argc < 3)
@@ -1937,6 +2493,9 @@ static int cmd_net(int argc, char **argv)
         if (argc != 3)
             return usage();
         return cmd_net_announce();
+    }
+    if (strcmp(argv[2], "wifi") == 0) {
+        return cmd_net_wifi(argc, argv);
     }
     if (strcmp(argv[2], "fetch") == 0) {
         return cmd_net_fetch(argc, argv);
@@ -1978,6 +2537,141 @@ static int cmd_net(int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* tokrah — the M6 third-party bring-up.                                */
 /*                                                                      */
+/* `sevyn app run <appId> [--seconds N] [--width W] [--height H]
+ * [--input <path>] [--out <path>] [--name <n>] [--color <#hex>]
+ * [--glyph <g>] [--permissions <csv>]` launches any installed
+ * system app headless in the RN host (M9): no window, the bundle
+ * still mounts and presents, ops go to --out as JSON and to the
+ * console as compact ops lines, input arrives from --input. The
+ * check drives the M9 app screens through it (Settings wifi UI,
+ * calculator arithmetic, calendar, store list, notes) — the same
+ * pattern as `sevyn tokrah run` (M6), generalised. The bundle
+ * resolves from the installed registry
+ * (/var/lib/sevyn/apps/<id>/app.hbc, seeded from pristine on first
+ * boot); the identity flags default to the app id itself (the
+ * template apps switch on Sevyn.appId, so name/color/glyph only
+ * matter for the header). The host runs DETACHED, as in cmd_tokrah:
+ * a headless run outlasts the exec bridge's 10 s synchronous window.
+ * ------------------------------------------------------------------ */
+
+#define APPS_DIR "/var/lib/sevyn/apps"
+
+static int cmd_app(int argc, char **argv)
+{
+    if (argc < 4 || strcmp(argv[2], "run") != 0)
+        return usage();
+    const char *app_id = argv[3];
+    /* App ids are registry directory names: reject anything that
+     * could escape /var/lib/sevyn/apps (no slashes, no dots). */
+    for (const char *p = app_id; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '-' || *p == '_'))
+            return usage();
+    }
+    int seconds = 30;
+    int width = 800;
+    int height = 500;
+    const char *input = NULL;
+    const char *out = NULL;
+    const char *name = app_id;
+    const char *color = "#6b7280";
+    const char *glyph = "?";
+    const char *permissions = NULL;
+    for (int i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
+            seconds = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
+            width = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
+            height = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
+            input = argv[++i];
+        } else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+            name = argv[++i];
+        } else if (strcmp(argv[i], "--color") == 0 && i + 1 < argc) {
+            color = argv[++i];
+        } else if (strcmp(argv[i], "--glyph") == 0 && i + 1 < argc) {
+            glyph = argv[++i];
+        } else if (strcmp(argv[i], "--permissions") == 0 && i + 1 < argc) {
+            permissions = argv[++i];
+        } else {
+            return usage();
+        }
+    }
+    char bundle[PATH_MAX];
+    if (snprintf(bundle, sizeof(bundle), "%s/%s/app.hbc", APPS_DIR,
+                 app_id) >= (int)sizeof(bundle)) {
+        fprintf(stderr, "error: app id too long\n");
+        return 1;
+    }
+    struct stat st;
+    if (stat(bundle, &st) != 0) {
+        fprintf(stderr, "error: %s is not installed (no %s)\n", app_id,
+                bundle);
+        return 1;
+    }
+    char secs[16], wbuf[16], hbuf[16];
+    snprintf(secs, sizeof(secs), "%d", seconds);
+    snprintf(wbuf, sizeof(wbuf), "%d", width);
+    snprintf(hbuf, sizeof(hbuf), "%d", height);
+    const char *args[40];
+    int n = 0;
+    args[n++] = SHELL_BIN;
+    args[n++] = "--bundle";
+    args[n++] = bundle;
+    args[n++] = "--width";
+    args[n++] = wbuf;
+    args[n++] = "--height";
+    args[n++] = hbuf;
+    args[n++] = "--app";
+    args[n++] = app_id;
+    args[n++] = "--name";
+    args[n++] = name;
+    args[n++] = "--color";
+    args[n++] = color;
+    args[n++] = "--glyph";
+    args[n++] = glyph;
+    if (permissions) {
+        args[n++] = "--permissions";
+        args[n++] = permissions;
+    }
+    args[n++] = "--headless";
+    args[n++] = "--headless-seconds";
+    args[n++] = secs;
+    if (input) {
+        args[n++] = "--headless-input";
+        args[n++] = input;
+    }
+    if (out) {
+        args[n++] = "--headless-out";
+        args[n++] = out;
+    }
+    args[n] = NULL;
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "error: cannot fork for the headless host\n");
+        return 1;
+    }
+    if (pid == 0) {
+        setsid();
+        int nullfd = open("/dev/null", O_RDONLY);
+        if (nullfd >= 0)
+            dup2(nullfd, STDIN_FILENO);
+        int consolefd = open("/dev/console", O_WRONLY);
+        if (consolefd >= 0) {
+            dup2(consolefd, STDOUT_FILENO);
+            dup2(consolefd, STDERR_FILENO);
+        }
+        execv(SHELL_BIN, (char *const *)args);
+        fprintf(stderr, "error: cannot exec %s\n", SHELL_BIN);
+        _exit(1);
+    }
+    printf("app run started (pid %d, %ds, detached)\n", (int)pid,
+           seconds);
+    return 0;
+}
+
 /* `sevyn tokrah run [--seconds N] [--input <path>] [--out <path>]`    */
 /* launches Tokrah headless in the RN host: no window, the bundle       */
 /* still mounts and presents, ops go to --out as JSON, input arrives    */
@@ -2119,6 +2813,8 @@ static int dispatch(int argc, char **argv)
         return cmd_net(argc, argv);
     if (strcmp(argv[1], "tokrah") == 0)
         return cmd_tokrah(argc, argv);
+    if (strcmp(argv[1], "app") == 0)
+        return cmd_app(argc, argv);
     return usage();
 }
 

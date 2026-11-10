@@ -27,7 +27,7 @@ that one invariant.
 ## Custody ceremony
 
 **Who holds the private key:** Kevon, and the GitHub Actions secret
-`SEVYN_UPDATE_SIGNING_KEY` (contents = the private-key JSON file produced by
+`SEVYN_NIGHTLY_UPDATE_SIGNING_KEY` (contents = the private-key JSON file produced by
 `generate-key.mjs`). Nobody else. It is never committed to the repo, never
 baked into an image, never printed to logs — `generate-key.mjs` writes it
 with mode `0600` and never prints private material to stdout.
@@ -50,7 +50,7 @@ both public keys are present in its `trusted-update-keys.json`.
 ```sh
 node tools/update-signing/generate-key.mjs --key-id nightly --out /secure/nightly-signing-key.json
 # → prints the PUBLIC fragment; store the private file offline + as the
-#   SEVYN_UPDATE_SIGNING_KEY Actions secret
+#   SEVYN_NIGHTLY_UPDATE_SIGNING_KEY Actions secret
 ```
 
 **Wiring the trust anchor:** set `SEVYN_UPDATE_TRUSTED_KEYS` to the public

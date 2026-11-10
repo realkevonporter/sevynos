@@ -53,6 +53,18 @@ Wayland::Wayland(int width, int height, bool fullscreen,
             compositor_ != nullptr, shm_ != nullptr, xdgWmBase_ != nullptr);
     return;
   }
+  // M9 fullscreen: the shell paints at the output's preferred
+  // (native) mode, not the 1024x768 default — weston.ini no longer
+  // pins Virtual-1, so the mode is the panel's native resolution
+  // (1920x1080 in QEMU with xres/yres, the GF65 panel on hardware).
+  // When no output mode arrived (no wl_output), keep the requested
+  // size. App windows keep their --width/--height.
+  if (fullscreen_ && outputWidth_ > 0 && outputHeight_ > 0) {
+    logLine("WAYLAND output mode %dx%d (requested %dx%d)", outputWidth_,
+            outputHeight_, width_, height_);
+    width_ = outputWidth_;
+    height_ = outputHeight_;
+  }
   painters_[0] = std::make_unique<Painter>(width_, height_);
   painters_[1] = std::make_unique<Painter>(width_, height_);
   if (painters_[0]->shmFd() < 0 || painters_[1]->shmFd() < 0) {
@@ -85,6 +97,8 @@ Wayland::~Wayland() {
     wl_buffer_destroy(buffers_[1]);
   if (xdgToplevel_)
     xdg_toplevel_destroy(xdgToplevel_);
+  if (output_)
+    wl_output_destroy(output_);
   if (xdgSurface_)
     xdg_surface_destroy(xdgSurface_);
   if (surface_)
@@ -132,6 +146,18 @@ void Wayland::onRegistryGlobal(void* data, wl_registry* registry,
   } else if (strcmp(interface, wl_shm_interface.name) == 0) {
     self->shm_ = static_cast<wl_shm*>(
         wl_registry_bind(registry, name, &wl_shm_interface, 1));
+  } else if (strcmp(interface, wl_output_interface.name) == 0) {
+    // Bind at min(advertised, 2): mode/geometry/done are v1, scale
+    // is v2. The first output wins — one output in this guest.
+    uint32_t v = version < 2 ? version : 2;
+    static const wl_output_listener kOutputListener = {
+        &Wayland::onOutputGeometry, &Wayland::onOutputMode,
+        &Wayland::onOutputDone, &Wayland::onOutputScale};
+    if (!self->output_) {
+      self->output_ = static_cast<wl_output*>(
+          wl_registry_bind(registry, name, &wl_output_interface, v));
+      wl_output_add_listener(self->output_, &kOutputListener, self);
+    }
   } else if (strcmp(interface, wl_seat_interface.name) == 0) {
     self->seat_ = static_cast<wl_seat*>(
         wl_registry_bind(registry, name, &wl_seat_interface, 1));
@@ -148,6 +174,54 @@ void Wayland::onRegistryGlobalRemove(void* data, wl_registry* registry,
   (void)data;
   (void)registry;
   (void)name;
+}
+
+void Wayland::onOutputGeometry(void* data, wl_output* output, int32_t x,
+                               int32_t y, int32_t physicalWidth,
+                               int32_t physicalHeight, int32_t subpixel,
+                               const char* make, const char* model,
+                               int32_t transform) {
+  (void)data;
+  (void)output;
+  (void)x;
+  (void)y;
+  (void)physicalWidth;
+  (void)physicalHeight;
+  (void)subpixel;
+  (void)make;
+  (void)model;
+  (void)transform;
+}
+
+void Wayland::onOutputMode(void* data, wl_output* output, uint32_t flags,
+                           int32_t width, int32_t height, int32_t refresh) {
+  (void)output;
+  (void)refresh;
+  Wayland* self = static_cast<Wayland*>(data);
+  // The preferred mode is the panel's native resolution; the current
+  // mode is the fallback when no mode carries PREFERRED (Weston
+  // marks the preferred mode current). Preferred always wins over a
+  // merely current mode — the two can differ. The constructor reads
+  // the result after the roundtrips.
+  if (flags & WL_OUTPUT_MODE_PREFERRED) {
+    self->outputWidth_ = width;
+    self->outputHeight_ = height;
+    self->outputPreferred_ = true;
+  } else if ((flags & WL_OUTPUT_MODE_CURRENT) && !self->outputPreferred_) {
+    self->outputWidth_ = width;
+    self->outputHeight_ = height;
+  }
+}
+
+void Wayland::onOutputDone(void* data, wl_output* output) {
+  (void)data;
+  (void)output;
+}
+
+void Wayland::onOutputScale(void* data, wl_output* output, int32_t factor) {
+  (void)data;
+  (void)output;
+  (void)factor;
 }
 
 void Wayland::onSeatCapabilities(void* data, wl_seat* seat,
@@ -197,14 +271,66 @@ void Wayland::onXdgSurfaceConfigure(void* data, xdg_surface* surface,
 void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
                                      int32_t width, int32_t height,
                                      wl_array* states) {
-  (void)data;
   (void)toplevel;
-  (void)width;
-  (void)height;
   (void)states;
-  // The shell is fullscreen and app windows are a fixed size: the
-  // compositor owns the shell size (1024x768) and app windows keep
-  // their committed buffer size. Ignore the suggestion either way.
+  Wayland* self = static_cast<Wayland*>(data);
+  // M9: honor the compositor's size. Zero means "no opinion" — the
+  // client keeps its size (Weston sends 0,0 for the initial
+  // fullscreen configure when the output mode already matches).
+  // A resize drag ends with a configure carrying the new size; the
+  // fullscreen shell gets one when the output mode changes. App
+  // windows clamp to the minimum size.
+  if (width <= 0 || height <= 0)
+    return;
+  int w = width;
+  int h = height;
+  if (!self->fullscreen_) {
+    if (w < kMinWidth)
+      w = kMinWidth;
+    if (h < kMinHeight)
+      h = kMinHeight;
+  }
+  if (w == self->width_ && h == self->height_)
+    return;
+  self->resize(w, h);
+}
+
+void Wayland::resize(int width, int height) {
+  if (width <= 0 || height <= 0)
+    return;
+  if (width == width_ && height == height_)
+    return;
+  logLine("WAYLAND resize %dx%d -> %dx%d", width_, height_, width, height);
+  // Drop both wl_buffers: they reference the old SHM fds at the old
+  // size, and doPresent recreates them from the resized painters.
+  // The compositor may still be reading a just-committed buffer; the
+  // presents here are seconds apart, so the residual tear risk is
+  // the same transient class the unconditional presents already
+  // accept (see doPresent).
+  for (int i = 0; i < 2; i++) {
+    if (buffers_[i]) {
+      wl_buffer_destroy(buffers_[i]);
+      buffers_[i] = nullptr;
+    }
+    busy_[i] = false;
+  }
+  lastCommitted_ = -1;
+  back_ = 0;
+  bool ok = true;
+  for (int i = 0; i < 2; i++)
+    ok = painters_[i]->resize(width, height) && ok;
+  if (!ok) {
+    logLine("WAYLAND resize failed (painter)");
+    return;
+  }
+  width_ = width;
+  height_ = height;
+  if (sizeHandler_)
+    sizeHandler_(width, height);
+  // The size handler re-lays out JS and presents at the new size;
+  // if nothing is subscribed, flush a pending present instead.
+  if (havePending_)
+    flushPending();
 }
 
 void Wayland::onXdgToplevelClose(void* data, xdg_toplevel* toplevel) {
@@ -352,8 +478,35 @@ void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
                               uint32_t time, uint32_t button, uint32_t state) {
   Wayland* self = static_cast<Wayland*>(data);
   (void)pointer;
-  (void)serial;
   (void)time;
+  // M9 move + resize (app windows only — the shell is fullscreen).
+  // Left-button press in the title bar (44px, minus the close-X
+  // zone) starts an interactive move; a press in the 8px right /
+  // bottom edge strips (or the bottom-right corner) starts an
+  // interactive resize. The compositor owns the drag from here: it
+  // sends a configure with the new size on release, which flows
+  // through onXdgToplevelConfigure. The press is still forwarded to
+  // JS below — the title bar holds no pressables, and the close X
+  // is outside the move region, so nothing in JS fires for a drag.
+  if (state == WL_POINTER_BUTTON_STATE_PRESSED && button == 0x110 &&
+      !self->fullscreen_ && self->xdgToplevel_ && self->seat_) {
+    const double x = self->pointerX_;
+    const double y = self->pointerY_;
+    const int w = self->width_;
+    const int h = self->height_;
+    uint32_t edges = XDG_TOPLEVEL_RESIZE_EDGE_NONE;
+    if (x >= w - kResizeEdge && y >= h - kResizeEdge)
+      edges = XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT;
+    else if (x >= w - kResizeEdge)
+      edges = XDG_TOPLEVEL_RESIZE_EDGE_RIGHT;
+    else if (y >= h - kResizeEdge)
+      edges = XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM;
+    if (edges != XDG_TOPLEVEL_RESIZE_EDGE_NONE) {
+      xdg_toplevel_resize(self->xdgToplevel_, self->seat_, serial, edges);
+    } else if (y < kTitleBarHeight && x < w - kCloseZoneWidth) {
+      xdg_toplevel_move(self->xdgToplevel_, self->seat_, serial);
+    }
+  }
   if (self->pointerHandler_)
     self->pointerHandler_("button", self->pointerX_, self->pointerY_, button,
                           state == WL_POINTER_BUTTON_STATE_PRESSED);

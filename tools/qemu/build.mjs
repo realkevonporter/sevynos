@@ -223,10 +223,10 @@ console.log(`SevynOS live USB and QEMU boot artifacts written to ${output}`);
   // Sign the feed when a signing key is available. Without it the feed
   // ships unsigned and on-device updaters (which fail closed) will refuse
   // it — correct for dev builds, loud on purpose.
-  const signingKeyEnv = process.env["SEVYN_UPDATE_SIGNING_KEY"];
+  const signingKeyEnv = process.env["SEVYN_NIGHTLY_UPDATE_SIGNING_KEY"];
   if (signingKeyEnv === undefined || signingKeyEnv.trim().length === 0) {
     console.warn(
-      "WARNING: SEVYN_UPDATE_SIGNING_KEY is not set — updates.json is UNSIGNED " +
+      "WARNING: SEVYN_NIGHTLY_UPDATE_SIGNING_KEY is not set — updates.json is UNSIGNED " +
         "and devices with a trust anchor will refuse this feed.",
     );
   } else {

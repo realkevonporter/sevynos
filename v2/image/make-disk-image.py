@@ -4,12 +4,24 @@
 Usage:
   make-disk-image.py --kernel <vmlinuz> --initramfs <initramfs.cpio.gz>
                      --version <version> --out <sevynos.img>
-                     [--esp-mb 512] [--data-mb 1024]
+                     [--esp-mb 1152] [--data-mb 864]
                      [--make-data-disk <path>] [--sysroot <path>]
 
-Layout (GPT, 1 MiB alignment, ~1.5 GiB total — under GitHub's 2 GB
+Layout (GPT, 1 MiB alignment, ~2.0 GiB total — under GitHub's 2 GB
 release-asset limit):
-  p1  EFI System, FAT32, 512 MiB — the standard Ubuntu ESP layout
+  p1  EFI System, FAT32, 1152 MiB — the standard Ubuntu ESP layout
+        (shim + GRUB in /EFI/ubuntu, fallback copies in /EFI/BOOT).
+        1152 MiB holds THREE copies of the boot set at the sync peak:
+        the M9 ESP sync preserves the old kernel + initramfs as .prev
+        alongside the new ones, and esp_copy_verified writes each file
+        to a temp name and renames it — so while the new initramfs is
+        being written the ESP holds old + .prev + temp-new (~366 MiB
+        each, ~1100 MiB total) + the EFI files. An 896 MiB ESP fits
+        old + .prev but runs out of space on the temp for the new
+        initramfs (ENOSPC, apply fails) — run10 proved it.
+        The data partition shrinks to 864 MiB to keep the total under
+        2 GiB (1152 + 864 = 2016 MiB): it still holds both A/B slots
+        (~768 MiB) with ~96 MiB for user data.
         (shim + GRUB in /EFI/ubuntu, fallback copies in /EFI/BOOT):
         /EFI/BOOT/BOOTX64.EFI    shim (Microsoft-signed — boots with
                                  Secure Boot ON; the GF65's firmware
@@ -55,7 +67,7 @@ release-asset limit):
                                  loads from the ESP — it cannot read
                                  ext4, so the kernel lives here, not
                                  in a slot; see the A/B note below)
-  p2  Sevyn data, ext4, LABEL=SEVYN_DATA, 1 GiB
+  p2  Sevyn data, ext4, LABEL=SEVYN_DATA, 864 MiB
         /slots/A/ + /slot-state.json (built by make-data-disk.py —
         same layout as the M6 data disk)
 
@@ -73,12 +85,18 @@ Built rootless (no loop mounts): mkfs.vfat + mtools for the ESP,
 mkfs.ext4 + debugfs (via make-data-disk.py) for the data partition,
 sgdisk for the GPT, dd to assemble.
 
-A/B note: the updater still downloads into the idle slot on the data
-partition (M8, proven in QEMU), but on bare metal GRUB loads
-the ESP kernel — an update that only lands in a slot would never
-boot. Copying the active slot's kernel onto the ESP after an update
-is a follow-up, not M7: M7 proves the boot path. Until then, a new
-nightly means a new sevynos.img (dd it to the stick again).
+A/B note (M9 closes the M7 gap): the updater downloads into the
+idle slot on the data partition (M8), and the M9 ESP sync then copies
+the new slot's kernel + initramfs onto the ESP (preserving the old
+kernel as /vmlinuz.prev) and rewrites grub.cfg with a default entry
+for the new slot and a "previous" entry for the good slot — so an
+in-place update boots on bare metal, and a twice-failed slot falls
+back to the good one. The image's initial grub.cfg stays
+single-entry (slot A); the updater adds the previous entry on the
+first ESP sync, when .prev files first exist. Until the nightly
+signing key is provisioned, the feed ships unsigned and installed
+systems refuse it — a new nightly still means a new sevynos.img
+until then.
 
 To boot the GF65: dd if=sevynos.img of=/dev/sdX bs=4M status=progress
 (where sdX is the USB stick — NOT the internal NVMe), boot from USB,
@@ -115,8 +133,8 @@ def main():
     ap.add_argument("--initramfs", required=True)
     ap.add_argument("--version", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--esp-mb", type=int, default=512)
-    ap.add_argument("--data-mb", type=int, default=1024)
+    ap.add_argument("--esp-mb", type=int, default=1152)
+    ap.add_argument("--data-mb", type=int, default=864)
     ap.add_argument("--make-data-disk", default=None)
     ap.add_argument("--sysroot", default="/")
     args = ap.parse_args()

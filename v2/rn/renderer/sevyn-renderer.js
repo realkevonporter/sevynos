@@ -330,7 +330,14 @@ function emitInstance(inst, ox, oy, ops, clip) {
       inst.props && typeof inst.props.value === "string" ? inst.props.value : "";
     const showingPlaceholder =
       !value && inst.props && typeof inst.props.placeholder === "string";
-    const display = showingPlaceholder ? inst.props.placeholder : value;
+    // secureTextEntry (M9 wifi password): the stored value stays
+    // real — only the drawn text is masked, so the caret position
+    // (which counts the display length) stays correct.
+    const display = showingPlaceholder
+      ? inst.props.placeholder
+      : inst.props && inst.props.secureTextEntry
+        ? "•".repeat(value.length)
+        : value;
     // Hit rect (background or transparent) so a click focuses the input.
     ops.push({
       type: "rect",
@@ -1003,6 +1010,26 @@ function render(element, options) {
   Sevyn.onStatus(handleStatus);
   if (typeof Sevyn.onScroll === "function") Sevyn.onScroll(scrollAt);
   if (typeof Sevyn.onAppEvent === "function") Sevyn.onAppEvent(handleAppEvent);
+  // M9 surface resize: the host resized the painters already; re-size
+  // the root Yoga node and re-present at the new size. The event
+  // carries the new size (Sevyn.width/height are updated too).
+  if (typeof Sevyn.onWindowResize === "function") {
+    Sevyn.onWindowResize((ev) => {
+      const w = ev && ev.width ? ev.width : rootWidth;
+      const h = ev && ev.height ? ev.height : rootHeight;
+      if (w === rootWidth && h === rootHeight) return;
+      rootWidth = w;
+      rootHeight = h;
+      if (rootContainer) {
+        Sevyn.yogaSetStyle(rootContainer.yogaId, {
+          width: rootWidth,
+          height: rootHeight,
+          flexDirection: "column",
+        });
+      }
+      presentRoot();
+    });
+  }
 
   // NOTE: the onUncaughtError handler must log — a no-op here would
   // silently swallow render throws and mount an empty tree. Log the

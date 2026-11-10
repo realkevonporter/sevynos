@@ -12,9 +12,32 @@
  *     (/data/slot-state.json): on startup it increments the boot
  *     attempt counter for the booted slot; when the shell reaches
  *     READY it marks the booted slot good (attempts reset). A slot
- *     that fails to boot twice is never booted again — the bootloader
- *     (the harness, for now; a real bootloader on hardware) falls
- *     back to the good slot.
+ *     that fails to boot twice is never booted again — the daemon
+ *     restores the ESP from the good slot and reboots into it (see
+ *     the M9 ESP sync below); GRUB's "previous" entry is the manual
+ *     half, for a kernel that will not boot at all.
+ *
+ * M9 — ESP sync (bare metal): on hardware GRUB boots the kernel +
+ * initramfs from the EFI System Partition, NOT from the data-disk
+ * slots, so a slot update alone never boots. After the slot install
+ * the apply child mounts the ESP (partition 1 of the data disk,
+ * vfat), preserves the running kernel as /vmlinuz.prev +
+ * /initramfs.prev.cpio.gz, copies the new slot's kernel +
+ * initramfs into place (temp + fsync + sha256 re-read + rename),
+ * and rewrites /EFI/ubuntu/grub.cfg atomically with two entries:
+ * the default boots the new active slot from /vmlinuz, "SevynOS
+ * (previous)" boots the good slot from /vmlinuz.prev. Any sync
+ * failure aborts the apply WITHOUT flipping the state — the running
+ * system keeps booting the old kernel. With no ESP at all (the
+ * QEMU -kernel path: the data device is a whole disk, no partition
+ * table) the sync is skipped and the slot flip still works, because
+ * the harness boots -kernel from the active slot.
+ *   On startup, when the booted slot's attempt counter reaches 2
+ * and the booted slot is not the good slot, the daemon restores
+ * the ESP from the good slot, flips active back to good, and
+ * reboots. No auto-reboot timer: the fallback fires on the second
+ * boot attempt (manual reboot / power-cycle after the first failed
+ * boot), so a slow first boot can never false-trigger it.
  *
  * Feed protocol (established in the repo — tools/update-signing/ and
  * services/update/src/feed-signing.ts; this daemon re-implements it
@@ -86,7 +109,11 @@
  *   SEVYN_UPDATE_HEALTH_FILE (default /tmp/sevyn-host.log),
  *   SEVYN_UPDATE_WGET (default wget),
  *   SEVYN_UPDATE_SLOT (host-test hook: the booted slot when the
- *     kernel cmdline carries no sevyn.slot=).
+ *     kernel cmdline carries no sevyn.slot=),
+ *   SEVYN_UPDATE_ESP_DIR (host-test hook: use this directory as the
+ *     ESP, skipping device discovery + mount),
+ *   SEVYN_UPDATE_PROC_MOUNTS (host-test hook: mounts table to read
+ *     for ESP discovery; default /proc/mounts).
  *
  * Build: gcc, libc + libcrypto. Links json.c + verify.c + canonical.c.
  */
@@ -102,6 +129,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -140,6 +168,11 @@ static const char *g_version_file;
 static const char *g_tmp_dir;
 static const char *g_health_file;
 static const char *g_wget;
+static const char *g_esp_dir;    /* SEVYN_UPDATE_ESP_DIR, or NULL */
+static const char *g_proc_mounts; /* SEVYN_UPDATE_PROC_MOUNTS, or NULL */
+
+#define ESP_MOUNT_POINT "/esp"
+#define ESP_GRUB_CFG_REL "EFI/ubuntu/grub.cfg"
 static int g_console_fd = -1;
 static volatile sig_atomic_t g_stop = 0;
 
@@ -836,24 +869,15 @@ static int download_verified(const struct feed_artifact *fa,
     return 0;
 }
 
-/* Write a verified file into the slot dir under a temp name, then
- * rename into place and fsync. Returns 0 on success. */
-static int install_into_slot(const char *slot_dir, const char *name,
-                             const char *src_path)
+/* Copy a file and fsync the destination. Used by the slot install
+ * and the ESP sync (both copy across filesystems, so rename alone
+ * cannot do it). Returns 0 on success. */
+static int copy_file_fsync(const char *src_path, const char *dst_path)
 {
-    char tmp[PATH_MAX];
-    char dst[PATH_MAX];
-    if (snprintf(tmp, sizeof(tmp), "%s/%s.tmp.%ld", slot_dir, name,
-                 (long)getpid()) >= (int)sizeof(tmp))
-        return -1;
-    if (snprintf(dst, sizeof(dst), "%s/%s", slot_dir, name) >=
-        (int)sizeof(dst))
-        return -1;
-    /* Copy (rename would cross filesystems: tmp dir vs /data). */
     int in = open(src_path, O_RDONLY);
     if (in < 0)
         return -1;
-    int out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int out = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) {
         close(in);
         return -1;
@@ -882,6 +906,56 @@ static int install_into_slot(const char *slot_dir, const char *name,
         ok = 0;
     close(in);
     if (!ok) {
+        unlink(dst_path);
+        return -1;
+    }
+    return 0;
+}
+
+/* Write a verified file into the slot dir under a temp name, then
+ * rename into place and fsync. Returns 0 on success. */
+static int install_into_slot(const char *slot_dir, const char *name,
+                             const char *src_path)
+{
+    char tmp[PATH_MAX];
+    char dst[PATH_MAX];
+    if (snprintf(tmp, sizeof(tmp), "%s/%s.tmp.%ld", slot_dir, name,
+                 (long)getpid()) >= (int)sizeof(tmp))
+        return -1;
+    if (snprintf(dst, sizeof(dst), "%s/%s", slot_dir, name) >=
+        (int)sizeof(dst))
+        return -1;
+    /* Copy (rename would cross filesystems: tmp dir vs /data). */
+    if (copy_file_fsync(src_path, tmp) != 0)
+        return -1;
+    if (rename(tmp, dst) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return sync_dir(slot_dir);
+}
+
+/* --- ESP sync (M9) --- */
+
+/* Copy src to dst via a temp name, verifying the copy's sha256
+ * matches the source's. Returns 0 on success. */
+static int esp_copy_verified(const char *src, const char *dst)
+{
+    char hash_src[65];
+    if (sha256_file_hex(src, hash_src) != 0)
+        return -1;
+    char tmp[PATH_MAX];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", dst, (long)getpid()) >=
+        (int)sizeof(tmp))
+        return -1;
+    if (copy_file_fsync(src, tmp) != 0)
+        return -1;
+    char hash_tmp[65];
+    if (sha256_file_hex(tmp, hash_tmp) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (strcmp(hash_src, hash_tmp) != 0) {
         unlink(tmp);
         return -1;
     }
@@ -889,7 +963,290 @@ static int install_into_slot(const char *slot_dir, const char *name,
         unlink(tmp);
         return -1;
     }
-    return sync_dir(slot_dir);
+    return 0;
+}
+
+/* The ESP sync core: operates on a plain directory (the mounted ESP
+ * or the SEVYN_UPDATE_ESP_DIR hook), so the host unit tests
+ * exercise it directly. new_* are the slot files to boot; prev_*
+ * are the kernel to preserve as /vmlinuz.prev (the running kernel
+ * on apply, the good slot on restore). Rewrites grub.cfg with the
+ * two entries. On any failure the live /vmlinuz is untouched
+ * (copies go through temp names + rename) and -1 is returned. */
+static int esp_sync_files(const char *esp_dir,
+                          const char *new_kern, const char *new_initrd,
+                          const char *prev_kern, const char *prev_initrd,
+                          char active_slot, char good_slot)
+{
+    char dst[PATH_MAX];
+    /* Preserve the previous kernel first: if the new copy fails
+     * after this, the ESP still boots the old kernel (now also the
+     * .prev one). */
+    if (snprintf(dst, sizeof(dst), "%s/vmlinuz.prev", esp_dir) >=
+        (int)sizeof(dst))
+        return -1;
+    if (esp_copy_verified(prev_kern, dst) != 0)
+        return -1;
+    if (snprintf(dst, sizeof(dst), "%s/initramfs.prev.cpio.gz",
+                 esp_dir) >= (int)sizeof(dst))
+        return -1;
+    if (esp_copy_verified(prev_initrd, dst) != 0)
+        return -1;
+    /* New kernel + initramfs into place. */
+    if (snprintf(dst, sizeof(dst), "%s/vmlinuz", esp_dir) >=
+        (int)sizeof(dst))
+        return -1;
+    if (esp_copy_verified(new_kern, dst) != 0)
+        return -1;
+    if (snprintf(dst, sizeof(dst), "%s/initramfs.cpio.gz", esp_dir) >=
+        (int)sizeof(dst))
+        return -1;
+    if (esp_copy_verified(new_initrd, dst) != 0)
+        return -1;
+    if (sync_dir(esp_dir) != 0)
+        return -1;
+    /* grub.cfg: default boots the active slot from /vmlinuz, the
+     * previous entry boots the good slot from /vmlinuz.prev. */
+    char cfg_text[1024];
+    snprintf(cfg_text, sizeof(cfg_text),
+             "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
+             "# Written by sevyn-updated (ESP sync): the default entry boots\n"
+             "# the active slot from /vmlinuz; the previous entry boots the\n"
+             "# good slot from the preserved /vmlinuz.prev.\n"
+             "set timeout=3\n"
+             "set default=0\n"
+             "menuentry \"SevynOS\" {\n"
+             "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=%c\n"
+             "    initrd /initramfs.cpio.gz\n"
+             "}\n"
+             "menuentry \"SevynOS (previous)\" {\n"
+             "    linux /vmlinuz.prev console=tty0 console=ttyS0 sevyn.slot=%c\n"
+             "    initrd /initramfs.prev.cpio.gz\n"
+             "}\n",
+             active_slot, good_slot);
+    char efi_dir[PATH_MAX];
+    if (snprintf(efi_dir, sizeof(efi_dir), "%s/EFI/ubuntu", esp_dir) >=
+        (int)sizeof(efi_dir))
+        return -1;
+    /* The EFI/ubuntu dir exists on every image (GRUB lives there);
+     * create it if a test ESP is bare. */
+    if (mkdir_p(efi_dir) != 0)
+        return -1;
+    char cfg_path[PATH_MAX];
+    if (snprintf(cfg_path, sizeof(cfg_path), "%s/%s", esp_dir,
+                 ESP_GRUB_CFG_REL) >= (int)sizeof(cfg_path))
+        return -1;
+    if (write_file_atomic(cfg_path, cfg_text) != 0)
+        return -1;
+    return 0;
+}
+
+/* Find the ESP device: partition 1 of the disk carrying the data
+ * partition (from the mounts table). Returns a malloc'd "/dev/..."
+ * or NULL when there is no ESP (whole-disk data device, ESP device
+ * absent, or the mounts table has no data entry). */
+static char *esp_find_device(void)
+{
+    const char *mounts_path =
+        g_proc_mounts ? g_proc_mounts : "/proc/mounts";
+    FILE *f = fopen(mounts_path, "r");
+    if (!f)
+        return NULL;
+    char line[1024];
+    char *device = NULL;
+    size_t data_len = strlen(g_data_dir);
+    while (fgets(line, sizeof(line), f)) {
+        /* fields: device mountpoint fstype options ... */
+        char *sp1 = strchr(line, ' ');
+        if (!sp1)
+            continue;
+        char *sp2 = strchr(sp1 + 1, ' ');
+        if (!sp2)
+            continue;
+        if ((size_t)(sp2 - (sp1 + 1)) != data_len)
+            continue;
+        if (strncmp(sp1 + 1, g_data_dir, data_len) != 0)
+            continue;
+        size_t dev_len = (size_t)(sp1 - line);
+        device = malloc(dev_len + 1);
+        if (!device)
+            break;
+        memcpy(device, line, dev_len);
+        device[dev_len] = '\0';
+        break;
+    }
+    fclose(f);
+    if (!device)
+        return NULL;
+    /* Resolve /dev/disk/by-label/... symlinks. */
+    char resolved[PATH_MAX];
+    if (realpath(device, resolved) != NULL) {
+        free(device);
+        device = strdup(resolved);
+        if (!device)
+            return NULL;
+    }
+    /* Derive the parent disk + partition 1. Two layouts:
+     *   sd-style: sda2 / vda2 -> parent sda / vda, ESP sda1 / vda1
+     *     (the part before the trailing digits has no digits);
+     *   p-style: nvme0n1p2 / mmcblk0p2 -> parent nvme0n1, ESP p1.
+     * Anything else (whole disk, e.g. /dev/vda or /dev/nvme0n1) has
+     * no ESP partition. */
+    const char *base = strrchr(device, '/');
+    base = base ? base + 1 : device;
+    size_t blen = strlen(base);
+    size_t i = blen;
+    while (i > 0 && isdigit((unsigned char)base[i - 1]))
+        i--;
+    if (i == blen) { /* no trailing digits: whole disk */
+        free(device);
+        return NULL;
+    }
+    int pstyle = 0;
+    size_t parent_len;
+    if (i > 1 && base[i - 1] == 'p' &&
+        isdigit((unsigned char)base[i - 2])) {
+        pstyle = 1;
+        parent_len = i - 1;
+    } else {
+        /* sd-style only when the disk name has no digits of its
+         * own (nvme0n1 without its p2 is a whole disk, not a
+         * partition). */
+        int has_digit = 0;
+        for (size_t j = 0; j < i; j++)
+            if (isdigit((unsigned char)base[j]))
+                has_digit = 1;
+        if (has_digit) {
+            free(device);
+            return NULL;
+        }
+        parent_len = i;
+    }
+    char *esp = malloc(strlen(device) - blen + parent_len + 3);
+    if (!esp) {
+        free(device);
+        return NULL;
+    }
+    size_t dev_prefix = (size_t)(base - device);
+    memcpy(esp, device, dev_prefix);
+    memcpy(esp + dev_prefix, base, parent_len);
+    esp[dev_prefix + parent_len] = '\0';
+    if (pstyle)
+        strcat(esp, "p1");
+    else
+        strcat(esp, "1");
+    free(device);
+    struct stat st;
+    if (stat(esp, &st) != 0 || !S_ISBLK(st.st_mode)) {
+        free(esp);
+        return NULL;
+    }
+    return esp;
+}
+
+/* Resolve the ESP directory for a sync: the SEVYN_UPDATE_ESP_DIR
+ * hook wins (no mount); otherwise discover the ESP device and mount
+ * it at /esp. Returns 0 with *esp_out set and *mounted_out (1 =
+ * caller must esp_release); 1 when there is no ESP (skip the sync);
+ * -1 on error with err filled. */
+static int esp_resolve(const char **esp_out, int *mounted_out,
+                       char *err, size_t errcap)
+{
+    *mounted_out = 0;
+    if (g_esp_dir && *g_esp_dir) {
+        *esp_out = g_esp_dir;
+        return 0;
+    }
+    char *dev = esp_find_device();
+    if (!dev) {
+        log_line("UPDATE no ESP found (whole-disk data device); "
+                 "slot-only update");
+        return 1;
+    }
+    if (mkdir_p(ESP_MOUNT_POINT) != 0) {
+        snprintf(err, errcap, "cannot create %s", ESP_MOUNT_POINT);
+        free(dev);
+        return -1;
+    }
+    if (mount(dev, ESP_MOUNT_POINT, "vfat", 0, NULL) != 0) {
+        snprintf(err, errcap, "cannot mount ESP %s: %s", dev,
+                 strerror(errno));
+        free(dev);
+        return -1;
+    }
+    free(dev);
+    *esp_out = ESP_MOUNT_POINT;
+    *mounted_out = 1;
+    return 0;
+}
+
+static void esp_release(int mounted)
+{
+    if (mounted)
+        (void)umount(ESP_MOUNT_POINT);
+}
+
+/* ESP sync for an apply: the new slot's files become /vmlinuz, the
+ * running ESP kernel is preserved as /vmlinuz.prev. Returns 0 when
+ * synced (or when there is no ESP), -1 on failure. */
+static int esp_sync_apply(const char *slot_dir, char idle, char good,
+                          char *err, size_t errcap)
+{
+    char new_kern[PATH_MAX], new_initrd[PATH_MAX];
+    if (snprintf(new_kern, sizeof(new_kern), "%s/vmlinuz",
+                 slot_dir) >= (int)sizeof(new_kern))
+        return -1;
+    if (snprintf(new_initrd, sizeof(new_initrd), "%s/initramfs.cpio.gz",
+                 slot_dir) >= (int)sizeof(new_initrd))
+        return -1;
+    const char *esp = NULL;
+    int mounted = 0;
+    int rc = esp_resolve(&esp, &mounted, err, errcap);
+    if (rc != 0)
+        return rc == 1 ? 0 : -1;
+    char prev_kern[PATH_MAX], prev_initrd[PATH_MAX];
+    if (snprintf(prev_kern, sizeof(prev_kern), "%s/vmlinuz",
+                 esp) >= (int)sizeof(prev_kern)) {
+        esp_release(mounted);
+        return -1;
+    }
+    if (snprintf(prev_initrd, sizeof(prev_initrd),
+                 "%s/initramfs.cpio.gz",
+                 esp) >= (int)sizeof(prev_initrd)) {
+        esp_release(mounted);
+        return -1;
+    }
+    int r = esp_sync_files(esp, new_kern, new_initrd, prev_kern,
+                           prev_initrd, idle, good);
+    esp_release(mounted);
+    if (r != 0)
+        snprintf(err, errcap, "ESP sync failed");
+    return r;
+}
+
+/* ESP restore for a twice-failed boot: the good slot's files become
+ * both /vmlinuz and /vmlinuz.prev, grub.cfg points both entries at
+ * the good slot. Returns 0 on success (or no ESP), -1 on failure. */
+static int esp_sync_restore(const char *slot_dir, char good,
+                            char *err, size_t errcap)
+{
+    char kern[PATH_MAX], initrd[PATH_MAX];
+    if (snprintf(kern, sizeof(kern), "%s/vmlinuz",
+                 slot_dir) >= (int)sizeof(kern))
+        return -1;
+    if (snprintf(initrd, sizeof(initrd), "%s/initramfs.cpio.gz",
+                 slot_dir) >= (int)sizeof(initrd))
+        return -1;
+    const char *esp = NULL;
+    int mounted = 0;
+    int rc = esp_resolve(&esp, &mounted, err, errcap);
+    if (rc != 0)
+        return rc == 1 ? 0 : -1;
+    int r = esp_sync_files(esp, kern, initrd, kern, initrd, good, good);
+    esp_release(mounted);
+    if (r != 0)
+        snprintf(err, errcap, "ESP restore failed");
+    return r;
 }
 
 /* The apply child: fetch + verify the feed, download + verify both
@@ -951,6 +1308,14 @@ static void apply_child(int listen_fd, int ctl_fd)
     }
     unlink(dl_kern);
     unlink(dl_initrd);
+    /* M9: sync the ESP before flipping the state — on bare metal
+     * GRUB boots from the ESP, so without this the new slot would
+     * never boot. A sync failure aborts the apply WITHOUT flipping
+     * the state; the running system keeps booting the old kernel. */
+    if (esp_sync_apply(slot_dir, idle, st.good, err, sizeof(err)) != 0) {
+        log_line("UPDATE APPLY FAIL %s", err);
+        _exit(1);
+    }
     /* Flip the state: the idle slot becomes active; the good slot is
      * untouched until the new slot proves itself healthy. */
     st.active = idle;
@@ -1295,6 +1660,45 @@ static void handle_client_line(struct client *c, const char *line)
 
 /* --- slot lifecycle: attempts on boot, good on READY --- */
 
+/* M9 fallback restore: when the booted slot has failed twice and is
+ * not the good slot, restore the ESP from the good slot, flip active
+ * back to good, and reboot. Runs once at startup, before the socket
+ * is up. A restore failure logs loudly and leaves the system up
+ * (rebooting would only retry the failed slot). Never returns on a
+ * successful restore (reboot replaces the process). */
+static void maybe_restore_esp(void)
+{
+    if (!data_disk_present() || !g_boot_slot)
+        return;
+    struct slot_state st;
+    if (read_slot_state(&st) != 0)
+        return;
+    if (st.attempts < 2 || g_boot_slot == st.good)
+        return;
+    log_line("UPDATE slot %c failed twice; restoring ESP from good "
+             "slot %c",
+             g_boot_slot, st.good);
+    char slot_dir[PATH_MAX];
+    snprintf(slot_dir, sizeof(slot_dir), "%s/slots/%c", g_data_dir,
+             st.good);
+    char err[512];
+    if (esp_sync_restore(slot_dir, st.good, err, sizeof(err)) != 0) {
+        log_line("UPDATE ESP restore FAILED: %s; staying up", err);
+        return;
+    }
+    st.active = st.good;
+    st.attempts = 0;
+    if (write_slot_state(&st) != 0) {
+        log_line("UPDATE ESP restore cannot write slot state; "
+                 "staying up");
+        return;
+    }
+    sync();
+    log_line("UPDATE ESP restored from slot %c; rebooting", st.good);
+    execlp("reboot", "reboot", "-f", (char *)NULL);
+    log_line("UPDATE ESP restore cannot reboot: %s", strerror(errno));
+}
+
 static void note_boot_attempt(void)
 {
     if (!data_disk_present() || !g_boot_slot)
@@ -1380,6 +1784,8 @@ int main(int argc, char **argv)
     g_wget = getenv("SEVYN_UPDATE_WGET");
     if (!g_wget || !*g_wget)
         g_wget = DEFAULT_WGET;
+    g_esp_dir = getenv("SEVYN_UPDATE_ESP_DIR");
+    g_proc_mounts = getenv("SEVYN_UPDATE_PROC_MOUNTS");
 
     g_console_fd = open("/dev/console", O_WRONLY | O_NONBLOCK);
     signal(SIGPIPE, SIG_IGN);
@@ -1396,6 +1802,7 @@ int main(int argc, char **argv)
         log_line("UPDATE no data disk at %s (degraded: STATUS only)",
                  g_data_dir);
     note_boot_attempt();
+    maybe_restore_esp();
 
     /* Listen socket. */
     unlink(g_sock_path);

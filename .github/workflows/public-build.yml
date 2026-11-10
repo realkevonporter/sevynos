@@ -91,18 +91,18 @@ jobs:
             sevynos-v2-deps-
       - name: Build v2 native deps
         run: sh v2/rn/host/build-deps.sh
-      - name: Build v2 (M7 bare-metal boot) image
+      - name: Build v2 (M9 desktop polish) image
         env:
           TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
-          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m7-image.sh
+          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m9-image.sh
           sudo chown -R "$USER" v2/image/build
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
           sha256sum vmlinuz initramfs.cpio.gz sevynos.img > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
-          SevynOS v2 (M7 bare-metal boot) — bootable image
+          SevynOS v2 (M9 desktop polish) — bootable image
           ==============================================
           Kernel + initramfs for QEMU (x86_64), plus sevynos.img — a
           GPT USB-boot disk image for real hardware. Boots to the
@@ -112,7 +112,9 @@ jobs:
           install from pristine bundles in the image; delete one and
           reinstall it offline. The system now updates itself in
           place (A/B slots, signed updates-v2.json feed) — no USB
-          re-flash.
+          re-flash: the updater syncs the ESP, so an installed
+          system boots the new kernel after an update, and falls
+          back to the previous slot after two failed boots.
           Terminal, Settings, and Files are real system apps now:
           the Terminal runs only the `sevyn` CLI (no bash — it is the
           recovery path: kill the shell, start it back from the
@@ -136,6 +138,11 @@ jobs:
           and the network now comes from DHCP instead of a hardcoded
           address. The GPT image boots under UEFI with Secure Boot ON
           (Microsoft-signed shim + Canonical-signed GRUB).
+          M9: the desktop fills the panel at its native resolution;
+          Settings has Wi-Fi (scan, connect, connected state);
+          windows drag to move and resize; the stock apps show real
+          content (working calculator, real calendar, notes,
+          installed-app store) instead of empty windows.
 
           Boot it in QEMU (4 GB RAM: Chromium + Sevyn Code run in the image):
             qemu-system-x86_64 -machine q35 -m 4096 -kernel vmlinuz \
@@ -164,7 +171,7 @@ jobs:
           ls -l vmlinuz initramfs.cpio.gz sevynos.img v2-SHA256SUMS v2-BOOT-NOTES.txt
       - name: Generate the v2 update feed
         env:
-          SEVYN_UPDATE_SIGNING_KEY: ${{ secrets.SEVYN_UPDATE_SIGNING_KEY }}
+          SEVYN_NIGHTLY_UPDATE_SIGNING_KEY: ${{ secrets.SEVYN_NIGHTLY_UPDATE_SIGNING_KEY }}
         run: |
           # The v2 updater's feed (updates-v2.json): version + hashes of
           # the freshly built v2 image. Signed when the signing secret
@@ -174,8 +181,8 @@ jobs:
           # publishes. The secret is written to a 0600 temp file and
           # removed on exit; it never enters the image or the logs.
           KEY_ARGS=""
-          if [ -n "${SEVYN_UPDATE_SIGNING_KEY:-}" ]; then
-            printf '%s' "$SEVYN_UPDATE_SIGNING_KEY" > /tmp/update-signing-key.json
+          if [ -n "${SEVYN_NIGHTLY_UPDATE_SIGNING_KEY:-}" ]; then
+            printf '%s' "$SEVYN_NIGHTLY_UPDATE_SIGNING_KEY" > /tmp/update-signing-key.json
             chmod 600 /tmp/update-signing-key.json
             KEY_ARGS="--key-file /tmp/update-signing-key.json"
             trap 'rm -f /tmp/update-signing-key.json' EXIT
@@ -200,7 +207,7 @@ jobs:
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
 
-            SevynOS v2 (M7 bare-metal boot) image: vmlinuz + initramfs.cpio.gz + sevynos.img
+            SevynOS v2 (M9 desktop polish) image: vmlinuz + initramfs.cpio.gz + sevynos.img
             (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
             status tray, dock with 12 apps — and dock clicks open apps
             in their own windows. Terminal, Settings, Files, and the
@@ -212,6 +219,9 @@ jobs:
             Tokrah runs as a third-party app. M7: the image boots on
             real hardware — sevynos.img is a GPT USB-boot disk image
             (UEFI, Secure Boot) for the MSI GF65 Thin 9SD and friends.
+            M9: full-screen desktop, wifi in Settings, movable and
+            resizable windows, real app content, and in-place updates
+            that sync the ESP (no USB re-flash).
             The v1 ISO below is the old
             tree's image. updates-v2.json is the v2 update feed: an
             installed v2 system checks it and updates in place (A/B
@@ -222,5 +232,5 @@ jobs:
           removeArtifacts: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
-          # The v2-* files are the M7 bare-metal boot image (kernel + initramfs + GPT disk image).
+          # The v2-* files are the M9 desktop-polish image (kernel + initramfs + GPT disk image).
           artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"

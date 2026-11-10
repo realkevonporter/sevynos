@@ -13,7 +13,7 @@
  * Existing signatures from other keyIds are preserved, so a feed can carry
  * both nightly and release signatures during a rotation.
  *
- * build.mjs calls signFeedFile() directly when SEVYN_UPDATE_SIGNING_KEY is
+ * build.mjs calls signFeedFile() directly when SEVYN_NIGHTLY_UPDATE_SIGNING_KEY is
  * set; this CLI exists for manual/CI signing outside the image build.
  */
 import { createPrivateKey, sign } from "node:crypto";
@@ -63,7 +63,7 @@ export async function signFeedFile(feedPath, keyMaterial) {
   return keyId;
 }
 
-/** Parses SEVYN_UPDATE_SIGNING_KEY: either the key JSON itself or a path to the key file. */
+/** Parses SEVYN_NIGHTLY_UPDATE_SIGNING_KEY: either the key JSON itself or a path to the key file. */
 export async function parseSigningKeyEnv(raw) {
   const trimmed = raw.trim();
   const text = trimmed.startsWith("{") ? trimmed : await readFile(trimmed, "utf8");
