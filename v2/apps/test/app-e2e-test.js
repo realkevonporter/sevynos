@@ -2,8 +2,9 @@
 // End-to-end Node test for the built app bundles (dist/app.js,
 // dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js)
 // and the crash bundle (dist/crash.js). Loads the app bundle with the
-// mock Sevyn host as two different apps — files (status.read granted)
-// and notes (no permission) — and drives the close X. The crash bundle
+// mock Sevyn host as several apps — files (status.read granted, the
+// fallback screen) and notes/music/calculator/calendar/store (the M9
+// real screens) — and drives the close X. The crash bundle
 // must throw during evaluation. The M4 apps load with cli.exec and a
 // canned exec handler, and drive their real flows (terminal typing,
 // settings channel switch + AI selection, files navigation). The M5
@@ -160,7 +161,10 @@ check("files (status.read): name, glyph, live status line", () => {
   assert.ok(header, "header uses the app colour");
 });
 
-check("notes (no permission): status line says not permitted", () => {
+// M9: the template apps have real screens now. The permission gate
+// is proven by the music empty state (which still shows the status
+// line) and the fallback screen; notes shows its real UI instead.
+check("notes: real notes screen, no status leak", () => {
   const last = loadAs({
     id: "notes",
     name: "Notes",
@@ -170,6 +174,27 @@ check("notes (no permission): status line says not permitted", () => {
   });
   const texts = textsOf(last);
   assert.ok(texts.includes("Notes"), "app name shown");
+  assert.ok(texts.includes("New note"), "new-note button shown");
+  assert.ok(
+    texts.some((t) => t.includes("No notes yet")),
+    "empty notes state shown",
+  );
+  assert.ok(
+    !texts.some((t) => t.includes("87%")),
+    "no live status leaks without the permission",
+  );
+});
+
+check("music (no permission): status line says not permitted", () => {
+  const last = loadAs({
+    id: "music",
+    name: "Music",
+    color: "#ec4899",
+    glyph: "M",
+    permissions: [],
+  });
+  const texts = textsOf(last);
+  assert.ok(texts.includes("Music"), "app name shown");
   assert.ok(
     texts.some((t) => t.includes("not permitted")),
     "status line says not permitted",
@@ -178,6 +203,111 @@ check("notes (no permission): status line says not permitted", () => {
     !texts.some((t) => t.includes("87%")),
     "no live status leaks without the permission",
   );
+});
+
+check("music (status.read): live status line", () => {
+  const last = loadAs({
+    id: "music",
+    name: "Music",
+    color: "#ec4899",
+    glyph: "M",
+    permissions: ["status.read"],
+  });
+  const texts = textsOf(last);
+  assert.ok(
+    texts.some((t) => t.includes("87%")),
+    "live battery in status line",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("Wi-Fi")),
+    "live wifi in status line",
+  );
+});
+
+// Tap a key by its label: find the text op, then the pressable rect
+// containing its centre (keys are fontSize 20; the calculator
+// display is 32, so the two never collide).
+function tapText(label, fontSize) {
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  const text = present.ops.find(
+    (o) => o.type === "text" && o.text === label && o.fontSize === fontSize,
+  );
+  assert.ok(text, `text ${JSON.stringify(label)} found`);
+  const cx = text.x + text.w / 2;
+  const cy = text.y + text.h / 2;
+  const rect = present.ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      cx >= o.x &&
+      cx < o.x + o.w &&
+      cy >= o.y &&
+      cy < o.y + o.h,
+  );
+  assert.ok(rect, `pressable for ${JSON.stringify(label)} found`);
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: cx,
+    y: cy,
+    button: 1,
+    pressed: true,
+    nodeId: rect.nodeId,
+  });
+}
+
+check("calculator: 2 + 3 = 5", () => {
+  loadAs({
+    id: "calculator",
+    name: "Calculator",
+    color: "#8b5cf6",
+    glyph: "=",
+    permissions: [],
+  });
+  tapText("2", 20);
+  tapText("+", 20);
+  tapText("3", 20);
+  tapText("=", 20);
+  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  assert.ok(
+    last.ops.some((o) => o.type === "text" && o.text === "5" && o.fontSize === 32),
+    "display reads 5",
+  );
+});
+
+check("calendar: current month shown", () => {
+  const last = loadAs({
+    id: "calendar",
+    name: "Calendar",
+    color: "#ef4444",
+    glyph: "C",
+    permissions: [],
+  });
+  const now = new Date();
+  const month = now.toLocaleString("en-US", { month: "long" });
+  const texts = textsOf(last);
+  assert.ok(
+    texts.some((t) => t.includes(month) && t.includes(String(now.getFullYear()))),
+    `month title shows ${month} ${now.getFullYear()}`,
+  );
+  assert.ok(
+    texts.some((t) => t === String(now.getDate())),
+    "today is on the grid",
+  );
+});
+
+check("store: installed apps listed", () => {
+  const last = loadAs({
+    id: "store",
+    name: "Store",
+    color: "#f97316",
+    glyph: "S",
+    permissions: [],
+  });
+  const texts = textsOf(last);
+  assert.ok(texts.includes("Installed apps"), "store title shown");
+  assert.ok(texts.includes("Settings"), "settings in the list");
+  assert.ok(texts.includes("Terminal"), "terminal in the list");
 });
 
 check("close X calls Sevyn.closeApp()", () => {
@@ -370,7 +500,9 @@ check("settings: channel switch applies and logs", () => {
   assert.ok(texts.includes("AI: echo-ai"), "current AI shown");
   assert.ok(texts.includes("echo-ai"), "echo-ai button shown");
   assert.ok(texts.includes("plan-ai"), "plan-ai button shown");
-  pressTab(3); // X, Nightly, Stable
+  // M9: the Wi-Fi Scan button is the second focusable, so the order
+  // is [X, Scan, Nightly, Stable, echo-ai, plan-ai].
+  pressTab(4); // X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS channel=stable"),
@@ -382,9 +514,9 @@ check("settings: channel switch applies and logs", () => {
     texts.some((t) => t.includes("Channel set to stable.")),
     "confirmation shown",
   );
-  // Focus order is now [X, Nightly, Stable, echo-ai, plan-ai]:
-  // Stable -> echo-ai -> plan-ai -> X -> Nightly.
-  pressTab(4);
+  // Focus order is now [X, Scan, Nightly, Stable, echo-ai, plan-ai]:
+  // Stable -> echo-ai -> plan-ai -> X -> Scan -> Nightly.
+  pressTab(5);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> echo-ai -> plan-ai: swap the AI through the

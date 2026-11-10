@@ -288,6 +288,23 @@ function layoutNode(
     if (row) w = Math.max(w, cx - px + (st.paddingRight || 0));
     else w = Math.max(w, 0);
   }
+  // Row cross size (M9): a row container with no explicit height
+  // sizes to its tallest child, margins included — real Yoga does
+  // this, and without it every row of a grid collapsed to height 0
+  // and the parent column stacked them all at the same y (the M9
+  // calculator keys all landed on the first row).
+  if (hAuto && row) {
+    let cross = padT + padB;
+    for (const cid of n.children) {
+      const c = nodes.get(cid);
+      if (!c || !c.layout) continue;
+      const cs = c.style || {};
+      const mT2 = cs.marginTop || cs.marginVertical || cs.margin || 0;
+      const mB2 = cs.marginBottom || cs.marginVertical || cs.margin || 0;
+      cross = Math.max(cross, c.layout.y + c.layout.height + mT2 + mB2 + padB);
+    }
+    h = Math.max(h, cross);
+  }
   if (hAuto) {
     if (!row) h = Math.max(h, cy - py + (st.paddingBottom || 0));
     else h = Math.max(h, 0);

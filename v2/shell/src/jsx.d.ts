@@ -63,6 +63,10 @@ declare global {
     onStatus(fn: (ev: any) => void): void;
     getStatus(): { [key: string]: string };
     // App identity (set by the host; the shell reads "shell" here).
+    // Window size in pixels (set by the host from the real surface;
+    // for the shell, the output's preferred mode — M9).
+    width: number;
+    height: number;
     appId: string;
     appName: string;
     appColor: string;

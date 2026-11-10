@@ -170,8 +170,7 @@ export function Terminal(): React.ReactElement {
   return (
     <View
       style={{
-        width: 800,
-        height: 500,
+        flex: 1,
         flexDirection: "column",
         backgroundColor: "#111827",
       }}

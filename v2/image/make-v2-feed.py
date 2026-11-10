@@ -14,7 +14,7 @@ same protocol as the old tree's updates.json (tools/update-signing/):
 the signature covers the canonical body, and the updater verifies it
 against the trust anchor baked into the image.
 
-Signing (only when --key-file is given — the SEVYN_UPDATE_SIGNING_KEY
+Signing (only when --key-file is given — the SEVYN_NIGHTLY_UPDATE_SIGNING_KEY
 secret, the private-key JSON from generate-key.mjs):
   - the key's keyId must be in the committed anchor (--anchor) when
     one exists; a mismatch fails loudly (a feed signed with a key no
@@ -91,7 +91,7 @@ def main():
     if not key_file:
         print("WARNING: no signing key — updates-v2.json is UNSIGNED "
               "and devices will refuse it (fail-closed). Set "
-              "SEVYN_UPDATE_SIGNING_KEY to sign.", file=sys.stderr)
+              "SEVYN_NIGHTLY_UPDATE_SIGNING_KEY to sign.", file=sys.stderr)
         return 0
     key = json.loads(Path(key_file).read_text())
     key_id = key.get("keyId")

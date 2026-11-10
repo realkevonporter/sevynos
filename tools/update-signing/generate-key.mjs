@@ -7,7 +7,7 @@
  *
  * Output:
  *   - <out>: the PRIVATE signing key as JSON. Written with mode 0600.
- *     This file (or its contents as the SEVYN_UPDATE_SIGNING_KEY CI secret)
+ *     This file (or its contents as the SEVYN_NIGHTLY_UPDATE_SIGNING_KEY CI secret)
  *     is the crown jewel: whoever holds it can ship OS updates to every
  *     SevynOS device. It must NEVER be committed, baked into an image, or
  *     printed to logs. See README.md for the custody ceremony.

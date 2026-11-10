@@ -96,21 +96,55 @@ bool hasProp(jsi::Runtime& rt, const jsi::Object& obj, const char* name) {
 // parent reads stdout+stderr with a 10 s timeout. Runs synchronously
 // on the JS thread — commands are fast; a hung command blocks the UI
 // for at most the timeout. The command line is split on whitespace
-// (no quoting) with a 64-token cap. Returns "<exit-code>\n<output>"
-// (output capped at 64 KiB). Logs EXEC <cmdline> -> <code> to serial,
-// which is what the M4 harness asserts on.
+// with a 64-token cap; a double-quoted span is one token with the
+// quotes stripped and \" / \\ unescaped (M9 — wifi SSIDs and
+// passwords with spaces: `sevyn net wifi connect "My Network"
+// "my pass"`). Unquoted input tokenizes exactly as before. Returns
+// "<exit-code>\n<output>" (output capped at 64 KiB). Logs EXEC
+// <cmdline> -> <code> to serial, which is what the M4 harness
+// asserts on.
 constexpr const char* kSevynCli = "/usr/local/bin/sevyn";
 
 std::string runSevyn(const std::string& cmdline) {
-  std::istringstream in(cmdline);
   std::vector<std::string> tokens;
-  std::string tok;
-  // 64 tokens: the M6 check writes long headless input files through
-  // `sevyn files write` (18+ whitespace-separated tokens); a 16-token
-  // cap silently dropped the last tap's coordinates, so the login
-  // submit never fired and the failure looked like a dead button.
-  while (tokens.size() < 64 && in >> tok)
-    tokens.push_back(tok);
+  {
+    std::string cur;
+    bool inQuotes = false;
+    bool haveToken = false;
+    for (size_t i = 0; i < cmdline.size() && tokens.size() < 64; i++) {
+      char c = cmdline[i];
+      if (inQuotes && c == '\\' && i + 1 < cmdline.size() &&
+          (cmdline[i + 1] == '"' || cmdline[i + 1] == '\\')) {
+        cur += cmdline[i + 1];
+        i++;
+        haveToken = true;
+        continue;
+      }
+      if (c == '"') {
+        inQuotes = !inQuotes;
+        haveToken = true;
+        continue;
+      }
+      if (!inQuotes &&
+          (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+        if (haveToken) {
+          tokens.push_back(cur);
+          cur.clear();
+          haveToken = false;
+        }
+        continue;
+      }
+      cur += c;
+      haveToken = true;
+    }
+    // 64 tokens: the M6 check writes long headless input files
+    // through `sevyn files write` (18+ whitespace-separated tokens);
+    // a 16-token cap silently dropped the last tap's coordinates, so
+    // the login submit never fired and the failure looked like a dead
+    // button.
+    if (haveToken && tokens.size() < 64)
+      tokens.push_back(cur);
+  }
   if (tokens.empty() || tokens[0] != "sevyn")
     return "ERR only the sevyn command is allowed";
   std::vector<char*> argv;
@@ -277,6 +311,9 @@ class RnHost {
                        uint32_t button, bool pressed);
   void dispatchScroll(double x, double y, double dx, double dy);
   void dispatchKey(uint32_t key, bool pressed, bool shift);
+  // M9 surface resize: update the host size, Sevyn.width/height,
+  // and the JS size handler (the renderer re-lays out + presents).
+  void dispatchSize(int width, int height);
   void drainStatusQueue();
   void drainAppEventQueue();
   void drainExecCompletions(jsi::Runtime& rt);
@@ -371,11 +408,16 @@ class RnHost {
   std::optional<jsi::Function> statusHandler_;
   std::optional<jsi::Function> appEventHandler_;
   std::optional<jsi::Function> scrollHandler_;
+  std::optional<jsi::Function> sizeHandler_;
   bool hasPointerHandler_ = false;
   bool hasKeyHandler_ = false;
   bool hasStatusHandler_ = false;
   bool hasAppEventHandler_ = false;
   bool hasScrollHandler_ = false;
+  bool hasSizeHandler_ = false;
+  // The Sevyn host object, kept so dispatchSize can update
+  // Sevyn.width/Sevyn.height when the surface resizes (M9).
+  jsi::Value sevynValue_;
 
   // setTimeout/clearTimeout timers. Hermes has no timers of its own,
   // and React's scheduler falls back to setTimeout when neither
@@ -947,6 +989,18 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            }
            return jsi::Value::undefined();
          });
+  // M9 surface resize: the renderer subscribes in render() and
+  // re-lays out the root at the new size (see dispatchSize).
+  hostFn("onWindowResize", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count >= 1 && args[0].isObject()) {
+             sizeHandler_ =
+                 std::move(args[0].asObject(rt).asFunction(rt));
+             hasSizeHandler_ = true;
+           }
+           return jsi::Value::undefined();
+         });
   hostFn("getStatus", 0,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
                 size_t) {
@@ -1103,6 +1157,8 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
   // without scrolling; the default app window is 800x500.
   sevyn.setProperty(rt, "width", (double)width_);
   sevyn.setProperty(rt, "height", (double)height_);
+  // Kept so dispatchSize can update width/height on resize (M9).
+  sevynValue_ = jsi::Value(rt, sevyn);
   rt.global().setProperty(rt, "Sevyn", sevyn);
 }
 
@@ -1212,6 +1268,30 @@ void RnHost::dispatchPointer(const std::string& type, double x, double y,
     rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
     logLine("JS pointer handler failed: %s", e.getMessage().c_str());
+  }
+}
+
+void RnHost::dispatchSize(int width, int height) {
+  if (!runtime_)
+    return;
+  width_ = width;
+  height_ = height;
+  jsi::Runtime& rt = *runtime_;
+  try {
+    if (!sevynValue_.isUndefined()) {
+      jsi::Object sevyn = sevynValue_.asObject(rt);
+      sevyn.setProperty(rt, "width", (double)width);
+      sevyn.setProperty(rt, "height", (double)height);
+    }
+    if (hasSizeHandler_) {
+      jsi::Object ev(rt);
+      ev.setProperty(rt, "width", (double)width);
+      ev.setProperty(rt, "height", (double)height);
+      sizeHandler_->call(rt, ev);
+      rt.drainMicrotasks();
+    }
+  } catch (const jsi::JSError& e) {
+    logLine("JS size handler failed: %s", e.getMessage().c_str());
   }
 }
 
@@ -1666,6 +1746,16 @@ int RnHost::run() {
     logLine("HOST Wayland setup failed");
     return 1;
   }
+  // M9: the Wayland constructor sizes the fullscreen shell to the
+  // output's preferred mode (1920x1080 in QEMU, panel native on
+  // hardware) — the constructor path never fires the size handler,
+  // so sync the host size here, before installSevyn publishes
+  // Sevyn.width/height to JS. Without this the shell laid out at
+  // the 1024x768 default inside a 1920-wide buffer (top bar 1024
+  // wide, desktop colour beyond). App windows keep their
+  // --width/--height; headless keeps its --width/--height.
+  width_ = wayland_->width();
+  height_ = wayland_->height();
   }
   if (isApp && !headless_) {
     // The compositor's close request ends the app (the shell is not
@@ -1706,6 +1796,10 @@ int RnHost::run() {
       [this](uint32_t key, bool pressed, bool shift) {
         dispatchKey(key, pressed, shift);
       });
+  // M9: a configure with a new size (resize drag, output mode)
+  // re-lays out JS at the new size.
+  wayland_->setSizeHandler(
+      [this](int w, int h) { dispatchSize(w, h); });
   }
 
   try {
@@ -1837,6 +1931,24 @@ int main(int argc, char** argv) {
   // during first contact could kill the shell silently (SIGPIPE
   // leaves no kernel log). See v2-m3 CI run 42360955143.
   signal(SIGPIPE, SIG_IGN);
+  // M9: logLine writes every line to stderr as well as /dev/console.
+  // For the shell host stderr is a regular file (never blocks), but
+  // for a detached headless host stderr is /dev/console — a tty
+  // whose output drains through the serial to the harness. When the
+  // serial backlogs, a blocking stderr write stalls the host: the
+  // main loop blocks inside logLine on its first beat/ops line and
+  // the run never presents, never logs ops, never completes (the
+  // M9 Tokrah headless hang — the loop stopped right after the
+  // bundle mounted, with the guest otherwise idle). Make stderr
+  // non-blocking: a write that would block is dropped (logging is
+  // best-effort) instead of stalling the host. On a regular file
+  // O_NONBLOCK is a no-op, so the shell host's /tmp/sevyn-host.log
+  // (which init greps for SEVYNOS_M2_READY) is unaffected.
+  {
+    int flags = fcntl(STDERR_FILENO, F_GETFL, 0);
+    if (flags >= 0)
+      (void)fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK);
+  }
   std::string bundle = kDefaultBundle;
   int width = kDefaultWidth, height = kDefaultHeight;
   std::string appId, appName, appColor, appGlyph, permissionsCsv;

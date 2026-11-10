@@ -2,10 +2,13 @@
 #include "common.h"
 
 #include <cstdarg>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
+#include <poll.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -24,9 +27,49 @@ int consoleFd() {
     fd = open("/dev/console", O_WRONLY | O_NONBLOCK);
   return fd;
 }
+
+// logLine is called from several threads (JS present, headless beat,
+// input, EXEC). Without a lock, two concurrent writes to the same
+// serial console interleave mid-line and corrupt the ops JSON the
+// check harness parses (~9% of ops lines in m9-check run5, which
+// cost Phase C its End-button read). Serialize the whole call so
+// each line lands intact.
+std::mutex logMutex;
+
+// Best-effort complete write: the serial console drains slowly, so
+// a 6 KB ops line does not fit in one non-blocking write — a bare
+// write() returns a short count and the tail is lost, which is why
+// ~15% of ops lines in m9-check run6 were truncated mid-JSON and
+// the host-screen End read failed. Poll for writability and retry
+// until the line lands or a bounded wait expires — never stall the
+// host indefinitely on a backlogged serial (2 s per line, max).
+void writeAll(int fd, const char* buf, size_t n) {
+  const long long deadline = nowMs() + 2000;
+  while (n > 0) {
+    ssize_t w = write(fd, buf, n);
+    if (w > 0) {
+      buf += w;
+      n -= (size_t)w;
+      continue;
+    }
+    if (w < 0 && errno == EINTR)
+      continue;
+    if (w < 0 && errno != EAGAIN)
+      return; // Real error: drop the rest.
+    // EAGAIN (or w == 0): the console buffer is full — wait for
+    // room, bounded by the deadline.
+    long long left = deadline - nowMs();
+    if (left <= 0)
+      return;
+    struct pollfd pfd = {fd, POLLOUT, 0};
+    if (poll(&pfd, 1, (int)left) <= 0)
+      return; // Timeout or error: drop the rest.
+  }
+}
 } // namespace
 
 void logLine(const char* fmt, ...) {
+  std::lock_guard<std::mutex> lock(logMutex);
   // 32 KB: headless mode logs a compact ops JSON per screen (M6),
   // which does not fit the old 1 KB buffer (texts + pressables +
   // coloured rects on a busy feed).
@@ -44,8 +87,8 @@ void logLine(const char* fmt, ...) {
     buf[n++] = '\n';
   int cfd = consoleFd();
   if (cfd >= 0)
-    (void)!write(cfd, buf, (size_t)n);
-  (void)!write(STDERR_FILENO, buf, (size_t)n);
+    writeAll(cfd, buf, (size_t)n);
+  writeAll(STDERR_FILENO, buf, (size_t)n);
 }
 
 bool parseColor(const std::string& s, uint32_t& out) {

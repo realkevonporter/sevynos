@@ -175,7 +175,7 @@ feed ships unsigned and installed systems refuse it (fail-closed):
 1. `node tools/update-signing/generate-key.mjs --key-id nightly --out /secure/nightly-signing-key.json`
    — prints the public fragment; guard the private file.
 2. Commit the public fragment as `v2/update/trusted-update-keys.json`.
-3. Add the private-key JSON as the `SEVYN_UPDATE_SIGNING_KEY` repo
+3. Add the private-key JSON as the `SEVYN_NIGHTLY_UPDATE_SIGNING_KEY` repo
    secret. The nightly signs the feed when the secret is set; the build
    stages the committed anchor into the image. Without the committed
    anchor the build generates a per-image TEST keypair instead (keyId

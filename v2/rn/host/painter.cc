@@ -92,6 +92,45 @@ Painter::Painter(int width, int height) : width_(width), height_(height) {
   }
 }
 
+bool Painter::resize(int width, int height) {
+  if (width <= 0 || height <= 0)
+    return false;
+  if (width == width_ && height == height_)
+    return true;
+  if (pixels_) {
+    munmap(pixels_, size_);
+    pixels_ = nullptr;
+  }
+  if (shmFd_ >= 0) {
+    close(shmFd_);
+    shmFd_ = -1;
+  }
+  width_ = width;
+  height_ = height;
+  size_ = (size_t)stride() * (size_t)height_;
+  shmFd_ = memfd_create("sevyn-shell-surface", MFD_CLOEXEC);
+  if (shmFd_ < 0) {
+    logLine("PAINTER resize memfd_create failed (%s)", strerror(errno));
+    return false;
+  }
+  if (ftruncate(shmFd_, (off_t)size_) != 0) {
+    logLine("PAINTER resize ftruncate failed (%s)", strerror(errno));
+    close(shmFd_);
+    shmFd_ = -1;
+    return false;
+  }
+  pixels_ = static_cast<uint8_t*>(
+      mmap(nullptr, size_, PROT_READ | PROT_WRITE, MAP_SHARED, shmFd_, 0));
+  if (pixels_ == MAP_FAILED) {
+    logLine("PAINTER resize mmap failed (%s)", strerror(errno));
+    pixels_ = nullptr;
+    close(shmFd_);
+    shmFd_ = -1;
+    return false;
+  }
+  return true;
+}
+
 Painter::~Painter() {
   if (ftFaceBold_)
     FT_Done_Face(static_cast<FT_Face>(ftFaceBold_));

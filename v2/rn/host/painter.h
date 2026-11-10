@@ -24,6 +24,10 @@ class Painter {
   int width() const { return width_; }
   int height() const { return height_; }
   int stride() const { return width_ * 4; }
+  // Recreate the SHM backing at a new size (M9 window resize /
+  // fullscreen output mode). Fonts survive; the pixel buffer does
+  // not — the caller repaints after resizing.
+  bool resize(int width, int height);
   // Anonymous SHM fd backing the pixel buffer (memfd).
   int shmFd() const { return shmFd_; }
   uint8_t* pixels() { return pixels_; }

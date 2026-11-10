@@ -679,6 +679,147 @@ def main():
     if ai_sock_path.exists():
         os.unlink(ai_sock_path)
 
+    # --- M9 ESP sync + fallback restore ------------------------------
+    # The host tests drive esp_sync_files through the
+    # SEVYN_UPDATE_ESP_DIR hook (a plain directory): the copy +
+    # verify + grub.cfg logic is identical to the guest path, only
+    # device discovery + the vfat mount are not exercised here —
+    # those are proven by m9-check on a real GPT disk under QEMU.
+    data2 = tmp / "data2"
+    (data2 / "slots" / "A").mkdir(parents=True)
+    (data2 / "slots" / "B").mkdir(parents=True)
+    kern_a = fake_image("vmlinuz-a", "VMLINUZ-A\n")
+    init_a = fake_image("initramfs-a.cpio.gz", "INITRAMFS-A\n")
+    kern_b = fake_image("vmlinuz-b", "VMLINUZ-B\n")
+    init_b = fake_image("initramfs-b.cpio.gz", "INITRAMFS-B\n")
+    (data2 / "slots" / "A" / "vmlinuz").write_bytes(kern_a.read_bytes())
+    (data2 / "slots" / "A" / "initramfs.cpio.gz").write_bytes(
+        init_a.read_bytes())
+    (data2 / "slot-state.json").write_text(json.dumps(
+        {"active": "A", "good": "A", "attempts": 0,
+         "version": "m9-esp-1"}, indent=2) + "\n")
+    (data2 / "update-config.json").write_text(json.dumps(
+        {"channel": "nightly", "url": feed_url}, indent=2) + "\n")
+    esp = tmp / "esp"
+    (esp / "EFI" / "ubuntu").mkdir(parents=True)
+    (esp / "vmlinuz").write_bytes(kern_a.read_bytes())
+    (esp / "initramfs.cpio.gz").write_bytes(init_a.read_bytes())
+    (esp / "EFI" / "ubuntu" / "grub.cfg").write_text(
+        "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
+        "set timeout=3\n"
+        "set default=0\n"
+        "menuentry \"SevynOS\" {\n"
+        "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=A\n"
+        "    initrd /initramfs.cpio.gz\n"
+        "}\n")
+    (tmp / "os-version").write_text("m9-esp-1\n")
+    (tmp / "health.log").write_text("")
+
+    def state2():
+        return json.loads((data2 / "slot-state.json").read_text())
+
+    def esp_env(sock_name, slot):
+        return {
+            "SEVYN_UPDATE_SOCK": str(tmp / sock_name),
+            "SEVYN_UPDATE_DATA": str(data2),
+            "SEVYN_UPDATE_TRUSTED_KEYS":
+                str(tmp / "trusted-update-keys.json"),
+            "SEVYN_UPDATE_VERSION_FILE": str(tmp / "os-version"),
+            "SEVYN_UPDATE_TMP": str(tmp / "dl"),
+            "SEVYN_UPDATE_HEALTH_FILE": str(tmp / "health.log"),
+            "SEVYN_UPDATE_SLOT": slot,
+            "SEVYN_UPDATE_ESP_DIR": str(esp),
+        }
+
+    master2, slave2 = pty.openpty()
+    env_esp = esp_env("update-esp.sock", "A")
+    env_esp["SEVYN_UPDATE_CTL"] = os.ttyname(slave2)
+    d_esp = Daemon(tmp, env_esp)
+    check("ESP daemon starts", d_esp.start())
+    write_feed(server_dir, key_file, "m9-esp-2", "nightly",
+               artifacts_for(kern_b, init_b))
+    n_reboots = len(reboot_marker.read_text().splitlines()) \
+        if reboot_marker.exists() else 0
+    check("ESP APPLY accepted",
+          d_esp.sock("APPLY") == "OK applying m9-esp-2")
+    ok_reboot = False
+    for _ in range(100):
+        if reboot_marker.exists() and \
+                len(reboot_marker.read_text().splitlines()) > n_reboots:
+            ok_reboot = True
+            break
+        time.sleep(0.1)
+    check("ESP apply requested a reboot", ok_reboot)
+    st2 = state2()
+    check("ESP apply flipped state to B (good stays A)",
+          st2["active"] == "B" and st2["good"] == "A" and
+          st2["attempts"] == 0 and st2["version"] == "m9-esp-2",
+          str(st2))
+    check("ESP /vmlinuz is the new kernel",
+          sha256_file(esp / "vmlinuz") == sha256_file(kern_b))
+    check("ESP /initramfs.cpio.gz is the new initramfs",
+          sha256_file(esp / "initramfs.cpio.gz") == sha256_file(init_b))
+    check("ESP /vmlinuz.prev preserves the old kernel",
+          sha256_file(esp / "vmlinuz.prev") == sha256_file(kern_a))
+    check("ESP /initramfs.prev.cpio.gz preserves the old initramfs",
+          sha256_file(esp / "initramfs.prev.cpio.gz") ==
+          sha256_file(init_a))
+    grub = (esp / "EFI" / "ubuntu" / "grub.cfg").read_text()
+    check("grub.cfg default entry boots the new slot",
+          "linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=B"
+          in grub, grub)
+    check("grub.cfg previous entry boots the good slot from .prev",
+          "linux /vmlinuz.prev console=tty0 console=ttyS0 sevyn.slot=A"
+          in grub and
+          "initrd /initramfs.prev.cpio.gz" in grub, grub)
+    check("ESP sync leaves no temp files",
+          not list(esp.glob("*.tmp.*")) and
+          not list((esp / "EFI" / "ubuntu").glob("*.tmp.*")))
+    d_esp.stop()
+
+    # Fallback: the B slot "fails to boot twice" — attempts goes 1 ->
+    # 2 at startup, the daemon restores the ESP from good slot A,
+    # flips active back, and reboots. It exits via the reboot stub,
+    # so drive it with Popen, not Daemon.start (no UPDATE ready).
+    (data2 / "slot-state.json").write_text(json.dumps(
+        {"active": "B", "good": "A", "attempts": 1,
+         "version": "m9-esp-2"}, indent=2) + "\n")
+    n_reboots = len(reboot_marker.read_text().splitlines()) \
+        if reboot_marker.exists() else 0
+    env_fb = esp_env("update-esp-fb.sock", "B")
+    env_fb["SEVYN_UPDATE_CTL"] = os.ttyname(slave2)
+    env_fb["PATH"] = str(tmp / "bin") + ":" + os.environ.get("PATH", "")
+    proc_fb = subprocess.Popen(
+        [str(tmp / "sevyn-updated")],
+        stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, env={
+            **dict(os.environ), **env_fb})
+    try:
+        rc_fb = proc_fb.wait(timeout=15)
+        fb_log = proc_fb.stderr.read().decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        proc_fb.kill()
+        proc_fb.wait(timeout=5)
+        rc_fb, fb_log = None, ""
+    check("fallback daemon exits via the reboot stub", rc_fb == 0,
+          f"rc={rc_fb} log={fb_log[:300]}")
+    check("fallback restore logged",
+          "ESP restored from slot A" in fb_log, fb_log[:300])
+    check("fallback requested a reboot",
+          reboot_marker.exists() and
+          len(reboot_marker.read_text().splitlines()) > n_reboots)
+    st2 = state2()
+    check("fallback flipped state back to A (attempts 0)",
+          st2["active"] == "A" and st2["good"] == "A" and
+          st2["attempts"] == 0, str(st2))
+    check("ESP /vmlinuz restored to the good kernel",
+          sha256_file(esp / "vmlinuz") == sha256_file(kern_a))
+    grub = (esp / "EFI" / "ubuntu" / "grub.cfg").read_text()
+    check("grub.cfg default entry back to the good slot",
+          "linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=A"
+          in grub, grub)
+    os.close(master2)
+    os.close(slave2)
+
     server.shutdown()
     os.close(master_fd)
     os.close(slave_fd)
