@@ -169,7 +169,68 @@ function findWindowHeader(img, r, g, b) {
   return { top, bottom, left, right };
 }
 
-// --- QMP client ---
+// Find the leftmost inactive (#e5e7eb) channel button in the Settings
+// window, by scanning the screenshot for that colour in the button
+// row. The channel buttons are 120x36 with a 12px gap, in a row
+// below the "Channel:" text; their exact y shifts between images
+// (M4 vs M4.5 layout, ScrollView position), so a hardcoded offset
+// (+76, +135) can miss. Scanning for the colour finds the button
+// wherever it actually is. Before Stable applies, the leftmost
+// inactive button is Stable (Nightly is active #111827); after
+// Stable applies, it is Nightly (Stable is active). Returns the
+// button centre {x, y} or null.
+function findInactiveChannelButton(img, header) {
+  const { width: W, pixels } = img;
+  // The channel-buttons row sits ~90–170px below the window header
+  // (Wi-Fi section + "Update channel" heading + "Channel:" line
+  // above it). The AI buttons (M4.5) are further down, past the
+  // Sevyn Code section, so capping at +180 keeps them out of range.
+  // In QEMU no Wi-Fi is connected, so the Disconnect/Forget buttons
+  // (also #e5e7eb) do not render; the Scan button is dark #111827.
+  const y0 = header.top + 90;
+  const y1 = header.top + 180;
+  const x0 = header.left + 8;
+  const x1 = header.left + 300;
+  // Collect the x-range of #e5e7eb pixels per row, then find the
+  // leftmost contiguous run wide enough to be a button (>= 60px).
+  let best = null;
+  for (let y = y0; y < y1; y++) {
+    let runStart = -1;
+    let runEnd = -1;
+    for (let x = x0; x < x1; x++) {
+      const i = (y * W + x) * 3;
+      const isBtn =
+        Math.abs(pixels[i] - 229) <= 10 &&
+        Math.abs(pixels[i + 1] - 231) <= 10 &&
+        Math.abs(pixels[i + 2] - 235) <= 10;
+      if (isBtn) {
+        if (runStart < 0) runStart = x;
+        runEnd = x;
+      } else if (runStart >= 0) {
+        if (runEnd - runStart >= 60) {
+          const cx = Math.round((runStart + runEnd) / 2);
+          // Prefer the leftmost run; among rows, take the first hit
+          // (the topmost row of the button).
+          if (!best || cx < best.x) best = { x: cx, y };
+        }
+        runStart = -1;
+        runEnd = -1;
+      }
+    }
+    if (runStart >= 0 && runEnd - runStart >= 60) {
+      const cx = Math.round((runStart + runEnd) / 2);
+      if (!best || cx < best.x) best = { x: cx, y };
+    }
+    // Once we found a button row, the next rows are the same button;
+    // keep the topmost y (first row) for the centre — but the centre
+    // y should be mid-button, so add ~18 (half the 36px height).
+    if (best) {
+      best.y = y + 18;
+      return best;
+    }
+  }
+  return best;
+}
 class QMP {
   constructor(path) {
     this.path = path;
@@ -788,31 +849,17 @@ async function main() {
   // M9: the Wi-Fi section comes first in Settings, so its Scan button
   // is focusable before the channel buttons — the focus order is now
   // [X, Scan, Nightly, Stable, echo-ai, plan-ai], and Tab x3 lands on
-  // Nightly, not Stable. Click the Stable button directly (like the
-  // Nightly step below): it sits in the same row as Nightly, 132px
-  // right of it (120px button + 12px gap), centre (+208, +135) from
-  // the window's top-left. Verify the top edge first, fall back to
-  // Tab x4 if the pixel is not the inactive button.
+  // Nightly, not Stable. Click the Stable button directly: before
+  // Stable applies, the channel is nightly, so Stable is the inactive
+  // #e5e7eb button and Nightly is the active #111827 one — the
+  // leftmost inactive button IS Stable. Scan for it by colour (the
+  // row's exact y shifts between images), falling back to Tab x4.
   const beforeStable = logLines(b.logPath).length;
   let clickedStable = false;
   if (settingsHeader) {
-    const vx = settingsHeader.left + 160;
-    const vy = settingsHeader.top + 120;
-    const i = (vy * shotSettings.width + vx) * 3;
-    const [pr, pg, pb] = [
-      shotSettings.pixels[i],
-      shotSettings.pixels[i + 1],
-      shotSettings.pixels[i + 2],
-    ];
-    const isStableButton =
-      Math.abs(pr - 229) <= 10 && Math.abs(pg - 231) <= 10 && Math.abs(pb - 235) <= 10;
-    if (isStableButton) {
-      await moveTo(
-        settingsHeader.left + 208,
-        settingsHeader.top + 135,
-        shotSettings.width,
-        shotSettings.height,
-      );
+    const btn = findInactiveChannelButton(shotSettings, settingsHeader);
+    if (btn) {
+      await moveTo(btn.x, btn.y, shotSettings.width, shotSettings.height);
       await sleep(300);
       await click();
       await sleep(300);
@@ -844,18 +891,12 @@ async function main() {
   // on X, and Enter closed the window instead of applying nightly —
   // no SETTINGS line at all, and the CLOSE after it failed because
   // the window was already gone. A pointer click cannot land on the
-  // wrong button: the channel buttons sit at fixed window-relative
-  // offsets (Nightly centre ≈ +76, +135 from the window's top-left;
-  // measured on a real frame), and the click is verified by sampling
-  // the pixel first — after Stable applies, Nightly is the inactive
-  // #e5e7eb button and Stable is the active #111827 one. If the pixel
-  // is not the inactive button, fall back to the Tab path.
-  // M9: take a FRESH shot after Stable applies (the pre-Stable shot
-  // still shows Nightly as active, so its pixel would fail the
-  // inactive check), but anchor the header to `settingsHeader` — the
-  // window does not move between the two clicks, so if the fresh
-  // header detection lands somewhere else it found the wrong window
-  // and the Stable shot's header is the right one.
+  // wrong button when it finds the button by colour: after Stable
+  // applies, Nightly is the inactive #e5e7eb button and Stable is the
+  // active #111827 one, so the leftmost inactive button IS Nightly.
+  // M9: scan for the button instead of a hardcoded offset (+76, +135)
+  // — the offset missed on the M4.5 image (different layout), which
+  // is why the M4 regression failed there while standalone M4 passed.
   const beforeNightly = logLines(b.logPath).length;
   let clickedNightly = false;
   const shotNightly = await shot(b.qmp, join(OUT, "m4-shot-settings-nightly.ppm"));
@@ -869,28 +910,9 @@ async function main() {
     nightlyHeader = settingsHeader;
   }
   if (nightlyHeader) {
-    // Verify at the button's TOP EDGE, centre-x (+76, +120): the
-    // top-left corner is rounded (radius 8), so a sample near the
-    // left edge sits on the curve and can miss the fill. Centre-x is
-    // safely inside; the label sits ~7px lower, so the top edge is
-    // pure button background.
-    const vx = nightlyHeader.left + 76;
-    const vy = nightlyHeader.top + 120;
-    const i = (vy * shotNightly.width + vx) * 3;
-    const [pr, pg, pb] = [
-      shotNightly.pixels[i],
-      shotNightly.pixels[i + 1],
-      shotNightly.pixels[i + 2],
-    ];
-    const isNightlyButton =
-      Math.abs(pr - 229) <= 10 && Math.abs(pg - 231) <= 10 && Math.abs(pb - 235) <= 10;
-    if (isNightlyButton) {
-      await moveTo(
-        nightlyHeader.left + 76,
-        nightlyHeader.top + 135,
-        shotNightly.width,
-        shotNightly.height,
-      );
+    const btn = findInactiveChannelButton(shotNightly, nightlyHeader);
+    if (btn) {
+      await moveTo(btn.x, btn.y, shotNightly.width, shotNightly.height);
       await sleep(300);
       await click();
       await sleep(300);
