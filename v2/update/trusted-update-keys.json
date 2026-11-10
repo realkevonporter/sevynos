@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "keyId": "nightly",
+      "publicKeyJwk": {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": "YKgsUjIvhofW4PiENg-Y2s56uhCRfa_bjSXNuijltLQ"
+      }
+    }
+  ]
+}
