@@ -1081,7 +1081,15 @@ async function main() {
     // of Chromium's viewport (left of the Terminal window) to raise
     // it, then count white inside the viewport (same pattern as the
     // IDE step below).
+    // M9: re-detect the Terminal header fresh before computing the
+    // strip — `termPos` was recorded when the Terminal launched, and
+    // the refocus clicks since can nudge the window; a stale left
+    // edge puts the strip click inside the Terminal instead of on
+    // Chromium, so the white poll sees the Terminal for 180s.
     if (chromiumViewport && termPos) {
+      const shotFresh = await shot(b.qmp, join(OUT, "m5-shot-strip-fresh.ppm"));
+      const termFresh = findWindowHeader(shotFresh, 17, 24, 39);
+      if (termFresh) termPos = termFresh;
       const stripX = Math.round((chromiumViewport.x0 + termPos.left) / 2);
       const stripY = Math.round((chromiumViewport.y0 + chromiumViewport.y1) / 2);
       // M9: the shell flex-sizes to the surface (no longer a fixed
@@ -1090,6 +1098,12 @@ async function main() {
       // Chromium, so the white poll sees the Terminal instead. Scale
       // by the real frame size.
       const shotStrip = await shot(b.qmp, join(OUT, "m5-shot-strip.ppm"));
+      await moveTo(stripX, stripY, shotStrip.width, shotStrip.height);
+      await sleep(300);
+      await click();
+      await sleep(1000);
+      // If the first click only focused Chromium without raising it
+      // above the Terminal, click the strip once more.
       await moveTo(stripX, stripY, shotStrip.width, shotStrip.height);
       await sleep(300);
       await click();
