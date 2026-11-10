@@ -268,8 +268,20 @@ async function shot(qmp, path) {
 
 // --- data disk (debugfs, read-only from the harness) ---
 async function readState() {
-  const { stdout } = await execAsync("debugfs", ["-R", "cat /slot-state.json", DISK]);
-  return JSON.parse(stdout);
+  // debugfs can return an empty/short read if it races a guest write
+  // (the daemon rewrites slot-state.json on every boot attempt); retry
+  // a few times instead of crashing on a transient empty parse.
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { stdout } = await execAsync("debugfs", ["-R", "cat /slot-state.json", DISK]);
+    try {
+      return JSON.parse(stdout);
+    } catch (e) {
+      lastErr = e;
+      await sleep(500);
+    }
+  }
+  throw new Error(`readState: slot-state.json never parsed (last: ${lastErr})`);
 }
 
 async function dumpSlot(slot, tag) {

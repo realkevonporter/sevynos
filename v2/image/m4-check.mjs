@@ -859,12 +859,12 @@ async function main() {
   const beforeNightly = logLines(b.logPath).length;
   let clickedNightly = false;
   if (nightlyHeader) {
-    // Verify at the button's TOP EDGE (+30, +120), not its centre:
-    // the centre is covered by the "Nightly" label text (dark glyphs),
-    // so sampling there never matches the inactive background and the
-    // check silently fell back to Tabs. The top edge is pure button
-    // background (the label sits ~7 px lower).
-    const vx = nightlyHeader.left + 30;
+    // Verify at the button's TOP EDGE, centre-x (+76, +120), not the
+    // left edge: the top-left corner is rounded (radius 8), so a
+    // sample 14px from the left edge sits on the curve and can miss
+    // the fill. Centre-x is safely inside the button; the label sits
+    // ~7px lower, so the top edge is pure button background.
+    const vx = nightlyHeader.left + 76;
     const vy = nightlyHeader.top + 120;
     const i = (vy * shotNightly.width + vx) * 3;
     const [pr, pg, pb] = [
