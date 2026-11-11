@@ -1,3 +1,5 @@
+// CI re-trigger (round 6): head 0b899a8c died at apt-get update
+// (azure.archive DNS) before any check ran; no product change.
 // M10 check: boot the SevynOS v2 M10 image in QEMU and prove the
 // milestone — the comms apps (Kevon, 2026-11-08: SevynOS's own
 // FaceTime / FaceTime Audio / iMessage — Messages, Video Calls,
