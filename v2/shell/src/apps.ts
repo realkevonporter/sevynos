@@ -2,7 +2,7 @@
 //
 // The dock renders from appd (Sevyn.listApps(), via the renderer's
 // app store): the installed stock apps, each a .sevyn bundle in
-// pristine. These 12 are the FALLBACK when appd's list is empty
+// pristine. These 14 are the FALLBACK when appd's list is empty
 // (appd down at first mount) — they match the pristine manifests, so
 // the dock looks identical either way. Icons are coloured tiles with
 // an initial (M3 has no staged image assets yet); real app icons land
@@ -62,6 +62,21 @@ export const APPS: ShellApp[] = [
     name: "Messages",
     color: "#22c55e",
     glyph: "M",
+    singleInstance: true,
+  },
+  // M10 working titles — Kevon picks the final names later.
+  {
+    id: "video-calls",
+    name: "Video Calls",
+    color: "#7c3aed",
+    glyph: "V",
+    singleInstance: true,
+  },
+  {
+    id: "voice-calls",
+    name: "Voice Calls",
+    color: "#0d9488",
+    glyph: "V",
     singleInstance: true,
   },
   { id: "store", name: "Store", color: "#f97316", glyph: "S", singleInstance: true },

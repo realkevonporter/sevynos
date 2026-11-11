@@ -1,15 +1,20 @@
 "use strict";
 // End-to-end Node test for the built app bundles (dist/app.js,
-// dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js)
-// and the crash bundle (dist/crash.js). Loads the app bundle with the
-// mock Sevyn host as several apps — files (status.read granted, the
-// fallback screen) and notes/music/calculator/calendar/store (the M9
-// real screens) — and drives the close X. The crash bundle
+// dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js,
+// dist/comms.js) and the crash bundle (dist/crash.js). Loads the app
+// bundle with the mock Sevyn host as several apps — files (status.read
+// granted, the fallback screen) and notes/music/calculator/calendar/store
+// (the M9 real screens) — and drives the close X. The crash bundle
 // must throw during evaluation. The M4 apps load with cli.exec and a
 // canned exec handler, and drive their real flows (terminal typing,
 // settings channel switch + AI selection, files navigation). The M5
 // Browser loads with cli.exec and a canned CDP-backed exec handler,
 // and drives its real flow (tabs on mount, address-bar navigation).
+// The M10 comms bundle loads as messages / video-calls / voice-calls
+// with a canned `sevyn comms` handler: login form, room list, thread
+// + send, and the call screens (the async login/send run in the
+// async section at the end — the mock's execAsync resolves on a
+// microtask, so those checks await a setImmediate flush).
 //
 // Run: node test/app-e2e-test.js   (from v2/apps, after npm run build)
 const assert = require("node:assert/strict");
@@ -39,6 +44,10 @@ const filesBundle = fs.readFileSync(
 );
 const browserBundle = fs.readFileSync(
   path.join(__dirname, "..", "dist", "browser.js"),
+  "utf8",
+);
+const commsBundle = fs.readFileSync(
+  path.join(__dirname, "..", "dist", "comms.js"),
   "utf8",
 );
 const crashBundle = fs.readFileSync(
@@ -641,4 +650,174 @@ check("browser: tabs on mount, address-bar navigation opens a page", () => {
   assert.ok(Sevyn._logs.includes("BROWSER tabs 2"), "refresh after open logged");
 });
 
-console.log(`\n${passed} app e2e checks passed`);
+// --- M10 comms -----------------------------------------------------------
+// Canned `sevyn comms` answers. `loggedIn` flips the mount between
+// the login form and the room/call screens.
+function commsHandler(loggedIn, calls) {
+  return (cmd) => {
+    if (cmd === "sevyn comms status")
+      return loggedIn
+        ? '0\n{"loggedIn":true,"userId":"@alice:test.local","homeserver":"https://matrix.org","deviceId":"SEVYNTEST","rooms":2,"calls":[],"bridge":"chromium"}'
+        : '0\n{"loggedIn":false,"userId":null,"homeserver":"https://matrix.org","deviceId":null,"rooms":0,"calls":[],"bridge":"chromium"}';
+    if (cmd === "sevyn comms rooms")
+      return loggedIn
+        ? '0\n{"rooms":[{"roomId":"!general:test.local","name":"General","encrypted":true,"members":["@alice:test.local","@bob:test.local"],"lastMessage":{"sender":"@bob:test.local","body":"Hello from bob","ts":1794355200000}},{"roomId":"!plain:test.local","name":"Plain room","encrypted":false,"members":["@alice:test.local"],"lastMessage":null}]}'
+        : '0\n{"rooms":[]}';
+    if (cmd === "sevyn comms calls")
+      return "0\n" + JSON.stringify({ calls: calls || [] });
+    if (cmd === "sevyn comms rcs status")
+      return '0\n{"staged":true,"state":"no carrier backend","detail":"RCS is staged in M10: SIP/MSRP skeleton only."}';
+    if (cmd.startsWith('sevyn comms messages "!general:test.local"'))
+      return '0\n{"messages":[{"eventId":"$1","sender":"@bob:test.local","type":"m.room.message","encrypted":true,"decrypted":true,"body":"Hello from bob","ts":1794355200000},{"eventId":"$2","sender":"@alice:test.local","type":"m.room.message","encrypted":true,"decrypted":true,"body":"Hi bob","ts":1794355201000}]}';
+    if (cmd.startsWith("sevyn comms login"))
+      return '0\n{"userId":"@alice:test.local","deviceId":"SEVYNTEST"}';
+    if (cmd.startsWith("sevyn comms send")) return '0\n{"eventId":"$sent1"}';
+    return "0\n";
+  };
+}
+
+function loadCommsAs(appId, name, loggedIn, calls) {
+  return loadAs(
+    { id: appId, name, color: "#22c55e", glyph: "M", permissions: ["cli.exec"] },
+    commsBundle,
+    commsHandler(loggedIn, calls),
+  );
+}
+
+check("comms messages (logged out): login form renders", () => {
+  loadCommsAs("messages", "Messages", false);
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Messages"), "app title shown");
+  assert.ok(texts.includes("LOG IN WITH MATRIX"), "login section shown");
+  assert.ok(
+    texts.some((t) => t.includes("@you:matrix.org")),
+    "Matrix ID placeholder shown",
+  );
+  assert.ok(
+    Sevyn._logs.includes("COMMS app=messages loggedIn=no"),
+    "mount logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+});
+
+check("comms messages (logged in): room list + staged RCS card", () => {
+  loadCommsAs("messages", "Messages", true);
+  let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("General")),
+    "room name shown",
+  );
+  assert.ok(texts.includes("Plain room"), "second room shown");
+  assert.ok(
+    texts.some((t) => t.includes("Hello from bob")),
+    "last message shown",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("RCS — carrier setup required")),
+    "RCS staged honestly, not as working",
+  );
+  tapText("Refresh", 14);
+  assert.ok(
+    Sevyn._logs.includes("COMMS rooms=2"),
+    "rooms refresh logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+});
+
+check("comms video-calls (logged in): start-call screen", () => {
+  loadCommsAs("video-calls", "Video Calls", true);
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Video Calls"), "app title shown");
+  assert.ok(texts.includes("START A CALL"), "start section shown");
+  assert.ok(
+    texts.some((t) => t.includes("@friend:matrix.org")),
+    "call-target placeholder shown",
+  );
+});
+
+check("comms voice-calls (logged in): incoming call banner", () => {
+  loadCommsAs("voice-calls", "Voice Calls", true, [
+    {
+      callId: "sevyn-incoming1",
+      roomId: "!general:test.local",
+      peer: "@bob:test.local",
+      video: false,
+      direction: "incoming",
+      state: "incoming",
+      media: "none",
+    },
+  ]);
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Incoming voice call")),
+    "incoming banner shown",
+  );
+  assert.ok(texts.includes("Answer"), "answer button shown");
+  assert.ok(texts.includes("Decline"), "decline button shown");
+});
+
+// Async flows (login + open room + send): the mock's execAsync
+// resolves on a microtask, so flush with setImmediate after each tap.
+const flush = () => new Promise((r) => setImmediate(r));
+async function checkAsync(name, fn) {
+  await fn();
+  passed++;
+  console.log("ok - " + name);
+}
+
+(async () => {
+  await checkAsync("comms messages: login flow reaches the room list", async () => {
+    loadCommsAs("messages", "Messages", false);
+    // Focus order after the close X: user, password, homeserver, Log in.
+    pressTab(1);
+    type("alice");
+    pressTab(1);
+    type("testpass");
+    pressTab(1); // homeserver (default https://matrix.org — leave it)
+    pressTab(1); // Log in button
+    pressEnter();
+    await flush();
+    await flush();
+    assert.ok(
+      Sevyn._logs.some((l) => l.startsWith("EXEC sevyn comms login")),
+      "login CLI issued, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    assert.ok(
+      Sevyn._logs.includes("COMMS login=@alice:test.local"),
+      "login marker logged",
+    );
+    // The canned handler answers logged-out status on mount, so the
+    // post-login refresh re-reads status — the login marker is the
+    // flow proof; the room list renders from the logged-in mount
+    // (proven by the sync check above).
+  });
+
+  await checkAsync("comms messages: open room shows thread, send works", async () => {
+    loadCommsAs("messages", "Messages", true);
+    tapText("General · encrypted", 16);
+    let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("Hello from bob")),
+      "thread message shown",
+    );
+    assert.ok(
+      texts.some((t) => t.includes("Write a message")),
+      "composer shown",
+    );
+    tapText("Write a message…", 15);
+    type("hi there");
+    tapText("Send", 15);
+    await flush();
+    await flush();
+    assert.ok(
+      Sevyn._logs.some((l) =>
+        l.startsWith('EXEC sevyn comms send "!general:test.local" "hi there"'),
+      ),
+      "send CLI issued, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    assert.ok(
+      Sevyn._logs.includes("COMMS sent room=!general:test.local"),
+      "send marker logged",
+    );
+  });
+
+  console.log(`\n${passed} app e2e checks passed`);
+})();

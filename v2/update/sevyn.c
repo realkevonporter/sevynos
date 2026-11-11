@@ -158,6 +158,27 @@ static void print_usage(FILE *f)
             "  sevyn browser activate <id> bring a tab forward\n"
             "  sevyn browser close <id>    close a tab\n"
             "  sevyn browser status        Chromium + CDP + tab count\n"
+            "  sevyn comms [--socket <path>] <verb>\n"
+            "                              talk to a commsd other than the\n"
+            "                              system one (the M10 check runs a\n"
+            "                              second daemon for the peer)\n"
+            "  sevyn comms status          Matrix login state + calls\n"
+            "  sevyn comms login <user> [password] [homeserver]\n"
+            "                              log into Matrix (password from\n"
+            "                              argv, --password-file, or stdin)\n"
+            "  sevyn comms logout          forget the Matrix account\n"
+            "  sevyn comms rooms           list Matrix rooms (JSON)\n"
+            "  sevyn comms messages <room> [limit]\n"
+            "                              list messages (JSON)\n"
+            "  sevyn comms send <room> <text...>\n"
+            "                              send a message\n"
+            "  sevyn comms call <room|user> [--video|--audio]\n"
+            "                              start a 1:1 call\n"
+            "  sevyn comms answer <callId> answer an incoming call\n"
+            "  sevyn comms hangup <callId> end a call\n"
+            "  sevyn comms calls           list calls (JSON)\n"
+            "  sevyn comms rcs status      RCS staging state\n"
+            "  sevyn comms rcs probe       SIP/MSRP skeleton vs mock ACS\n"
             "  sevyn net status            link, address, gateway, DNS,\n"
             "                              wifi\n"
             "  sevyn net dns <host>        resolve a name (guest DNS)\n"
@@ -950,6 +971,231 @@ static int cmd_ai(int argc, char **argv)
         return 1;
     }
     return print_reply(line);
+}
+
+/* ------------------------------------------------------------------ */
+/* comms (M10) — Matrix messaging + 1:1 calls via commsd               */
+/* ------------------------------------------------------------------ */
+
+/* Talk to commsd (the Matrix daemon). One line out, one (possibly
+ * long — rooms/messages are JSON arrays) line back. The daemon's
+ * replies are a single bare JSON line ({ok:true,...} or
+ * {ok:false,error:...}); print_reply prints it verbatim, so the RN
+ * apps JSON.parse the payload — and the exit code follows the
+ * payload's ok flag, so a failed verb (bad login, failed RCS probe)
+ * exits 1 instead of silently succeeding. */
+#define COMMS_SOCK "/run/sevyn-comms.sock"
+
+static int connect_comms(void)
+{
+    return connect_sock("SEVYN_COMMS_SOCK", COMMS_SOCK);
+}
+
+/* send_line's 2048 cap is too small for a message; this one takes
+ * up to 8192 bytes (room id + text). */
+static int comms_send(int fd, const char *line)
+{
+    size_t n = strlen(line);
+    char buf[8192];
+    if (n + 1 >= sizeof(buf))
+        return -1;
+    memcpy(buf, line, n);
+    buf[n++] = '\n';
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, buf + off, n - off);
+        if (w <= 0)
+            return -1;
+        off += (size_t)w;
+    }
+    return 0;
+}
+
+static int comms_roundtrip(const char *cmd)
+{
+    int fd = connect_comms();
+    if (fd < 0) {
+        fprintf(stderr, "error: cannot reach the comms daemon\n");
+        return 1;
+    }
+    if (comms_send(fd, cmd) != 0) {
+        fprintf(stderr, "error: cannot talk to the comms daemon\n");
+        close(fd);
+        return 1;
+    }
+    static char reply[65536];
+    int n = read_line(fd, reply, sizeof(reply));
+    close(fd);
+    if (n <= 0) {
+        fprintf(stderr, "error: no reply from the comms daemon\n");
+        return 1;
+    }
+    /* The daemon answers bare JSON, not the "OK "/"ERR " lines the
+     * other daemons speak — print_reply prints it verbatim (the RN
+     * apps parse it), but its fallthrough returns 0 even for
+     * {ok:false,...}. The exit code must follow the payload: a failed
+     * verb exits 1. (ok is always the daemon's first key.) */
+    int rc = print_reply(reply);
+    if (rc == 0 && strncmp(reply, "{\"ok\":false", 11) == 0)
+        return 1;
+    return rc;
+}
+
+/* Read a password from a file (and unlink it right after — the file
+ * must not linger). Returns 0 on success. */
+static int read_password_file(const char *path, char *out, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    size_t n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    unlink(path);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r'))
+        n--;
+    out[n] = '\0';
+    return n > 0 ? 0 : -1;
+}
+
+static int cmd_comms(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    /* --socket <path> talks to a commsd other than the system one.
+     * (The M10 check runs a second daemon for the peer user, and the
+     * Terminal has no shell env assignment, so the socket must ride
+     * on the command line. setenv is safe here: this process runs
+     * one command, then exits.) */
+    if (strcmp(argv[2], "--socket") == 0) {
+        if (argc < 5)
+            return usage();
+        setenv("SEVYN_COMMS_SOCK", argv[3], 1);
+        argv += 2;
+        argc -= 2;
+    }
+    const char *verb = argv[2];
+
+    if (strcmp(verb, "login") == 0) {
+        /* login <user> [--password-file <path> | <password>]
+         *        [homeserver]
+         * The password comes from argv (the RN apps have no stdin —
+         * same root-only visibility as `sevyn files write`), from a
+         * --password-file (read + unlinked at once), or from stdin
+         * (the Terminal). It travels to the daemon over the local
+         * socket only, and is never logged. Passwords with spaces
+         * are not supported (the daemon's protocol is whitespace
+         * separated). */
+        if (argc < 4 || argc > 7)
+            return usage();
+        const char *user = argv[3];
+        const char *homeserver = NULL;
+        char password[1024];
+        if (argc >= 5 && strcmp(argv[4], "--password-file") == 0) {
+            if (argc < 6)
+                return usage();
+            if (read_password_file(argv[5], password, sizeof(password)) != 0) {
+                fprintf(stderr, "error: cannot read password file\n");
+                return 1;
+            }
+            if (argc >= 7)
+                homeserver = argv[6];
+        } else if (argc >= 5 && strncmp(argv[4], "--", 2) != 0) {
+            if (strlen(argv[4]) >= sizeof(password)) {
+                fprintf(stderr, "error: password too long\n");
+                return 1;
+            }
+            strcpy(password, argv[4]);
+            if (argc >= 6)
+                homeserver = argv[5];
+        } else if (argc == 4) {
+            /* Password from stdin; homeserver is the default. (A
+             * homeserver with a stdin password needs --password-file
+             * or the argv form — the two are ambiguous otherwise.) */
+            if (!fgets(password, (int)sizeof(password), stdin)) {
+                fprintf(stderr, "error: no password on stdin\n");
+                return 1;
+            }
+            size_t n = strlen(password);
+            while (n > 0 && (password[n - 1] == '\n' || password[n - 1] == '\r'))
+                password[--n] = '\0';
+            if (n == 0) {
+                fprintf(stderr, "error: empty password\n");
+                return 1;
+            }
+        } else {
+            return usage();
+        }
+        char cmd[2048];
+        if (homeserver)
+            snprintf(cmd, sizeof(cmd), "LOGIN %s %s %s", user, password, homeserver);
+        else
+            snprintf(cmd, sizeof(cmd), "LOGIN %s %s", user, password);
+        memset(password, 0, sizeof(password));
+        return comms_roundtrip(cmd);
+    }
+
+    if (strcmp(verb, "status") == 0 && argc == 3)
+        return comms_roundtrip("STATUS");
+    if (strcmp(verb, "logout") == 0 && argc == 3)
+        return comms_roundtrip("LOGOUT");
+    if (strcmp(verb, "rooms") == 0 && argc == 3)
+        return comms_roundtrip("ROOMS");
+    if (strcmp(verb, "calls") == 0 && argc == 3)
+        return comms_roundtrip("CALLS");
+    if (strcmp(verb, "messages") == 0 && (argc == 4 || argc == 5)) {
+        char cmd[512];
+        if (argc == 5)
+            snprintf(cmd, sizeof(cmd), "MESSAGES %s %s", argv[3], argv[4]);
+        else
+            snprintf(cmd, sizeof(cmd), "MESSAGES %s", argv[3]);
+        return comms_roundtrip(cmd);
+    }
+    if (strcmp(verb, "send") == 0 && argc >= 5) {
+        char cmd[8192];
+        size_t n = (size_t)snprintf(cmd, sizeof(cmd), "SEND %s", argv[3]);
+        for (int i = 4; i < argc && n < sizeof(cmd) - 1; i++)
+            n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " %s", argv[i]);
+        if (n >= sizeof(cmd) - 1) {
+            fprintf(stderr, "error: message too long\n");
+            return 1;
+        }
+        return comms_roundtrip(cmd);
+    }
+    if (strcmp(verb, "call") == 0 && (argc == 4 || argc == 5)) {
+        char cmd[512];
+        if (argc == 5 && strcmp(argv[4], "--video") == 0)
+            snprintf(cmd, sizeof(cmd), "CALL %s --video", argv[3]);
+        else if (argc == 5 && strcmp(argv[4], "--audio") == 0)
+            snprintf(cmd, sizeof(cmd), "CALL %s --audio", argv[3]);
+        else if (argc == 4)
+            snprintf(cmd, sizeof(cmd), "CALL %s --video", argv[3]);
+        else
+            return usage();
+        return comms_roundtrip(cmd);
+    }
+    if (strcmp(verb, "answer") == 0 && (argc == 3 || argc == 4)) {
+        char cmd[512];
+        if (argc == 4)
+            snprintf(cmd, sizeof(cmd), "ANSWER %s", argv[3]);
+        else
+            snprintf(cmd, sizeof(cmd), "ANSWER");
+        return comms_roundtrip(cmd);
+    }
+    if (strcmp(verb, "hangup") == 0 && (argc == 3 || argc == 4)) {
+        char cmd[512];
+        if (argc == 4)
+            snprintf(cmd, sizeof(cmd), "HANGUP %s", argv[3]);
+        else
+            snprintf(cmd, sizeof(cmd), "HANGUP");
+        return comms_roundtrip(cmd);
+    }
+    if (strcmp(verb, "rcs") == 0 && argc == 4 &&
+        (strcmp(argv[3], "status") == 0 || strcmp(argv[3], "probe") == 0)) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "RCS %s", argv[3]);
+        return comms_roundtrip(cmd);
+    }
+    return usage();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2849,6 +3095,8 @@ static int dispatch(int argc, char **argv)
         return cmd_code(argc, argv);
     if (strcmp(argv[1], "browser") == 0)
         return cmd_browser(argc, argv);
+    if (strcmp(argv[1], "comms") == 0)
+        return cmd_comms(argc, argv);
     if (strcmp(argv[1], "net") == 0)
         return cmd_net(argc, argv);
     if (strcmp(argv[1], "tokrah") == 0)
