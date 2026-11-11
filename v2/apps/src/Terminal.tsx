@@ -36,6 +36,14 @@ import { runCli, parseField } from "./cli";
 
 const MAX_LINES = 500;
 
+// Render cap: the scrollback buffer keeps 500 lines, but only the
+// last RENDERED_LINES render. A full 500-line render makes every
+// keystroke present ~12x costlier (measured in the mock renderer:
+// 15.6ms vs 1.35ms at 21 lines) and the M7 headless phases timed out
+// typing into the Terminal at max accumulation under TCG (PR #98).
+// 100 lines is still ~5 screens of scrollable history.
+const RENDERED_LINES = 100;
+
 const HELP_LINES: string[] = [
   "SevynOS Terminal — the sevyn CLI only. No bash.",
   "",
@@ -212,14 +220,16 @@ export function Terminal(): React.ReactElement {
           <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
         </Pressable>
       </View>
-      {/* GF65 scroll fix: the whole scrollback renders in a
-          ScrollView (was: only the last 21 lines, earlier output
-          unreachable). The input row stays pinned below it. */}
+      {/* GF65 scroll fix: the scrollback renders in a ScrollView
+          (was: only the last 21 lines, earlier output unreachable).
+          Only the last RENDERED_LINES render (see the cap above) —
+          the buffer still keeps 500. The input row stays pinned
+          below it. */}
       <ScrollView
         ref={scrollRef}
         style={{ flex: 1, paddingLeft: 8, paddingRight: 8, paddingTop: 8 }}
       >
-        {lines.map((line, i) => (
+        {lines.slice(-RENDERED_LINES).map((line, i) => (
           <Text key={i} style={{ fontSize: 14, color: "#e5e7eb" }}>
             {line || " "}
           </Text>
