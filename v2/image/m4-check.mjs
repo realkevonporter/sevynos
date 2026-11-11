@@ -879,7 +879,9 @@ async function main() {
     }
   }
   if (!clickedStable) {
-    // Fallback: Tab x4 -> Stable (X, Scan, Nightly, Stable).
+    // Fallback: Tab x6 -> Stable (—, ▢, X, Scan, Nightly, Stable).
+    await key("tab");
+    await key("tab");
     await key("tab");
     await key("tab");
     await key("tab");
@@ -934,11 +936,13 @@ async function main() {
   check("settings: Settings window still up for the nightly step", !!nightlyHeader);
   if (!clickedNightly) {
     // Fallback: Tab from Stable to Nightly. The focus order depends
-    // on the image: M4 has no echo-ai/plan-ai, so it is [X, Scan,
-    // Nightly, Stable] and Tab x3 from Stable reaches Nightly; M4.5
-    // adds echo-ai/plan-ai, making it x5. Try x3 first (M4); the
+    // on the image: M4 has no echo-ai/plan-ai, so it is [—, ▢, X,
+    // Scan, Nightly, Stable] and Tab x5 from Stable reaches Nightly;
+    // M4.5 adds echo-ai/plan-ai, making it x7. Try x5 first (M4); the
     // waitForLog below will fail if it landed elsewhere, and the
     // check reports it.
+    await key("tab");
+    await key("tab");
     await key("tab");
     await key("tab");
     await key("tab");
@@ -993,10 +997,13 @@ async function main() {
     await click();
     await sleep(300);
   }
-  // Focus order: [X, .., lost+found, m4-files-test, slots] — /data
-  // always carries lost+found (ext4) and slots/, both directories, so
-  // m4-files-test is the fourth Tab from no-focus (files are not
-  // pressable, so the two .json files never enter the order).
+  // Focus order: [—, ▢, X, .., lost+found, m4-files-test, slots] —
+  // /data always carries lost+found (ext4) and slots/, both
+  // directories, so m4-files-test is the sixth Tab from no-focus
+  // (files are not pressable, so the two .json files never enter
+  // the order).
+  await key("tab");
+  await key("tab");
   await key("tab");
   await key("tab");
   await key("tab");

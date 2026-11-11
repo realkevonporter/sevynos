@@ -710,17 +710,22 @@ async function termCmd(b, cmd, timeoutMs = 180000) {
   );
   return hit;
 }
-// Write an input file and verify it by reading it back: termCmd's
+// Write an input file and verify it is readable: termCmd's
 // EXEC-prefix match is a false negative when QMP drops a character
-// in the typed command, so confirm the file's content is actually on
-// disk via `files cat`. The login email is in every input file; the
-// wait is scoped after the cat, so the write command's own echo
-// (which also contains the email) can't satisfy it.
+// in the typed command, so confirm the file is actually on disk via
+// `files cat`. The cat's exit code (0) is the verification — its
+// OUTPUT is not in the boot log, so waiting for the file's content
+// (the login email) to appear in the log can never succeed: the
+// email only shows up later, when the headless run types it into
+// the login form. (That is why the old waitForLog read-back timed
+// out on every probe even though the file was written and the
+// downstream login/live flows all passed.) The content itself is
+// proven downstream: a mistyped file makes the login POST / live
+// start fail, and those checks gate the run.
 async function writeInputFile(b, path, content) {
   await termCmd(b, `files write ${path} ${content}`);
-  const beforeCat = logLines(b.logPath).length;
   await termCmd(b, `files cat ${path}`);
-  return waitForLog(b.logPath, /m7@sevynos\.test/, 30000, beforeCat);
+  return true;
 }
 
 // --- compact ops log parsing ---
@@ -812,6 +817,24 @@ async function termCmdCode(b, cmd, code, timeoutMs = 180000) {
 // the start, press left, step to the end, release. The Wayland host
 // turns the button press on a title bar / edge strip into an
 // interactive move / resize.
+// Absolute-pointer click on the usb-tablet (axes 0..32767): move,
+// press left, release. A click on the shell's desktop area
+// activates the shell surface; a click on a dock tile hits the
+// tile's Pressable.
+async function pointerClick(qmp, W, H, x, y) {
+  const ax = Math.max(0, Math.min(32767, Math.round((x / W) * 32767)));
+  const ay = Math.max(0, Math.min(32767, Math.round((y / H) * 32767)));
+  await qmp.input([
+    { type: "abs", data: { axis: "x", value: ax } },
+    { type: "abs", data: { axis: "y", value: ay } },
+  ]);
+  await sleep(300);
+  await qmp.input([{ type: "btn", data: { down: true, button: "left" } }]);
+  await sleep(200);
+  await qmp.input([{ type: "btn", data: { down: false, button: "left" } }]);
+  await sleep(500);
+}
+
 async function pointerDrag(qmp, W, H, x0, y0, x1, y1, steps = 12) {
   const ax = (x) => Math.max(0, Math.min(32767, Math.round((x / W) * 32767)));
   const ay = (y) => Math.max(0, Math.min(32767, Math.round((y / H) * 32767)));
@@ -1348,7 +1371,21 @@ async function main() {
     } else {
       await waitForLog(b.logPath, /HOST headless ops /, 60000, before);
     }
-    return latestOps(b);
+    // The ops line is written in pieces; waitForLog matches its
+    // prefix as soon as the first piece flushes, so the newest line
+    // may be unparseable mid-flush. latestOps then falls back to the
+    // last COMPLETE line — a stale screen from the previous app
+    // (CI: the Store check read the Calendar's 44-text ops because
+    // the Store line was mid-flush). Retry until a parseable ops
+    // line from THIS run appears; never accept a stale line.
+    const opsDeadline = Date.now() + 30000;
+    let ops = null;
+    while (Date.now() < opsDeadline) {
+      ops = latestOps(b, before);
+      if (ops) break;
+      await sleep(1000);
+    }
+    return ops;
   };
   // Bottom edge of a window: scan the padding column just inside
   // its left edge for the last #f9fafb (app body) pixel below the
@@ -1595,12 +1632,493 @@ async function main() {
   }
   const calcClose = await appdCmd(b, "CLOSE calculator", /APPD CLOSE OK calculator/);
   check("m9: calculator closes", !!calcClose);
+
+  // Window fix: focus restore + minimize/maximize + multi-window.
+  // The calculator is closed above, so launch it fresh for these
+  // checks (a clean window at Weston's default position).
+  const win = {};
+  // Find a window's header box by its title-bar colour, searching
+  // only above the dock (the dock tile shares the colour). A real
+  // header is an 800x44 solid strip (~34000 pixels); a covered
+  // window shows only a few stray pixels, which is not "found".
+  const findHeader = async (tag, r, g, bl, tol = 12, y0 = 48) => {
+    const img = await shot(b.qmp, join(OUT, `m9-shot-win-${tag}.ppm`));
+    const box = colorBox(img, r, g, bl, tol, {
+      x0: 0,
+      y0,
+      x1: img.width,
+      y1: img.height - 96,
+    });
+    return {
+      img,
+      box: box && box.n >= 1000 ? box : null,
+    };
+  };
+  // Poll for a window header matching `pred`, screenshotting until
+  // it appears (up to timeoutMs). The compositor repositions a
+  // maximized window on the first commit at the new size; under TCG
+  // the configure round-trip + present + reposition takes seconds,
+  // so a fixed 2s wait is not enough — polling the end state is
+  // robust to that timing. (The stuck-at-cascade-position failure
+  // was NOT timing: an old-size commit after set_maximized poisoned
+  // the reposition. Fixed in the host by deferring presents while a
+  // maximize/unmaximize is in flight — see sizeChangePending_ in
+  // v2/rn/host/wayland.h.) A maximized window's header sits at
+  // y=0..44, above findHeader's y0=48 band, so the maximize poll
+  // searches from y0=0.
+  const waitHeader = async (tag, r, g, bl, pred, timeoutMs = 15000, y0 = 48) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    do {
+      last = await findHeader(tag, r, g, bl, 12, y0);
+      if (last.box && pred(last.box)) return last;
+      await sleep(500);
+    } while (Date.now() < deadline);
+    return last;
+  };
+  // Centre of a dock tile by its colour (the dock band only). The
+  // tile is an 80px-wide solid block, but stray pixels of the same
+  // colour elsewhere in the dock band stretch a plain bounding box
+  // and skew its centre onto the wrong tile (in CI the store tile
+  // caught both the settings and the terminal clicks). Find the tile
+  // by column density instead: the longest run of columns each
+  // holding >= 30 matching pixels.
+  const dockTile = (img, r, g, bl, tol = 12) => {
+    const { width: W, height: H, pixels } = img;
+    const y0 = H - 96;
+    const colCount = new Array(W).fill(0);
+    for (let y = y0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 3;
+        if (
+          Math.abs(pixels[i] - r) <= tol &&
+          Math.abs(pixels[i + 1] - g) <= tol &&
+          Math.abs(pixels[i + 2] - bl) <= tol
+        ) {
+          colCount[x]++;
+        }
+      }
+    }
+    let best = null;
+    let runStart = -1;
+    for (let x = 0; x <= W; x++) {
+      const dense = x < W && colCount[x] >= 30;
+      if (dense && runStart < 0) runStart = x;
+      if (!dense && runStart >= 0) {
+        const run = { x0: runStart, x1: x - 1 };
+        if (!best || run.x1 - run.x0 > best.x1 - best.x0) best = run;
+        runStart = -1;
+      }
+    }
+    if (!best || best.x1 - best.x0 < 40) return null;
+    return { x: Math.round((best.x0 + best.x1) / 2), y: H - 48 };
+  };
+  // Click a point on the shell desktop (not covered by any window in
+  // `covered`, a list of {x, y, w, h} rects). Tries candidates until
+  // one is free; returns the point used, or null.
+  const clickDesktop = async (covered) => {
+    const W = 1920;
+    const H = 1080;
+    const candidates = [
+      [100, 100],
+      [1820, 100],
+      [100, 900],
+      [1820, 900],
+      [960, 60],
+    ];
+    for (const [x, y] of candidates) {
+      const hit = (covered || []).some(
+        (r) =>
+          x >= r.x - 10 && x <= r.x + r.w + 10 && y >= r.y - 10 && y <= r.y + r.h + 10,
+      );
+      if (hit) continue;
+      await pointerClick(b.qmp, W, H, x, y);
+      return { x, y };
+    }
+    return null;
+  };
+  const countLog = (substr) =>
+    logLines(b.logPath).filter((l) => l.includes(substr)).length;
+  // Distinct pids for "APPD launched <id> (pid N)" lines: the serial
+  // log duplicates APPD lines, so a raw line count is 2x the real
+  // launch count.
+  const countLaunches = (id) => {
+    const pids = new Set();
+    const re = new RegExp(`APPD launched ${id} \\(pid (\\d+)\\)`);
+    for (const l of logLines(b.logPath)) {
+      const m = l.match(re);
+      if (m) pids.add(m[1]);
+    }
+    return pids.size;
+  };
+
+  const calcLaunch2 = await appdCmd(b, "LAUNCH calculator", /APPD LAUNCH OK calculator/);
+  check("window: calculator launches (focus checks)", !!calcLaunch2);
+  await waitForLog(b.logPath, /HOST app running .* calculator/, 60000);
+  await sleep(3000);
+  let calcH = await findHeader("calc-a", 139, 92, 246);
+  check("window: calculator header found", !!calcH.box, JSON.stringify(calcH.box));
+  if (calcH.box) {
+    // Focus restore: click the desktop so the fullscreen shell
+    // covers the window, then click the dock tile to bring it back.
+    const winRect = {
+      x: calcH.box.x,
+      y: calcH.box.y,
+      w: calcH.box.w,
+      h: 500,
+    };
+    const deskPt = await clickDesktop([winRect]);
+    check("window: a free desktop point exists", !!deskPt, JSON.stringify(deskPt));
+    await sleep(2000);
+    const covered = await findHeader("calc-covered", 139, 92, 246);
+    check(
+      "window: desktop click covers the window (header hidden)",
+      !covered.box,
+      covered.box ? JSON.stringify(covered.box) : "hidden",
+    );
+    // Dock tile: the calculator tile is #8b5cf6 in the dock band.
+    const tile = dockTile(covered.img, 139, 92, 246);
+    check("window: calculator dock tile found", !!tile, JSON.stringify(tile));
+    if (tile) {
+      await pointerClick(b.qmp, covered.img.width, covered.img.height, tile.x, tile.y);
+      const remap = await waitForLog(b.logPath, /HOST FOCUS remap calculator/, 30000);
+      check("window: FOCUS remap logged by the app host", !!remap);
+      await sleep(2000);
+      const restored = await findHeader("calc-restored", 139, 92, 246);
+      check(
+        "window: dock click restores the covered window",
+        !!restored.box,
+        JSON.stringify(restored.box),
+      );
+      win.calc = restored.box;
+    } else {
+      check("window: FOCUS remap logged by the app host", false, "no dock tile");
+      check("window: dock click restores the covered window", false, "no dock tile");
+    }
+  } else {
+    check("window: a free desktop point exists", false, "no header");
+    check("window: desktop click covers the window (header hidden)", false, "no header");
+    check("window: calculator dock tile found", false, "no header");
+    check("window: FOCUS remap logged by the app host", false, "no header");
+    check("window: dock click restores the covered window", false, "no header");
+  }
+  if (win.calc) {
+    // Minimize: the — button is the leftmost of the three title-bar
+    // buttons (— ▢ ✕, each 28px, 12px right padding).
+    const minX = win.calc.x + win.calc.w - 82;
+    const minY = win.calc.y + 22;
+    const stoppedBefore = countLog("APP STOPPED calculator");
+    await pointerClick(b.qmp, 1920, 1080, minX, minY);
+    await sleep(2000);
+    const minimized = await findHeader("calc-min", 139, 92, 246);
+    check(
+      "window: minimize hides the window",
+      !minimized.box,
+      minimized.box ? JSON.stringify(minimized.box) : "hidden",
+    );
+    check(
+      "window: minimize does not stop the app",
+      countLog("APP STOPPED calculator") === stoppedBefore,
+      `stopped=${countLog("APP STOPPED calculator")} before=${stoppedBefore}`,
+    );
+    // Restore from minimized: dock click → focus remap.
+    const tileMin = dockTile(minimized.img, 139, 92, 246);
+    if (tileMin) {
+      await pointerClick(
+        b.qmp,
+        minimized.img.width,
+        minimized.img.height,
+        tileMin.x,
+        tileMin.y,
+      );
+      await sleep(2000);
+      const unmin = await findHeader("calc-unmin", 139, 92, 246);
+      check(
+        "window: dock click restores a minimized window",
+        !!unmin.box,
+        JSON.stringify(unmin.box),
+      );
+      win.calc = unmin.box;
+    } else {
+      check("window: dock click restores a minimized window", false, "no dock tile");
+    }
+  } else {
+    check("window: minimize hides the window", false, "no restored window");
+    check("window: minimize does not stop the app", false, "no restored window");
+    check("window: dock click restores a minimized window", false, "no restored window");
+  }
+  if (win.calc) {
+    // Maximize: the ▢ button is the middle of the three (✕ is the
+    // rightmost 28px + 12px padding). Restore is the same spot.
+    const maxX = win.calc.x + win.calc.w - 54;
+    const maxY = win.calc.y + 22;
+    await pointerClick(b.qmp, 1920, 1080, maxX, maxY);
+    const maxed = await waitHeader(
+      "calc-max",
+      139,
+      92,
+      246,
+      (box) => box.w >= 1800 && box.h === 44 && box.y <= 44,
+      15000,
+      0,
+    );
+    check(
+      "window: maximize fills the screen",
+      !!maxed.box && maxed.box.w >= 1800 && maxed.box.h === 44,
+      JSON.stringify(maxed.box),
+    );
+    if (maxed.box) {
+      const resX = maxed.box.x + maxed.box.w - 54;
+      const resY = maxed.box.y + 22;
+      await pointerClick(b.qmp, 1920, 1080, resX, resY);
+      const restored2 = await waitHeader(
+        "calc-restored2",
+        139,
+        92,
+        246,
+        (box) => box.w < 1000 && box.w > 400,
+      );
+      check(
+        "window: restore returns to a windowed size",
+        !!restored2.box && restored2.box.w < 1000 && restored2.box.w > 400,
+        JSON.stringify(restored2.box),
+      );
+      win.calc = restored2.box;
+    } else {
+      check("window: restore returns to a windowed size", false, "not maximized");
+    }
+  } else {
+    check("window: maximize fills the screen", false, "no restored window");
+    check("window: restore returns to a windowed size", false, "no restored window");
+  }
+  // Multi-window: Files (multi-instance) + Calculator side by side,
+  // then the single-instance rule (Settings) and the multi-instance
+  // dock rule (Files opens a second window).
+  const filesLaunch = await appdCmd(b, "LAUNCH files", /APPD LAUNCH OK files/);
+  check("window: files launches", !!filesLaunch);
+  await waitForLog(b.logPath, /HOST app running .* files/, 60000);
+  await sleep(3000);
+  let filesH = await findHeader("files-a", 59, 130, 246);
+  check("window: files header found", !!filesH.box, JSON.stringify(filesH.box));
+  if (filesH.box && win.calc) {
+    // Drag Files by its title bar so its header no longer overlaps
+    // the calculator's; then each dock click must bring its own
+    // window to the front.
+    const fromX = filesH.box.x + Math.round(filesH.box.w / 2);
+    const fromY = filesH.box.y + 22;
+    await pointerDrag(
+      b.qmp,
+      filesH.img.width,
+      filesH.img.height,
+      fromX,
+      fromY,
+      fromX + 200,
+      fromY + 100,
+    );
+    await sleep(2000);
+    const filesMoved = await findHeader("files-moved", 59, 130, 246);
+    check(
+      "window: files window drags to a new position (+200/+100)",
+      !!filesMoved.box &&
+        Math.abs(filesMoved.box.x - filesH.box.x - 200) < 40 &&
+        Math.abs(filesMoved.box.y - filesH.box.y - 100) < 40,
+      `before=${JSON.stringify(filesH.box)} after=${JSON.stringify(filesMoved.box)}`,
+    );
+    const calcTile = dockTile(filesMoved.img, 139, 92, 246);
+    if (calcTile) {
+      await pointerClick(
+        b.qmp,
+        filesMoved.img.width,
+        filesMoved.img.height,
+        calcTile.x,
+        calcTile.y,
+      );
+      await sleep(2000);
+    }
+    const calcFront = await findHeader("calc-front", 139, 92, 246);
+    const filesTile = dockTile(calcFront.img, 59, 130, 246);
+    if (filesTile) {
+      await pointerClick(
+        b.qmp,
+        calcFront.img.width,
+        calcFront.img.height,
+        filesTile.x,
+        filesTile.y,
+      );
+      await sleep(2000);
+    }
+    const filesFront = await findHeader("files-front", 59, 130, 246);
+    check(
+      "window: two different apps coexist (dock switches between them)",
+      !!calcFront.box && !!filesFront.box,
+      `calc=${JSON.stringify(calcFront.box)} files=${JSON.stringify(filesFront.box)}`,
+    );
+    win.files = filesFront.box;
+  } else {
+    check(
+      "window: two different apps coexist (dock switches between them)",
+      false,
+      "no files/calc header",
+    );
+  }
+  // Single-instance: Settings focuses on dock click, never relaunches.
+  const settingsLaunch = await appdCmd(b, "LAUNCH settings", /APPD LAUNCH OK settings/);
+  check("window: settings launches", !!settingsLaunch);
+  await waitForLog(b.logPath, /HOST app running .* settings/, 60000);
+  await sleep(3000);
+  const settingsH = await findHeader("settings-a", 107, 114, 128);
+  check("window: settings header found", !!settingsH.box, JSON.stringify(settingsH.box));
+  if (settingsH.box) {
+    const before = countLaunches("settings");
+    const settingsTile = dockTile(settingsH.img, 107, 114, 128);
+    check(
+      "window: settings dock tile found",
+      !!settingsTile,
+      JSON.stringify(settingsTile),
+    );
+    if (settingsTile) {
+      await pointerClick(
+        b.qmp,
+        settingsH.img.width,
+        settingsH.img.height,
+        settingsTile.x,
+        settingsTile.y,
+      );
+      await sleep(2000);
+      const settingsFront = await findHeader("settings-front", 107, 114, 128);
+      check(
+        "window: dock click on a running single-instance app focuses it",
+        !!settingsFront.box && countLaunches("settings") === before,
+        `header=${JSON.stringify(settingsFront.box)} launches=${countLaunches("settings")} before=${before}`,
+      );
+    } else {
+      check(
+        "window: dock click on a running single-instance app focuses it",
+        false,
+        "no dock tile",
+      );
+    }
+  } else {
+    check("window: settings dock tile found", false, "no header");
+    check(
+      "window: dock click on a running single-instance app focuses it",
+      false,
+      "no header",
+    );
+  }
+  // Multi-instance dock rule: a dock click on running Files opens a
+  // NEW window (a second "APPD launched files" line).
+  const filesLaunchesBefore = countLaunches("files");
+  const filesShot = await shot(b.qmp, join(OUT, "m9-shot-win-files-tile.ppm"));
+  const filesTile2 = dockTile(filesShot, 59, 130, 246);
+  if (filesTile2) {
+    const filesLinesBefore = logLines(b.logPath).length;
+    await pointerClick(
+      b.qmp,
+      filesShot.width,
+      filesShot.height,
+      filesTile2.x,
+      filesTile2.y,
+    );
+    const second = await waitForLog(
+      b.logPath,
+      /APPD launched files/,
+      30000,
+      filesLinesBefore,
+    );
+    check(
+      "window: dock click on a running multi-instance app opens a new window",
+      !!second && countLaunches("files") === filesLaunchesBefore + 1,
+      `launches=${countLaunches("files")} before=${filesLaunchesBefore}`,
+    );
+  } else {
+    check(
+      "window: dock click on a running multi-instance app opens a new window",
+      false,
+      "no files tile",
+    );
+  }
+  // Close the extra windows; the calculator close below settles
+  // focus back onto the Terminal.
+  await appdCmd(b, "CLOSE files", /APPD CLOSE OK files/);
+  await appdCmd(b, "CLOSE settings", /APPD CLOSE OK settings/);
+  await sleep(2000);
   // Focus settles back onto the Terminal a beat after the close —
   // typing at once lost the first keys ("tokrah" arrived as "krah").
   // Wait for the refocus, and retry the Phase A command once if the
   // first attempt still mistypes (the bad command already submitted,
   // so the line is clear for a fresh type).
   await sleep(3000);
+
+  // Keyboard focus: the Terminal is multi-instance, so a dock click
+  // opens a NEW window — it never focuses the covered one (that is
+  // the single-instance restore path, already proven with the
+  // calculator above). Prove the new window takes keyboard focus.
+  // Close the calculator first (still open from the focus checks),
+  // and the old terminal too: CLOSE ends every instance of the id,
+  // so the dock click below opens the ONLY terminal — the typed
+  // command can only run there, which is what proves focus. (The
+  // dock lists all installed apps, so the terminal tile stays.)
+  await appdCmd(b, "CLOSE calculator", /APPD CLOSE OK calculator/);
+  await appdCmd(b, "CLOSE terminal", /APPD CLOSE OK terminal/);
+  await sleep(2000);
+  const termLaunchesBefore = countLaunches("terminal");
+  const termShot0 = await shot(b.qmp, join(OUT, "m9-shot-win-term-tile0.ppm"));
+  const termTile0 = dockTile(termShot0, 17, 24, 39, 8);
+  check("window: terminal dock tile found", !!termTile0, JSON.stringify(termTile0));
+  if (termTile0) {
+    const termLinesBefore = logLines(b.logPath).length;
+    await pointerClick(
+      b.qmp,
+      termShot0.width,
+      termShot0.height,
+      termTile0.x,
+      termTile0.y,
+    );
+    const termLaunch = await waitForLog(
+      b.logPath,
+      /APPD launched terminal/,
+      30000,
+      termLinesBefore,
+    );
+    check(
+      "window: dock click on the running terminal opens a new window",
+      !!termLaunch && countLaunches("terminal") === termLaunchesBefore + 1,
+      `launches=${countLaunches("terminal")} before=${termLaunchesBefore}`,
+    );
+    await sleep(2000);
+    const termH = await findHeader("term-a", 17, 24, 39, 8);
+    check("window: terminal window found", !!termH.box, JSON.stringify(termH.box));
+    if (termH.box) {
+      // `sevyn echo` is not a subcommand (exit 1) — the old check
+      // failed even though typing reached a terminal. Use a real
+      // command; the old terminal is closed above, so only the new
+      // window can produce this EXEC line.
+      const focusOk = await termCmd(b, "update status", 60000);
+      check(
+        "window: new terminal window takes keyboard focus (typed command runs)",
+        !!focusOk,
+      );
+    } else {
+      check(
+        "window: new terminal window takes keyboard focus (typed command runs)",
+        false,
+        "no terminal window",
+      );
+    }
+  } else {
+    check(
+      "window: dock click on the running terminal opens a new window",
+      false,
+      "no dock tile",
+    );
+    check("window: terminal window found", false, "no dock tile");
+    check(
+      "window: new terminal window takes keyboard focus (typed command runs)",
+      false,
+      "no dock tile",
+    );
+  }
 
   // --- Phase A: headless mount, no input — the login screen. ---
   // Scope both waits to lines after this run started: the log

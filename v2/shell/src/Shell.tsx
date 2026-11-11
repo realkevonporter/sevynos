@@ -30,11 +30,26 @@ export function Shell(): React.ReactElement {
           name: a.name,
           color: a.color,
           glyph: a.glyph,
+          // Absent on old list lines: single-instance (the default).
+          singleInstance: a.singleInstance !== false,
         }))
       : APPS;
   const running = new Set(snap.running);
 
   const onLaunch = (appId: string) => {
+    const app = apps.find((a) => a.id === appId);
+    if (running.has(appId)) {
+      // Already running: a single-instance app is focused (its
+      // window is raised above the shell); a multi-instance app
+      // opens a new window. There is no dock path to focus a hidden
+      // multi-instance window — click the window itself.
+      if (app && app.singleInstance) {
+        Sevyn.focusApp(appId);
+      } else if (Sevyn.launchApp(appId)) {
+        setLaunching(appId);
+      }
+      return;
+    }
     // Only claim "Starting…" when appd accepted the launch.
     if (Sevyn.launchApp(appId)) setLaunching(appId);
   };

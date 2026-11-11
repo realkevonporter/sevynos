@@ -22,6 +22,7 @@
 
 import * as React from "react";
 import { View, Text, Pressable, ScrollView, TextInput } from "./host";
+import { WindowButtons } from "./window-buttons";
 import { runCli, runCliAsync, parseField } from "./cli";
 
 function readChannel(): string {
@@ -306,6 +307,7 @@ export function Settings(): React.ReactElement {
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Settings
         </Text>
+        <WindowButtons />
         <Pressable
           onPress={() => {
             Sevyn.closeApp();

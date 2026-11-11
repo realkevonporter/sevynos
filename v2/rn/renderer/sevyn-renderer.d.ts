@@ -30,6 +30,10 @@ export interface AppSnapshot {
     system: boolean;
     protected: boolean;
     permissions: string[];
+    // Per-app single-instance flag (default true): a dock click on a
+    // running single-instance app focuses it; a running multi-instance
+    // app opens a new window instead.
+    singleInstance: boolean;
   }[];
   running: string[];
   lastEvent: { kind: string; id: string } | null;
@@ -37,3 +41,9 @@ export interface AppSnapshot {
 }
 export function subscribeApps(fn: () => void): () => void;
 export function getAppsSnapshot(): AppSnapshot;
+// Window state store for useSyncExternalStore (title-bar ▢ / ❐).
+export interface WindowStateSnapshot {
+  maximized: boolean;
+}
+export function subscribeWindowState(fn: () => void): () => void;
+export function getWindowStateSnapshot(): WindowStateSnapshot;

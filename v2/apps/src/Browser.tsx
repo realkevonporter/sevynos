@@ -14,6 +14,7 @@
 
 import * as React from "react";
 import { View, Text, Pressable, TextInput } from "./host";
+import { WindowButtons } from "./window-buttons";
 import { runCli, parseField } from "./cli";
 
 type Tab = { id: string; title: string; url: string };
@@ -142,6 +143,7 @@ export function Browser(): React.ReactElement {
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Browser
         </Text>
+        <WindowButtons />
         <Pressable
           onPress={() => {
             Sevyn.closeApp();

@@ -27,6 +27,10 @@ struct AppInfo {
   std::string glyph;
   bool system = false;
   bool protected_ = false;
+  // Per-app single-instance flag (loader list line `single=0|1`).
+  // Default true when the field is absent (old registry entries):
+  // a single-instance app can have only one window open.
+  bool singleInstance = true;
   std::vector<std::string> permissions;
 };
 
@@ -50,6 +54,9 @@ class AppClient {
   // listApps retries for up to ~5s; launchApp for up to ~2s.
   std::vector<AppInfo> listApps();
   bool launchApp(const std::string& id);
+  // Ask appd to focus a running app (EVENT FOCUS to its most recent
+  // instance). False when the app is not running.
+  bool focusApp(const std::string& id);
 
  private:
   void run();
