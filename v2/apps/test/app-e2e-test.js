@@ -503,9 +503,13 @@ check("settings: channel switch applies and logs", () => {
   assert.ok(texts.includes("AI: echo-ai"), "current AI shown");
   assert.ok(texts.includes("echo-ai"), "echo-ai button shown");
   assert.ok(texts.includes("plan-ai"), "plan-ai button shown");
+  assert.ok(texts.includes("Power"), "power section shown");
+  assert.ok(texts.includes("Shut Down"), "power shut down button shown");
+  assert.ok(texts.includes("Restart"), "power restart button shown");
   // M9: the Wi-Fi Scan button is the second focusable, so the order
-  // is [—, ▢, X, Scan, Nightly, Stable, echo-ai, plan-ai] (the two
-  // window buttons lead the title bar).
+  // is [—, ▢, X, Scan, Nightly, Stable, echo-ai, plan-ai, Shut Down,
+  // Restart] (the two window buttons lead the title bar; the power
+  // buttons are the last two).
   pressTab(6); // —, ▢, X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
@@ -519,9 +523,9 @@ check("settings: channel switch applies and logs", () => {
     "confirmation shown",
   );
   // Focus order is now [—, ▢, X, Scan, Nightly, Stable, echo-ai,
-  // plan-ai]: Stable -> echo-ai -> plan-ai -> — -> ▢ -> X -> Scan ->
-  // Nightly.
-  pressTab(7);
+  // plan-ai, Shut Down, Restart]: Stable -> echo-ai -> plan-ai ->
+  // Shut Down -> Restart -> — -> ▢ -> X -> Scan -> Nightly.
+  pressTab(9);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> echo-ai -> plan-ai: swap the AI through the

@@ -37,7 +37,13 @@
 //      restores the ESP from the good slot, flips active back, and
 //      reboots; the harness proves the ESP + state are back on A.
 //   5. UEFI boot — post-restore: the restored system boots clean.
-//   6. Clean poweroff (every boot).
+//   6. Shutdown/restart (the shutdown fix): `sevyn reboot` from the
+//      Terminal tears the guest down cleanly (daemons stopped, /data
+//      unmounted) and the guest reboots (QEMU exits under
+//      -no-reboot); a second boot proves `sevyn poweroff` the same
+//      way; a third boot proves the tray power menu (tap Power, tap
+//      Shut Down). The Settings Power section is proved by the
+//      headless Settings run in step 1.
 //
 // Two modes for the UEFI boots (step 2-5), mirroring m8-check:
 //   Test-key mode (no anchor committed): the image trusts a fresh
@@ -253,6 +259,16 @@ class QMP {
         if (w) w(msg);
       }
     });
+    // A dead QEMU must surface as an error, not a hang: when the
+    // socket closes, every pending waiter rejects instead of waiting
+    // forever. A tap that powers the guest off (the tray shutdown
+    // probe) kills the socket mid-drag — without this, Node's event
+    // loop empties and the check exits 0 without a verdict.
+    const failWaiters = (err) => {
+      for (const w of this.waiters.splice(0)) w({ error: err });
+    };
+    this.sock.on("close", () => failWaiters({ message: "qmp socket closed" }));
+    this.sock.on("error", (e) => failWaiters(e));
   }
   ready() {
     return new Promise((resolve, reject) => {
@@ -1428,6 +1444,13 @@ async function main() {
   check(
     "m9: Settings still shows the update channel below Wi-Fi",
     settingsTexts.some((t) => t.includes("Channel: nightly")),
+  );
+  check(
+    "shutdown: Settings shows the Power section (Shut Down + Restart)",
+    settingsTexts.includes("Power") &&
+      settingsTexts.includes("Shut Down") &&
+      settingsTexts.includes("Restart"),
+    `${settingsTexts.length} texts`,
   );
   const calcProbe = await appRun(
     "calculator",
@@ -2609,11 +2632,133 @@ async function main() {
   const close = await appdCmd(b, "CLOSE tokrah", /APPD CLOSE OK tokrah/);
   check("interactive: appd CLOSE tokrah", !!close);
 
-  // Clean poweroff.
-  b.ctl.write("POWEROFF\n");
-  const exited = await waitExit(b, 30000);
-  check("shutdown: guest powers off on request", exited);
+  // --- Shutdown/restart: the power verbs + clean teardown. ---
+  // The Terminal lost focus to the Tokrah window above, and a
+  // re-LAUNCH of a running app is a no-op (no focus restore yet —
+  // the window fix), so close it and launch it fresh: a fresh
+  // launch is focused, and the typed commands land in it.
+  const termClose = await appdCmd(b, "CLOSE terminal", /APPD CLOSE OK terminal/);
+  check("shutdown: terminal closes before the reboot probe", !!termClose);
+  const termReopen = await appdCmd(b, "LAUNCH terminal", /APPD LAUNCH OK terminal/);
+  check("shutdown: terminal relaunches (focused) for the reboot probe", !!termReopen);
+  await sleep(5000);
+  // Search the whole log, not just lines after `before`: the `before`
+  // count overcounts by one when the file ends with "\n" (split yields
+  // a trailing ""), so the first line written after capture is skipped
+  // — the request line was in the log yet the scoped wait timed out
+  // (the same race termCmd already works around). The patterns are
+  // unique per boot log, so a stale match is impossible.
+  await typeText(b.qmp, "reboot");
+  await keyTap(b.qmp, "ret");
+  const rebootReq = await waitForLog(b.logPath, /STATUSD power reboot requested/, 60000);
+  check("shutdown: sevyn reboot reaches statusd", !!rebootReq);
+  const rebootTeardown = await waitForLog(
+    b.logPath,
+    /SEVYNOS power: clean teardown done/,
+    60000,
+  );
+  check(
+    "shutdown: reboot teardown runs (daemons stopped, /data unmounted)",
+    !!rebootTeardown,
+  );
+  const rebooted = await waitExit(b, 60000);
+  check("shutdown: guest reboots on sevyn reboot (QEMU exits, -no-reboot)", rebooted);
   closeBoot(b);
+
+  // The guest rebooted cleanly: boot it again and prove `sevyn
+  // poweroff` from the Terminal ends it the same way.
+  const b2 = await boot("power-off");
+  await connectSockets(b2);
+  const ready2 = await waitForLog(b2.logPath, /SEVYNOS_M5_READY/, 300000);
+  check("shutdown: guest boots again after reboot", !!ready2);
+  const settled2 = await screenSettled(b2, 60000);
+  check("shutdown: shell settles after reboot", !!settled2);
+  const term2 = await appdCmd(b2, "LAUNCH terminal", /APPD LAUNCH OK terminal/);
+  check("shutdown: terminal launches after reboot", !!term2);
+  await sleep(5000);
+  await typeText(b2.qmp, "poweroff");
+  await keyTap(b2.qmp, "ret");
+  const offReq = await waitForLog(b2.logPath, /STATUSD power poweroff requested/, 60000);
+  check("shutdown: sevyn poweroff reaches statusd", !!offReq);
+  const offUnmount = await waitForLog(
+    b2.logPath,
+    /SEVYNOS power: \/data unmounted/,
+    60000,
+  );
+  check("shutdown: poweroff teardown unmounts /data", !!offUnmount);
+  const offDone = await waitForLog(
+    b2.logPath,
+    /SEVYNOS power: clean teardown done/,
+    60000,
+  );
+  check("shutdown: poweroff teardown completes", !!offDone);
+  const offExited = await waitExit(b2, 60000);
+  check("shutdown: guest powers off on sevyn poweroff", offExited);
+  closeBoot(b2);
+
+  // Tray power menu: boot a third time, tap the Power button in the
+  // top bar (fixed 64px wide, right edge at 1920-16 — centre
+  // 1872,24), prove the menu paints, then tap Shut Down and prove
+  // the guest powers off through the tray path.
+  const b3 = await boot("power-tray");
+  await connectSockets(b3);
+  const ready3 = await waitForLog(b3.logPath, /SEVYNOS_M5_READY/, 300000);
+  check("shutdown: guest boots for the tray probe", !!ready3);
+  const settled3 = await screenSettled(b3, 60000);
+  check("shutdown: shell settles for the tray probe", !!settled3);
+  let powerBtn = 0;
+  if (settled3) {
+    powerBtn = countColor(settled3, 38, 38, 46, 10, {
+      x0: 1840,
+      y0: 6,
+      x1: 1904,
+      y1: 42,
+    });
+  }
+  check(
+    "shutdown: tray Power button paints (#26262e)",
+    powerBtn > 500,
+    `btn=${powerBtn}`,
+  );
+  await pointerDrag(b3.qmp, 1920, 1080, 1872, 24, 1872, 24);
+  const powerTap = await waitForLog(
+    b3.logPath,
+    /POINTER nodeId \d+ inst Pressable onPress true testID tray-power/,
+    30000,
+  );
+  check("shutdown: tapping Power opens the menu (onPress tray-power)", !!powerTap);
+  await sleep(1000);
+  let menuPx = 0;
+  try {
+    const menuShot = await shot(b3.qmp, join(OUT, "m9-shot-power-menu.ppm"));
+    menuPx = countColor(menuShot, 31, 41, 55, 10, {
+      x0: 1704,
+      y0: 48,
+      x1: 1904,
+      y1: 136,
+    });
+  } catch {}
+  check("shutdown: power menu paints (#1f2937)", menuPx > 10000, `menu=${menuPx}`);
+  // The tap powers the guest off, so QEMU can die mid-drag and the
+  // QMP socket closes under the last steps — a rejected drag is the
+  // expected outcome here, not a failure. The tap itself is proven
+  // by the log + exit checks below, which still gate the probe.
+  try {
+    await pointerDrag(b3.qmp, 1920, 1080, 1804, 70, 1804, 70);
+  } catch (e) {
+    console.log(`note: tray shutdown drag ended with the guest: ${e.message}`);
+  }
+  const shutTap = await waitForLog(
+    b3.logPath,
+    /POINTER nodeId \d+ inst Pressable onPress true testID power-shutdown/,
+    30000,
+  );
+  check("shutdown: tapping Shut Down fires (onPress power-shutdown)", !!shutTap);
+  const trayOff = await waitForLog(b3.logPath, /STATUSD power poweroff requested/, 60000);
+  check("shutdown: tray Shut Down reaches statusd", !!trayOff);
+  const trayExited = await waitExit(b3, 60000);
+  check("shutdown: guest powers off from the tray menu", trayExited);
+  closeBoot(b3);
 
   // --- UEFI boots: the ESP-sync installer proof (M9) ---
   // The test feed (m9-test-2, marker initramfs) is served from the
