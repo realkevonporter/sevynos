@@ -50,8 +50,54 @@ check("dock shows 12 tiles and both chevrons (overflow by design)", () => {
   // 12 app glyphs: F > B S M P C N = O M S (two Ms, two Ss — count tiles
   // by their pressable rects instead).
   const hits = last.ops.filter((o) => o.nodeId != null && o.nodeId >= 0);
-  // 12 tiles + 2 chevrons = 14 pressables.
-  assert.equal(hits.length, 14, "14 pressable rects, got " + hits.length);
+  // 12 tiles + 2 chevrons + 1 tray power button = 15 pressables.
+  assert.equal(hits.length, 15, "15 pressable rects, got " + hits.length);
+});
+
+check("tray power button opens the menu; Shut Down runs sevyn poweroff", () => {
+  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  // The tray power button is the only pressable in the top tray band.
+  const power = last.ops
+    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.y < 48)
+    .sort((a, b) => b.x - a.x)[0];
+  assert.ok(power, "power button rect present");
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: power.x + 2,
+    y: power.y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: power.nodeId,
+  });
+  const menu = Sevyn._presents[Sevyn._presents.length - 1];
+  const menuTexts = menu.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(menuTexts.includes("Shut Down"), "menu shows Shut Down");
+  assert.ok(menuTexts.includes("Restart"), "menu shows Restart");
+  // The Shut Down row is the upper of the two menu-row pressables
+  // (panel top 48: rows 52..96 and 96..140; the full-screen backdrop
+  // sits at y 0 and is excluded by the y filter).
+  const rows = menu.ops
+    .filter(
+      (o) =>
+        o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.y >= 48 && o.y < 140,
+    )
+    .sort((a, b) => a.y - b.y);
+  assert.ok(rows.length >= 1, "menu rows present, got " + rows.length);
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: rows[0].x + 2,
+    y: rows[0].y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: rows[0].nodeId,
+  });
+  assert.ok(
+    Sevyn._logs.some((l) => l === "EXEC sevyn poweroff"),
+    "poweroff requested, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  const after = Sevyn._presents[Sevyn._presents.length - 1];
+  const afterTexts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(!afterTexts.includes("Shut Down"), "menu closed after Shut Down");
 });
 
 check("clicking a dock tile logs LAUNCH and shows Starting…", () => {

@@ -33,6 +33,8 @@
  *   sevyn net dns <host>        resolve a name through the guest DNS
  *   sevyn net announce          announce the link state to statusd
  *                               (wifi on/off; init calls this at boot)
+ *   sevyn poweroff              power the system off (clean teardown)
+ *   sevyn reboot                reboot the system (clean teardown)
  *
  * Exit 0 on success, 1 on error. No shell quoting, no pipes, no
  * globbing anywhere in this CLI — the exec bridge splits on
@@ -121,6 +123,8 @@ static void print_usage(FILE *f)
             "usage: sevyn [help|<command> ...]\n"
             "  sevyn                       REPL: read commands from stdin\n"
             "  sevyn help                  this help\n"
+            "  sevyn poweroff            power the system off (clean teardown)\n"
+            "  sevyn reboot              reboot the system (clean teardown)\n"
             "  sevyn update check          check for a newer version\n"
             "  sevyn update apply          install into the idle slot "
             "and reboot\n"
@@ -2791,6 +2795,28 @@ static int cmd_tokrah(int argc, char **argv)
 
 /* ------------------------------------------------------------------ */
 /* dispatch + REPL                                                     */
+/* `sevyn poweroff` / `sevyn reboot`: ask statusd to power the
+ * system off or reboot it (statusd signals init, which does the
+ * clean teardown). Prints "<action> requested" and exits 0 once the
+ * request is sent — the guest goes down a second later, so callers
+ * must not expect anything after it. */
+static int cmd_power(const char *action, const char *verb)
+{
+    int fd = connect_sock("SEVYN_STATUS_SOCK", STATUS_SOCK);
+    if (fd < 0) {
+        fprintf(stderr, "error: cannot reach the status daemon\n");
+        return 1;
+    }
+    if (send_line(fd, verb) != 0) {
+        fprintf(stderr, "error: cannot talk to the status daemon\n");
+        close(fd);
+        return 1;
+    }
+    close(fd);
+    printf("%s requested\n", action);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 
 static int dispatch(int argc, char **argv)
@@ -2800,6 +2826,16 @@ static int dispatch(int argc, char **argv)
     if (strcmp(argv[1], "help") == 0) {
         print_usage(stdout);
         return 0;
+    }
+    if (strcmp(argv[1], "poweroff") == 0) {
+        if (argc != 2)
+            return usage();
+        return cmd_power("poweroff", "POWEROFF");
+    }
+    if (strcmp(argv[1], "reboot") == 0) {
+        if (argc != 2)
+            return usage();
+        return cmd_power("reboot", "REBOOT");
     }
     if (strcmp(argv[1], "update") == 0)
         return cmd_update(argc, argv);

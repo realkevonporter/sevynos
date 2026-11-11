@@ -671,6 +671,50 @@ export PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:/usr/local/sbin
 # fails the image if this line ever loses /usr/sbin again.
 export XDG_RUNTIME_DIR=/run
 export WAYLAND_DISPLAY=wayland-0
+# Clean poweroff/reboot: statusd signals init (SIGTERM) with the
+# requested action in /run/sevyn-power-action. The trap stops the
+# daemons, syncs, unmounts /data, then powers off or reboots for
+# real — the old statusd POWEROFF did none of that (sync + reboot
+# only, filesystems left dirty). The marker file is what statusd
+# waits for; without it statusd falls back to its legacy direct
+# reboot after ~5 s (older images have no trap).
+sevyn_power_teardown() {
+  ACTION=$(cat /run/sevyn-power-action 2>/dev/null || echo poweroff)
+  echo "SEVYNOS power: $ACTION requested — clean teardown starting"
+  echo "$ACTION" > /run/sevyn-power-teardown
+  # Stop every daemon by process name (comm, 15-char cap — every
+  # name below fits). node is code-server + the mock API.
+  for name in sevyn-updated sevyn-statusd sevyn-appd sevyn-aid sevyn-rn-host weston seatd systemd-udevd wpa_supplicant node; do
+    for d in /proc/[0-9]*; do
+      [ "$(cat "$d/comm" 2>/dev/null)" = "$name" ] || continue
+      kill "${d#/proc/}" 2>/dev/null
+    done
+  done
+  sleep 1
+  # SIGKILL anything still alive, so a wedged daemon cannot hold
+  # /data open past the unmount.
+  for name in sevyn-updated sevyn-statusd sevyn-appd sevyn-aid sevyn-rn-host weston seatd systemd-udevd wpa_supplicant node; do
+    for d in /proc/[0-9]*; do
+      [ "$(cat "$d/comm" 2>/dev/null)" = "$name" ] || continue
+      kill -9 "${d#/proc/}" 2>/dev/null
+    done
+  done
+  sync
+  if /bin/busybox umount /data 2>/dev/null; then
+    echo "SEVYNOS power: /data unmounted"
+  elif /bin/busybox umount -l /data 2>/dev/null; then
+    echo "SEVYNOS power: /data lazy-unmounted"
+  else
+    echo "SEVYNOS power: /data unmount failed (continuing)"
+  fi
+  sync
+  echo "SEVYNOS power: clean teardown done — $ACTION"
+  case "$ACTION" in
+    reboot) exec /bin/busybox reboot -f ;;
+    *) exec /bin/busybox poweroff -f ;;
+  esac
+}
+trap sevyn_power_teardown TERM
 echo "M4 init: modules start @ $(cut -d" " -f1 /proc/uptime)s"
 for mod in $(cat "/lib/modules/$(uname -r)/sevyn-modules.txt" 2>/dev/null); do
   /bin/busybox insmod "$mod" || echo "M4 init: insmod $mod failed"
@@ -907,8 +951,11 @@ echo "SEVYNOS_M4_5_READY"
 NET_IF=$(/usr/local/bin/sevyn net status 2>/dev/null | grep '^interface:' || echo "interface: unknown")
 echo "M5 init: $NET_IF"
 echo "SEVYNOS_M5_READY"
-# Stay alive; the harness powers us off via the status daemon.
-while true; do sleep 3600; done
+# Stay alive; the harness powers us off via the status daemon. The
+# sleep is 1 s, not 3600 s: a trapped SIGTERM only runs once the
+# foreground sleep returns, so a long sleep would defer the power
+# teardown up to an hour.
+while true; do sleep 1; done
 EOF
 chmod +x "$STAGE/init"
 

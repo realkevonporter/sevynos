@@ -7,7 +7,7 @@
 // handler, owned by the renderer.
 
 import * as React from "react";
-import { Text } from "./host";
+import { Text, Pressable } from "./host";
 import { subscribeStatus, getStatusSnapshot } from "../../rn/renderer/sevyn-renderer";
 
 export interface StatusSnapshot {
@@ -37,7 +37,11 @@ const itemStyle = {
   marginLeft: 16,
 };
 
-export function StatusTray(): React.ReactElement {
+export interface StatusTrayProps {
+  onPowerPress(): void;
+}
+
+export function StatusTray(props: StatusTrayProps): React.ReactElement {
   const status = React.useSyncExternalStore(
     subscribeStatus,
     getStatusSnapshot,
@@ -47,6 +51,27 @@ export function StatusTray(): React.ReactElement {
       <Text style={itemStyle}>{wifiLabel(status.wifi)}</Text>
       <Text style={itemStyle}>{"🔋 " + batteryLabel(status.battery)}</Text>
       <Text style={itemStyle}>{volumeLabel(status.volume)}</Text>
+      {/* Power button: the tray's only pressable. A text label, not a
+          symbol — the tray font (DejaVu Sans) has no power glyph
+          (U+23FB), so a symbol would render as tofu. Fixed 64px wide
+          so its screen position is deterministic (right edge pinned
+          to the bar's 16px padding — the m9-check taps it by
+          coordinate). */}
+      <Pressable
+        testID="tray-power"
+        onPress={props.onPowerPress}
+        style={{
+          width: 64,
+          height: 36,
+          marginLeft: 16,
+          borderRadius: 6,
+          backgroundColor: "#26262e",
+          justifyContent: "center",
+          alignItems: "center",
+        }}
+      >
+        <Text style={{ fontSize: 13, color: "#d1d5db", textAlign: "center" }}>Power</Text>
+      </Pressable>
     </React.Fragment>
   );
 }

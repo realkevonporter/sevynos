@@ -12,7 +12,7 @@
 // LAUNCHED event (or a STOPPED/CRASHED for the same id) arrives.
 
 import * as React from "react";
-import { View, Text } from "./host";
+import { View, Text, Pressable } from "./host";
 import { Dock } from "./Dock";
 import { APPS, type ShellApp } from "./apps";
 import { StatusTray } from "./StatusTray";
@@ -20,6 +20,7 @@ import { subscribeApps, getAppsSnapshot } from "../../rn/renderer/sevyn-renderer
 
 export function Shell(): React.ReactElement {
   const [launching, setLaunching] = React.useState<string | null>(null);
+  const [powerMenu, setPowerMenu] = React.useState(false);
   const snap = React.useSyncExternalStore(subscribeApps, getAppsSnapshot);
   // appd's list is the source of truth; the built-in 12 are the
   // fallback when it is empty (appd down at first mount).
@@ -92,7 +93,7 @@ export function Shell(): React.ReactElement {
           SevynOS
         </Text>
         <View style={{ flex: 1 }} />
-        <StatusTray />
+        <StatusTray onPowerPress={() => setPowerMenu(true)} />
       </View>
       <View
         style={{
@@ -120,6 +121,69 @@ export function Shell(): React.ReactElement {
         </Text>
       </View>
       <Dock apps={apps} running={running} onLaunch={onLaunch} />
+      {/* Power menu: last child, so it paints over the desktop. The
+          backdrop closes it on a tap outside; the rows run `sevyn
+          poweroff` / `sevyn reboot` through the shell's trusted exec
+          (the shell always has every permission). Positions are
+          deterministic at 1920x1080 — the m9-check taps them by
+          coordinate (button centre 1872,24; Shut Down 1804,70;
+          Restart 1804,114). */}
+      {powerMenu ? (
+        <React.Fragment>
+          <Pressable
+            testID="power-menu-backdrop"
+            onPress={() => setPowerMenu(false)}
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              right: 0,
+              bottom: 0,
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              top: 48,
+              right: 16,
+              width: 200,
+              backgroundColor: "#1f2937",
+              borderRadius: 12,
+              paddingTop: 4,
+              paddingBottom: 4,
+            }}
+          >
+            <Pressable
+              testID="power-shutdown"
+              onPress={() => {
+                Sevyn.exec("sevyn poweroff");
+                setPowerMenu(false);
+              }}
+              style={{
+                height: 44,
+                justifyContent: "center",
+                paddingLeft: 16,
+              }}
+            >
+              <Text style={{ fontSize: 15, color: "#ffffff" }}>Shut Down</Text>
+            </Pressable>
+            <Pressable
+              testID="power-restart"
+              onPress={() => {
+                Sevyn.exec("sevyn reboot");
+                setPowerMenu(false);
+              }}
+              style={{
+                height: 44,
+                justifyContent: "center",
+                paddingLeft: 16,
+              }}
+            >
+              <Text style={{ fontSize: 15, color: "#ffffff" }}>Restart</Text>
+            </Pressable>
+          </View>
+        </React.Fragment>
+      ) : null}
     </View>
   );
 }

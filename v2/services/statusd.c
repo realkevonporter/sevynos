@@ -18,6 +18,7 @@
  *   client -> SET k v     : set a value, broadcast STATUS k v to subscribers
  *   client -> GET         : receive current values (this client only)
  *   client -> POWEROFF    : clean guest poweroff (M1 harness end-of-test)
+ *   client -> REBOOT      : clean guest reboot (same teardown, then reboot)
  *   daemon -> STATUS k v  : a value changed
  *
  * Build: gcc, libc only. Run as root from the guest init script.
@@ -274,6 +275,38 @@ static void handle_inotify(void)
 
 /* --- command handling --- */
 
+/* Poweroff / reboot: ask init (PID 1) to do the clean teardown, and
+ * fall back to the legacy direct reboot when this image's init has
+ * no trap. The init trap (M9 image) stops the daemons, syncs,
+ * unmounts /data, then powers off or reboots for real; it writes
+ * /run/sevyn-power-teardown first, so this wait (up to ~5 s) tells
+ * the two apart. Older images ignore the signal (PID 1 only
+ * delivers signals it has a handler for), so without the fallback
+ * their harness POWEROFF would hang instead of powering off. */
+static void request_power(const char *action)
+{
+    FILE *f = fopen("/run/sevyn-power-action", "w");
+    if (f) {
+        fprintf(f, "%s\n", action);
+        fclose(f);
+    }
+    log_line("STATUSD power %s requested (init trap)", action);
+    kill(1, SIGTERM);
+    for (int i = 0; i < 50; i++) {
+        struct stat st;
+        if (stat("/run/sevyn-power-teardown", &st) == 0) {
+            log_line("STATUSD init teardown in progress; exiting");
+            _exit(0);
+        }
+        struct timespec ts = { 0, 100 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    log_line("STATUSD no init trap answered; direct %s", action);
+    sync();
+    reboot(strcmp(action, "reboot") == 0 ? RB_AUTOBOOT : RB_POWER_OFF);
+    _exit(0);
+}
+
 static void handle_command(const char *line)
 {
     char cmd[32], key[64], val[64];
@@ -285,10 +318,9 @@ static void handle_command(const char *line)
             set_value(key, val);
         }
     } else if (strcmp(cmd, "POWEROFF") == 0) {
-        log_line("STATUSD poweroff requested");
-        sync();
-        reboot(RB_POWER_OFF);
-        _exit(0);
+        request_power("poweroff");
+    } else if (strcmp(cmd, "REBOOT") == 0) {
+        request_power("reboot");
     }
 }
 

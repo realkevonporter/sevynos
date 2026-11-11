@@ -19,6 +19,10 @@
 // Wi-Fi hardware" where there is no wlan device (QEMU). The body
 // scrolls, so the new section never clips the older ones at the
 // default 800x500 window.
+//
+// The Power section (shutdown fix) shuts down or restarts the
+// system through `sevyn poweroff` / `sevyn reboot` — the same verbs
+// the tray power menu runs.
 
 import * as React from "react";
 import { View, Text, Pressable, ScrollView, TextInput } from "./host";
@@ -82,6 +86,7 @@ export function Settings(): React.ReactElement {
   const [selected, setSelected] = React.useState<string>("");
   const [password, setPassword] = React.useState<string>("");
   const [wifiMessage, setWifiMessage] = React.useState<string>("");
+  const [powerMessage, setPowerMessage] = React.useState<string>("");
   const color = Sevyn.appColor;
 
   function setChannelTo(next: string): void {
@@ -112,6 +117,22 @@ export function Settings(): React.ReactElement {
         : "AI is " + current.selected + ".",
     );
     Sevyn.log("SETTINGS ai=" + current.selected);
+  }
+
+  async function shutdownSystem(): Promise<void> {
+    const { code } = await runCliAsync("sevyn poweroff");
+    setPowerMessage(
+      code === 0 ? "Shutting down…" : "Could not shut down (status daemon unreachable).",
+    );
+    Sevyn.log("SETTINGS power=shutdown");
+  }
+
+  async function restartSystem(): Promise<void> {
+    const { code } = await runCliAsync("sevyn reboot");
+    setPowerMessage(
+      code === 0 ? "Restarting…" : "Could not restart (status daemon unreachable).",
+    );
+    Sevyn.log("SETTINGS power=restart");
   }
 
   async function scanWifi(): Promise<void> {
@@ -483,6 +504,59 @@ export function Settings(): React.ReactElement {
           <View style={{ flexDirection: "row", marginTop: 12 }}>
             {ai.backends.map((id) => aiButton(id, id))}
           </View>
+          <Text
+            style={{ fontSize: 16, fontWeight: "bold", color: "#111827", marginTop: 24 }}
+          >
+            Power
+          </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            Shut down or restart SevynOS.
+          </Text>
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            <Pressable
+              onPress={() => void shutdownSystem()}
+              style={{
+                width: 120,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: "#111827",
+                justifyContent: "center",
+                alignItems: "center",
+                marginRight: 12,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 15,
+                  fontWeight: "bold",
+                  color: "#ffffff",
+                  textAlign: "center",
+                }}
+              >
+                Shut Down
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => void restartSystem()}
+              style={{
+                width: 120,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+              }}
+            >
+              <Text style={{ fontSize: 15, color: "#111827", textAlign: "center" }}>
+                Restart
+              </Text>
+            </Pressable>
+          </View>
+          {powerMessage ? (
+            <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
+              {powerMessage}
+            </Text>
+          ) : null}
         </View>
       </ScrollView>
     </View>

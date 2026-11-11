@@ -519,14 +519,17 @@ async function main() {
   // keyboard focus at boot but no activation until a pointer button
   // press lands on it, so click the main area first (it has no
   // pressable, so nothing launches and focus stays unset).
-  // Tab TWICE, not once: the renderer's focus list is the tree order,
-  // and the dock's LEFT CHEVRON is focusable list[0] — the first tile
-  // is list[1]. One Tab + Enter would just scroll the dock.
+  // Tab THREE times, not twice: the renderer's focus list is the tree
+  // order, and the tray POWER button is focusable list[0] (shutdown
+  // fix), the dock's LEFT CHEVRON is list[1] — the first tile is
+  // list[2]. Two Tabs + Enter would just scroll the dock.
   {
     const before = logLines().length;
     await moveTo(512, 300, W, H); // main area (welcome text), no pressable
     await sleep(300);
     await click();
+    await sleep(300);
+    await key("tab");
     await sleep(300);
     await key("tab");
     await sleep(300);
