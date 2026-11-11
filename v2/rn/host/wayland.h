@@ -39,6 +39,14 @@ class Wayland {
   using PointerHandler =
       std::function<void(const std::string& type, double x, double y,
                          uint32_t button, bool pressed)>;
+  // Scroll event (GF65 fix, 2026-11-10): a wheel click or a
+  // trackpad two-finger scroll, accumulated per pointer frame.
+  // (x, y) is the pointer position; (dx, dy) is the scroll amount
+  // in pixels — positive dy scrolls DOWN (content moves up),
+  // positive dx scrolls RIGHT. Matches the renderer's scrollAt
+  // convention (scrollY += dy), so the handler forwards as-is.
+  using ScrollHandler =
+      std::function<void(double x, double y, double dx, double dy)>;
   // Key event: evdev keycode (28 Enter, 103 Up, 105 Left, 106 Right,
   // 108 Down, 15 Tab, 1 Esc…), pressed or released. shift is the
   // state of either Shift key at the moment of the event (tracked in
@@ -83,6 +91,7 @@ class Wayland {
   bool dispatch(int timeoutMs);
 
   void setPointerHandler(PointerHandler h) { pointerHandler_ = h; }
+  void setScrollHandler(ScrollHandler h) { scrollHandler_ = h; }
   void setKeyHandler(KeyHandler h) { keyHandler_ = h; }
   void setFrameHandler(FrameHandler h) { frameHandler_ = h; }
   void setCloseHandler(CloseHandler h) { closeHandler_ = h; }
@@ -237,6 +246,7 @@ class Wayland {
   bool shiftRight_ = false;
 
   PointerHandler pointerHandler_;
+  ScrollHandler scrollHandler_;
   KeyHandler keyHandler_;
   FrameHandler frameHandler_;
   CloseHandler closeHandler_;
@@ -255,6 +265,22 @@ class Wayland {
   static constexpr int kMinHeight = 320;
 
   double pointerX_ = 0, pointerY_ = 0;
+
+  // GF65 scroll fix: wheel/trackpad axis events accumulate here
+  // between pointer frames and flush as one scroll event in
+  // onPointerFrame (Weston groups one gesture's axis events into a
+  // frame). axisAccum_ is the wl_fixed value sum (pixels for smooth
+  // trackpad scrolling); axisDiscrete_ counts wheel clicks — when a
+  // frame has discrete steps, the click count wins over the axis
+  // value for that axis, because libinput reports ~10 axis units
+  // per click alongside the discrete event and using both would
+  // double-scroll.
+  double axisAccumX_ = 0, axisAccumY_ = 0;
+  int axisDiscreteX_ = 0, axisDiscreteY_ = 0;
+  bool axisPending_ = false;
+  // One wheel click moves this many pixels. A click is a coarse
+  // gesture — the raw ~10 axis units per click would crawl.
+  static constexpr double kWheelStepPx = 48;
 };
 
 } // namespace sevyn

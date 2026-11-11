@@ -8,7 +8,7 @@
 // on. Files are shown, not opened — opening is a later milestone.
 
 import * as React from "react";
-import { View, Text, Pressable } from "./host";
+import { View, Text, Pressable, ScrollView } from "./host";
 import { runCli } from "./cli";
 
 type Entry = { type: string; name: string };
@@ -104,7 +104,9 @@ export function Files(): React.ReactElement {
       >
         <Text style={{ fontSize: 14, color: "#374151" }}>{path}</Text>
       </View>
-      <View style={{ flex: 1, paddingLeft: 12, paddingRight: 12, paddingTop: 8 }}>
+      {/* GF65 scroll fix: the listing scrolls when it outgrows the
+          window. Header + path bar stay fixed; only entries scroll. */}
+      <ScrollView style={{ flex: 1, paddingLeft: 12, paddingRight: 12, paddingTop: 8 }}>
         {path !== "/" ? (
           <Pressable
             onPress={() => navigate(parentOf(path))}
@@ -136,7 +138,7 @@ export function Files(): React.ReactElement {
         {error ? (
           <Text style={{ fontSize: 14, color: "#dc2626", marginTop: 8 }}>{error}</Text>
         ) : null}
-      </View>
+      </ScrollView>
     </View>
   );
 }

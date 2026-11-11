@@ -1792,6 +1792,13 @@ int RnHost::run() {
   wayland_->setPointerHandler(
       [this](const std::string& type, double x, double y, uint32_t button,
              bool pressed) { dispatchPointer(type, x, y, button, pressed); });
+  // GF65 scroll fix: wheel/trackpad axis events reach the
+  // renderer's scrollAt through the existing dispatchScroll (the
+  // same path the headless `scroll` input lines use).
+  wayland_->setScrollHandler(
+      [this](double x, double y, double dx, double dy) {
+        dispatchScroll(x, y, dx, dy);
+      });
   wayland_->setKeyHandler(
       [this](uint32_t key, bool pressed, bool shift) {
         dispatchKey(key, pressed, shift);

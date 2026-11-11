@@ -8,7 +8,7 @@
 const nodes = new Map();
 let nextId = 1;
 
-const handlers = { pointer: null, key: null, status: null, appEvent: null };
+const handlers = { pointer: null, key: null, status: null, appEvent: null, scroll: null };
 const presents = []; // {ops, bg} per Sevyn.present call
 const logs = [];
 
@@ -402,6 +402,9 @@ const Sevyn = {
   onStatus(fn) {
     handlers.status = fn;
   },
+  onScroll(fn) {
+    handlers.scroll = fn;
+  },
   onAppEvent(fn) {
     handlers.appEvent = fn;
   },
@@ -464,6 +467,7 @@ const Sevyn = {
     handlers.key = null;
     handlers.status = null;
     handlers.appEvent = null;
+    handlers.scroll = null;
   },
 };
 
