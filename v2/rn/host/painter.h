@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "common.h"
@@ -72,6 +73,35 @@ class Painter {
   void* ftFace_ = nullptr;    // FT_Face regular
   void* ftFaceBold_ = nullptr; // FT_Face bold
   bool fontReady_ = false;
+
+  // Rasterized glyph cache, keyed by (face, pixel size, codepoint).
+  // Without it every present re-rasterizes every glyph of every text
+  // line (drawText) and re-loads every glyph for measuring
+  // (measureTextWidth) — O(total characters) FreeType work per
+  // present. That made Terminal typing slow down linearly with
+  // scrollback lines under TCG (PR #98: hundreds of ms native per
+  // present at 100 lines, seconds under TCG, one present per
+  // keystroke), which timed out the M7/M9 QEMU checks. Distinct
+  // glyphs are few (ASCII x 2 faces x a handful of sizes), so the
+  // cache stays tiny.
+  struct Glyph {
+    int advance = 0;    // advance.x >> 6, pixels
+    int bitmapLeft = 0; // bitmap_left
+    int bitmapTop = 0;  // bitmap_top
+    int width = 0;      // bitmap.width
+    int height = 0;     // bitmap.rows
+    std::vector<uint8_t> bitmap; // width*height coverage bytes, row-major
+  };
+  std::unordered_map<uint64_t, Glyph> glyphCache_;
+  // Pixel size last set on each face; FT_Set_Pixel_Sizes runs only
+  // when the size changes for that face.
+  float glyphSizeRegular_ = -1;
+  float glyphSizeBold_ = -1;
+  // Rasterized glyph for (codepoint, size, bold), loading it on first
+  // use. The returned pointer is valid only until the next glyphFor
+  // call (a cache insert may rehash); use it immediately.
+  // Returns nullptr only when no font is available.
+  const Glyph* glyphFor(uint32_t cp, float size, bool bold);
 
   struct Image {
     int w = 0, h = 0;

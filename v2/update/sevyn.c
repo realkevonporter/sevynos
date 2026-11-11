@@ -2041,11 +2041,13 @@ static void wifi_escape(const char *in, char *out, size_t cap)
 }
 
 /* `wpa_cli -i <iface> <args...>` with stdout captured. args is a
- * NULL-terminated list of at most 5 extra arguments. */
+ * NULL-terminated list of at most 5 extra arguments.
+ * GF65 wifi fix: absolute path — the daemon runs under init's PATH,
+ * which has no /usr/sbin, so a bare name fails ENOENT in execvp. */
 static int wpa_cli(const char *iface, char **out, const char **args)
 {
     char *argv[9];
-    argv[0] = "wpa_cli";
+    argv[0] = "/usr/sbin/wpa_cli";
     argv[1] = "-i";
     argv[2] = (char *)iface;
     int n = 3;
@@ -2081,7 +2083,9 @@ static int wifi_ensure_supplicant(const char *iface)
         fclose(f);
         chmod(WIFI_CONF_PATH, 0600);
     }
-    char *sargv[] = {"wpa_supplicant", "-B", "-i", (char *)iface,
+    /* GF65 wifi fix: absolute path (see wpa_cli above) — init's
+     * PATH has no /usr/sbin. */
+    char *sargv[] = {"/usr/sbin/wpa_supplicant", "-B", "-i", (char *)iface,
                      "-c", WIFI_CONF_PATH, "-Dnl80211", NULL};
     char *discard = NULL;
     if (run_capture(sargv, &discard) != 0) {

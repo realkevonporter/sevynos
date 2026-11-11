@@ -221,14 +221,55 @@ void Painter::beginFrame(uint32_t bg) {
   }
 }
 
-float Painter::measureTextWidth(const std::string& text, float size,
-                                bool bold) {
+const Painter::Glyph* Painter::glyphFor(uint32_t cp, float size,
+                                        bool bold) {
   FT_Face face = static_cast<FT_Face>(bold ? ftFaceBold_ : ftFace_);
   if (!face)
     face = static_cast<FT_Face>(ftFace_);
   if (!face)
-    return 0;
-  FT_Set_Pixel_Sizes(face, 0, (FT_UInt)ceilf(size));
+    return nullptr;
+  const bool isBold = face == static_cast<FT_Face>(ftFaceBold_);
+  float px = ceilf(size);
+  float& lastSize = isBold ? glyphSizeBold_ : glyphSizeRegular_;
+  if (lastSize != px) {
+    FT_Set_Pixel_Sizes(face, 0, (FT_UInt)px);
+    lastSize = px;
+  }
+  uint64_t key =
+      ((uint64_t)(isBold ? 1 : 0) << 56) | ((uint64_t)(uint32_t)px << 32) | cp;
+  auto it = glyphCache_.find(key);
+  if (it != glyphCache_.end())
+    return &it->second;
+  // Bound the cache: the working set is tiny (ASCII x 2 faces x a
+  // handful of sizes), so clearing on overflow is safe and keeps
+  // memory bounded if an app ever renders unbounded codepoints.
+  if (glyphCache_.size() >= 8192)
+    glyphCache_.clear();
+  Glyph g;
+  if (FT_Load_Char(face, cp, FT_LOAD_RENDER) == 0) {
+    FT_GlyphSlot s = face->glyph;
+    g.advance = (int)(s->advance.x >> 6);
+    g.bitmapLeft = s->bitmap_left;
+    g.bitmapTop = s->bitmap_top;
+    g.width = (int)s->bitmap.width;
+    g.height = (int)s->bitmap.rows;
+    // Copy the bitmap now: the glyph slot is reused by the next load.
+    const uint8_t* src = s->bitmap.buffer;
+    if (src && g.width > 0 && g.height > 0) {
+      g.bitmap.resize((size_t)g.width * (size_t)g.height);
+      for (int r = 0; r < g.height; r++)
+        memcpy(g.bitmap.data() + (size_t)r * g.width,
+               src + (size_t)r * s->bitmap.pitch, (size_t)g.width);
+    }
+  }
+  // A failed load caches as an empty zero-advance glyph, so a missing
+  // codepoint is not re-loaded on every present.
+  auto inserted = glyphCache_.emplace(key, std::move(g));
+  return &inserted.first->second;
+}
+
+float Painter::measureTextWidth(const std::string& text, float size,
+                                bool bold) {
   float w = 0;
   size_t i = 0;
   while (i < text.size()) {
@@ -236,9 +277,9 @@ float Painter::measureTextWidth(const std::string& text, float size,
     i += utf8Decode(text, i, cp);
     if (cp == '\n')
       break;
-    if (FT_Load_Char(face, cp, FT_LOAD_DEFAULT) != 0)
-      continue;
-    w += (float)(face->glyph->advance.x >> 6);
+    const Glyph* g = glyphFor(cp, size, bold);
+    if (g)
+      w += (float)g->advance;
   }
   return w;
 }
@@ -294,7 +335,6 @@ void Painter::drawText(const DrawOp& op) {
     face = static_cast<FT_Face>(ftFace_);
   if (!face || !pixels_)
     return;
-  FT_Set_Pixel_Sizes(face, 0, (FT_UInt)ceilf(op.fontSize));
   float lineH = op.fontSize * 1.25f;
   // Split into lines on \n.
   std::vector<std::string> lines;
@@ -321,20 +361,21 @@ void Painter::drawText(const DrawOp& op) {
     while (i < line.size()) {
       uint32_t cp = 0;
       i += utf8Decode(line, i, cp);
-      if (FT_Load_Char(face, cp, FT_LOAD_RENDER) != 0)
+      // Blit the cached rasterization: glyphFor loads + renders only
+      // on first use of this (face, size, codepoint).
+      const Glyph* g = glyphFor(cp, op.fontSize, op.fontBold);
+      if (!g)
         continue;
-      FT_GlyphSlot g = face->glyph;
-      FT_Bitmap& bm = g->bitmap;
-      int gx = (int)floorf(penX) + g->bitmap_left;
-      int gy = (int)floorf(baseline) - g->bitmap_top;
-      for (unsigned row = 0; row < bm.rows; row++) {
-        for (unsigned col = 0; col < bm.width; col++) {
-          uint8_t cov = bm.buffer[row * bm.pitch + col];
+      int gx = (int)floorf(penX) + g->bitmapLeft;
+      int gy = (int)floorf(baseline) - g->bitmapTop;
+      for (int row = 0; row < g->height; row++) {
+        for (int col = 0; col < g->width; col++) {
+          uint8_t cov = g->bitmap[(size_t)row * g->width + col];
           if (cov)
-            blendPixel(gx + (int)col, gy + (int)row, op.color, cov);
+            blendPixel(gx + col, gy + row, op.color, cov);
         }
       }
-      penX += (float)(g->advance.x >> 6);
+      penX += (float)g->advance;
     }
   }
 }

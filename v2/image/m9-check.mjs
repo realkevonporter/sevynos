@@ -1988,6 +1988,78 @@ async function main() {
   );
   check("headless D: mock live session ENDED", !!ended);
 
+  // --- Headless S: stock-app ScrollViews scroll (GF65 fix). ---
+  // The Store list (12+ apps) is taller than its 800x500 window, so
+  // it only reaches its tail after a scroll — this proves the
+  // App.tsx ScrollView wrap end-to-end in-guest. The scroll input
+  // line drives the synthetic headless path (dispatchScroll ->
+  // scrollAt); a real Wayland axis event cannot be injected through
+  // QEMU 8.2's QMP input-send-event (pointer moves only, no wheel
+  // event exists), so the axis -> dispatchScroll hop is proven by
+  // inspection + the renderer unit test, and the GF65 is the final
+  // gate for real wheel/trackpad scrolling.
+  await termCmd(b, `files write /tmp/m9-in-scroll.txt 5000 scroll 400 250 0 200`);
+  const beforeS = logLines(b.logPath).length;
+  const runS = await termCmd(
+    b,
+    "app run store --name Store --color #f97316 --glyph S --seconds 15 --input /tmp/m9-in-scroll.txt --out /tmp/m9-ops-scroll.json",
+    240000,
+  );
+  check("headless S: sevyn app run store completes (scroll input)", !!runS);
+  const scrollLine = await waitForLog(
+    b.logPath,
+    /SCROLL \(400,250\) by \(0,200\) -> scrollY 0 -> 200/,
+    60000,
+    beforeS,
+  );
+  check(
+    "headless S: Store scrolls to scrollY 200 (ScrollView under the point)",
+    !!scrollLine,
+    scrollLine || "no SCROLL line — without the App.tsx wrap scrollAt finds no scroller",
+  );
+
+  // --- Headless T: Terminal scrollback scrolls (GF65 fix). ---
+  // Two `sevyn help` runs overflow the ~420px scrollback viewport;
+  // the app autoscrolls to the bottom after each command, so a
+  // wheel-UP input must move scrollY back down. This proves the
+  // Terminal's ScrollView wrap (full scrollback, not the old
+  // last-21 slice) and the autoscroll in one run. Terminal needs
+  // cli.exec to run commands. (No --glyph: `>` is not typeable
+  // through QMP; the header shows the app name, not the glyph.)
+  const inTerm = [
+    "1000 type sevyn help",
+    "2000 key 28 down 0",
+    "2100 key 28 up 0",
+    "5000 type sevyn help",
+    "6000 key 28 down 0",
+    "6100 key 28 up 0",
+    "10000 scroll 400 250 0 -200",
+  ].join(";");
+  await termCmd(b, `files write /tmp/m9-in-term.txt ${inTerm}`);
+  const beforeT = logLines(b.logPath).length;
+  const runT = await termCmd(
+    b,
+    "app run terminal --name Terminal --color #111827 --permissions cli.exec --seconds 15 --input /tmp/m9-in-term.txt --out /tmp/m9-ops-term.json",
+    240000,
+  );
+  check("headless T: sevyn app run terminal completes (scroll input)", !!runT);
+  const termScroll = await waitForLog(
+    b.logPath,
+    /SCROLL \(400,250\) by \(0,-200\) -> scrollY [0-9]+ -> [0-9]+/,
+    60000,
+    beforeT,
+  );
+  let termScrolled = false;
+  if (termScroll) {
+    const m = termScroll.match(/scrollY ([0-9]+) -> ([0-9]+)/);
+    termScrolled = !!m && Number(m[1]) > Number(m[2]) && Number(m[1]) > 0;
+  }
+  check(
+    "headless T: Terminal scrolls up from the autoscrolled bottom (scrollY drops)",
+    termScrolled,
+    termScroll || "no SCROLL line — without the Terminal wrap scrollAt finds no scroller",
+  );
+
   // --- Interactive: launch Tokrah from the dock. ---
   const launch = await appdCmd(b, "LAUNCH tokrah", /APPD LAUNCH OK tokrah/);
   check("interactive: appd LAUNCH tokrah", !!launch);

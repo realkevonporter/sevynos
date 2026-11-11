@@ -16,7 +16,7 @@
 // same through the host's close handler.)
 
 import * as React from "react";
-import { View, Text, Pressable, TextInput } from "./host";
+import { View, Text, Pressable, ScrollView, TextInput } from "./host";
 import {
   subscribeStatus,
   getStatusSnapshot,
@@ -517,6 +517,7 @@ function Notes(): React.ReactElement {
           value={body}
           onChangeText={setBody}
           placeholder="Write a note…"
+          multiline
           style={{
             flex: 1,
             backgroundColor: "#ffffff",
@@ -811,7 +812,11 @@ export function App(): React.ReactElement {
           <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
         </Pressable>
       </View>
-      {body}
+      {/* GF65 scroll fix: the stock-app body scrolls when its content
+          outgrows the window (notes list, store list). One wrap here
+          serves every stock app; a flex:1 child fills the viewport
+          inside a ScrollView, so fitting screens render unchanged. */}
+      <ScrollView style={{ flex: 1 }}>{body}</ScrollView>
     </View>
   );
 }

@@ -831,11 +831,21 @@ async function main() {
     );
     check("settings: host ready in its own runtime", !!appReady);
   }
-  await sleep(800);
-  const shotSettings = await shot(b.qmp, join(OUT, "m4-shot-settings.ppm"));
   // The Settings window header is its registered colour #6b7280.
   // Click the header title (left of the X) to activate the surface.
-  const settingsHeader = findWindowHeader(shotSettings, 107, 113, 128);
+  // The first frame can lag APP_READY by more than the old 800ms
+  // sleep under TCG load (PR #98's M4 run: no window at all in the
+  // first shot, then the Tab fallback below walked the dock and
+  // launched Calendar) — retry the screenshot up to 3x before
+  // giving up, so a slow first paint doesn't cascade.
+  let shotSettings = null;
+  let settingsHeader = null;
+  for (let attempt = 0; attempt < 3 && !settingsHeader; attempt++) {
+    if (attempt > 0) await sleep(1000);
+    else await sleep(800);
+    shotSettings = await shot(b.qmp, join(OUT, "m4-shot-settings.ppm"));
+    settingsHeader = findWindowHeader(shotSettings, 107, 113, 128);
+  }
   check("settings: window on screen (header found)", !!settingsHeader);
   if (settingsHeader) {
     await moveTo(

@@ -514,16 +514,44 @@ void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
 
 void Wayland::onPointerAxis(void* data, wl_pointer* pointer, uint32_t time,
                             uint32_t axis, wl_fixed_t value) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)pointer;
   (void)time;
-  (void)axis;
-  (void)value;
+  // GF65 scroll fix: accumulate the delta; onPointerFrame flushes
+  // one scroll event per frame. Vertical positive = scroll down,
+  // horizontal positive = scroll right — the renderer's scrollAt
+  // convention, forwarded unchanged.
+  const double v = wl_fixed_to_double(value);
+  if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+    self->axisAccumY_ += v;
+  } else if (axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
+    self->axisAccumX_ += v;
+  }
+  self->axisPending_ = true;
 }
 
 void Wayland::onPointerFrame(void* data, wl_pointer* pointer) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)pointer;
+  if (!self->axisPending_)
+    return;
+  // A frame with discrete wheel steps scrolls by clicks, not by the
+  // raw axis value (libinput reports ~10 axis units per click next
+  // to the discrete event). A frame with no discrete steps is a
+  // smooth trackpad gesture: forward the accumulated pixels as-is.
+  const double dx = self->axisDiscreteX_ != 0
+                        ? self->axisDiscreteX_ * kWheelStepPx
+                        : self->axisAccumX_;
+  const double dy = self->axisDiscreteY_ != 0
+                        ? self->axisDiscreteY_ * kWheelStepPx
+                        : self->axisAccumY_;
+  self->axisAccumX_ = 0;
+  self->axisAccumY_ = 0;
+  self->axisDiscreteX_ = 0;
+  self->axisDiscreteY_ = 0;
+  self->axisPending_ = false;
+  if (self->scrollHandler_)
+    self->scrollHandler_(self->pointerX_, self->pointerY_, dx, dy);
 }
 
 void Wayland::onPointerAxisSource(void* data, wl_pointer* pointer,
@@ -543,10 +571,14 @@ void Wayland::onPointerAxisStop(void* data, wl_pointer* pointer, uint32_t time,
 
 void Wayland::onPointerAxisDiscrete(void* data, wl_pointer* pointer,
                                     uint32_t axis, int32_t discrete) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)pointer;
-  (void)axis;
-  (void)discrete;
+  if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+    self->axisDiscreteY_ += discrete;
+  } else if (axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
+    self->axisDiscreteX_ += discrete;
+  }
+  self->axisPending_ = true;
 }
 
 void Wayland::onKeyboardKeymap(void* data, wl_keyboard* keyboard,

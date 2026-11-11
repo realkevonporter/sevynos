@@ -662,7 +662,13 @@ mkdir -p /run /tmp
 mkdir -p /dev/shm
 /bin/busybox mount -t tmpfs -o size=256M tmpfs /dev/shm 2>/dev/null || echo "M5 init: /dev/shm mount failed"
 echo "SevynOS v2 - M9 image (compositor + RN shell + app runtime + system updates + system apps + Sevyn Code + AI connector + connectivity + Chromium browser + bare-metal boot + desktop polish)"
-export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
+export PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:/usr/local/sbin
+# ^ GF65 wifi fix: /usr/sbin was missing, so the update daemon's
+# bare-name wpa_supplicant/wpa_cli spawns failed ENOENT and Wi-Fi
+# scan errored "cannot start wpa_supplicant". The daemon now also
+# uses absolute paths (v2/update/sevyn.c); this keeps every other
+# /usr/sbin tool (iw, seatd) findable too. A build-time guard below
+# fails the image if this line ever loses /usr/sbin again.
 export XDG_RUNTIME_DIR=/run
 export WAYLAND_DISPLAY=wayland-0
 echo "M4 init: modules start @ $(cut -d" " -f1 /proc/uptime)s"
@@ -905,6 +911,16 @@ echo "SEVYNOS_M5_READY"
 while true; do sleep 3600; done
 EOF
 chmod +x "$STAGE/init"
+
+# GF65 wifi fix (CI guard): the staged init's PATH must contain
+# /usr/sbin — without it the update daemon can never spawn
+# wpa_supplicant/wpa_cli and Wi-Fi scan fails on hardware. QEMU has
+# no wlan, so no harness can catch this at runtime; fail the build
+# here instead.
+if ! grep -q '^export PATH=.*:/usr/sbin' "$STAGE/init"; then
+  echo "error: staged init PATH lacks /usr/sbin (Wi-Fi would fail on hardware)" >&2
+  exit 1
+fi
 
 (cd "$STAGE" && find . | cpio -o -H newc 2>/dev/null | gzip -9 >"$OUT/initramfs.cpio.gz")
 

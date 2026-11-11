@@ -28,16 +28,21 @@
 //                          /usr/local/bin/sevyn only; gated by the
 //                          cli.exec permission (ERR string otherwise).
 //
-// TextInput (M4): a controlled single-line input. Props: value,
-// onChangeText, onSubmitEditing, placeholder, autoFocus. The focused
-// input eats printable keys (US keycode map below, Shift-aware),
-// Backspace, and Enter (submit); Tab moves focus, Escape blurs. It
-// draws its value (or the placeholder, dimmed) plus a caret when
-// focused. No cursor movement, no multiline, no selection — M4 scope.
+// TextInput (M4, caret + multiline in the GF65 fixes): a controlled
+// input, single-line by default. Props: value, onChangeText,
+// onSubmitEditing, placeholder, autoFocus, multiline, secureTextEntry.
+// The focused input eats printable keys (US keycode map below,
+// Shift-aware), Backspace, Delete, and Enter (submit — or a newline
+// when multiline); Tab moves focus, Escape blurs. The caret moves
+// with Left/Right/Home/End and, when multiline, Up/Down between
+// wrapped lines; it is drawn from the value (masked when secure),
+// never the placeholder. No selection — still M4 scope.
 //
 // The renderer keeps a yoga-id -> instance map for hit routing and a
-// focus list for keyboard activation. ScrollView scrolls only via
-// scrollBy/scrollTo (the host does not forward wheel/axis events).
+// focus list for keyboard activation. ScrollView scrolls via
+// scrollBy/scrollTo, driven by wheel/trackpad axis events from the
+// host (Wayland onPointerAxis -> dispatchScroll -> scrollAt) and by
+// the headless `scroll` input lines.
 
 const Reconciler = require("react-reconciler");
 
@@ -188,6 +193,7 @@ function installImageMeasure(inst) {
 
 // Install the Yoga measure function for a TextInput: one line, sized
 // to the displayed text (value, or the placeholder when empty).
+// Multiline grows with its wrapped lines instead.
 function installTextInputMeasure(inst) {
   Sevyn.yogaSetMeasureFunc(inst.yogaId, (w, wm, h, hm) => {
     const font = fontOf(inst);
@@ -198,9 +204,15 @@ function installTextInputMeasure(inst) {
       (inst.props && typeof inst.props.placeholder === "string"
         ? inst.props.placeholder
         : "");
+    const multiline = !!(inst.props && inst.props.multiline);
+    const maxW = wm === 2 || wm === 1 ? w : 0;
+    const wrapped = multiline
+      ? wrapMultiline(display, font.size, font.bold, maxW)
+      : display;
+    const lines = multiline ? wrapped.split("\n").length : 1;
     const m = Sevyn.measureText(display, font.size, font.bold, 0);
     const width = wm === 1 ? w : m.width;
-    return { width, height: font.size * 1.25 };
+    return { width, height: font.size * 1.25 * lines };
   });
 }
 
@@ -223,6 +235,66 @@ function wrapText(text, fontSize, bold, maxWidth) {
   }
   if (line) lines.push(line);
   return lines.join("\n");
+}
+
+// Wrap a multiline value: each logical (\n-separated) line is wrapped
+// with wrapText, and the lines are re-joined — the painter draws one
+// line per \n, so explicit newlines survive the wrap.
+function wrapMultiline(text, fontSize, bold, maxWidth) {
+  return text
+    .split("\n")
+    .map((line) => wrapText(line, fontSize, bold, maxWidth))
+    .join("\n");
+}
+
+// Greedy wrap of ONE logical line, mirroring wrapText's splits exactly
+// but tracking each visual line's character span [start, end) in the
+// original line. The caret and Up/Down use these spans so the caret
+// row matches the rows the display actually draws. maxWidth <= 0
+// returns the whole line as one span (single-line inputs).
+function wrapLineSpans(line, fontSize, bold, maxWidth) {
+  if (maxWidth <= 0) return [{ text: line, start: 0, end: line.length }];
+  const words = line.split(" ");
+  const spans = [];
+  let cur = "";
+  let curStart = 0;
+  let pos = 0; // offset of the next word in `line`
+  for (const word of words) {
+    const wordStart = pos;
+    const trial = cur ? cur + " " + word : word;
+    if (Sevyn.measureText(trial, fontSize, bold, 0).width <= maxWidth) {
+      if (!cur) curStart = wordStart;
+      cur = trial;
+    } else {
+      if (cur) {
+        spans.push({ text: cur, start: curStart, end: curStart + cur.length });
+      }
+      cur = word;
+      curStart = wordStart;
+    }
+    pos = wordStart + word.length + 1; // +1 for the space after this word
+  }
+  if (cur || spans.length === 0) {
+    spans.push({ text: cur, start: curStart, end: curStart + cur.length });
+  }
+  return spans;
+}
+
+// Visual (wrapped) lines of a multiline value, each with its character
+// span [start, end) in the original text. \n boundaries are preserved
+// (an empty logical line is one empty visual line), and the wrap space
+// between two visual lines belongs to neither span — so a caret offset
+// always belongs to exactly one visual line.
+function visualLines(text, fontSize, bold, maxWidth) {
+  const out = [];
+  let base = 0; // offset of the current logical line in `text`
+  for (const logical of text.split("\n")) {
+    for (const s of wrapLineSpans(logical, fontSize, bold, maxWidth)) {
+      out.push({ text: s.text, start: base + s.start, end: base + s.end });
+    }
+    base += logical.length + 1; // +1 for the \n
+  }
+  return out;
 }
 
 function emitInstance(inst, ox, oy, ops, clip) {
@@ -331,13 +403,14 @@ function emitInstance(inst, ox, oy, ops, clip) {
     const showingPlaceholder =
       !value && inst.props && typeof inst.props.placeholder === "string";
     // secureTextEntry (M9 wifi password): the stored value stays
-    // real — only the drawn text is masked, so the caret position
-    // (which counts the display length) stays correct.
-    const display = showingPlaceholder
-      ? inst.props.placeholder
-      : inst.props && inst.props.secureTextEntry
-        ? "•".repeat(value.length)
-        : value;
+    // real — only the drawn text is masked. The caret measures the
+    // masked text, so its position stays correct either way.
+    const multiline = !!(inst.props && inst.props.multiline);
+    // The drawn text: placeholder when empty, else the value (masked
+    // when secure). Multiline wraps it at the box width, reusing the
+    // Text branch's wrap; single-line draws un-wrapped, as before.
+    const drawn = showingPlaceholder ? inst.props.placeholder : textInputValueText(inst);
+    const display = multiline ? wrapMultiline(drawn, font.size, font.bold, w) : drawn;
     // Hit rect (background or transparent) so a click focuses the input.
     ops.push({
       type: "rect",
@@ -364,17 +437,28 @@ function emitInstance(inst, ox, oy, ops, clip) {
         nodeId: -1,
       });
     }
-    // Caret after the displayed text while focused.
+    // Caret: measured from the VALUE (masked when secure), never the
+    // placeholder — an empty input's caret sits at the left edge, not
+    // after the placeholder text. Multiline: the caret's visual row
+    // and column come from the same wrapping the display uses.
     if (focusedInstance === inst) {
-      const textW = display
-        ? Sevyn.measureText(display, font.size, font.bold, 0).width
+      const caretText = textInputValueText(inst);
+      const offset = caretOffsetFor(inst);
+      const lines = visualLines(caretText, font.size, font.bold, multiline ? w : 0);
+      let line = lines.find((l) => offset >= l.start && offset <= l.end);
+      if (!line) line = lines[lines.length - 1];
+      const row = lines.indexOf(line);
+      const colText = caretText.slice(line.start, offset);
+      const colW = colText
+        ? Sevyn.measureText(colText, font.size, font.bold, 0).width
         : 0;
+      const lineH = font.size * 1.25;
       ops.push({
         type: "rect",
-        x: x + textW + 1,
-        y: y + 1,
+        x: x + colW + 1,
+        y: y + row * lineH + 1,
         w: 2,
-        h: Math.max(1, font.size * 1.25 - 2),
+        h: Math.max(1, lineH - 2),
         color: font.color,
         nodeId: -1,
       });
@@ -471,7 +555,7 @@ function presentRoot() {
   // re-focuses the input — that is the Terminal's home state.
   if (!focusedInstance) {
     const auto = firstAutoFocusInput();
-    if (auto) focusedInstance = auto;
+    if (auto) focusInstance(auto);
   }
   syncYogaChildren(rootContainer);
   Sevyn.yogaCalculateLayout(rootContainer.yogaId, rootWidth, rootHeight);
@@ -482,6 +566,39 @@ function presentRoot() {
 
 // ------------------------------------------------------------------- focus
 let focusedInstance = null;
+
+// TextInput caret state. The caret offset (character index into the
+// value) lives on the instance; it is (re)set to the end of the value
+// on focus and clamped lazily to [0, value.length], so an external
+// value change (e.g. Terminal clearing the input on submit) can never
+// leave it out of range. No click-to-place: a tap focuses the input,
+// arrows move the caret.
+function textInputValueText(inst) {
+  const props = inst.props || {};
+  const value = typeof props.value === "string" ? props.value : "";
+  return props.secureTextEntry ? "•".repeat(value.length) : value;
+}
+
+function textInputValue(inst) {
+  return inst.props && typeof inst.props.value === "string" ? inst.props.value : "";
+}
+
+function caretOffsetFor(inst) {
+  const value = textInputValue(inst);
+  const n = typeof inst.caretOffset === "number" ? inst.caretOffset : value.length;
+  return Math.max(0, Math.min(value.length, n));
+}
+
+function setCaretOffset(inst, n) {
+  inst.caretOffset = Math.max(0, Math.min(textInputValue(inst).length, n));
+}
+
+function focusInstance(inst) {
+  focusedInstance = inst;
+  if (inst && inst.type === "TextInput") {
+    inst.caretOffset = textInputValue(inst).length;
+  }
+}
 
 function focusables() {
   const out = [];
@@ -520,7 +637,7 @@ function moveFocus(dir) {
   if (list.length === 0) return;
   const i = list.indexOf(focusedInstance);
   const next = list[(i + dir + list.length) % list.length];
-  focusedInstance = next;
+  focusInstance(next);
   presentRoot();
 }
 
@@ -586,33 +703,83 @@ const KEYMAP = {
 
 // Keys for the focused TextInput. Returns true when the key is
 // consumed (no focus movement), false for Tab/Escape, which fall
-// through to the focus handling below.
+// through to the focus handling below. Typing, Backspace, and Delete
+// edit at the caret offset; Left/Right/Home/End move it; Up/Down move
+// between visual lines when multiline (single-line: swallowed, never
+// a focus move — the M4 behaviour, kept).
 function handleTextInputKey(inst, ev) {
   const props = inst.props || {};
-  const value = typeof props.value === "string" ? props.value : "";
+  const value = textInputValue(inst);
+  const multiline = !!props.multiline;
+  const offset = caretOffsetFor(inst);
+  const change = (next, nextOffset) => {
+    if (typeof props.onChangeText === "function") props.onChangeText(next);
+    // Clamp against the NEW value's length: props.value is still the
+    // old value until the state update flushes.
+    inst.caretOffset = Math.max(0, Math.min(next.length, nextOffset));
+  };
   switch (ev.key) {
     case 15: // Tab — move focus.
     case 1: // Escape — blur.
       return false;
-    case 28: // Enter — submit (single-line: never a newline).
-      if (typeof props.onSubmitEditing === "function") {
+    case 28: // Enter — submit, or a newline when multiline.
+      if (multiline) {
+        change(value.slice(0, offset) + "\n" + value.slice(offset), offset + 1);
+      } else if (typeof props.onSubmitEditing === "function") {
         props.onSubmitEditing();
       }
       return true;
-    case 14: // Backspace.
-      if (typeof props.onChangeText === "function" && value.length > 0) {
-        props.onChangeText(value.slice(0, -1));
+    case 14: // Backspace — delete the char before the caret.
+      if (offset > 0) {
+        change(value.slice(0, offset - 1) + value.slice(offset), offset - 1);
       }
       return true;
-    case 103: // Up
+    case 111: // Delete — delete the char at the caret.
+      if (offset < value.length) {
+        change(value.slice(0, offset) + value.slice(offset + 1), offset);
+      }
+      return true;
     case 105: // Left
+      setCaretOffset(inst, offset - 1);
+      return true;
     case 106: // Right
-    case 108: // Down — no cursor in M4; swallow, do not move focus.
+      setCaretOffset(inst, offset + 1);
+      return true;
+    case 102: // Home
+      setCaretOffset(inst, 0);
+      return true;
+    case 107: // End
+      setCaretOffset(inst, value.length);
+      return true;
+    case 103: // Up
+    case 108: // Down
+      if (multiline) {
+        const font = fontOf(inst);
+        const box = measureBox(inst);
+        const lines = visualLines(
+          textInputValueText(inst),
+          font.size,
+          font.bold,
+          box.width,
+        );
+        let i = lines.findIndex((l) => offset >= l.start && offset <= l.end);
+        if (i < 0) i = lines.length - 1;
+        const col = offset - lines[i].start;
+        const j = ev.key === 103 ? i - 1 : i + 1;
+        if (j >= 0 && j < lines.length) {
+          const target = lines[j];
+          setCaretOffset(inst, Math.min(target.start + col, target.end));
+        }
+      }
       return true;
     default: {
       const pair = KEYMAP[ev.key];
       if (pair && typeof props.onChangeText === "function") {
-        props.onChangeText(value + (ev.shift ? pair[1] : pair[0]));
+        // Insert at the caret, not at the end.
+        change(
+          value.slice(0, offset) + (ev.shift ? pair[1] : pair[0]) + value.slice(offset),
+          offset + 1,
+        );
       }
       return true;
     }
@@ -620,7 +787,8 @@ function handleTextInputKey(inst, ev) {
 }
 
 // Linux keycodes (evdev): Enter 28, Space 57, Tab 15, Left 105,
-// Right 106, Up 103, Down 108, Escape 1.
+// Right 106, Up 103, Down 108, Escape 1, Home 102, End 107,
+// Delete 111.
 function handleKey(ev) {
   if (!ev.pressed) return;
   // Typing into the focused TextInput takes precedence over the
@@ -677,7 +845,7 @@ function handlePointer(ev) {
       (inst && inst.props ? inst.props.accessibilityLabel || "" : ""),
   );
   if (!inst) return;
-  focusedInstance = inst;
+  focusInstance(inst);
   if (inst.props && inst.props.onPress) {
     inst.props.onPress();
     // Pinpoint a stuck tap: if the loop wedges inside the navigation,

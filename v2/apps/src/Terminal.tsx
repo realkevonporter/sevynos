@@ -30,11 +30,19 @@
 // markers carry the parsed fields the harness asserts on.
 
 import * as React from "react";
-import { View, Text, Pressable, TextInput } from "./host";
+import { View, Text, Pressable, ScrollView, TextInput } from "./host";
+import { scrollTo } from "../../rn/renderer/sevyn-renderer";
 import { runCli, parseField } from "./cli";
 
 const MAX_LINES = 500;
-const VISIBLE_LINES = 21;
+
+// Render cap: the scrollback buffer keeps 500 lines, but only the
+// last RENDERED_LINES render. A full 500-line render makes every
+// keystroke present ~12x costlier (measured in the mock renderer:
+// 15.6ms vs 1.35ms at 21 lines) and the M7 headless phases timed out
+// typing into the Terminal at max accumulation under TCG (PR #98).
+// 100 lines is still ~5 screens of scrollable history.
+const RENDERED_LINES = 100;
 
 const HELP_LINES: string[] = [
   "SevynOS Terminal — the sevyn CLI only. No bash.",
@@ -142,6 +150,7 @@ export function Terminal(): React.ReactElement {
   const [lines, setLines] = React.useState<string[]>(HELP_LINES);
   const [input, setInput] = React.useState("");
   const color = Sevyn.appColor;
+  const scrollRef = React.useRef<any>(null);
 
   function append(more: string[]): void {
     setLines((prev) => [...prev, ...more].slice(-MAX_LINES));
@@ -150,6 +159,16 @@ export function Terminal(): React.ReactElement {
   function run(cmd: string): void {
     const trimmed = cmd.trim();
     append(["sevyn> " + trimmed]);
+    // GF65 scroll fix: keep the tail visible. The timer fires on
+    // the next host tick, after the state flush + present, so the
+    // scroll clamps against the fresh content height (a same-tick
+    // scrollTo would clamp against the stale one). scrollTo clamps,
+    // so a huge Y lands exactly at the bottom. Scheduled here so
+    // even an empty command (echo only) scrolls.
+    setTimeout(() => {
+      const inst = scrollRef.current;
+      if (inst) scrollTo(inst, 0, 1000000);
+    }, 0);
     if (!trimmed) return;
     const { out } = runCli("sevyn " + trimmed);
     const outLines = out.split("\n");
@@ -164,8 +183,6 @@ export function Terminal(): React.ReactElement {
     setInput("");
     run(cmd);
   }
-
-  const visible = lines.slice(-VISIBLE_LINES);
 
   return (
     <View
@@ -203,13 +220,21 @@ export function Terminal(): React.ReactElement {
           <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
         </Pressable>
       </View>
-      <View style={{ flex: 1, paddingLeft: 8, paddingRight: 8, paddingTop: 8 }}>
-        {visible.map((line, i) => (
+      {/* GF65 scroll fix: the scrollback renders in a ScrollView
+          (was: only the last 21 lines, earlier output unreachable).
+          Only the last RENDERED_LINES render (see the cap above) —
+          the buffer still keeps 500. The input row stays pinned
+          below it. */}
+      <ScrollView
+        ref={scrollRef}
+        style={{ flex: 1, paddingLeft: 8, paddingRight: 8, paddingTop: 8 }}
+      >
+        {lines.slice(-RENDERED_LINES).map((line, i) => (
           <Text key={i} style={{ fontSize: 14, color: "#e5e7eb" }}>
             {line || " "}
           </Text>
         ))}
-      </View>
+      </ScrollView>
       <View
         style={{
           flexDirection: "row",

@@ -173,9 +173,12 @@ check("unmount frees yoga nodes", () => {
 const submitted = [];
 const inputClicks = [];
 let inputValue = "";
+let noteValue = "";
 function InputApp() {
   const [value, setValue] = React.useState("");
   inputValue = value;
+  const [note, setNote] = React.useState("");
+  noteValue = note;
   return h(
     "View",
     { style: { width: 800, height: 500, backgroundColor: "#111827" } },
@@ -200,6 +203,19 @@ function InputApp() {
       },
       h("Text", { style: { fontSize: 14, color: "#fff" } }, "Go"),
     ),
+    h("TextInput", {
+      value: note,
+      onChangeText: setNote,
+      placeholder: "type a note",
+      multiline: true,
+      style: {
+        width: 120,
+        height: 64,
+        backgroundColor: "#312e81",
+        fontSize: 16,
+        color: "#ffffff",
+      },
+    }),
   );
 }
 
@@ -229,6 +245,11 @@ check("TextInput: autoFocus + placeholder + caret on mount", () => {
   assert.ok(ph, "placeholder shown");
   assert.equal(ph.color, "#6b7280", "placeholder is dimmed");
   assert.ok(caret(), "caret drawn for the focused input");
+  assert.equal(
+    caret().x,
+    ph.x + 1,
+    "caret at the left edge of the empty input, not after the placeholder",
+  );
 });
 
 check("TextInput: typing appends, Shift uppercases", () => {
@@ -252,9 +273,29 @@ check("TextInput: Space types a space, Backspace deletes", () => {
   assert.equal(inputValue, "aA/");
 });
 
-check("TextInput: Enter submits, arrows do not move focus", () => {
-  key(106); // Right — swallowed, focus stays in the input
-  assert.equal(inputValue, "aA/");
+check("TextInput: caret moves with arrows, Home/End, insert/delete in the middle", () => {
+  // Value is "aA/" from the earlier checks; caret starts at the end.
+  const endX = caret().x;
+  key(105); // Left
+  assert.ok(caret().x < endX, "Left moves the caret back");
+  const midX = caret().x;
+  key(45, true); // X — inserts at the caret, not at the end
+  assert.equal(inputValue, "aAX/", "typed char inserted mid-value");
+  assert.ok(caret().x > midX, "caret advances past the insert");
+  key(14); // Backspace — deletes the char before the caret (the X)
+  assert.equal(inputValue, "aA/", "Backspace deleted the inserted char");
+  key(102); // Home — caret to the start
+  const hit = lastPresent().ops.find(
+    (o) => o.type === "rect" && o.h === 32 && o.color === "#1f2937",
+  );
+  assert.ok(hit, "input hit rect exists");
+  assert.equal(caret().x, hit.x + 1, "Home puts the caret at the left edge");
+  key(107); // End — caret back to the end
+  assert.equal(caret().x, endX, "End restores the caret to the end");
+  key(111); // Delete at the end — no-op
+  assert.equal(inputValue, "aA/", "Delete at the end changes nothing");
+  key(106); // Right at the end — clamped, no move
+  assert.equal(caret().x, endX, "Right at the end is clamped");
   key(28); // Enter
   assert.deepEqual(submitted, ["aA/"], "submitted the current value");
   assert.ok(caret(), "still focused after submit");
@@ -287,6 +328,136 @@ check("TextInput: clicking the input focuses it again", () => {
   });
   assert.ok(caret(), "caret back after click-focus");
   assert.equal(inputClicks.length, 1, "click did not fire the button");
+});
+
+// --- TextInput multiline (GF65 fix) ------------------------------------
+check("TextInput multiline: Tab reaches the note input", () => {
+  key(15); // Tab — input -> button
+  key(15); // Tab — button -> multiline note input
+  assert.ok(caret(), "caret drawn for the multiline input");
+  assert.equal(noteValue, "", "note starts empty");
+});
+
+check("TextInput multiline: typing wraps, Up/Down move between rows", () => {
+  // "aaaa bbbb cccc dddd" at 8.8px/char in a 120px box: "aaaa bbbb"
+  // (79.2px) fits row 0, "cccc dddd" wraps to row 1.
+  const codes = [
+    30, 30, 30, 30, 57, 48, 48, 48, 48, 57, 46, 46, 46, 46, 57, 32, 32, 32, 32,
+  ];
+  for (const c of codes) key(c);
+  assert.equal(noteValue, "aaaa bbbb cccc dddd", "typed the full note");
+  const hit = lastPresent().ops.find(
+    (o) => o.type === "rect" && o.h === 64 && o.color === "#312e81",
+  );
+  assert.ok(hit, "note hit rect exists");
+  // Caret is on row 1 (after "dddd"): y = input y + one line (20px) + 1.
+  assert.equal(caret().y, hit.y + 21, "caret on the wrapped second row");
+  key(103); // Up — same column (9) on row 0
+  assert.equal(caret().y, hit.y + 1, "Up moves the caret to row 0");
+  key(108); // Down — back to row 1
+  assert.equal(caret().y, hit.y + 21, "Down moves the caret back to row 1");
+});
+
+check("TextInput multiline: Enter inserts a newline instead of submitting", () => {
+  const before = submitted.length;
+  key(28); // Enter
+  assert.equal(noteValue, "aaaa bbbb cccc dddd\n", "newline inserted at the caret");
+  assert.equal(submitted.length, before, "Enter did not submit a multiline input");
+  assert.ok(
+    lastTexts().some((t) => t.includes("cccc dddd\n")),
+    "wrapped display shows the newline",
+  );
+});
+
+// Restore the shell tree for a clean end state.
+renderer.update(h(App));
+
+// --- ScrollView wheel scrolling (GF65 fix) ---------------------------
+// A vertical ScrollView whose content (20 rows x 40px = 800) is taller
+// than its 500px viewport. Wheel events arrive as onScroll({x, y, dx,
+// dy}) — the same shape the host's dispatchScroll produces from
+// Wayland axis events — with the sign convention the host relies on:
+// positive dy scrolls DOWN (content moves up, scrollY grows).
+function ScrollApp() {
+  const rows = [];
+  for (let i = 0; i < 20; i++) {
+    rows.push(
+      h(
+        "View",
+        { key: i, style: { height: 40, backgroundColor: "#ffffff" } },
+        h("Text", { style: { fontSize: 14, color: "#111827" } }, "Row " + i),
+      ),
+    );
+  }
+  return h(
+    "View",
+    { style: { width: 800, height: 500, backgroundColor: "#f9fafb" } },
+    h("ScrollView", { style: { flex: 1 } }, ...rows),
+  );
+}
+
+function scrollViewInstance() {
+  for (const inst of renderer._instancesByYogaId.values()) {
+    if (inst.type === "ScrollView") return inst;
+  }
+  return null;
+}
+
+function wheel(dx, dy) {
+  Sevyn._handlers.scroll({ x: 400, y: 250, dx, dy });
+}
+
+renderer.update(h(ScrollApp));
+
+check("ScrollView: content taller than viewport, starts at top", () => {
+  const sv = scrollViewInstance();
+  assert.ok(sv, "ScrollView instance exists");
+  assert.equal(sv.scrollY, 0);
+  assert.equal(sv.contentHeight, 800, "20 rows x 40px");
+});
+
+check("ScrollView: wheel down (positive dy) scrolls down", () => {
+  wheel(0, 120);
+  assert.equal(scrollViewInstance().scrollY, 120);
+});
+
+check("ScrollView: wheel down clamps at the content edge", () => {
+  wheel(0, 10000);
+  const sv = scrollViewInstance();
+  assert.equal(sv.scrollY, sv.contentHeight - 500, "max scroll");
+});
+
+check("ScrollView: wheel up (negative dy) scrolls back, clamps at 0", () => {
+  wheel(0, -10000);
+  assert.equal(scrollViewInstance().scrollY, 0);
+});
+
+check("ScrollView: scrolled content shifts in the presented ops", () => {
+  const before = lastPresent().ops.find((o) => o.type === "text" && o.text === "Row 19");
+  assert.ok(before, "Row 19 drawn");
+  wheel(0, 120);
+  const after = lastPresent().ops.find((o) => o.type === "text" && o.text === "Row 19");
+  assert.ok(after, "Row 19 drawn after scroll");
+  assert.equal(after.y, before.y - 120, "row moved up by the scroll delta");
+  assert.equal(scrollViewInstance().scrollY, 120);
+});
+
+check("ScrollView: a point outside it does not scroll it", () => {
+  // (799, 499) is inside the 800x500 root but the ScrollView spans
+  // the whole root here — so scroll a point on the (nonexistent)
+  // outside by rendering the shell tree back and scrolling it: the
+  // dock is horizontal, so a vertical wheel there scrolls nothing.
+  renderer.update(h(App));
+  const dock = scrollViewInstance();
+  assert.ok(dock, "dock ScrollView exists");
+  const beforeY = dock.scrollY;
+  wheel(0, 120);
+  assert.equal(
+    dock.scrollY,
+    beforeY,
+    "vertical wheel on a horizontal scroller is a no-op",
+  );
+  renderer.update(h(ScrollApp));
 });
 
 // Restore the shell tree for a clean end state.
