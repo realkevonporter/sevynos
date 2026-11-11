@@ -444,6 +444,11 @@ const Sevyn = {
     }
     return "0\n";
   },
+  // Off-thread exec (M9 wifi scan, M10 comms login/send/call):
+  // same string shape as exec, as a Promise.
+  execAsync(cmdline) {
+    return Promise.resolve(Sevyn.exec(cmdline));
+  },
   launchApp(appId) {
     logs.push("LAUNCH " + appId);
     return true;
@@ -460,7 +465,16 @@ const Sevyn = {
     Sevyn._status = { battery: "87", wifi: "on", volume: "43" };
     Sevyn._execHandler = null;
     nodes.clear();
-    nextId = 1;
+    // NOTE: nextId is deliberately NOT reset. Yoga node IDs must be
+    // unique for the life of the process (real Yoga never reuses
+    // one): a previous load's instances can outlive _reset — the
+    // Terminal's auto-scroll setTimeout fires after unmount and
+    // calls scrollTo on its stale ScrollView, which re-presents the
+    // new tree. If IDs were reused, that stale View could share a
+    // yogaId with a new #text (which installs a measure function),
+    // and syncYogaChildren would throw "Nodes with measure
+    // functions cannot have children" on the View. Monotonic IDs
+    // make that collision impossible.
     presents.length = 0;
     logs.length = 0;
     handlers.pointer = null;

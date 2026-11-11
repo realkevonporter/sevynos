@@ -1,0 +1,16 @@
+{
+  "name": "@sevynos/commsd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SevynOS v2 M10 — commsd: Matrix client daemon (login/sync/rooms/send, E2EE, 1:1 call signaling) + RCS skeleton",
+  "type": "module",
+  "scripts": {
+    "test": "node test-commsd.mjs"
+  },
+  "dependencies": {
+    "matrix-js-sdk": "45.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

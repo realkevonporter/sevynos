@@ -1,0 +1,236 @@
+# SevynOS v2 M10 — build the comms-apps image and prove it in QEMU
+# (Kevon, 2026-11-10: M10 is SevynOS's own FaceTime / FaceTime Audio /
+# iMessage — three RN apps over a Node daemon, `commsd`, speaking
+# Matrix: legacy 1:1 m.call.* P2P VoIP for calls, E2EE messaging,
+# and an RCS skeleton that is staged, never presented as working).
+#
+# Runs on pushes and PRs touching v2/ (the fresh build). The job builds
+# the native deps (Hermes + Yoga, cached), the shell + app bundles
+# (including the comms bundle), the loader + app daemon + update daemon
+# + CLI + AI daemon, and the M10 image (the M9 image plus commsd, the
+# Chromium media bridge, and the mock comms servers), then runs the
+# m10-check harness:
+#   0. the Node harness gate on the host: test-commsd.mjs (null bridge
+#      + Chromium bridge against the mock Matrix homeserver + mock
+#      ACS) and test-cli.mjs (the `sevyn comms` exit-code contract);
+#   1. the kernel boot (-kernel/-initrd + the M10 data disk,
+#      LABEL=SEVYN_DATA) at 1920x1080 with sevyn.mockcomms=1: the
+#      mock homeserver + mock ACS + a second commsd for bob start from
+#      init. The harness drives `sevyn comms` in the Terminal and
+#      renders the apps' own screens headlessly: alice logs in, the
+#      Messages room list + the RCS staged card, bob logs in, plain
+#      send/receive, encrypted send/decrypt, the RCS probe, then a
+#      video call alice->bob by user id (answer, media connected with
+#      real frames flowing on both Chromium bridges — the guest's
+#      loopback UDP works, unlike the sandbox — hangup). A final
+#      env-gated step (SEVYN_V2_M10_MATRIX_REAL=1 + test credentials)
+#      logs into the real matrix.org with a throwaway test account.
+# Boot logs, screendumps, the data disk, and the JSON result are kept
+# as artifacts. sevynos.img itself is NOT uploaded here (1.5 GiB) —
+# the nightly (public-build.yml) publishes it on merge.
+#
+# No UEFI boots here: M10 touches nothing in the updater/ESP/disk
+# layout, and the m7/m8/m9 workflows cover the UEFI path on the same
+# PR. If M10 ever touches those paths, add the UEFI boots back.
+#
+# Tokrah is a PRIVATE repo — CI clones it with the TOKRAH_READ_TOKEN
+# secret (a read-only repo-scoped PAT; Kevon's one-time action). If
+# the secret is absent the job fails loudly with instructions instead
+# of silently skipping the Tokrah proof. The built Tokrah bundle is
+# NEVER committed to this repo (it would publish Tokrah's proprietary
+# JS); it is built fresh in the job and lives only in the build dir.
+name: SevynOS v2 M10
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m10.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m10.yml"
+
+jobs:
+  m10-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          # setup-node v5 defaults package-manager-cache to true and
+          # auto-detects pnpm from the repo root's packageManager field —
+          # but this job uses npm only (v2/rn/renderer, v2/shell) and
+          # never installs pnpm, so the cache step fails with "Unable to
+          # locate executable file: pnpm". The Hermes/Yoga deps cache is
+          # handled by the actions/cache step below.
+          package-manager-cache: false
+
+      - name: Install build + boot dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            g++ \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwayland-dev \
+            wayland-protocols \
+            libfreetype-dev \
+            libpng-dev \
+            libssl-dev \
+            weston \
+            seatd \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data \
+            e2fsprogs \
+            curl \
+            unzip \
+            ca-certificates \
+            fontconfig \
+            libnss3 \
+            libnspr4 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libatspi2.0-0 \
+            libcups2 \
+            libasound2t64 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libdbus-1-3 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libxfixes3 \
+            libgbm1 \
+            libdrm2 \
+            libxkbcommon0 \
+            libexpat1 \
+            libxcb1 \
+            libxext6 \
+            libfontconfig1 \
+            libfreetype6 \
+            libharfbuzz0b \
+            libudev1 \
+            libglib2.0-0 \
+            libx11-6 \
+            libxi6 \
+            libxrender1 \
+            libxtst6 \
+            libxss1 \
+            wpasupplicant \
+            iw \
+            grub-efi-amd64-signed \
+            grub-efi-amd64 \
+            shim-signed \
+            dosfstools \
+            gdisk \
+            mtools
+
+      - name: Clone Tokrah (private — read-only PAT)
+        run: |
+          if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
+            echo "::error::TOKRAH_READ_TOKEN is not set. Add a read-only repo-scoped PAT as the TOKRAH_READ_TOKEN secret on realkevonporter/sevynos (Kevon's one-time action) — the M10 check cannot clone the private Tokrah repo without it, and the Tokrah proof must not be skipped silently."
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
+
+      - name: Install yarn (Tokrah's pinned 1.22.22)
+        run: |
+          # yarn 1.22 refuses to run inside a checkout whose
+          # package.json pins a different manager (sevynos pins
+          # pnpm@11.17.0) — corepack failed the same way, and
+          # running from /tmp does not help. Install yarn
+          # globally with npm, then run every yarn command from
+          # the Tokrah consumer app dir, whose package.json pins
+          # yarn@1.22.22. The clone ROOT has no package.json, so
+          # yarn walks up from there and hits sevynos's pnpm pin.
+          # Sevynos itself stays pnpm.
+          npm install -g yarn@1.22.22
+          cd "$GITHUB_WORKSPACE/tokrah/tokrah"
+          yarn config set registry https://registry.npmjs.org
+
+      - name: Download Chromium (pinned snapshot 1738523)
+        run: |
+          # The image build reuses CHROMIUM_TARBALL when it exists
+          # (it only downloads when the variable is unset), and the
+          # build's BUILD_TMP is deleted on exit — so download the
+          # zip into the workspace here, where both the build step
+          # and the check step (step 0's Chromium bridge run) can
+          # reach it.
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 \
+            -o "$GITHUB_WORKSPACE/chrome-linux.zip" \
+            "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Linux_x64/1738523/chrome-linux.zip"
+
+      - name: Cache native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevynos-v2-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}-hermes-0.13.0-yoga-41118bd
+          restore-keys: |
+            sevynos-v2-deps-
+
+      - name: Build native deps
+        run: sh v2/rn/host/build-deps.sh
+
+      - name: Renderer + shell + apps JS checks
+        run: |
+          cd v2/rn/renderer && npm ci --no-audit --no-fund && npm test
+          cd ../../shell && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+          cd ../apps && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+
+      - name: Loader + appd + updater checks
+        run: |
+          python3 v2/loader/test-loader.py
+          python3 v2/loader/test-appd.py
+          python3 v2/ai/test-aid.py
+          python3 v2/update/test-updated.py
+          python3 v2/update/test-browser.py
+
+      - name: Build the M10 image
+        env:
+          TOKRAH_SRC: ${{ github.workspace }}/tokrah
+          CHROMIUM_TARBALL: ${{ github.workspace }}/chrome-linux.zip
+        run: |
+          # The harness boots the built image as version m10-test-1,
+          # so the image and the check agree on the version string.
+          sudo env SEVYN_V2_VERSION=m10-test-1 TOKRAH_SRC="$TOKRAH_SRC" CHROMIUM_TARBALL="$CHROMIUM_TARBALL" sh v2/image/build-m10-image.sh
+
+      - name: Run the M10 check in QEMU
+        env:
+          TOKRAH_SRC: ${{ github.workspace }}/tokrah
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create m10-boot-*.log (EACCES — the M1 failure mode).
+          sudo chown -R "$USER" v2/image/build
+          # Step 0's Chromium bridge run needs a real Chrome binary;
+          # unzip the pinned snapshot the build step reused.
+          unzip -q -o "$GITHUB_WORKSPACE/chrome-linux.zip" -d "$GITHUB_WORKSPACE/chrome"
+          export SEVYN_M10_CHROME="$GITHUB_WORKSPACE/chrome/chrome-linux/chrome"
+          node v2/image/m10-check.mjs
+
+      - name: Upload M10 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-m10
+          path: |
+            v2/image/build/m10-boot-*.log
+            v2/image/build/m10-check.json
+            v2/image/build/m10-shot-*.ppm
+            v2/image/build/m10-data.img
+          if-no-files-found: warn

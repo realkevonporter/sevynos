@@ -1,8 +1,8 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M6 merged (PR #93, 2026-11-09). M7 in progress (bare-metal boot).**
+**Status: M9 merged (PR #96 + PR #97, 2026-11-10). M10 in progress (PR-ready: KVM check8 40/40 + TCG check24 40/40, 2026-11-11) (comms apps).**
 M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
-#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). M4.5 merged 2026-11-07 (PR #91). M5 merged 2026-11-08 (PR #92). M6 merged 2026-11-09 (PR #93). This directory is
+#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). M4.5 merged 2026-11-07 (PR #91). M5 merged 2026-11-08 (PR #92). M6 merged 2026-11-09 (PR #93). M7 merged 2026-11-09 (PR #94). M9 merged 2026-11-10 (PR #96 + #97). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never

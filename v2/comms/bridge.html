@@ -1,0 +1,353 @@
+<!doctype html>
+<!-- SevynOS v2 M10 — Chromium media bridge page.
+     Runs headless in the image's Chromium (M5) under CDP, driven by
+     commsd (bridge.mjs). One RTCPeerConnection per call; the remote
+     video paints here (the Chromium window is the video surface,
+     detached from the RN calling app, as M5's browser windowing is
+     detached). Local camera/mic come from getUserMedia — real hardware
+     on GF65, Chromium's synthetic camera under
+     --use-fake-device-for-media-stream in the check.
+     No UI beyond the two video elements; no network calls of its own.
+     Exposes window.__sevynCall: createOffer / createAnswer /
+     setRemoteAnswer / addIceCandidate / takeCandidates / getStats /
+     closeCall. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>SevynOS call bridge</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #000;
+        height: 100%;
+        overflow: hidden;
+      }
+      #remote {
+        width: 100vw;
+        height: 100vh;
+        object-fit: contain;
+        background: #000;
+      }
+      #local {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        width: 180px;
+        border-radius: 12px;
+        background: #111;
+      }
+      #status {
+        position: fixed;
+        left: 8px;
+        top: 8px;
+        color: #666;
+        font: 12px monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="remote" autoplay playsinline></video>
+    <video id="local" autoplay playsinline muted></video>
+    <div id="status">bridge ready</div>
+    <script>
+      const pcs = new Map(); // callId -> { pc, candidates: [], local, remote }
+      // One DTLS certificate for the whole page, generated at load
+      // and reused by every PC. A fresh RTCPeerConnection generates
+      // its own ECDSA key on createOffer/createAnswer — under TCG
+      // that keygen alone can exceed the CDP budget (check11: bob's
+      // createAnswer never returned inside 180 s), so the call sat
+      // "ringing" until the ring timer fired. Generating once, at
+      // page load (inside the bridge warm's budget, minutes before
+      // any call), makes the per-call path skip keygen entirely.
+      // If generation fails, newPc falls back to a per-PC cert.
+      let pageCert = null;
+      const certPromise = (
+        typeof RTCPeerConnection.generateCertificate === "function"
+          ? RTCPeerConnection.generateCertificate({
+              name: "ECDSA",
+              namedCurve: "P-256",
+            })
+          : Promise.resolve(null)
+      )
+        .then((c) => {
+          pageCert = c;
+          return c;
+        })
+        .catch(() => null);
+      // Candidates that arrive before their PC exists (the answerer's
+      // window: the caller's host candidates all gather in ~100 ms,
+      // the answerer's prepareAnswer takes ~300 ms, so the caller's
+      // first batch always lands before the answerer's PC is created).
+      // Dropping them leaves ICE at "new" forever on the answerer's
+      // side — no pairs, no frames — with no other symptom. Queue
+      // them here and drain on PC creation.
+      const pending = new Map(); // callId -> [candidate, ...]
+      let queuedDrained = 0; // candidates moved from pending into a PC
+      let queuedDropped = 0; // queued candidates whose add threw
+      // Per-call step timings (ms since page load), for diagnosing a
+      // slow createOffer/createAnswer under TCG: getStats reports
+      // them, the daemon logs them in the media-state lines, so a
+      // stuck step is visible in the guest log instead of a bare
+      // "CDP timeout". Null until the first call.
+      let lastCallTimings = null;
+      // Move a call's queued candidates into its PC. Only valid once
+      // the PC has a remote description — Chrome throws
+      // addIceCandidate ("The remote description was null") before
+      // that, so a drain in newPc mostly throws and the candidates
+      // are lost. Callers await this after setting a description.
+      async function drainPending(callId) {
+        const entry = pcs.get(callId);
+        const queued = pending.get(callId) || [];
+        pending.delete(callId);
+        if (!entry) return;
+        for (const cand of queued) {
+          try {
+            await entry.pc.addIceCandidate(cand);
+            queuedDrained += 1;
+          } catch {
+            queuedDropped += 1;
+          }
+        }
+      }
+      const statusEl = document.getElementById("status");
+      function status(s) {
+        statusEl.textContent = s;
+      }
+      // Local media, cached per video flag: getUserMedia is also a
+      // per-call cost (device start under TCG), and the same tracks
+      // may be added to more than one PC. The first call pays it;
+      // later calls reuse the stream. A failure still resolves to
+      // null (receive-only), exactly as before.
+      const streamCache = new Map(); // video flag -> Promise<MediaStream|null>
+      async function localStream(video) {
+        const key = video ? "video" : "audio";
+        if (!streamCache.has(key)) {
+          streamCache.set(
+            key,
+            (async () => {
+              try {
+                return await navigator.mediaDevices.getUserMedia({
+                  // 640x360, not 720p: the fake device is test-only
+                  // (real hardware uses the real camera), and 720p
+                  // encode/decode under TCG starves the host — the
+                  // Terminal/app probes go "no ops" while two 720p
+                  // fake streams run. Frames still flow at 360p.
+                  video: video ? { width: 640, height: 360 } : false,
+                  audio: true,
+                });
+              } catch (e) {
+                status("no local media: " + (e && e.name ? e.name : e));
+                return null;
+              }
+            })(),
+          );
+        }
+        return streamCache.get(key);
+      }
+      // Pre-warm the local stream at page load, the same way the
+      // DTLS cert is pre-generated: the first getUserMedia (device
+      // start) is the step that stalls a createAnswer under TCG
+      // (check16 timings: cert 8 ms, remote-desc 624 ms, then stuck
+      // on local-stream past the 180 s CDP budget — while the
+      // caller's own first getUserMedia, minutes earlier under less
+      // load, completed). Starting it here, inside the bridge warm's
+      // budget and minutes before any call, means the per-call path
+      // finds a resolved cached stream. Fire-and-forget: the warm
+      // only waits for __sevynCall to exist, never for this.
+      void localStream(true);
+      function newPc(callId, video, iceServers) {
+        const pc = new RTCPeerConnection({
+          iceServers:
+            iceServers && iceServers.length
+              ? iceServers
+              : [{ urls: "stun:stun.l.google.com:19302" }],
+          ...(pageCert ? { certificates: [pageCert] } : {}),
+        });
+        const entry = { pc, candidates: [], video };
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate) entry.candidates.push(ev.candidate.toJSON());
+        };
+        pc.ontrack = (ev) => {
+          const remote = document.getElementById("remote");
+          if (ev.streams && ev.streams[0]) remote.srcObject = ev.streams[0];
+          status("remote track: " + ev.track.kind);
+        };
+        pc.onconnectionstatechange = () => {
+          status("pc " + callId + ": " + pc.connectionState);
+        };
+        pcs.set(callId, entry);
+        return entry;
+      }
+      window.__sevynCall = {
+        async createOffer({ callId, video, iceServers }) {
+          // The page-load certificate is (almost always) ready by
+          // now — it started generating when the page loaded, minutes
+          // before the first call — so this await is instant, and
+          // newPc reuses it instead of generating a fresh key.
+          await certPromise;
+          const entry = newPc(callId, video, iceServers);
+          const stream = await localStream(video);
+          if (stream) {
+            entry.local = stream;
+            for (const t of stream.getTracks()) entry.pc.addTrack(t, stream);
+            document.getElementById("local").srcObject = stream;
+          }
+          const offer = await entry.pc.createOffer();
+          await entry.pc.setLocalDescription(offer);
+          await drainPending(callId);
+          return { sdp: offer.sdp };
+        },
+        async createAnswer({ callId, offerSdp, iceServers }) {
+          const t0 = performance.now();
+          lastCallTimings = { callId, steps: [{ step: "start", ms: 0 }] };
+          const mark = (step) => {
+            lastCallTimings.steps.push({ step, ms: Math.round(performance.now() - t0) });
+          };
+          await certPromise;
+          mark("cert-awaited");
+          const entry = newPc(callId, true, iceServers);
+          await entry.pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
+          mark("remote-desc-set");
+          const stream = await localStream(true);
+          mark("local-stream");
+          if (stream) {
+            entry.local = stream;
+            for (const t of stream.getTracks()) entry.pc.addTrack(t, stream);
+            document.getElementById("local").srcObject = stream;
+          }
+          const answer = await entry.pc.createAnswer();
+          mark("answer-created");
+          await entry.pc.setLocalDescription(answer);
+          mark("local-desc-set");
+          await drainPending(callId);
+          mark("drained");
+          return { sdp: answer.sdp };
+        },
+        async setRemoteAnswer({ callId, sdp }) {
+          const entry = pcs.get(callId);
+          if (!entry) throw new Error("no such call " + callId);
+          await entry.pc.setRemoteDescription({ type: "answer", sdp });
+          await drainPending(callId);
+          return { ok: true };
+        },
+        async addIceCandidate({ callId, candidate }) {
+          const entry = pcs.get(callId);
+          // No PC yet, or no remote description yet (answerer's
+          // pre-answer window, offerer's pre-answer window): Chrome
+          // throws addIceCandidate without a remote description, so
+          // queue it for the drain after the description is set.
+          // The caller never resends a candidate it already trickled,
+          // so dropping one here strands ICE at "new" with no other
+          // symptom.
+          if (!entry || !entry.pc.remoteDescription) {
+            const q = pending.get(callId) || [];
+            q.push(candidate);
+            pending.set(callId, q);
+            return { ok: true, queued: true };
+          }
+          try {
+            await entry.pc.addIceCandidate(candidate);
+          } catch (e) {
+            // Surface the failure: a candidate that never lands leaves
+            // ICE at "new" with no other symptom, so swallowing this
+            // hid exactly that bug. The daemon logs it.
+            return { ok: false, error: String((e && e.message) || e) };
+          }
+          return { ok: true };
+        },
+        takeCandidates({ callId }) {
+          const entry = pcs.get(callId);
+          if (!entry) return [];
+          const out = entry.candidates.splice(0, entry.candidates.length);
+          return out;
+        },
+        // Synchronous, no awaits and no pc.getStats: readable even
+        // while a createAnswer is stuck, so the daemon can log where
+        // it stopped (getStats can itself hang on a mid-answer PC).
+        getTimings() {
+          return lastCallTimings;
+        },
+        async getStats() {
+          let connectionState = "new";
+          let iceConnectionState = "new";
+          let iceGatheringState = "new";
+          let framesReceived = 0;
+          let localCandidates = 0;
+          let remoteCandidates = 0;
+          let pairs = 0;
+          let nominated = 0;
+          let localUfrag = "";
+          let remoteUfrag = "";
+          const ufragOf = (sdp) => {
+            const m = sdp ? sdp.match(/^a=ice-ufrag:(.+)$/m) : null;
+            return m ? m[1] : "";
+          };
+          for (const entry of pcs.values()) {
+            if (!localUfrag) localUfrag = ufragOf(entry.pc.localDescription?.sdp);
+            if (!remoteUfrag) remoteUfrag = ufragOf(entry.pc.remoteDescription?.sdp);
+            if (connectionState !== "connected" && entry.pc.connectionState !== "new")
+              connectionState = entry.pc.connectionState;
+            if (entry.pc.iceConnectionState !== "new")
+              iceConnectionState = entry.pc.iceConnectionState;
+            if (entry.pc.iceGatheringState !== "new")
+              iceGatheringState = entry.pc.iceGatheringState;
+            const stats = await entry.pc.getStats();
+            for (const report of stats.values()) {
+              if (
+                report.type === "inbound-rtp" &&
+                typeof report.framesReceived === "number"
+              ) {
+                framesReceived += report.framesReceived;
+              } else if (report.type === "local-candidate") {
+                localCandidates += 1;
+              } else if (report.type === "remote-candidate") {
+                remoteCandidates += 1;
+              } else if (report.type === "candidate-pair") {
+                pairs += 1;
+                if (report.nominated) nominated += 1;
+              }
+            }
+          }
+          return {
+            connectionState,
+            iceConnectionState,
+            iceGatheringState,
+            framesReceived,
+            localCandidates,
+            remoteCandidates,
+            pairs,
+            nominated,
+            localUfrag,
+            remoteUfrag,
+            queuedPending: [...pending.values()].reduce((n, a) => n + a.length, 0),
+            queuedDrained,
+            queuedDropped,
+            answerTimings: lastCallTimings,
+            calls: pcs.size,
+          };
+        },
+        closeCall({ callId }) {
+          const entry = pcs.get(callId);
+          if (!entry) return { ok: false };
+          try {
+            entry.pc.close();
+          } catch (e) {}
+          // Do NOT stop the local tracks: the stream is cached and
+          // shared across calls now (localStream cache), so stopping
+          // them here would hand the next call dead tracks. The
+          // devices are released when the bridge page itself closes
+          // (daemon shutdown).
+          pcs.delete(callId);
+          if (pcs.size === 0) {
+            document.getElementById("remote").srcObject = null;
+            document.getElementById("local").srcObject = null;
+          }
+          return { ok: true };
+        },
+      };
+      status("bridge ready");
+    </script>
+  </body>
+</html>
