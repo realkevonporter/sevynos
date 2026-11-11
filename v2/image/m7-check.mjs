@@ -682,6 +682,23 @@ function latestOps(b) {
   }
   return null;
 }
+// Wait until the log holds a COMPLETE, parseable ops line. A bare
+// waitForLog on /HOST headless ops/ matches a line caught mid-flush
+// (the guest is still draining the ~6 KB JSON through the serial),
+// so it can return at once while latestOps finds nothing parseable
+// — the d4cee753 M6 failure (present-ok and FAIL 1 ms apart,
+// "no ops line"), and the 381c4ef7 M9 failure with the same
+// signature. Polling latestOps itself retries past the partial line
+// until the flush completes.
+async function waitForOps(b, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ops = latestOps(b);
+    if (ops) return ops;
+    await sleep(500);
+  }
+  return null;
+}
 // Centre of a text rect (exact match, or first of several).
 function textCenter(ops, text) {
   const t = (ops?.texts || []).find((t) => t.t === text);
@@ -910,8 +927,9 @@ async function main() {
   // The run is detached (the CLI returns at once), so the ops line
   // lands after the first present — wait for it before reading.
   // (Guest time runs ~0.5x wall under TCG, so waits are generous.)
-  await waitForLog(b.logPath, /HOST headless ops/, 60000);
-  const opsA = latestOps(b);
+  // Wait for a COMPLETE ops line, not just the pattern (see
+  // waitForOps: a bare waitForLog matches a line caught mid-flush).
+  const opsA = await waitForOps(b, 60000);
   check(
     "headless A: login screen ops logged (TOKRAH + Sign In)",
     !!opsA &&

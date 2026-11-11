@@ -1261,28 +1261,48 @@ async function main() {
   await sleep(20000);
   // `before` scopes the wait to lines written after the answer, so
   // a stale media-state from an earlier run cannot satisfy it.
+  // 360 s, not 180 s: round 3 connected at ~120 s, but round 6 got
+  // no connected state within 200 s on a slower TCG runner — the
+  // bridges were still working, just slower than the budget.
   const before = logLines(b.logPath).length;
   const serialMedia = await Promise.all([
     waitForLog(
       b.logPath,
       /"kind":"media-state","user":"@alice:test.local","media":"connected"/,
-      180000,
+      360000,
       before,
     ),
     waitForLog(
       b.logPath,
       /"kind":"media-state","user":"@bob:test.local","media":"connected"/,
-      180000,
+      360000,
       before,
     ),
   ]);
   const mediaFlows = serialMedia.every(Boolean);
+  // On timeout, say what the daemons last reported instead of just
+  // "no connected media-state": a last state of "connecting" means
+  // the bridges were still working (slow TCG), while "failed" — or
+  // no media-state line at all — means the media engine never got
+  // going.
+  let lastMedia = "";
+  if (!mediaFlows) {
+    const states = logLines(b.logPath)
+      .slice(before)
+      .filter((l) => l.includes("media-state"))
+      .slice(-4)
+      .map((l) => l.slice(-160));
+    lastMedia =
+      states.length > 0
+        ? ` — last media-state: ${states.join(" | ")}`
+        : " — no media-state line at all after the answer";
+  }
   check(
     "comms: video media connected (frames flowing on both bridges)",
     mediaFlows,
     mediaFlows
       ? "serial media-state connected on both daemons"
-      : "no connected media-state on the serial console",
+      : "no connected media-state on the serial console" + lastMedia,
   );
   let callsTexts = [];
   let callsOps = null;
