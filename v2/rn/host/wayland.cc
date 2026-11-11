@@ -26,10 +26,6 @@ Wayland::Wayland(int width, int height, bool fullscreen,
       appId_(appId) {
   static const wl_registry_listener kRegistryListener = {
       &Wayland::onRegistryGlobal, &Wayland::onRegistryGlobalRemove};
-  static const xdg_surface_listener kXdgSurfaceListener = {
-      &Wayland::onXdgSurfaceConfigure};
-  static const xdg_toplevel_listener kXdgToplevelListener = {
-      &Wayland::onXdgToplevelConfigure, &Wayland::onXdgToplevelClose};
   display_ = wl_display_connect(nullptr);
   if (!display_) {
     logLine("WAYLAND connect failed (WAYLAND_DISPLAY=%s)",
@@ -71,6 +67,15 @@ Wayland::Wayland(int width, int height, bool fullscreen,
     logLine("WAYLAND painter SHM setup failed");
     return;
   }
+  createSurface();
+  ok_ = true;
+}
+
+void Wayland::createSurface() {
+  static const xdg_surface_listener kXdgSurfaceListener = {
+      &Wayland::onXdgSurfaceConfigure};
+  static const xdg_toplevel_listener kXdgToplevelListener = {
+      &Wayland::onXdgToplevelConfigure, &Wayland::onXdgToplevelClose};
   surface_ = wl_compositor_create_surface(compositor_);
   if (!surface_) {
     logLine("WAYLAND create surface failed");
@@ -87,10 +92,104 @@ Wayland::Wayland(int width, int height, bool fullscreen,
   wl_surface_commit(surface_);
   // Collect the initial configure before the caller presents.
   wl_display_roundtrip(display_);
-  ok_ = true;
+}
+
+void Wayland::remap() {
+  if (!surface_ || fullscreen_)
+    return;
+  logLine("WAYLAND remap (focus restore)");
+  // Drop the pending frame callback: destroying the surface orphans
+  // it, and a stale framePending_ would block later frame requests.
+  if (frameCallback_) {
+    wl_callback_destroy(frameCallback_);
+    frameCallback_ = nullptr;
+    framePending_ = false;
+  }
+  // Drop both wl_buffers (doPresent recreates them from the
+  // painters, which survive — their SHM fds are independent of the
+  // surface).
+  for (int i = 0; i < 2; i++) {
+    if (buffers_[i]) {
+      wl_buffer_destroy(buffers_[i]);
+      buffers_[i] = nullptr;
+    }
+    busy_[i] = false;
+  }
+  lastCommitted_ = -1;
+  back_ = 0;
+  if (xdgToplevel_) {
+    xdg_toplevel_destroy(xdgToplevel_);
+    xdgToplevel_ = nullptr;
+  }
+  if (xdgSurface_) {
+    xdg_surface_destroy(xdgSurface_);
+    xdgSurface_ = nullptr;
+  }
+  if (surface_) {
+    wl_surface_destroy(surface_);
+    surface_ = nullptr;
+  }
+  // The new surface has not been configured yet; the next configure
+  // flushes a pending present (see present()).
+  configured_ = false;
+  bool wasMaximized = maximized_;
+  suppressWindowState_ = true;
+  createSurface();
+  suppressWindowState_ = false;
+  if (!surface_)
+    return;
+  // A maximized window comes back maximized on the new surface.
+  // (The initial configure carries no states, so restore the flag
+  // silently — the maximize configure that follows agrees with it.)
+  if (wasMaximized && xdgToplevel_) {
+    maximized_ = true;
+    xdg_toplevel_set_maximized(xdgToplevel_);
+  }
+  // Re-present the current content on the new surface. The last
+  // present already cleared havePending_, so force it: pendingOps_
+  // still holds the last frame, and the new surface has no buffer
+  // attached until a present runs — without this the remapped
+  // window stays blank (invisible) even though the compositor
+  // raised it.
+  havePending_ = true;
+  flushPending();
+}
+
+void Wayland::minimize() {
+  if (!xdgToplevel_ || fullscreen_)
+    return;
+  logLine("WAYLAND minimize");
+  xdg_toplevel_set_minimized(xdgToplevel_);
+}
+
+void Wayland::maximize() {
+  if (!xdgToplevel_ || fullscreen_ || maximized_)
+    return;
+  logLine("WAYLAND maximize");
+  xdg_toplevel_set_maximized(xdgToplevel_);
+  // Defer presents until the maximize configure is processed (see
+  // sizeChangePending_ in wayland.h): the button-press release
+  // re-render would otherwise commit a frame at the OLD size after
+  // this request and poison the compositor's reposition.
+  sizeChangePending_ = true;
+  logLine("WAYLAND maximize: deferring presents until configure");
+}
+
+void Wayland::unmaximize() {
+  if (!xdgToplevel_ || fullscreen_ || !maximized_)
+    return;
+  logLine("WAYLAND unmaximize");
+  xdg_toplevel_unset_maximized(xdgToplevel_);
+  // Same gate as maximize(): a commit at the maximized size after
+  // this request but before the restore configure would poison the
+  // restore the same way.
+  sizeChangePending_ = true;
+  logLine("WAYLAND unmaximize: deferring presents until configure");
 }
 
 Wayland::~Wayland() {
+  if (frameCallback_)
+    wl_callback_destroy(frameCallback_);
   if (buffers_[0])
     wl_buffer_destroy(buffers_[0]);
   if (buffers_[1])
@@ -264,6 +363,20 @@ void Wayland::onXdgSurfaceConfigure(void* data, xdg_surface* surface,
   Wayland* self = static_cast<Wayland*>(data);
   xdg_surface_ack_configure(surface, serial);
   self->configured_ = true;
+  // Apply a deferred unmaximize restore (see restorePending_ in
+  // wayland.h): the ack above cleared the compositor's maximized
+  // bookkeeping, so committing the saved pre-maximize size now is
+  // legal. Committing it in onXdgToplevelConfigure (before this
+  // ack) made Weston raise xdg_wm_base error 4 and kill the
+  // connection.
+  if (self->restorePending_) {
+    self->restorePending_ = false;
+    if (self->savedWidth_ > 0 && self->savedHeight_ > 0) {
+      logLine("WAYLAND restore to saved size %dx%d (after ack)",
+              self->savedWidth_, self->savedHeight_);
+      self->resize(self->savedWidth_, self->savedHeight_);
+    }
+  }
   // The compositor is ready for content; present anything pending.
   self->flushPending();
 }
@@ -272,16 +385,85 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
                                      int32_t width, int32_t height,
                                      wl_array* states) {
   (void)toplevel;
-  (void)states;
   Wayland* self = static_cast<Wayland*>(data);
+  // The configure answers a maximize/unmaximize request (or a resize
+  // drag); either way the size-change window is over — presents may
+  // flow again. resize() below (or the surface configure's
+  // flushPending) replays any deferred present.
+  self->sizeChangePending_ = false;
+  // Track the maximized flag from the states array (maximize /
+  // unmaximize, or a title-bar drag restoring a maximized window).
+  // The flag can change in a configure that carries no size, so
+  // parse it before the size early-return below.
+  bool maximized = false;
+  if (states) {
+    // wl_array_for_each does not compile in C++ (void* assignment),
+    // so walk the array by hand.
+    for (size_t i = 0; i + sizeof(uint32_t) <= states->size;
+         i += sizeof(uint32_t)) {
+      uint32_t s = *reinterpret_cast<uint32_t*>(
+          static_cast<char*>(states->data) + i);
+      if (s == XDG_TOPLEVEL_STATE_MAXIMIZED)
+        maximized = true;
+    }
+  }
+  bool flagChanged = (maximized != self->maximized_);
+  if (flagChanged)
+    self->maximized_ = maximized;
+  // Save the pre-maximize size (before resize() below runs) so an
+  // unmaximize configure that carries no size can restore to it.
+  // Arm the settle commit on either transition (see
+  // maximizeSettlePending_ in wayland.h): on the next frame
+  // callback after this configure, commit once more so the
+  // compositor gets a second, definitely-armed chance to
+  // reposition the window.
+  if (flagChanged) {
+    if (maximized) {
+      self->savedWidth_ = self->width_;
+      self->savedHeight_ = self->height_;
+    }
+    self->maximizeSettlePending_ = true;
+  }
+  // Notify the JS window-state handler AFTER any resize below: the
+  // handler re-renders the title bar, which presents a frame. If it
+  // runs before the resize, that present is at the OLD size — and a
+  // stale old-size commit followed back-to-back by the new-size
+  // commit leaves a maximized window at its cascade position (the
+  // compositor applies the maximized position on the first
+  // post-configure commit only; verified against Weston 13 with a
+  // minimal client). Resizing first makes every post-configure
+  // commit the new size.
+  auto notifyState = [&]() {
+    if (flagChanged && !self->suppressWindowState_) {
+      logLine("WAYLAND toplevel %s", maximized ? "maximized" : "restored");
+      if (self->windowStateHandler_)
+        self->windowStateHandler_(maximized);
+    }
+  };
   // M9: honor the compositor's size. Zero means "no opinion" — the
   // client keeps its size (Weston sends 0,0 for the initial
   // fullscreen configure when the output mode already matches).
   // A resize drag ends with a configure carrying the new size; the
   // fullscreen shell gets one when the output mode changes. App
   // windows clamp to the minimum size.
-  if (width <= 0 || height <= 0)
+  // Exception: on unmaximize, a sizeless configure means "restore
+  // to your pre-maximize size" — the client keeps the maximized
+  // size otherwise, and the window stays fullscreen. (Weston sends
+  // 0,0 on unmaximize when it has no saved size; verified in CI:
+  // the restore configure carried no size and no resize ran.)
+  // Defer the resize to onXdgSurfaceConfigure (restorePending_):
+  // committing 800x500 before acking the configure makes Weston
+  // raise xdg_wm_base error 4 and kill the connection.
+  if (width <= 0 || height <= 0) {
+    if (flagChanged && !maximized && self->savedWidth_ > 0 &&
+        self->savedHeight_ > 0) {
+      logLine("WAYLAND restore to saved size %dx%d deferred (sizeless configure)",
+              self->savedWidth_, self->savedHeight_);
+      self->restorePending_ = true;
+    }
+    notifyState();
     return;
+  }
   int w = width;
   int h = height;
   if (!self->fullscreen_) {
@@ -290,9 +472,23 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
     if (h < kMinHeight)
       h = kMinHeight;
   }
-  if (w == self->width_ && h == self->height_)
+  if (w == self->width_ && h == self->height_) {
+    // Same exception as above: on unmaximize the compositor may
+    // echo the maximized size instead of the restored one; restore
+    // to the saved pre-maximize size (deferred to after the ack,
+    // as above).
+    if (flagChanged && !maximized && self->savedWidth_ > 0 &&
+        self->savedHeight_ > 0 &&
+        (self->savedWidth_ != w || self->savedHeight_ != h)) {
+      logLine("WAYLAND restore to saved size %dx%d deferred (configure echoed maximized size)",
+              self->savedWidth_, self->savedHeight_);
+      self->restorePending_ = true;
+    }
+    notifyState();
     return;
+  }
   self->resize(w, h);
+  notifyState();
 }
 
 void Wayland::resize(int width, int height) {
@@ -325,10 +521,21 @@ void Wayland::resize(int width, int height) {
   }
   width_ = width;
   height_ = height;
+  // The size handler re-lays out JS and presents at the new size.
+  // If it does not present synchronously (the usual case under TCG —
+  // the JS re-layout takes seconds), force a present of the last
+  // frame at the new size now: the compositor repositions a maximized
+  // window on the first commit at the new size, so without this the
+  // window sits at its old (cascade) position until JS catches up
+  // (M9 CI: the maximized calculator stayed at (169,521) for 4+ s
+  // because the first new-size commit waited on the JS re-layout).
+  // The forced frame repaints the old layout in the top-left of the
+  // new buffer; the JS present replaces it.
+  int committedBefore = lastCommitted_;
   if (sizeHandler_)
     sizeHandler_(width, height);
-  // The size handler re-lays out JS and presents at the new size;
-  // if nothing is subscribed, flush a pending present instead.
+  if (lastCommitted_ == committedBefore)
+    havePending_ = true;
   if (havePending_)
     flushPending();
 }
@@ -362,6 +569,8 @@ void Wayland::onFrameDoneCb(void* data, wl_callback* callback,
   Wayland* self = static_cast<Wayland*>(data);
   (void)time;
   wl_callback_destroy(callback);
+  if (self->frameCallback_ == callback)
+    self->frameCallback_ = nullptr;
   self->onFrameDone();
 }
 
@@ -379,6 +588,16 @@ void Wayland::onFrameDone() {
   if (lastCommitted_ >= 0)
     busy_[1 - lastCommitted_] = false;
   flushPending();
+  // Maximize/restore settle (see maximizeSettlePending_ in
+  // wayland.h): the compositor has now presented a frame at the new
+  // size, so commit once more — a second, definitely-armed chance
+  // to reposition the window.
+  if (maximizeSettlePending_) {
+    maximizeSettlePending_ = false;
+    logLine("WAYLAND settle commit after maximize/restore");
+    havePending_ = true;
+    flushPending();
+  }
   if (frameHandler_)
     frameHandler_();
 }
@@ -657,12 +876,21 @@ void Wayland::requestFrame() {
       &Wayland::onFrameDoneCb};
   wl_callback* cb = wl_surface_frame(surface_);
   wl_callback_add_listener(cb, &kFrameListener, this);
+  frameCallback_ = cb;
   framePending_ = true;
 }
 
 void Wayland::doPresent() {
   if (!configured_ || !surface_)
     return;
+  // A maximize/unmaximize is in flight: do NOT commit. The frame is
+  // not lost — havePending_ replays it once the configure is
+  // processed (resize()'s flushPending, or the surface configure's).
+  if (sizeChangePending_) {
+    logLine("WAYLAND present deferred (size change pending)");
+    havePending_ = true;
+    return;
+  }
   // Present into the back buffer unconditionally and alternate.
   // Weston never releases these SHM buffers in this guest and
   // stops sending frame callbacks after the first frames (0

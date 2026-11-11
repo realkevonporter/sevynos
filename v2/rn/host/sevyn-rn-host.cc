@@ -314,6 +314,10 @@ class RnHost {
   // M9 surface resize: update the host size, Sevyn.width/height,
   // and the JS size handler (the renderer re-lays out + presents).
   void dispatchSize(int width, int height);
+  // Window-state change: update windowState_, the Sevyn.windowState
+  // property, and the JS onWindowState handler (the renderer's
+  // window-state store re-renders the title bar).
+  void setWindowState(const std::string& state);
   void drainStatusQueue();
   void drainAppEventQueue();
   void drainExecCompletions(jsi::Runtime& rt);
@@ -409,12 +413,20 @@ class RnHost {
   std::optional<jsi::Function> appEventHandler_;
   std::optional<jsi::Function> scrollHandler_;
   std::optional<jsi::Function> sizeHandler_;
+  std::optional<jsi::Function> windowStateHandler_;
   bool hasPointerHandler_ = false;
   bool hasKeyHandler_ = false;
   bool hasStatusHandler_ = false;
   bool hasAppEventHandler_ = false;
   bool hasScrollHandler_ = false;
   bool hasSizeHandler_ = false;
+  bool hasWindowStateHandler_ = false;
+  // Window state ("normal" | "maximized" | "minimized"), tracked by
+  // the host: maximized comes from the compositor's configure states
+  // (Wayland state handler), minimized is set by minimizeApp() and
+  // cleared by a focus remap. Published to JS as Sevyn.windowState
+  // and to the renderer's window-state store via onWindowState.
+  std::string windowState_ = "normal";
   // The Sevyn host object, kept so dispatchSize can update
   // Sevyn.width/Sevyn.height when the surface resizes (M9).
   jsi::Value sevynValue_;
@@ -1098,6 +1110,7 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
              o.setProperty(rt, "glyph", apps[i].glyph.c_str());
              o.setProperty(rt, "system", apps[i].system);
              o.setProperty(rt, "protected", apps[i].protected_);
+             o.setProperty(rt, "singleInstance", apps[i].singleInstance);
              jsi::Array perms(rt, apps[i].permissions.size());
              for (size_t j = 0; j < apps[i].permissions.size(); j++)
                perms.setValueAtIndex(rt, j,
@@ -1117,6 +1130,20 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
              std::string id = jsString(rt, args[0]);
              bool ok = appClient_ && appClient_->launchApp(id);
              logLine("LAUNCH %s %s", id.c_str(), ok ? "ok" : "failed");
+             return jsi::Value(ok);
+           }
+           return jsi::Value(false);
+         });
+  hostFn("focusApp", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           // Window-focus fix: ask appd to focus a running app
+           // (EVENT FOCUS to its most recent instance; the target
+           // host raises its window). False when not running.
+           if (count >= 1) {
+             std::string id = jsString(rt, args[0]);
+             bool ok = appClient_ && appClient_->focusApp(id);
+             logLine("FOCUS %s %s", id.c_str(), ok ? "ok" : "failed");
              return jsi::Value(ok);
            }
            return jsi::Value(false);
@@ -1142,6 +1169,46 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            }
            return jsi::Value(false);
          });
+  // Window state (app windows only — the fullscreen shell has no
+  // minimize/maximize). minimizeApp hides the window; a dock click
+  // restores it through the focus path (remap). maximizeApp /
+  // unmaximizeApp ask the compositor; the new state is confirmed
+  // through the configure states array (see setWindowState).
+  hostFn("minimizeApp", 0,
+         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           if (appId_.empty() || !wayland_)
+             return jsi::Value(false);
+           wayland_->minimize();
+           setWindowState("minimized");
+           return jsi::Value(true);
+         });
+  hostFn("maximizeApp", 0,
+         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           if (appId_.empty() || !wayland_)
+             return jsi::Value(false);
+           wayland_->maximize();
+           return jsi::Value(true);
+         });
+  hostFn("unmaximizeApp", 0,
+         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           if (appId_.empty() || !wayland_)
+             return jsi::Value(false);
+           wayland_->unmaximize();
+           return jsi::Value(true);
+         });
+  hostFn("onWindowState", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count >= 1 && args[0].isObject()) {
+             windowStateHandler_ =
+                 std::move(args[0].asObject(rt).asFunction(rt));
+             hasWindowStateHandler_ = true;
+           }
+           return jsi::Value::undefined();
+         });
   // App identity, for the app template (the shell reads these too;
   // its own values are the defaults below).
   sevyn.setProperty(rt, "appId",
@@ -1157,6 +1224,9 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
   // without scrolling; the default app window is 800x500.
   sevyn.setProperty(rt, "width", (double)width_);
   sevyn.setProperty(rt, "height", (double)height_);
+  // Window state (see setWindowState): "normal" at startup; the
+  // renderer subscribes via Sevyn.onWindowState.
+  sevyn.setProperty(rt, "windowState", windowState_.c_str());
   // Kept so dispatchSize can update width/height on resize (M9).
   sevynValue_ = jsi::Value(rt, sevyn);
   rt.global().setProperty(rt, "Sevyn", sevyn);
@@ -1295,6 +1365,29 @@ void RnHost::dispatchSize(int width, int height) {
   }
 }
 
+void RnHost::setWindowState(const std::string& state) {
+  if (state == windowState_)
+    return;
+  windowState_ = state;
+  if (!runtime_)
+    return;
+  jsi::Runtime& rt = *runtime_;
+  try {
+    if (!sevynValue_.isUndefined()) {
+      jsi::Object sevyn = sevynValue_.asObject(rt);
+      sevyn.setProperty(rt, "windowState", state.c_str());
+    }
+    if (hasWindowStateHandler_) {
+      jsi::Object ev(rt);
+      ev.setProperty(rt, "state", state.c_str());
+      windowStateHandler_->call(rt, ev);
+      rt.drainMicrotasks();
+    }
+  } catch (const jsi::JSError& e) {
+    logLine("JS window-state handler failed: %s", e.getMessage().c_str());
+  }
+}
+
 void RnHost::dispatchKey(uint32_t key, bool pressed, bool shift) {
   if (!hasKeyHandler_ || !runtime_)
     return;
@@ -1355,7 +1448,13 @@ void RnHost::drainStatusQueue() {
 }
 
 void RnHost::drainAppEventQueue() {
-  if (!hasAppEventHandler_ || !runtime_)
+  // Always drain — app hosts never register a JS onAppEvent handler,
+  // so an early return here would let the queue grow forever and the
+  // FOCUS interception below would never run. EVENT FOCUS lines are
+  // handled in C++ (the target host raises its window by remapping
+  // its surface); every other line goes to JS only when a handler
+  // exists (the shell's app store).
+  if (!runtime_)
     return;
   std::queue<std::string> q;
   {
@@ -1369,7 +1468,36 @@ void RnHost::drainAppEventQueue() {
     while (!q.empty()) {
       std::string line = q.front();
       q.pop();
-      appEventHandler_->call(rt, jsi::String::createFromUtf8(rt, line));
+      // "EVENT FOCUS <id> <pid>" — only the host whose app id AND
+      // pid match raises its window (multi-instance: appd targets
+      // the most recently launched instance). The shell and other
+      // apps ignore it.
+      if (line.rfind("EVENT FOCUS ", 0) == 0 && !appId_.empty() &&
+          wayland_) {
+        std::string rest = line.substr(12);
+        size_t sp = rest.find(' ');
+        if (sp != std::string::npos) {
+          std::string id = rest.substr(0, sp);
+          std::string pidStr = rest.substr(sp + 1);
+          long pid = -1;
+          try {
+            pid = std::stol(pidStr);
+          } catch (...) {
+            pid = -1;
+          }
+          if (id == appId_ && pid == (long)getpid()) {
+            logLine("HOST FOCUS remap %s (pid %ld)", id.c_str(), pid);
+            wayland_->remap();
+            // A minimized window comes back as a normal window
+            // (remap re-applies maximized when it was maximized).
+            if (windowState_ == "minimized")
+              setWindowState("normal");
+            continue;
+          }
+        }
+      }
+      if (hasAppEventHandler_)
+        appEventHandler_->call(rt, jsi::String::createFromUtf8(rt, line));
     }
     rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
@@ -1807,6 +1935,17 @@ int RnHost::run() {
   // re-lays out JS at the new size.
   wayland_->setSizeHandler(
       [this](int w, int h) { dispatchSize(w, h); });
+  // Window-focus fix: a configure that flips the maximized flag
+  // (maximize/unmaximize, or a title-bar drag restoring a maximized
+  // window) updates the window state for the title bar. A minimized
+  // window gets no configures, so its state is never overwritten
+  // here — minimizeApp()/the focus remap own it.
+  wayland_->setWindowStateHandler([this](bool maximized) {
+    if (maximized)
+      setWindowState("maximized");
+    else if (windowState_ != "minimized")
+      setWindowState("normal");
+  });
   }
 
   try {

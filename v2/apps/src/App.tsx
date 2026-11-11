@@ -17,6 +17,7 @@
 
 import * as React from "react";
 import { View, Text, Pressable, ScrollView, TextInput } from "./host";
+import { WindowButtons } from "./window-buttons";
 import {
   subscribeStatus,
   getStatusSnapshot,
@@ -797,6 +798,7 @@ export function App(): React.ReactElement {
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           {name}
         </Text>
+        <WindowButtons />
         <Pressable
           onPress={() => {
             Sevyn.closeApp();

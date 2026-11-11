@@ -6,17 +6,25 @@
  *     one — is never re-seeded, so a deleted stock app stays deleted
  *     until the user reinstalls it from pristine),
  *   - serves the app socket /run/sevyn-apps.sock for the shell host
- *     (LIST / LAUNCH / CLOSE / INSTALL / UNINSTALL / REINSTALL /
- *     SUBSCRIBE for EVENT lines),
+ *     (LIST / LAUNCH / CLOSE / FOCUS / INSTALL / UNINSTALL /
+ *     REINSTALL / SUBSCRIBE for EVENT lines),
  *   - reads the harness control serial /dev/ttyS2 for the same verbs
  *     (replies go to the console as APPD log lines),
  *   - spawns one sevyn-rn-host process per running app (windowed,
  *     sandboxed: a crashing app never takes down the shell), reaps
  *     children, writes/removes pid files under /run/sevyn/apps, and
- *     broadcasts EVENT LAUNCHED / STOPPED / CRASHED / INSTALLED /
- *     UNINSTALLED to subscribers. The host is launched with
- *     --app <id> --name <name> --color <#rrggbb> --glyph <letter>
+ *     broadcasts EVENT LAUNCHED / STOPPED / CRASHED / FOCUS /
+ *     INSTALLED / UNINSTALLED to subscribers. The host is launched
+ *     with --app <id> --name <name> --color <#rrggbb> --glyph <letter>
  *     [--permissions <csv>] from the registry entry.
+ *
+ * Single-instance is a per-app property (manifest/registry
+ * singleInstance, default true): a single-instance app refuses a
+ * second launch ("already-running"); a multi-instance app may run
+ * several windows at once (Files, Terminal, Notes, Browser). The
+ * first instance writes <id>.pid; later instances write
+ * <id>-<pid>.pid. CLOSE closes every instance of the id; FOCUS
+ * targets the most recently launched instance.
  *
  * The loader does the registry + signature work; appd forks it for
  * INSTALL / UNINSTALL / REINSTALL / LIST and parses the list output.
@@ -32,14 +40,20 @@
  *   LIST                 -> APP <loader list line> ... then OK list
  *   LAUNCH <id>          -> OK launched <id> / ERR <reason>
  *   CLOSE <id>           -> OK closed <id> / ERR not-running
+ *                           (closes EVERY instance of the id)
+ *   FOCUS <id>           -> OK focused <id> / ERR not-running
+ *                           (broadcasts EVENT FOCUS to the most
+ *                           recently launched instance)
  *   INSTALL <path>       -> OK installed <id> / ERR <reason>
  *   UNINSTALL <id>       -> OK uninstalled <id> / ERR <reason>
  *   REINSTALL <id>       -> OK reinstalled <id> / ERR <reason>
  * Events (subscribers only):
  *   EVENT LAUNCHED <id>
- *   EVENT STOPPED <id> <exit-code>       (clean exit, or SIGTERM after
- *                                          a CLOSE request)
- *   EVENT CRASHED <id> <exit-code|signal N>
+ *   EVENT FOCUS <id> <pid>          (the target instance's pid)
+ *   EVENT STOPPED <id> <exit-code> <remaining>  (clean exit, or
+ *           SIGTERM after a CLOSE request; remaining = instances of
+ *           the id still running after this one exited)
+ *   EVENT CRASHED <id> <exit-code|signal N> <remaining>
  *   EVENT INSTALLED <id>
  *   EVENT UNINSTALLED <id>
  *
@@ -50,6 +64,7 @@
  *   APPD REINSTALL OK <id> / APPD REINSTALL FAIL <reason>
  *   APPD LAUNCH OK <id> / APPD LAUNCH FAIL <reason>
  *   APPD CLOSE OK <id> / APPD CLOSE FAIL <reason>
+ *   APPD FOCUS OK <id> / APPD FOCUS FAIL <reason>
  *   APPD LIST <loader list line> (one per app)
  *   APPD PONG
  *
@@ -215,6 +230,10 @@ struct app_proc {
     pid_t pid;
     int closing; /* set when CLOSE asked for SIGTERM: a SIGTERM death
                   * after a close request is STOPPED, not CRASHED */
+    /* This instance's pid file: <id>.pid for the first instance,
+     * <id>-<pid>.pid for later instances of a multi-instance app.
+     * Reap unlinks exactly this path. */
+    char pidfile[PATH_MAX];
 };
 
 static struct app_proc g_apps[MAX_APPS];
@@ -226,6 +245,26 @@ static struct app_proc *find_app(const char *id)
         if (strcmp(g_apps[i].id, id) == 0)
             return &g_apps[i];
     return NULL;
+}
+
+/* Most recently launched instance of the id (the FOCUS target). */
+static struct app_proc *find_app_last(const char *id)
+{
+    struct app_proc *found = NULL;
+    for (size_t i = 0; i < g_napps; i++)
+        if (strcmp(g_apps[i].id, id) == 0)
+            found = &g_apps[i];
+    return found;
+}
+
+/* Instances of the id still running. */
+static size_t count_app(const char *id)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < g_napps; i++)
+        if (strcmp(g_apps[i].id, id) == 0)
+            n++;
+    return n;
 }
 
 static struct app_proc *find_app_by_pid(pid_t pid)
@@ -256,6 +295,26 @@ static char *pid_path(const char *id)
         return NULL;
     }
     snprintf(full, n + 1, "%s%s.pid", dir, id);
+    free(dir);
+    return full;
+}
+
+/* Pid file for one instance: <id>.pid for the first instance,
+ * <id>-<pid>.pid for later instances of a multi-instance app. */
+static char *pid_path_instance(const char *id, pid_t pid, int first)
+{
+    if (first)
+        return pid_path(id);
+    char *dir = path_join(g_run_dir, "");
+    if (!dir)
+        return NULL;
+    size_t n = strlen(dir) + strlen(id) + 32;
+    char *full = (char *)malloc(n + 1);
+    if (!full) {
+        free(dir);
+        return NULL;
+    }
+    snprintf(full, n + 1, "%s%s-%ld.pid", dir, id, (long)pid);
     free(dir);
     return full;
 }
@@ -508,21 +567,36 @@ static void list_line_perms(const char *line, char *out, size_t outcap)
     out[n] = '\0';
 }
 
+/* The single= field from a list line: 1 = single-instance (default
+ * when the field is absent — old registry entries), 0 =
+ * multi-instance. */
+static int list_line_single(const char *line)
+{
+    const char *p = strstr(line, "|single=");
+    if (!p)
+        return 1;
+    return p[8] != '0';
+}
+
 /* --- app lifecycle --- */
 
 /* Launch an app. On success returns 0 and the pid is recorded; on
- * failure returns -1 with err set. */
+ * failure returns -1 with err set. A single-instance app refuses a
+ * second launch; a multi-instance app may launch again. */
 static int launch_app(const char *id, char *err, size_t errcap)
 {
-    if (find_app(id)) {
-        snprintf(err, errcap, "already-running");
-        return -1;
-    }
     char *line = loader_list_one(id);
     if (!line) {
         snprintf(err, errcap, "not-installed");
         return -1;
     }
+    int single = list_line_single(line);
+    if (single && find_app(id)) {
+        free(line);
+        snprintf(err, errcap, "already-running");
+        return -1;
+    }
+    int first = find_app(id) == NULL;
     char perms[512];
     list_line_perms(line, perms, sizeof(perms));
     char app_name[65], app_color[16], app_glyph[8];
@@ -580,31 +654,57 @@ static int launch_app(const char *id, char *err, size_t errcap)
     struct app_proc *a = &g_apps[g_napps++];
     snprintf(a->id, sizeof(a->id), "%s", id);
     a->pid = pid;
-    char *pp = pid_path(id);
+    a->closing = 0;
+    char *pp = pid_path_instance(id, pid, first);
     if (pp) {
+        snprintf(a->pidfile, sizeof(a->pidfile), "%s", pp);
         char pidbuf[32];
         snprintf(pidbuf, sizeof(pidbuf), "%ld\n", (long)pid);
         write_file(pp, pidbuf);
         free(pp);
+    } else {
+        a->pidfile[0] = '\0';
     }
     log_line("APPD launched %s (pid %ld)", id, (long)pid);
     broadcast_event("EVENT LAUNCHED %s\n", id);
     return 0;
 }
 
+/* Close an app: SIGTERM every running instance of the id (a
+ * multi-instance app closes all its windows). Returns 0 when at
+ * least one instance was signalled. */
 static int close_app(const char *id, char *err, size_t errcap)
 {
-    struct app_proc *a = find_app(id);
+    size_t n = 0;
+    for (size_t i = 0; i < g_napps; i++) {
+        if (strcmp(g_apps[i].id, id) != 0)
+            continue;
+        if (kill(g_apps[i].pid, SIGTERM) != 0) {
+            snprintf(err, errcap, "kill failed: %s", strerror(errno));
+            return -1;
+        }
+        g_apps[i].closing = 1;
+        log_line("APPD closing %s (pid %ld)", id, (long)g_apps[i].pid);
+        n++;
+    }
+    if (n == 0) {
+        snprintf(err, errcap, "not-running");
+        return -1;
+    }
+    return 0;
+}
+
+/* Focus an app: broadcast EVENT FOCUS to the most recently launched
+ * instance so its host raises its window. Returns 0 on success. */
+static int focus_app(const char *id, char *err, size_t errcap)
+{
+    struct app_proc *a = find_app_last(id);
     if (!a) {
         snprintf(err, errcap, "not-running");
         return -1;
     }
-    if (kill(a->pid, SIGTERM) != 0) {
-        snprintf(err, errcap, "kill failed: %s", strerror(errno));
-        return -1;
-    }
-    a->closing = 1;
-    log_line("APPD closing %s (pid %ld)", id, (long)a->pid);
+    broadcast_event("EVENT FOCUS %s %ld\n", id, (long)a->pid);
+    log_line("APPD focusing %s (pid %ld)", id, (long)a->pid);
     return 0;
 }
 
@@ -620,30 +720,35 @@ static void reap_children(void)
         char id[65];
         snprintf(id, sizeof(id), "%s", a->id);
         int was_closing = a->closing;
+        char pidfile[PATH_MAX];
+        snprintf(pidfile, sizeof(pidfile), "%s", a->pidfile);
         remove_app(a);
-        char *pp = pid_path(id);
-        if (pp) {
-            unlink(pp);
-            free(pp);
-        }
+        if (pidfile[0])
+            unlink(pidfile);
+        /* Remaining instances of this id after this one exited. */
+        size_t remaining = count_app(id);
         if (WIFEXITED(status)) {
             int code = WEXITSTATUS(status);
             if (code == 0) {
                 log_line("APP STOPPED %s %d", id, code);
-                broadcast_event("EVENT STOPPED %s %d\n", id, code);
+                broadcast_event("EVENT STOPPED %s %d %zu\n", id, code,
+                                remaining);
             } else {
                 log_line("APP CRASHED %s %d", id, code);
-                broadcast_event("EVENT CRASHED %s %d\n", id, code);
+                broadcast_event("EVENT CRASHED %s %d %zu\n", id, code,
+                                remaining);
             }
         } else if (WIFSIGNALED(status)) {
             int sig = WTERMSIG(status);
             if (was_closing && sig == SIGTERM) {
                 /* Asked to close: a SIGTERM death is a clean stop. */
                 log_line("APP STOPPED %s signal %d", id, sig);
-                broadcast_event("EVENT STOPPED %s signal %d\n", id, sig);
+                broadcast_event("EVENT STOPPED %s signal %d %zu\n", id,
+                                sig, remaining);
             } else {
                 log_line("APP CRASHED %s signal %d", id, sig);
-                broadcast_event("EVENT CRASHED %s signal %d\n", id, sig);
+                broadcast_event("EVENT CRASHED %s signal %d %zu\n", id,
+                                sig, remaining);
             }
         }
     }
@@ -763,6 +868,31 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         } else {
             if (from_ctl)
                 log_line("APPD CLOSE FAIL %s %s", arg, err);
+            else if (reply) {
+                snprintf(out, sizeof(out), "ERR %s\n", err);
+                reply(ctx, out);
+            }
+        }
+        return;
+    }
+    if (strcmp(line, "FOCUS") == 0) {
+        if (!arg) {
+            if (from_ctl)
+                log_line("APPD FOCUS FAIL usage");
+            else if (reply)
+                reply(ctx, "ERR usage: FOCUS <id>\n");
+            return;
+        }
+        if (focus_app(arg, err, sizeof(err)) == 0) {
+            if (from_ctl)
+                log_line("APPD FOCUS OK %s", arg);
+            else if (reply) {
+                snprintf(out, sizeof(out), "OK focused %s\n", arg);
+                reply(ctx, out);
+            }
+        } else {
+            if (from_ctl)
+                log_line("APPD FOCUS FAIL %s %s", arg, err);
             else if (reply) {
                 snprintf(out, sizeof(out), "ERR %s\n", err);
                 reply(ctx, out);

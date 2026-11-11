@@ -89,6 +89,17 @@ class SockClient:
             if line.startswith(prefix):
                 return line
 
+    def drain(self, timeout=0.5):
+        """Drop buffered lines (stale events from earlier sections)."""
+        self.s.settimeout(timeout)
+        try:
+            while True:
+                self.readline()
+        except (socket.timeout, EOFError):
+            pass
+        finally:
+            self.s.settimeout(10)
+
     def close(self):
         self.s.close()
 
@@ -141,7 +152,7 @@ def main():
 
     def make_bundle(out_path, *, app_id, name, version="1.0.0",
                     system=False, protected=False, permissions=None,
-                    sign=False):
+                    sign=False, single_instance=True):
         import hashlib
         entry = b"FAKE-HBC-" + app_id.encode()
         manifest = {
@@ -150,6 +161,7 @@ def main():
             "system": system, "protected": protected,
             "permissions": permissions or [],
             "bundleHash": hashlib.sha256(entry).hexdigest(),
+            "singleInstance": single_instance,
         }
         if sign:
             signed = (f"sevyn-bundle-v1\n{app_id}\n{version}\n"
@@ -166,6 +178,8 @@ def main():
 
     make_bundle(pristine / "files.sevyn", app_id="files", name="Files",
                 permissions=["status.read"])
+    make_bundle(pristine / "notes.sevyn", app_id="notes", name="Notes",
+                single_instance=False)
     make_bundle(pristine / "terminal.sevyn", app_id="terminal",
                 name="Terminal", system=True, protected=True, sign=True)
 
@@ -206,23 +220,35 @@ def main():
             "APPD ready", lambda: "APPD ready" in log_text()))
         check("seed installed files", wait_for(
             "seed files", lambda: "APPD seeded files.sevyn" in log_text()))
+        check("seed installed notes", wait_for(
+            "seed notes", lambda: "APPD seeded notes.sevyn" in log_text()))
         check("seed installed terminal", wait_for(
             "seed terminal",
             lambda: "APPD seeded terminal.sevyn" in log_text()))
         reg = json.loads((apps / "registry.json").read_text())
-        check("registry seeded with 2 apps",
-              {a["id"] for a in reg["apps"]} == {"files", "terminal"})
+        check("registry seeded with 3 apps",
+              {a["id"] for a in reg["apps"]} == {"files", "notes", "terminal"})
+        reg_by_id = {a["id"]: a for a in reg["apps"]}
+        check("registry: files is single-instance",
+              reg_by_id["files"].get("singleInstance") is True)
+        check("registry: notes is multi-instance",
+              reg_by_id["notes"].get("singleInstance") is False)
 
         # 2. socket: PING + LIST.
         c = SockClient(str(sock_path))
         c.send("PING")
         check("PING -> OK pong", c.readline() == "OK pong")
         c.send("LIST")
-        lines = [c.readline(), c.readline(), c.readline()]
-        check("LIST returns both apps + OK",
+        lines = [c.readline(), c.readline(), c.readline(), c.readline()]
+        check("LIST returns all apps + OK",
               lines[0].startswith("APP files|") and
-              lines[1].startswith("APP terminal|") and lines[2] == "OK list",
+              lines[1].startswith("APP notes|") and
+              lines[2].startswith("APP terminal|") and lines[3] == "OK list",
               str(lines))
+        check("LIST carries single=1 for files",
+              "|single=1|" in lines[0], lines[0])
+        check("LIST carries single=0 for notes",
+              "|single=0|" in lines[1], lines[1])
 
         # 3. subscribe on a second connection; LAUNCH files.
         sub = SockClient(str(sock_path))
@@ -255,12 +281,13 @@ def main():
 
         # 5. CLOSE files; reap + STOPPED event + pid file gone.
         # A CLOSE kills with SIGTERM, so the stop reports "signal 15"
-        # (a clean stop, not a crash).
+        # (a clean stop, not a crash). The trailing 0 is the
+        # remaining-instance count (0: no files window left).
         c.send("CLOSE files")
         check("CLOSE files ok", c.readline() == "OK closed files")
-        check("EVENT STOPPED files signal 15",
+        check("EVENT STOPPED files signal 15 0",
               sub.read_until("EVENT STOPPED") ==
-              "EVENT STOPPED files signal 15")
+              "EVENT STOPPED files signal 15 0")
         check("pid file removed", wait_for(
             "pid gone", lambda: not (run / "files.pid").exists()))
         check("APP STOPPED logged",
@@ -279,8 +306,8 @@ def main():
         fake_host.chmod(0o755)
         c.send("LAUNCH files")
         check("LAUNCH crash-app ok", c.readline() == "OK launched files")
-        check("EVENT CRASHED files 1",
-              sub.read_until("EVENT CRASHED") == "EVENT CRASHED files 1")
+        check("EVENT CRASHED files 1 0",
+              sub.read_until("EVENT CRASHED") == "EVENT CRASHED files 1 0")
         check("APP CRASHED logged", "APP CRASHED files 1" in log_text())
 
         # 7. socket INSTALL / UNINSTALL / REINSTALL.
@@ -292,7 +319,8 @@ def main():
         check("EVENT INSTALLED crash",
               sub.read_until("EVENT INSTALLED") == "EVENT INSTALLED crash")
         c.send("LIST")
-        got = [c.readline(), c.readline(), c.readline(), c.readline()]
+        got = [c.readline(), c.readline(), c.readline(), c.readline(),
+               c.readline()]
         check("crash in LIST after install",
               any(l.startswith("APP crash|") for l in got), str(got))
         c.send("UNINSTALL crash")
@@ -344,6 +372,65 @@ def main():
             "unknown cmd",
             lambda: "APPD unknown command: BOGUS" in log_text()))
         ctl_w.close()
+
+        # 9. FOCUS + multi-instance (window fix): notes is
+        # multi-instance (singleInstance:false), files is not.
+        # Drain stale events first (the control-serial section's
+        # LAUNCHED/STOPPED lines are still in this buffer).
+        sub.drain()
+        c.send("FOCUS notes")
+        check("FOCUS stopped app refused",
+              c.readline() == "ERR not-running")
+        c.send("LAUNCH notes")
+        check("LAUNCH notes ok (1st instance)",
+              c.readline() == "OK launched notes")
+        check("EVENT LAUNCHED notes",
+              sub.read_until("EVENT LAUNCHED") == "EVENT LAUNCHED notes")
+        check("notes pid file written", (run / "notes.pid").exists())
+        c.send("LAUNCH notes")
+        check("LAUNCH notes ok (2nd instance allowed)",
+              c.readline() == "OK launched notes")
+        second_pid_files = sorted(run.glob("notes-*.pid"))
+        check("second instance pid file written",
+              len(second_pid_files) == 1, str(second_pid_files))
+        second_pid = None
+        if second_pid_files:
+            second_pid = second_pid_files[0].name[len("notes-"):-len(".pid")]
+        c.send("FOCUS notes")
+        check("FOCUS notes ok", c.readline() == "OK focused notes")
+        focus_ev = sub.read_until("EVENT FOCUS")
+        check("EVENT FOCUS notes targets the newest instance",
+              second_pid is not None and
+              focus_ev == f"EVENT FOCUS notes {second_pid}", focus_ev)
+        check("FOCUS logged", wait_for(
+            "FOCUS log",
+            lambda: f"APPD focusing notes (pid {second_pid})" in log_text()))
+        # A second launch of the single-instance app is still refused.
+        c.send("LAUNCH files")
+        check("LAUNCH files ok", c.readline() == "OK launched files")
+        c.send("LAUNCH files")
+        check("double launch of single-instance app refused",
+              c.readline() == "ERR already-running")
+        c.send("CLOSE files")
+        check("CLOSE files ok (2nd time)",
+              c.readline() == "OK closed files")
+        check("files stopped after close",
+              sub.read_until("EVENT STOPPED") ==
+              "EVENT STOPPED files signal 15 0")
+        # CLOSE notes closes BOTH instances: the first STOPPED
+        # carries remaining 1, the second remaining 0.
+        c.send("CLOSE notes")
+        check("CLOSE notes ok", c.readline() == "OK closed notes")
+        check("first notes STOPPED carries remaining 1",
+              sub.read_until("EVENT STOPPED") ==
+              "EVENT STOPPED notes signal 15 1")
+        check("second notes STOPPED carries remaining 0",
+              sub.read_until("EVENT STOPPED") ==
+              "EVENT STOPPED notes signal 15 0")
+        check("notes pid files removed", wait_for(
+            "notes pid files gone",
+            lambda: not (run / "notes.pid").exists() and
+            not list(run.glob("notes-*.pid"))))
         c.close()
         sub.close()
     finally:

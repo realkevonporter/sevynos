@@ -63,23 +63,35 @@ OVERRIDES = {
         "protected": True,
         "sign": True,
         "permissions": ["cli.exec"],
+        "singleInstance": False,
     },
     "settings": {"permissions": ["cli.exec"]},
-    "files": {"permissions": ["status.read", "cli.exec"]},
-    "browser": {"permissions": ["cli.exec"]},
+    "files": {"permissions": ["status.read", "cli.exec"],
+              "singleInstance": False},
+    "browser": {"permissions": ["cli.exec"], "singleInstance": False},
+    # Notes is a template app (no own hbc) — multi-instance like
+    # Files/Terminal/Browser, so it gets the flag here.
+    "notes": {"singleInstance": False},
 }
 
 
 def parse_apps_ts():
-    """Parse the one-line APPS entries out of apps.ts."""
+    """Parse the APPS entries out of apps.ts.
+
+    Entries are one logical object each (they may span lines after
+    prettier); fields are id, name, color, glyph, in that order, with
+    an optional trailing `singleInstance: true|false` after glyph.
+    """
     text = APPS_TS.read_text()
     apps = []
     pat = re.compile(
         r'\{\s*id:\s*"([^"]+)",\s*name:\s*"([^"]+)",\s*'
-        r'color:\s*"([^"]+)",\s*glyph:\s*"([^"]+)"\s*\}')
+        r'color:\s*"([^"]+)",\s*glyph:\s*"([^"]+)"'
+        r'(?:,\s*singleInstance:\s*(true|false))?,?\s*\}')
     for m in pat.finditer(text):
         apps.append({"id": m.group(1), "name": m.group(2),
-                     "color": m.group(3), "glyph": m.group(4)})
+                     "color": m.group(3), "glyph": m.group(4),
+                     "singleInstance": m.group(5) != "false"})
     if not apps:
         raise SystemExit(f"no apps parsed from {APPS_TS}")
     return apps
@@ -196,6 +208,8 @@ def main():
                 "glyph": app["glyph"],
                 "system": ov.get("system", False),
                 "protected": ov.get("protected", False),
+                "singleInstance": ov.get(
+                    "singleInstance", app.get("singleInstance", True)),
                 "permissions": ov.get("permissions", []),
                 "bundleHash": sha256_hex(app_hbc),
             }

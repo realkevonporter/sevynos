@@ -15,7 +15,7 @@
 //      is refused (allowed=0 denied=2, AID DENIED lines for
 //      app.uninstall + system.reboot), nothing reaches appd, and
 //      files is still installed.
-//   4. Swap through the Settings UI: Tab x5 to plan-ai + Enter, the
+//   4. Swap through the Settings UI: Tab x8 to plan-ai + Enter, the
 //      SETTINGS ai=plan-ai log line, and the aid control serial
 //      reads the new selection back (STATUS).
 //   5. Backend B (plan-ai) via the Terminal, same boot, no rebuild:
@@ -887,7 +887,7 @@ async function main() {
     check("boundary: files is still installed", !!listed, listed || "");
   }
 
-  // 4. Swap through the Settings UI: Tab x5 to plan-ai + Enter, then
+  // 4. Swap through the Settings UI: Tab x8 to plan-ai + Enter, then
   // read the new selection back over the aid control serial.
   {
     const launched = await appdCmd(b, "LAUNCH settings", /APPD LAUNCH OK settings/);
@@ -918,7 +918,10 @@ async function main() {
   }
   // M9: the Wi-Fi section comes first in Settings, so its Scan button
   // is focusable before the channel buttons — the focus order is now
-  // [X, Scan, Nightly, Stable, echo-ai, plan-ai]. Tab x6 -> plan-ai.
+  // [—, ▢, X, Scan, Nightly, Stable, echo-ai, plan-ai]. Tab x8 ->
+  // plan-ai.
+  await key("tab");
+  await key("tab");
   await key("tab");
   await key("tab");
   await key("tab");

@@ -31,6 +31,9 @@ declare global {
     glyph: string;
     system: boolean;
     protected: boolean;
+    // Per-app single-instance flag (false = multi-instance:
+    // Files, Terminal, Notes, Browser). Absent on old list lines.
+    singleInstance: boolean;
     permissions: string[];
   }
 
@@ -82,8 +85,22 @@ declare global {
     onWindowResize(fn: (ev: { width: number; height: number }) => void): void;
     listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
+    // Focus a running app (dock click on a running single-instance
+    // app): appd raises its window. False when it is not running.
+    focusApp(appId: string): boolean;
     onAppEvent(fn: (line: string) => void): void;
     closeApp(): boolean;
+    // Window state (app windows only): minimize hides the window
+    // (a dock click restores it through the focus path); maximize /
+    // unmaximize ask the compositor. windowState is the host's
+    // tracked state ("normal" | "maximized" | "minimized"); the
+    // renderer subscribes via onWindowState and re-renders the
+    // title bar when it changes.
+    minimizeApp(): boolean;
+    maximizeApp(): boolean;
+    unmaximizeApp(): boolean;
+    windowState: string;
+    onWindowState(fn: (ev: { state: string }) => void): void;
     log(msg: string): void;
   };
 }

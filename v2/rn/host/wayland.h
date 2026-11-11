@@ -102,11 +102,42 @@ class Wayland {
   // painters, and fire the size handler. A no-op for the current
   // size. The output mode is the shell's size — see outputWidth().
   void resize(int width, int height);
+  // Remap (window-focus fix): destroy the wl_surface/xdg_toplevel
+  // and create a fresh one (same title/app id/size). Weston's
+  // desktop-shell activates a newly mapped toplevel and raises it
+  // above the fullscreen shell — Weston 13 does NOT implement
+  // xdg_activation_v1 (verified: the global is never advertised),
+  // so re-creating the surface is the only Wayland-correct way to
+  // raise a covered window. The painters survive (their SHM fds are
+  // independent of the surface); a pending present is flushed by
+  // the new surface's first configure. A maximized window is
+  // re-maximized on the new surface.
+  void remap();
+  // Window state (xdg_toplevel): minimize hides the window (a dock
+  // click restores it via remap); maximize/unmaximize toggle the
+  // maximized state, which the compositor confirms through the
+  // configure states array (see maximized()).
+  void minimize();
+  void maximize();
+  void unmaximize();
+  bool maximized() const { return maximized_; }
+  // Fired when the compositor's configure changes the maximized
+  // flag (maximize/unmaximize, or a title-bar drag that restores
+  // a maximized window). The host forwards it to JS.
+  using WindowStateHandler = std::function<void(bool maximized)>;
+  void setWindowStateHandler(WindowStateHandler h) {
+    windowStateHandler_ = h;
+  }
   // Preferred output mode (0,0 when no wl_output mode arrived).
   int outputWidth() const { return outputWidth_; }
   int outputHeight() const { return outputHeight_; }
 
  private:
+  // Create the wl_surface + xdg_surface + xdg_toplevel for the
+  // current width_/height_/title_/appId_/fullscreen_ and collect the
+  // initial configure. Used by the constructor and by remap().
+  void createSurface();
+
   void onFrameDone();
   void onBufferRelease(int index);
   void doPresent();
@@ -236,7 +267,64 @@ class Wayland {
   uint32_t pendingBg_ = 0;
 
   bool framePending_ = false;
+  // The pending frame callback (owned here so remap() can destroy
+  // it: destroying the surface leaves the callback orphaned, and a
+  // stale framePending_ would block every later frame request).
+  wl_callback* frameCallback_ = nullptr;
   bool configured_ = false;
+
+  // Maximized state from the compositor's configure states array
+  // (xdg_toplevel state MAXIMIZED). Set only by the configure
+  // handler — never assumed from a maximize() call.
+  bool maximized_ = false;
+  // While remap() recreates the surface, the new surface's initial
+  // configure carries no states — suppress the state handler there
+  // so a maximized window does not flicker to "restored" mid-remap.
+  bool suppressWindowState_ = false;
+  // While a maximize/unmaximize is in flight (set_*_maximized sent,
+  // configure not yet processed), presents are deferred (see
+  // doPresent). A commit at the OLD size after the request but
+  // before the configure poisons the compositor's reposition: Weston
+  // applies the maximized position only on the first post-configure
+  // commit at the new size, and an old-size commit in between leaves
+  // the window at its cascade position at the new size (verified
+  // against Weston 13 with a minimal client: an old-size commit
+  // 2ms after set_maximized breaks it; a second new-size commit
+  // 250ms later is harmless). The button-press release re-render
+  // presents exactly such an old-size frame, so the gate has to live
+  // here, not in the JS. Cleared by onXdgToplevelConfigure.
+  bool sizeChangePending_ = false;
+  // After a maximize/unmaximize configure, commit once more when the
+  // frame callback for the first frame at the new size fires. The
+  // compositor (Weston on DRM) repositions a window on commit, but
+  // the first post-configure commit can land before it has armed
+  // the reposition — the window then sits at its cascade position
+  // at the new size until a later commit (in CI the maximized
+  // calculator only reached (0,0) when the Files launch
+  // re-evaluated the scene). A settle commit after the first
+  // presented frame gives the compositor a second,
+  // definitely-armed chance. Set on any maximize/unmaximize
+  // configure, consumed once in onFrameDone.
+  bool maximizeSettlePending_ = false;
+  // Pre-maximize size, saved when a maximize configure lands. On
+  // unmaximize Weston may send a configure with no size (0,0) or
+  // echo the maximized size; without a saved size the host would
+  // keep the maximized size and the window would stay fullscreen
+  // (its header at y=0, invisible to the check's y0=48 band).
+  int savedWidth_ = 0;
+  int savedHeight_ = 0;
+  // Set in onXdgToplevelConfigure when an unmaximize configure
+  // carries no size (or echoes the maximized size): the host must
+  // restore to the saved pre-maximize size, but NOT in that
+  // handler. The compositor only clears its maximized bookkeeping
+  // when the client acks the configure (onXdgSurfaceConfigure),
+  // and committing 800x500 before the ack makes Weston raise
+  // xdg_wm_base error 4 ("geometry does not match the configured
+  // maximized state") and kill the connection. So the resize is
+  // deferred to onXdgSurfaceConfigure, which acks first and then
+  // applies the pending restore.
+  bool restorePending_ = false;
+  WindowStateHandler windowStateHandler_;
 
   // Either Shift key held (evdev 42 left, 54 right). The host reads no
   // xkb keymap, so modifiers are tracked by keycode here and forwarded
@@ -255,11 +343,14 @@ class Wayland {
   // M9 window geometry: the title bar is 44px on every app surface
   // (template + Settings/Terminal/Files/Browser), and the close X
   // lives in the rightmost ~40px of it. The move region is the title
-  // bar minus that close zone; the resize zones are 8px strips on
+  // bar minus the button zone; the resize zones are 8px strips on
   // the right and bottom edges (+ the bottom-right corner). Minimum
   // window size after a resize drag.
+  // The button zone is 100px: three 28px buttons (minimize,
+  // maximize/restore, close) + 12px right padding. A press inside
+  // it must reach the JS Pressables, never start a move drag.
   static constexpr int kTitleBarHeight = 44;
-  static constexpr int kCloseZoneWidth = 48;
+  static constexpr int kCloseZoneWidth = 100;
   static constexpr int kResizeEdge = 8;
   static constexpr int kMinWidth = 480;
   static constexpr int kMinHeight = 320;

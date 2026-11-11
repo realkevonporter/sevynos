@@ -930,7 +930,15 @@ function handleAppEvent(line) {
   if (kind === "LAUNCHED") {
     if (!running.includes(id)) running = [...running, id];
   } else if (kind === "STOPPED" || kind === "CRASHED") {
-    running = running.filter((r) => r !== id);
+    // "EVENT STOPPED <id> <exit> <remaining>" — remaining is the
+    // instances of this id still running (multi-instance apps).
+    // Keep the dock dot while any instance is alive; the field is
+    // absent on old event lines, which behave as before (0). The
+    // signal form carries an extra word ("EVENT STOPPED <id> signal
+    // <n> <remaining>"), so the index depends on parts[3].
+    const remIdx = parts[3] === "signal" ? 5 : 4;
+    const remaining = parts.length > remIdx ? Number(parts[remIdx]) || 0 : 0;
+    if (remaining <= 0) running = running.filter((r) => r !== id);
   } else if (kind === "INSTALLED" || kind === "UNINSTALLED") {
     try {
       apps = Sevyn.listApps() || [];
@@ -951,6 +959,43 @@ function handleAppEvent(line) {
       fn();
     } catch (e) {
       Sevyn.log("apps listener failed: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+  SevynReconciler.flushSyncWork();
+  presentRoot();
+}
+
+// Window state store for useSyncExternalStore. The snapshot is
+// {maximized: boolean} — an app's title bar shows ▢ or ❐ from it.
+// The host reports changes via Sevyn.onWindowState (maximize /
+// unmaximize / a title-bar drag restoring a maximized window);
+// Sevyn.windowState ("normal" | "maximized" | "minimized") is the
+// initial value. Minimized never reaches this store (a minimized
+// window is hidden; the dock restores it through the focus path).
+let windowStateSnapshot = null;
+const windowStateListeners = new Set();
+function getWindowStateSnapshot() {
+  if (!windowStateSnapshot) {
+    windowStateSnapshot = { maximized: Sevyn.windowState === "maximized" };
+  }
+  return windowStateSnapshot;
+}
+function subscribeWindowState(fn) {
+  windowStateListeners.add(fn);
+  return () => windowStateListeners.delete(fn);
+}
+function handleWindowState(ev) {
+  const maximized = !!(ev && ev.state === "maximized");
+  const prev = getWindowStateSnapshot();
+  if (prev.maximized === maximized) return;
+  windowStateSnapshot = { maximized };
+  for (const fn of Array.from(windowStateListeners)) {
+    try {
+      fn();
+    } catch (e) {
+      Sevyn.log(
+        "window-state listener failed: " + (e && e.message ? e.message : String(e)),
+      );
     }
   }
   SevynReconciler.flushSyncWork();
@@ -1178,6 +1223,7 @@ function render(element, options) {
   Sevyn.onStatus(handleStatus);
   if (typeof Sevyn.onScroll === "function") Sevyn.onScroll(scrollAt);
   if (typeof Sevyn.onAppEvent === "function") Sevyn.onAppEvent(handleAppEvent);
+  if (typeof Sevyn.onWindowState === "function") Sevyn.onWindowState(handleWindowState);
   // M9 surface resize: the host resized the painters already; re-size
   // the root Yoga node and re-present at the new size. The event
   // carries the new size (Sevyn.width/height are updated too).
@@ -1382,6 +1428,8 @@ module.exports = {
   getStatusSnapshot,
   subscribeApps,
   getAppsSnapshot,
+  subscribeWindowState,
+  getWindowStateSnapshot,
   // Exposed for tests: the live instance map and present pass.
   _instancesByYogaId: instancesByYogaId,
   _presentRoot: presentRoot,

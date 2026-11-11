@@ -26,6 +26,10 @@
  *   protected     bool, default false — honoured ONLY for system apps
  *                 with a trusted signature (a regular app cannot make
  *                 itself undeletable by claiming protected)
+ *   singleInstance bool, default true — a single-instance app can
+ *                 have only one window open at a time (appd refuses
+ *                 a second launch); false opts the app into
+ *                 multi-instance (Files, Terminal, Notes, Browser)
  *   permissions   array of strings, each from the known set
  *                 {"status.read"} — unknown permissions refuse install
  *   bundleHash    sha256 hex of app.hbc; the loader verifies it
@@ -300,6 +304,7 @@ struct manifest {
     char *glyph;
     int system;
     int protected_;
+    int single_instance; /* default true; false = multi-instance */
     char **permissions;
     size_t npermissions;
     char *bundle_hash;
@@ -460,6 +465,8 @@ static int parse_manifest(const jval_t *obj, struct manifest *m, char *err,
     m->system = v ? json_bool(v, 0) : 0;
     v = json_obj_get(obj, "protected");
     m->protected_ = v ? json_bool(v, 0) : 0;
+    v = json_obj_get(obj, "singleInstance");
+    m->single_instance = v ? json_bool(v, 1) : 1;
     v = json_obj_get(obj, "permissions");
     if (v) {
         if (v->type != J_ARR) {
@@ -614,6 +621,7 @@ struct reg_entry {
     char *glyph; /* 1-4 byte tile letter (default "?") */
     int system;
     int protected_;
+    int single_instance; /* default true when the field is absent */
     char **permissions;
     size_t npermissions;
     char *sig_key_id; /* NULL when unsigned */
@@ -741,6 +749,7 @@ static int registry_load(struct registry *r, char *err, size_t errcap)
         e->glyph = strdup(glyph ? glyph : "?");
         e->system = json_bool(json_obj_get(o, "system"), 0);
         e->protected_ = json_bool(json_obj_get(o, "protected"), 0);
+        e->single_instance = json_bool(json_obj_get(o, "singleInstance"), 1);
         const jval_t *perms = json_obj_get(o, "permissions");
         if (perms && perms->type == J_ARR) {
             size_t pn = json_arr_len(perms);
@@ -812,10 +821,12 @@ static int registry_save(struct registry *r, char *err, size_t errcap)
         REG_APPEND("%s{\"id\":\"%s\",\"name\":\"%s\",\"version\":\"%s\","
                    "\"path\":\"%s\",\"color\":\"%s\",\"glyph\":\"%s\","
                    "\"system\":%s,\"protected\":%s,"
+                   "\"singleInstance\":%s,"
                    "\"permissions\":[",
                    i ? "," : "", eid, ename, ever, epath, ecolor, eglyph,
                    e->system ? "true" : "false",
-                   e->protected_ ? "true" : "false");
+                   e->protected_ ? "true" : "false",
+                   e->single_instance ? "true" : "false");
         free(eid);
         free(ename);
         free(ever);
@@ -866,6 +877,24 @@ static int registry_save(struct registry *r, char *err, size_t errcap)
 
 /* --- running check (pid file written by appd) --- */
 
+/* True when a pid file names a live process: the first instance's
+ * <id>.pid, or a later instance's <id>-<pid>.pid (multi-instance
+ * apps). A stale file (dead pid) does not count. */
+static int pid_file_live(const char *full)
+{
+    size_t len = 0;
+    char *data = read_file(full, &len);
+    if (!data)
+        return 0;
+    long pid = strtol(data, NULL, 10);
+    free(data);
+    if (pid <= 0)
+        return 0;
+    if (kill((pid_t)pid, 0) == 0)
+        return 1;
+    return errno != ESRCH && errno != EPERM ? 1 : 0;
+}
+
 static int app_running(const char *id)
 {
     char *path = path_join(g_run_dir, "");
@@ -878,19 +907,42 @@ static int app_running(const char *id)
         return 0;
     }
     snprintf(full, n + 1, "%s%s.pid", path, id);
-    free(path);
-    size_t len = 0;
-    char *data = read_file(full, &len);
+    int live = pid_file_live(full);
     free(full);
-    if (!data)
-        return 0;
-    long pid = strtol(data, NULL, 10);
-    free(data);
-    if (pid <= 0)
-        return 0;
-    if (kill((pid_t)pid, 0) == 0)
+    if (live) {
+        free(path);
         return 1;
-    return errno != ESRCH && errno != EPERM ? 1 : 0;
+    }
+    /* Multi-instance: scan for <id>-<pid>.pid files. */
+    DIR *d = opendir(path);
+    if (!d) {
+        free(path);
+        return 0;
+    }
+    size_t idlen = strlen(id);
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL && !live) {
+        const char *name = de->d_name;
+        if (strncmp(name, id, idlen) != 0 || name[idlen] != '-')
+            continue;
+        size_t l = strlen(name);
+        if (l < idlen + 6 || strcmp(name + l - 4, ".pid") != 0)
+            continue;
+        int digits = 1;
+        for (size_t i = idlen + 1; i < l - 4; i++)
+            if (!isdigit((unsigned char)name[i]))
+                digits = 0;
+        if (!digits)
+            continue;
+        char *pf = path_join(path, name);
+        if (pf) {
+            live = pid_file_live(pf);
+            free(pf);
+        }
+    }
+    closedir(d);
+    free(path);
+    return live;
 }
 
 /* --- unzip --- */
@@ -1108,6 +1160,7 @@ static int cmd_install(const char *bundle_path)
         e->system = m.system;
         /* protected is honoured only for trusted system apps. */
         e->protected_ = (m.protected_ && m.system && trusted) ? 1 : 0;
+        e->single_instance = m.single_instance;
         e->npermissions = m.npermissions;
         e->permissions = (char **)calloc(m.npermissions ? m.npermissions : 1,
                                          sizeof(char *));
@@ -1230,8 +1283,9 @@ static int cmd_list(void)
     }
     for (size_t i = 0; i < reg.n; i++) {
         struct reg_entry *e = &reg.entries[i];
-        printf("%s|%s|%s|%s|%s|system=%d|protected=%d|perms=", e->id, e->name,
-               e->version, e->color, e->glyph, e->system, e->protected_);
+        printf("%s|%s|%s|%s|%s|system=%d|protected=%d|single=%d|perms=",
+               e->id, e->name, e->version, e->color, e->glyph, e->system,
+               e->protected_, e->single_instance);
         for (size_t j = 0; j < e->npermissions; j++)
             printf("%s%s", j ? "," : "", e->permissions[j]);
         printf("|key=%s\n", e->sig_key_id ? e->sig_key_id : "-");

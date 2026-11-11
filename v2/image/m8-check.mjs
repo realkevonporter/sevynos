@@ -273,9 +273,14 @@ async function readState() {
   // journal may not have flushed yet and debugfs can return an
   // empty/stale read. Retry generously (the guest syncs within a
   // few seconds) instead of crashing on a transient empty parse.
+  // 30 attempts: the old 5-attempt budget (~5s) lost a CI run to a
+  // live-disk read hazard — all 5 reads failed even though the last
+  // write was ~2 min earlier and the final image was correct.
   let lastErr = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  let lastLen = -1;
+  for (let attempt = 0; attempt < 30; attempt++) {
     const { stdout } = await execAsync("debugfs", ["-R", "cat /slot-state.json", DISK]);
+    lastLen = stdout.length;
     try {
       return JSON.parse(stdout);
     } catch (e) {
@@ -283,7 +288,9 @@ async function readState() {
       await sleep(1000);
     }
   }
-  throw new Error(`readState: slot-state.json never parsed (last: ${lastErr})`);
+  throw new Error(
+    `readState: slot-state.json never parsed (last: ${lastErr}, stdoutLen=${lastLen})`,
+  );
 }
 
 async function dumpSlot(slot, tag) {

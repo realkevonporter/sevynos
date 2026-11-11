@@ -318,13 +318,16 @@ check("close X calls Sevyn.closeApp()", () => {
     glyph: "F",
     permissions: ["status.read"],
   });
-  // The X is the only pressable in the app window (28x28).
+  // The title bar has three pressables (— / ▢ / ✕, each 28x28);
+  // the X is the rightmost.
   const pressables = last.ops.filter(
     (o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect",
   );
-  assert.equal(pressables.length, 1, "one pressable (the X)");
-  const x = pressables[0];
-  assert.equal(x.w, 28, "X button is 28 wide");
+  assert.equal(pressables.length, 3, "three title-bar buttons (— ▢ ✕)");
+  for (const b of pressables) {
+    assert.equal(b.w, 28, "title-bar button is 28 wide");
+  }
+  const x = pressables.reduce((a, b) => (b.x > a.x ? b : a));
   Sevyn._handlers.pointer({
     type: "button",
     x: x.x + 2,
@@ -501,8 +504,9 @@ check("settings: channel switch applies and logs", () => {
   assert.ok(texts.includes("echo-ai"), "echo-ai button shown");
   assert.ok(texts.includes("plan-ai"), "plan-ai button shown");
   // M9: the Wi-Fi Scan button is the second focusable, so the order
-  // is [X, Scan, Nightly, Stable, echo-ai, plan-ai].
-  pressTab(4); // X, Scan, Nightly, Stable
+  // is [—, ▢, X, Scan, Nightly, Stable, echo-ai, plan-ai] (the two
+  // window buttons lead the title bar).
+  pressTab(6); // —, ▢, X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS channel=stable"),
@@ -514,9 +518,10 @@ check("settings: channel switch applies and logs", () => {
     texts.some((t) => t.includes("Channel set to stable.")),
     "confirmation shown",
   );
-  // Focus order is now [X, Scan, Nightly, Stable, echo-ai, plan-ai]:
-  // Stable -> echo-ai -> plan-ai -> X -> Scan -> Nightly.
-  pressTab(5);
+  // Focus order is now [—, ▢, X, Scan, Nightly, Stable, echo-ai,
+  // plan-ai]: Stable -> echo-ai -> plan-ai -> — -> ▢ -> X -> Scan ->
+  // Nightly.
+  pressTab(7);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> echo-ai -> plan-ai: swap the AI through the
@@ -561,7 +566,7 @@ check("files: lists a real directory, navigates into it", () => {
   );
   assert.ok(texts.includes("slot-state.json"), "file entry shown");
   assert.ok(Sevyn._logs.includes("FILES listed /data (2)"), "initial listing logged");
-  pressTab(3); // X, .., m4-files-test
+  pressTab(5); // —, ▢, X, .., m4-files-test
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("FILES listed /data/m4-files-test (1)"),

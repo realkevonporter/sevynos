@@ -9,6 +9,7 @@
 
 import * as React from "react";
 import { View, Text, Pressable, ScrollView } from "./host";
+import { WindowButtons } from "./window-buttons";
 import { runCli } from "./cli";
 
 type Entry = { type: string; name: string };
@@ -79,6 +80,7 @@ export function Files(): React.ReactElement {
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Files
         </Text>
+        <WindowButtons />
         <Pressable
           onPress={() => {
             Sevyn.closeApp();

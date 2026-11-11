@@ -32,6 +32,7 @@
 import * as React from "react";
 import { View, Text, Pressable, ScrollView, TextInput } from "./host";
 import { scrollTo } from "../../rn/renderer/sevyn-renderer";
+import { WindowButtons } from "./window-buttons";
 import { runCli, parseField } from "./cli";
 
 const MAX_LINES = 500;
@@ -205,6 +206,7 @@ export function Terminal(): React.ReactElement {
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Terminal
         </Text>
+        <WindowButtons />
         <Pressable
           onPress={() => {
             Sevyn.closeApp();

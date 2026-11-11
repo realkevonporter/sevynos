@@ -14,8 +14,10 @@ namespace {
 const char* kSockPath = "/run/sevyn-apps.sock";
 
 // Split a "|" list line ("id|name|version|color|glyph|system=0|
-// protected=0|perms=a,b|key=...") into an AppInfo. Returns false when
-// the line does not have the expected shape.
+// protected=0|single=1|perms=a,b|key=...") into an AppInfo. Returns
+// false when the line does not have the expected shape. The single=
+// field is optional (absent = single-instance, the old-registry
+// default); when present it sits between protected= and perms=.
 bool parseAppLine(const std::string& line, AppInfo& out) {
   std::vector<std::string> parts;
   size_t start = 0;
@@ -37,8 +39,18 @@ bool parseAppLine(const std::string& line, AppInfo& out) {
   out.glyph = parts[4];
   out.system = parts[5] == "system=1";
   out.protected_ = parts[6] == "protected=1";
-  if (parts[7].rfind("perms=", 0) == 0) {
-    std::string perms = parts[7].substr(6);
+  // The perms= field is parts[7] on old lines (no single=) and
+  // parts[8] when single= is present. Find it by prefix instead of
+  // by position so both shapes parse.
+  size_t permsIdx = 7;
+  if (parts[7].rfind("single=", 0) == 0) {
+    out.singleInstance = parts[7] != "single=0";
+    if (parts.size() < 10)
+      return false;
+    permsIdx = 8;
+  }
+  if (parts[permsIdx].rfind("perms=", 0) == 0) {
+    std::string perms = parts[permsIdx].substr(6);
     size_t s = 0;
     while (s < perms.size()) {
       size_t comma = perms.find(',', s);
@@ -180,6 +192,15 @@ bool AppClient::launchApp(const std::string& id) {
       command({"LAUNCH " + id}, 10, 200);
   for (const auto& line : reply) {
     if (line.rfind("OK launched", 0) == 0)
+      return true;
+  }
+  return false;
+}
+
+bool AppClient::focusApp(const std::string& id) {
+  std::vector<std::string> reply = command({"FOCUS " + id}, 10, 200);
+  for (const auto& line : reply) {
+    if (line.rfind("OK focused", 0) == 0)
       return true;
   }
   return false;

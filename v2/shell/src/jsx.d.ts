@@ -31,6 +31,9 @@ declare global {
     glyph: string;
     system: boolean;
     protected: boolean;
+    // Per-app single-instance flag (false = multi-instance:
+    // Files, Terminal, Notes, Browser). Absent on old list lines.
+    singleInstance: boolean;
     permissions: string[];
   }
 
@@ -77,6 +80,9 @@ declare global {
     exec(cmdline: string): string;
     listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
+    // Focus a running app (dock click on a running single-instance
+    // app): appd raises its window. False when it is not running.
+    focusApp(appId: string): boolean;
     onAppEvent(fn: (line: string) => void): void;
     closeApp(): boolean;
     log(msg: string): void;
