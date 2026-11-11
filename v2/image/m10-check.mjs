@@ -1097,11 +1097,23 @@ async function main() {
   check("comms: login as @alice:test.local against the mock homeserver", !!loginOk);
 
   // Messages lists the mock rooms, and the RCS card states the
-  // staging honestly (never a working state).
-  const msgsOps = await appRun(
-    "messages",
-    "--name Messages --color #22c55e --glyph M --permissions cli.exec",
-  );
+  // staging honestly (never a working state). RETRY the probe: on
+  // CI's 2-vCPU TCG runner the host is too starved right after
+  // login to render the app in one attempt (round 3: "no ops"
+  // even though the daemon + mock were up and the CLI worked) —
+  // the load settles and a later attempt succeeds (the post-hangup
+  // probe in round 3 returned ops). 3 attempts, 30 s apart.
+  let msgsOps = null;
+  for (let attempt = 0; attempt < 3 && !msgsOps; attempt++) {
+    if (attempt > 0) await sleep(30000);
+    msgsOps = await appRun(
+      "messages",
+      "--name Messages --color #22c55e --glyph M --permissions cli.exec",
+    );
+    if (msgsOps && !opsTexts(msgsOps).some((t) => t.includes("Alice & Bob"))) {
+      msgsOps = null; // rendered but the rooms had not synced yet — retry
+    }
+  }
   const msgsTexts = opsTexts(msgsOps);
   check(
     "comms: Messages lists the mock rooms (Alice & Bob)",
@@ -1125,18 +1137,37 @@ async function main() {
   // Open a thread by tapping the room card in a headless run (the
   // M9 calculator pattern: coordinates from the first probe's ops,
   // taps via an input file, waitComplete for the final screen).
+  // Retries: if the room-list ops are missing (starved host) the
+  // tap has no coordinates, so re-probe the list first; if the
+  // tap run itself returns no ops, retry the whole open once.
   const openThread = async (roomText) => {
-    const center = msgsOps ? textCenter(msgsOps, roomText) : null;
-    const rect = center ? pressableFor(msgsOps, center.x, center.y) : null;
-    if (!rect) return null;
-    const input = `1000 tap ${Math.round(rect.x)} ${Math.round(rect.y)}`;
-    await termCmd(b, `files write /tmp/m10-in-msgs.txt ${input}`);
-    return appRun(
-      "messages",
-      "--name Messages --color #22c55e --glyph M --permissions cli.exec --input /tmp/m10-in-msgs.txt",
-      10,
-      true,
-    );
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let ops = msgsOps;
+      if (!ops) {
+        ops = await appRun(
+          "messages",
+          "--name Messages --color #22c55e --glyph M --permissions cli.exec",
+        );
+        if (ops) msgsOps = ops;
+      }
+      const center = ops ? textCenter(ops, roomText) : null;
+      const rect = center ? pressableFor(ops, center.x, center.y) : null;
+      if (!rect) {
+        if (attempt < 2) await sleep(30000);
+        continue;
+      }
+      const input = `1000 tap ${Math.round(rect.x)} ${Math.round(rect.y)}`;
+      await termCmd(b, `files write /tmp/m10-in-msgs.txt ${input}`);
+      const threadOps = await appRun(
+        "messages",
+        "--name Messages --color #22c55e --glyph M --permissions cli.exec --input /tmp/m10-in-msgs.txt",
+        10,
+        true,
+      );
+      if (threadOps) return threadOps;
+      if (attempt < 2) await sleep(30000);
+    }
+    return null;
   };
 
   // Alice sends to the plain DM; the thread probe must show it.
