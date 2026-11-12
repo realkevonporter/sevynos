@@ -544,7 +544,7 @@ async function screenSettled(b, timeoutMs = 30000) {
         x1: img.width,
         y1: 48,
       });
-      const dockBg = countColor(img, 16, 16, 20, 10, {
+      const dockBg = countColor(img, 57, 57, 59, 10, {
         x0: 0,
         y0: 672,
         x1: img.width,
@@ -774,10 +774,11 @@ async function main() {
       x1: shotDead.width,
       y1: 48,
     });
-    // The dock's background #101014 is indistinguishable from
-    // Weston's desktop background (16,16,16) at tolerance 10, so the
-    // dock is proven gone by its tiles instead: the first dock tile
-    // is Browser blue #0ea5e9, which vanishes with the shell.
+    // The dock is a floating glass pill now, so its glass interior
+    // (57,57,59) IS distinguishable from Weston's desktop background
+    // (16,16,16) at tolerance 10 — but the dock is still proven gone
+    // by its tiles, which vanish with the shell: the first dock tile
+    // is Browser blue #0ea5e9 (64x64 since the dock redesign).
     const deadTile = countColor(shotDead, 14, 165, 233, 12, {
       x0: 0,
       y0: 672,
@@ -1033,7 +1034,7 @@ async function main() {
     x1: imgFinal.width,
     y1: 48,
   });
-  const fDock = countColor(imgFinal, 16, 16, 20, 10, {
+  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
     x0: 0,
     y0: 672,
     x1: imgFinal.width,

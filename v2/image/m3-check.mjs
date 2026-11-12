@@ -9,8 +9,8 @@
 //   2. The shell surface is on screen: top bar, main area, and dock
 //      colours are all present. The dock is appd-driven now, so the
 //      first tile is Browser (alphabetical registry order) — its blue
-//      (#0ea5e9) is fully visible and the dock's right edge is the
-//      scroll chevron, not a half-cut tile.
+//      (#0ea5e9) is fully visible. The dock is a floating glass pill
+//      that shrinks its tiles to fit: no scroll chevron, no cut tile.
 //   3. Keys reach the shell: Tab + Enter (no pointer yet) launches the
 //      first tile — LAUNCH browser, and the app's own host logs
 //      SEVYNOS_M3_APP_READY browser. The app window is on screen: the
@@ -171,7 +171,7 @@ function diffBox(a, b, box) {
 
 // Find an app window's header bar: rows in the main area (below the
 // shell top bar, above the dock) with >700 pixels of the app colour.
-// A dock tile is 80 wide and the glyph tile 96 — only the 800-wide
+// A dock tile is 64 wide and the glyph tile 96 — only the 800-wide
 // header bar clears 700. Returns {top, bottom, left, right} or null.
 function findWindowHeader(img, r, g, b) {
   const { width: W, pixels } = img;
@@ -460,9 +460,19 @@ async function main() {
       await sleep(1000);
       continue;
     }
-    // Top bar #15151c (21,21,28); dock #101014 (16,16,20).
+    // Top bar #15151c (21,21,28); dock glass (57,57,59) — the pill
+    // interior: the edge ring's #ffffff14 paints under the pill,
+    // then the pill's own #ffffff1f fill composites over it. The
+    // band is the bottom 128px of the frame — the pill sits at the
+    // bottom with an 8px margin, so this holds at any surface size
+    // (CI runs at 1280x800, not 1024x768).
     topBar = countColor(img, 21, 21, 28, 10, { x0: 0, y0: 0, x1: img.width, y1: 48 });
-    dockBg = countColor(img, 16, 16, 20, 10, { x0: 0, y0: 672, x1: img.width, y1: 768 });
+    dockBg = countColor(img, 57, 57, 59, 10, {
+      x0: 0,
+      y0: img.height - 128,
+      x1: img.width,
+      y1: img.height,
+    });
     if (topBar > 10000 && dockBg > 2000) break;
     await sleep(1000);
   }
@@ -480,37 +490,85 @@ async function main() {
     `topBar=${topBar} dockBg=${dockBg}`,
   );
 
+  // Dock geometry, mirroring v2/shell/src/Dock.tsx (same constants):
+  // the pill is centered, so its position depends on the frame size —
+  // CI runs at 1280x800, not 1024x768, and hardcoding 1024 geometry
+  // fails there (the first tile lands at x212, not x84, and the pill
+  // extends past x984). Everything below derives from W/H.
+  const scaleAtDistance = (d) => {
+    if (d >= 2.2) return 1;
+    const t = 1 - d / 2.2;
+    const f = t * t * (3 - 2 * t);
+    return Math.round((1 + 0.6 * f) / 0.05) * 0.05;
+  };
+  const maxScaleSum = (n) => {
+    const mid = (n - 1) / 2;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += scaleAtDistance(Math.abs(i - mid));
+    return sum;
+  };
+  const restingTileSize = (n, surfaceWidth) => {
+    const cap = surfaceWidth - 2 * 24;
+    const fixed = 2 * 8 + (n - 1) * 8;
+    return Math.max(40, Math.min(64, Math.floor((cap - fixed) / maxScaleSum(n))));
+  };
+  const restingPillWidth = (n, tile) => 2 * 8 + n * tile + (n - 1) * 8;
+  const restingPillHeight = (tile) => 2 * 8 + tile + 4 + 6;
+  const dockGeom = (n) => {
+    const tile = restingTileSize(n, W);
+    const pillW = restingPillWidth(n, tile);
+    const pillH = restingPillHeight(tile);
+    const pillX = Math.floor((W - pillW) / 2);
+    const pillTop = H - 8 - pillH;
+    return { tile, pillW, pillH, pillX, pillTop };
+  };
+  const dockBand = { x0: 0, y0: H - 128, x1: W, y1: H };
+  const g16 = dockGeom(16);
+
   // The dock is appd-driven now: registry order is the alphabetical
   // seed order, so the first tile is Browser (#0ea5e9 = 14,165,233).
-  const browserBlue = countColor(img, 14, 165, 233, 12, {
-    x0: 44,
-    y0: 680,
-    x1: 124,
-    y1: 760,
+  // Tile 0 sits at (pillX + 8, pillTop + 1 + 8); at 1280x800 that
+  // is x76..139, y712..775 (at 1024x768 it was x84..148, y677..743).
+  // The pill floats and centres (no glass at the far edges) and
+  // there is no scroll chevron.
+  const tile0 = {
+    x0: g16.pillX + 8,
+    y0: g16.pillTop + 1 + 8,
+    x1: g16.pillX + 8 + g16.tile,
+    y1: g16.pillTop + 1 + 8 + g16.tile,
+  };
+  const browserBlue = countColor(img, 14, 165, 233, 12, tile0);
+  const glassLeft = countColor(img, 57, 57, 59, 10, {
+    x0: 0,
+    y0: dockBand.y0,
+    x1: Math.max(0, g16.pillX - 8),
+    y1: H,
   });
-  const rightChevron = countColor(img, 31, 41, 55, 10, {
-    // M9: the shell flex-sizes to the surface (no longer a fixed
-    // 1024px), so the dock — and its right chevron — sit at the
-    // image's right edge, not at x988..1016. The chevron is 28px wide
-    // with 8px dock padding, so it spans img.width-36..img.width-8.
-    x0: img.width - 36,
-    y0: 680,
-    x1: img.width - 8,
-    y1: 760,
+  const glassRight = countColor(img, 57, 57, 59, 10, {
+    x0: g16.pillX + g16.pillW + 8,
+    y0: dockBand.y0,
+    x1: W,
+    y1: H,
   });
+  const chevron = countColor(img, 31, 41, 55, 10, dockBand);
   check(
     "dock: first tile fully visible (Browser blue)",
     browserBlue > 1000,
     `blue pixels=${browserBlue}`,
   );
   check(
-    "dock: right edge is the scroll chevron, not a cut tile",
-    rightChevron > 1000,
-    `chevron pixels=${rightChevron}`,
+    "dock: floating pill, no glass at the far edges",
+    glassLeft < 100 && glassRight < 100,
+    `glassLeft=${glassLeft} glassRight=${glassRight}`,
+  );
+  check(
+    "dock: no scroll chevron in the dock band",
+    chevron < 100,
+    `chevron pixels=${chevron}`,
   );
 
   // Baseline browser-blue count for the window-appears check below
-  // (the dock tile alone contributes ~6400).
+  // (the dock tile alone contributes ~4096).
   const blueBefore = countColor(img, 14, 165, 233, 12);
 
   // 3. Keyboard: Tab from no-focus lands on the first tile; Enter
@@ -520,17 +578,15 @@ async function main() {
   // keyboard focus at boot but no activation until a pointer button
   // press lands on it, so click the main area first (it has no
   // pressable, so nothing launches and focus stays unset).
-  // Tab THREE times, not twice: the renderer's focus list is the tree
-  // order, and the tray POWER button is focusable list[0] (shutdown
-  // fix), the dock's LEFT CHEVRON is list[1] — the first tile is
-  // list[2]. Two Tabs + Enter would just scroll the dock.
+  // Tab TWICE: the renderer's focus list is the tree order, and the
+  // tray POWER button is focusable list[0] (shutdown fix) — with no
+  // scroll chevrons the first tile is list[1]. One Tab + Enter would
+  // land on the power button; three would overshoot to the second tile.
   {
     const before = logLines().length;
     await moveTo(512, 300, W, H); // main area (welcome text), no pressable
     await sleep(300);
     await click();
-    await sleep(300);
-    await key("tab");
     await sleep(300);
     await key("tab");
     await sleep(300);
@@ -717,7 +773,7 @@ async function main() {
   {
     const imgAlive = await shot(qmp, join(OUT, "m3-shot-after-crash.ppm"));
     const t = countColor(imgAlive, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-    const d = countColor(imgAlive, 16, 16, 20, 10, { x0: 0, y0: 672, x1: W, y1: 768 });
+    const d = countColor(imgAlive, 57, 57, 59, 10, { x0: 0, y0: H - 128, x1: W, y1: H });
     check(
       "sandbox: shell still on screen after app crash",
       t > 10000 && d > 2000,
@@ -790,7 +846,12 @@ async function main() {
   const shotFinal = join(OUT, "m3-shot-final.ppm");
   const imgFinal = await shot(qmp, shotFinal);
   const fTop = countColor(imgFinal, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-  const fDock = countColor(imgFinal, 16, 16, 20, 10, { x0: 0, y0: 672, x1: W, y1: 768 });
+  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+    x0: 0,
+    y0: H - 128,
+    x1: W,
+    y1: H,
+  });
   check(
     "screen: shell still visible at end",
     fTop > 10000 && fDock > 2000,

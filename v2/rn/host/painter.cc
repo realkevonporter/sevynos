@@ -429,6 +429,16 @@ void Painter::drawImage(const DrawOp& op) {
   auto img = loadImage(op.asset);
   if (!img || img->w <= 0 || img->h <= 0 || !pixels_)
     return;
+  // Bilinear sampling (dock redesign: icons magnify, so icon art is
+  // drawn at non-native sizes — nearest-neighbour would crunch it).
+  // Premultiplied-alpha interpolation keeps transparent edges clean.
+  // At exactly 1:1 scale the sample lands on texel centres, so
+  // unmagnified art reproduces the source pixels exactly.
+  auto texel = [&](int ix, int iy) {
+    ix = std::min(std::max(ix, 0), img->w - 1);
+    iy = std::min(std::max(iy, 0), img->h - 1);
+    return img->rgba.data() + ((size_t)iy * img->w + ix) * 4;
+  };
   int x0 = std::max(0, (int)floorf(op.x));
   int y0 = std::max(0, (int)floorf(op.y));
   int x1 = std::min(width_, (int)ceilf(op.x + op.w));
@@ -437,12 +447,30 @@ void Painter::drawImage(const DrawOp& op) {
     for (int x = x0; x < x1; x++) {
       float sx = (x + 0.5f - op.x) / op.w * img->w - 0.5f;
       float sy = (y + 0.5f - op.y) / op.h * img->h - 0.5f;
-      int ix = std::min(std::max((int)floorf(sx), 0), img->w - 1);
-      int iy = std::min(std::max((int)floorf(sy), 0), img->h - 1);
-      const uint8_t* px =
-          img->rgba.data() + ((size_t)iy * img->w + ix) * 4;
-      uint32_t color = ((uint32_t)px[0] << 24) | ((uint32_t)px[1] << 16) |
-          ((uint32_t)px[2] << 8) | px[3];
+      int ix = (int)floorf(sx);
+      int iy = (int)floorf(sy);
+      float fx = sx - (float)ix;
+      float fy = sy - (float)iy;
+      const uint8_t* ps[4] = {texel(ix, iy), texel(ix + 1, iy),
+                              texel(ix, iy + 1), texel(ix + 1, iy + 1)};
+      float ws[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy,
+                     fx * fy};
+      float a = 0, r = 0, g = 0, b = 0;
+      for (int k = 0; k < 4; k++) {
+        float pa = ps[k][3] / 255.0f;
+        a += ws[k] * pa;
+        r += ws[k] * ps[k][0] * pa;
+        g += ws[k] * ps[k][1] * pa;
+        b += ws[k] * ps[k][2] * pa;
+      }
+      if (a <= 0.001f)
+        continue;
+      uint8_t cr = (uint8_t)std::min(255.0f, r / a);
+      uint8_t cg = (uint8_t)std::min(255.0f, g / a);
+      uint8_t cb = (uint8_t)std::min(255.0f, b / a);
+      uint8_t ca = (uint8_t)(a * 255.0f);
+      uint32_t color = ((uint32_t)cr << 24) | ((uint32_t)cg << 16) |
+                       ((uint32_t)cb << 8) | ca;
       blendPixel(x, y, color, 255);
     }
   }

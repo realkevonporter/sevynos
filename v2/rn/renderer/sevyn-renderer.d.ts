@@ -47,3 +47,20 @@ export interface WindowStateSnapshot {
 }
 export function subscribeWindowState(fn: () => void): () => void;
 export function getWindowStateSnapshot(): WindowStateSnapshot;
+// Pointer-move subscribers (the dock's magnification). A listener
+// receives {x, y} and returns true only when it changed state.
+export interface PointerMoveEvent {
+  x: number;
+  y: number;
+}
+export function subscribePointerMove(
+  fn: (ev: PointerMoveEvent) => boolean | void,
+): () => void;
+// Surface-size store for useSyncExternalStore (the dock's
+// shrink-to-fit); the snapshot is replaced on host resize.
+export interface SurfaceSizeSnapshot {
+  width: number;
+  height: number;
+}
+export function subscribeSurfaceSize(fn: () => void): () => void;
+export function getSurfaceSizeSnapshot(): SurfaceSizeSnapshot;
