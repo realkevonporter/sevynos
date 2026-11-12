@@ -81,6 +81,30 @@ static int utf8_put(char **buf, size_t *len, size_t *cap, unsigned cp)
     return 1;
 }
 
+/* Append one raw byte to a growing buffer. Raw bytes are already
+ * UTF-8; they must be copied through unchanged, NOT fed to utf8_put
+ * as code points — utf8_put would re-encode each byte >= 0x80 as its
+ * own 2-byte sequence, doubling the string on every parse/save
+ * round-trip. (That is what corrupted the installer's "↓" glyph:
+ * 3 bytes became ~2000 after the seed, until its APP line overflowed
+ * appd's LIST buffer and swallowed the messages line.) */
+static int buf_put_byte(char **buf, size_t *len, size_t *cap, unsigned char c)
+{
+    if (*len + 2 > *cap) {
+        size_t ncap = *cap ? *cap * 2 : 32;
+        while (ncap < *len + 2)
+            ncap *= 2;
+        char *nb = (char *)realloc(*buf, ncap);
+        if (!nb)
+            return 0;
+        *buf = nb;
+        *cap = ncap;
+    }
+    (*buf)[(*len)++] = (char)c;
+    (*buf)[*len] = '\0';
+    return 1;
+}
+
 static char *parse_string_raw(parser_t *ps)
 {
     /* ps->p points at the opening quote. */
@@ -184,8 +208,9 @@ static char *parse_string_raw(parser_t *ps)
             }
             continue;
         }
-        /* Raw byte (part of a UTF-8 sequence or ASCII). */
-        if (!utf8_put(&buf, &len, &cap, c)) {
+        /* Raw byte (part of a UTF-8 sequence or ASCII). Copy through
+         * unchanged — see buf_put_byte. */
+        if (!buf_put_byte(&buf, &len, &cap, c)) {
             fail(ps, "out of memory");
             free(buf);
             return NULL;
