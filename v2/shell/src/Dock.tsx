@@ -13,10 +13,17 @@
 //
 // Tiles render from the apps prop (appd's list via the shell, or the
 // built-in fallback). A white dot under a tile marks a running app.
+//
+// Icons (direction C): each tile renders its staged app icon
+// (/usr/share/sevyn/shell/icons/<id>.png, 80x80) on top of the
+// monogram glyph. The icon is opaque, so it covers the letter when
+// present; when the file is absent the painter skips it and the
+// monogram shows through — third-party apps keep working with no icon.
 
 import * as React from "react";
-import { View, Text, Pressable, ScrollView } from "./host";
+import { View, Text, Image, Pressable, ScrollView } from "./host";
 import { type ShellApp } from "./apps";
+import { appIconPath, symbolPath } from "./icons";
 import { scrollBy } from "../../rn/renderer/sevyn-renderer";
 
 const SURFACE_WIDTH = 1024;
@@ -65,7 +72,7 @@ export function Dock(props: DockProps): React.ReactElement {
     >
       {overflow ? (
         <Pressable onPress={() => scroll(-1)} style={chevronStyle}>
-          <Text style={{ fontSize: 18, color: "#ffffff", textAlign: "center" }}>‹</Text>
+          <Image source={symbolPath("chevron-left")} style={{ width: 16, height: 24 }} />
         </Pressable>
       ) : null}
       <ScrollView
@@ -103,6 +110,16 @@ export function Dock(props: DockProps): React.ReactElement {
               >
                 {app.glyph}
               </Text>
+              <Image
+                source={appIconPath(app.id)}
+                style={{
+                  width: TILE,
+                  height: TILE,
+                  position: "absolute",
+                  left: 0,
+                  top: 0,
+                }}
+              />
             </Pressable>
             {props.running.has(app.id) ? (
               <View
@@ -120,7 +137,7 @@ export function Dock(props: DockProps): React.ReactElement {
       </ScrollView>
       {overflow ? (
         <Pressable onPress={() => scroll(1)} style={chevronStyle}>
-          <Text style={{ fontSize: 18, color: "#ffffff", textAlign: "center" }}>›</Text>
+          <Image source={symbolPath("chevron-right")} style={{ width: 16, height: 24 }} />
         </Pressable>
       ) : null}
     </View>

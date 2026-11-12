@@ -1361,6 +1361,75 @@ async function main() {
   }
   check("m9: top bar spans the full 1920 width", fsEdge);
 
+  // App icons (direction C): every dock tile paints its staged icon —
+  // a vertical gradient in the app colour with a white glyph — instead
+  // of the flat tile + monogram. The gradient is the proof: a flat
+  // tile would read the same colour at its top and bottom edges, while
+  // the icon reads lightened at the top and darkened at the bottom.
+  //
+  // Live dock order is appd's alphabetical seed order (sevyn-appd.c
+  // seed_from_pristine qsorts the *.sevyn names), NOT the apps.ts
+  // fallback order — so the list below is alphabetical by id.
+  // Tiles sit at x = 44 + i*88. Vertically the 80px tile is centred
+  // in the 96px dock row (dock top 984): y = 992..1072 when no app is
+  // running, y = 987..1067 when the running dot is shown (the dot
+  // adds 10px to the wrapper). The samples below sit inside the tile
+  // in both cases (top y=997, bottom y=1064, glyph band 999..1060).
+  const ICON_APPS = [
+    ["browser", "#0ea5e9"],
+    ["calculator", "#8b5cf6"],
+    ["calendar", "#ef4444"],
+    ["camera", "#14b8a6"],
+    ["files", "#3b82f6"],
+    ["messages", "#22c55e"],
+    ["music", "#ec4899"],
+    ["notes", "#eab308"],
+    ["photos", "#f59e0b"],
+    ["settings", "#6b7280"],
+    ["store", "#f97316"],
+    ["terminal", "#111827"],
+  ];
+  const hexRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const lighten = (rgb, f) =>
+    rgb.map((c) => Math.min(255, Math.round(c + (255 - c) * f)));
+  const darken = (rgb, f) => rgb.map((c) => Math.max(0, Math.round(c * (1 - f))));
+  const pxAt = (img, x, y) => {
+    const i = (y * img.width + x) * 3;
+    return [img.pixels[i], img.pixels[i + 1], img.pixels[i + 2]];
+  };
+  const closeTo = (a, b, tol) => a.every((v, i) => Math.abs(v - b[i]) <= tol);
+  const whiteIn = (img, x0, y0, x1, y1) => {
+    let n = 0;
+    for (let y = y0; y < y1; y++)
+      for (let x = x0; x < x1; x++) {
+        const i = (y * img.width + x) * 3;
+        if (img.pixels[i] > 200 && img.pixels[i + 1] > 200 && img.pixels[i + 2] > 200)
+          n++;
+      }
+    return n;
+  };
+  let iconsOk = !!settled;
+  const iconDetail = [];
+  if (settled) {
+    ICON_APPS.forEach(([id, color], i) => {
+      const cx = 44 + i * 88 + 40;
+      const top = pxAt(settled, cx, 997);
+      const bottom = pxAt(settled, cx, 1064);
+      const wantTop = lighten(hexRgb(color), 0.22);
+      const wantBottom = darken(hexRgb(color), 0.14);
+      const glyph = whiteIn(settled, cx - 28, 999, cx + 28, 1060);
+      const ok =
+        closeTo(top, wantTop, 14) && closeTo(bottom, wantBottom, 14) && glyph > 100;
+      if (!ok) iconsOk = false;
+      iconDetail.push(`${id}: top=${top} bottom=${bottom} white=${glyph}`);
+    });
+  }
+  check(
+    "icons: all 12 dock tiles paint their gradient icon + white glyph",
+    iconsOk,
+    settled ? iconDetail.join(" | ") : "no settled frame",
+  );
+
   // The Terminal app: open it once; every headless run is typed here.
   const term = await appdCmd(b, "LAUNCH terminal", /APPD LAUNCH OK terminal/);
   check("terminal: launch", !!term);
@@ -1469,6 +1538,13 @@ async function main() {
       settingsTexts.includes("Shut Down") &&
       settingsTexts.includes("Restart"),
     `${settingsTexts.length} texts`,
+  );
+  // Icons: the title-bar close is a drawn symbol now, not a ✕ text —
+  // the headless ops carry no ✕ text anywhere in the Settings screen.
+  check(
+    "icons: Settings title-bar close is a drawn symbol, not text",
+    !!settingsOps && !settingsTexts.includes("✕"),
+    settingsOps ? `${settingsTexts.length} texts` : "no ops",
   );
   const calcProbe = await appRun(
     "calculator",

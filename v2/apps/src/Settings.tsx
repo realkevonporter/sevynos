@@ -25,9 +25,10 @@
 // the tray power menu runs.
 
 import * as React from "react";
-import { View, Text, Pressable, ScrollView, TextInput } from "./host";
+import { View, Text, Image, Pressable, ScrollView, TextInput } from "./host";
 import { WindowButtons } from "./window-buttons";
 import { runCli, runCliAsync, parseField } from "./cli";
+import { appIconTitlePath, symbolPath } from "./icons";
 
 function readChannel(): string {
   const { out } = runCli("sevyn update status");
@@ -325,6 +326,10 @@ export function Settings(): React.ReactElement {
           paddingRight: 12,
         }}
       >
+        <Image
+          source={appIconTitlePath("settings")}
+          style={{ width: 20, height: 20, marginRight: 8 }}
+        />
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Settings
         </Text>
@@ -341,7 +346,7 @@ export function Settings(): React.ReactElement {
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
+          <Image source={symbolPath("close")} style={{ width: 16, height: 16 }} />
         </Pressable>
       </View>
       <ScrollView style={{ flex: 1 }}>

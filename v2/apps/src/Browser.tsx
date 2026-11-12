@@ -13,9 +13,10 @@
 // (Chromium's window shows the page), not by this app.
 
 import * as React from "react";
-import { View, Text, Pressable, TextInput } from "./host";
+import { View, Text, Image, Pressable, TextInput } from "./host";
 import { WindowButtons } from "./window-buttons";
 import { runCli, parseField } from "./cli";
+import { appIconTitlePath, symbolPath } from "./icons";
 
 type Tab = { id: string; title: string; url: string };
 
@@ -140,6 +141,10 @@ export function Browser(): React.ReactElement {
           paddingRight: 12,
         }}
       >
+        <Image
+          source={appIconTitlePath("browser")}
+          style={{ width: 20, height: 20, marginRight: 8 }}
+        />
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Browser
         </Text>
@@ -156,7 +161,7 @@ export function Browser(): React.ReactElement {
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
+          <Image source={symbolPath("close")} style={{ width: 16, height: 16 }} />
         </Pressable>
       </View>
       <View
@@ -196,9 +201,7 @@ export function Browser(): React.ReactElement {
                 marginLeft: 4,
               }}
             >
-              <Text style={{ fontSize: 12, color: "#0c4a6e", textAlign: "center" }}>
-                ✕
-              </Text>
+              <Image source={symbolPath("close")} style={{ width: 16, height: 16 }} />
             </Pressable>
           </Pressable>
         ))}
@@ -215,7 +218,7 @@ export function Browser(): React.ReactElement {
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 16, color: "#0c4a6e", textAlign: "center" }}>+</Text>
+          <Image source={symbolPath("plus")} style={{ width: 16, height: 16 }} />
         </Pressable>
       </View>
       <View

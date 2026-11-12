@@ -30,10 +30,11 @@
 // markers carry the parsed fields the harness asserts on.
 
 import * as React from "react";
-import { View, Text, Pressable, ScrollView, TextInput } from "./host";
+import { View, Text, Image, Pressable, ScrollView, TextInput } from "./host";
 import { scrollTo } from "../../rn/renderer/sevyn-renderer";
 import { WindowButtons } from "./window-buttons";
 import { runCli, parseField } from "./cli";
+import { appIconTitlePath, symbolPath } from "./icons";
 
 const MAX_LINES = 500;
 
@@ -203,6 +204,10 @@ export function Terminal(): React.ReactElement {
           paddingRight: 12,
         }}
       >
+        <Image
+          source={appIconTitlePath("terminal")}
+          style={{ width: 20, height: 20, marginRight: 8 }}
+        />
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Terminal
         </Text>
@@ -219,7 +224,7 @@ export function Terminal(): React.ReactElement {
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
+          <Image source={symbolPath("close")} style={{ width: 16, height: 16 }} />
         </Pressable>
       </View>
       {/* GF65 scroll fix: the scrollback renders in a ScrollView
