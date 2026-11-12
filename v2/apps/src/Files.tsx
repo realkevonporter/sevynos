@@ -8,9 +8,10 @@
 // on. Files are shown, not opened — opening is a later milestone.
 
 import * as React from "react";
-import { View, Text, Pressable, ScrollView } from "./host";
+import { View, Text, Image, Pressable, ScrollView } from "./host";
 import { WindowButtons } from "./window-buttons";
 import { runCli } from "./cli";
+import { appIconTitlePath, symbolPath } from "./icons";
 
 type Entry = { type: string; name: string };
 
@@ -77,6 +78,10 @@ export function Files(): React.ReactElement {
           paddingRight: 12,
         }}
       >
+        <Image
+          source={appIconTitlePath("files")}
+          style={{ width: 20, height: 20, marginRight: 8 }}
+        />
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           Files
         </Text>
@@ -93,7 +98,7 @@ export function Files(): React.ReactElement {
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
+          <Image source={symbolPath("close")} style={{ width: 16, height: 16 }} />
         </Pressable>
       </View>
       <View
@@ -114,7 +119,13 @@ export function Files(): React.ReactElement {
             onPress={() => navigate(parentOf(path))}
             style={{ height: 36, justifyContent: "center" }}
           >
-            <Text style={{ fontSize: 14, color: "#111827" }}>↑ ..</Text>
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <Image
+                source={symbolPath("up")}
+                style={{ width: 16, height: 16, marginRight: 4 }}
+              />
+              <Text style={{ fontSize: 14, color: "#111827" }}>..</Text>
+            </View>
           </Pressable>
         ) : null}
         {entries.map((e) =>

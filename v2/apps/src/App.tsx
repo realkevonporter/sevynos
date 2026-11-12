@@ -16,7 +16,7 @@
 // same through the host's close handler.)
 
 import * as React from "react";
-import { View, Text, Pressable, ScrollView, TextInput } from "./host";
+import { View, Text, Image, Pressable, ScrollView, TextInput } from "./host";
 import { WindowButtons } from "./window-buttons";
 import {
   subscribeStatus,
@@ -25,6 +25,13 @@ import {
   getAppsSnapshot,
 } from "../../rn/renderer/sevyn-renderer";
 import { runCli } from "./cli";
+import {
+  appIconHeroPath,
+  appIconLargePath,
+  appIconSmallPath,
+  appIconTitlePath,
+  symbolPath,
+} from "./icons";
 
 function statusText(status: { [key: string]: string }): string {
   const battery = status.battery ?? "—";
@@ -90,6 +97,16 @@ function EmptyState(props: {
         >
           {props.glyph}
         </Text>
+        <Image
+          source={appIconLargePath(Sevyn.appId)}
+          style={{
+            width: 72,
+            height: 72,
+            position: "absolute",
+            left: 0,
+            top: 0,
+          }}
+        />
       </View>
       <Text
         style={{
@@ -631,6 +648,16 @@ function Store(): React.ReactElement {
             >
               {a.glyph}
             </Text>
+            <Image
+              source={appIconSmallPath(a.id)}
+              style={{
+                width: 40,
+                height: 40,
+                position: "absolute",
+                left: 0,
+                top: 0,
+              }}
+            />
           </View>
           <Text style={{ fontSize: 15, color: "#111827", flex: 1 }}>{a.name}</Text>
           <Text style={{ fontSize: 13, color: "#6b7280", marginRight: 8 }}>
@@ -751,6 +778,16 @@ export function App(): React.ReactElement {
           >
             {Sevyn.appGlyph}
           </Text>
+          <Image
+            source={appIconHeroPath(Sevyn.appId)}
+            style={{
+              width: 96,
+              height: 96,
+              position: "absolute",
+              left: 0,
+              top: 0,
+            }}
+          />
         </View>
         <Text
           style={{
@@ -795,6 +832,10 @@ export function App(): React.ReactElement {
           paddingRight: 12,
         }}
       >
+        <Image
+          source={appIconTitlePath(Sevyn.appId)}
+          style={{ width: 20, height: 20, marginRight: 8 }}
+        />
         <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
           {name}
         </Text>
@@ -811,7 +852,7 @@ export function App(): React.ReactElement {
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 16, color: "#ffffff", textAlign: "center" }}>✕</Text>
+          <Image source={symbolPath("close")} style={{ width: 16, height: 16 }} />
         </Pressable>
       </View>
       {/* GF65 scroll fix: the stock-app body scrolls when its content

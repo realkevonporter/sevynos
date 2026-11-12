@@ -489,6 +489,28 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$CHROMIUM_DIR/chrome:/usr/share/sevyn/chromium/chrome"
 
 cp "$BUILD_TMP/shell-dist/shell.hbc" "$STAGE/usr/share/sevyn/shell/shell.hbc"
+# App icons (direction C, v2/shell/icons/build_icons.py): the dock,
+# the Store, and the title bars reference them by absolute path, so
+# they are staged with the shell. All 16 dock icons must exist or
+# the build fails — a missing icon would silently fall back to the
+# monogram in the dock and hide a broken asset.
+for f in files terminal browser settings music photos calendar notes calculator camera messages store video-calls voice-calls installer tokrah; do
+  if [ ! -f "$ROOT/shell/icons/$f.png" ]; then
+    echo "error: missing app icon $ROOT/shell/icons/$f.png (run v2/shell/icons/build_icons.py)" >&2
+    exit 1
+  fi
+done
+mkdir -p "$STAGE/usr/share/sevyn/shell/icons/large" \
+         "$STAGE/usr/share/sevyn/shell/icons/hero" \
+         "$STAGE/usr/share/sevyn/shell/icons/small" \
+         "$STAGE/usr/share/sevyn/shell/icons/title" \
+         "$STAGE/usr/share/sevyn/shell/icons/symbols"
+cp "$ROOT/shell/icons/"*.png "$STAGE/usr/share/sevyn/shell/icons/"
+cp "$ROOT/shell/icons/large/"*.png "$STAGE/usr/share/sevyn/shell/icons/large/"
+cp "$ROOT/shell/icons/hero/"*.png "$STAGE/usr/share/sevyn/shell/icons/hero/"
+cp "$ROOT/shell/icons/small/"*.png "$STAGE/usr/share/sevyn/shell/icons/small/"
+cp "$ROOT/shell/icons/title/"*.png "$STAGE/usr/share/sevyn/shell/icons/title/"
+cp "$ROOT/shell/icons/symbols/"*.png "$STAGE/usr/share/sevyn/shell/icons/symbols/"
 cp "$BUILD_TMP/pristine/"*.sevyn "$STAGE/usr/share/sevyn/pristine/"
 cp "$BUILD_TMP/test-bundles/"*.sevyn "$STAGE/usr/share/sevyn/test-bundles/"
 cp "$BUILD_TMP/trusted-keys/"*.pub "$STAGE/usr/share/sevyn/trusted-keys/"

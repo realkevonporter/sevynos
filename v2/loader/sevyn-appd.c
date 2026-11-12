@@ -817,7 +817,15 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
             char *save = NULL;
             for (char *l = strtok_r(list, "\n", &save); l;
                  l = strtok_r(NULL, "\n", &save)) {
-                snprintf(out, sizeof(out), "APP %s\n", l);
+                int n = snprintf(out, sizeof(out), "APP %s\n", l);
+                if (n >= (int)sizeof(out)) {
+                    /* Truncated: force a newline terminator so the
+                     * next APP line cannot be concatenated onto this
+                     * one (a missing terminator once swallowed the
+                     * messages line whole). */
+                    out[sizeof(out) - 2] = '\n';
+                    out[sizeof(out) - 1] = '\0';
+                }
                 reply(ctx, out);
             }
             reply(ctx, "OK list\n");

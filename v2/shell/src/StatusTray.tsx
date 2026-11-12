@@ -5,10 +5,18 @@
 // the tray re-renders exactly when status changes. The shell never
 // calls Sevyn.onStatus itself — the host exposes a single onStatus
 // handler, owned by the renderer.
+//
+// Icons: each item is a drawn symbol next to its text label (the
+// labels stay — they carry the state: "offline", the percentage, the
+// volume number). The battery used to be a 🔋 emoji; the painter's
+// font is DejaVu Sans, which has no color emoji, so it rendered
+// unreliably — it is now a drawn outline whose fill is a View sized
+// by the percentage.
 
 import * as React from "react";
-import { Text, Pressable } from "./host";
+import { View, Text, Image, Pressable } from "./host";
 import { subscribeStatus, getStatusSnapshot } from "../../rn/renderer/sevyn-renderer";
+import { symbolPath } from "./icons";
 
 export interface StatusSnapshot {
   battery?: string;
@@ -31,11 +39,36 @@ function volumeLabel(v?: string): string {
   return "Vol " + v;
 }
 
+// Battery symbol geometry (v2/shell/icons/build_icons.py): the
+// battery.png outline is 28x14; the clear area inside is x 2..22,
+// y 2..11, so the fill is a 9px-high View starting at left 2.
+const BATTERY_W = 28;
+const BATTERY_H = 14;
+const BATTERY_FILL_LEFT = 2;
+const BATTERY_FILL_TOP = 2;
+const BATTERY_FILL_H = 9;
+const BATTERY_FILL_MAX_W = 20;
+
+function batteryFillWidth(v?: string): number {
+  const n = v == null ? NaN : parseFloat(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(
+    0,
+    Math.min(BATTERY_FILL_MAX_W, Math.round((n / 100) * BATTERY_FILL_MAX_W)),
+  );
+}
+
 const itemStyle = {
+  flexDirection: "row",
+  alignItems: "center",
+  marginLeft: 16,
+} as const;
+
+const labelStyle = {
   fontSize: 13,
   color: "#d1d5db",
-  marginLeft: 16,
-};
+  marginLeft: 6,
+} as const;
 
 export interface StatusTrayProps {
   onPowerPress(): void;
@@ -48,9 +81,33 @@ export function StatusTray(props: StatusTrayProps): React.ReactElement {
   ) as StatusSnapshot;
   return (
     <React.Fragment>
-      <Text style={itemStyle}>{wifiLabel(status.wifi)}</Text>
-      <Text style={itemStyle}>{"🔋 " + batteryLabel(status.battery)}</Text>
-      <Text style={itemStyle}>{volumeLabel(status.volume)}</Text>
+      <View style={itemStyle}>
+        <Image source={symbolPath("wifi")} style={{ width: 20, height: 14 }} />
+        <Text style={labelStyle}>{wifiLabel(status.wifi)}</Text>
+      </View>
+      <View style={itemStyle}>
+        <View style={{ width: BATTERY_W, height: BATTERY_H }}>
+          <Image
+            source={symbolPath("battery")}
+            style={{ width: BATTERY_W, height: BATTERY_H }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              left: BATTERY_FILL_LEFT,
+              top: BATTERY_FILL_TOP,
+              width: batteryFillWidth(status.battery),
+              height: BATTERY_FILL_H,
+              backgroundColor: "#ffffff",
+            }}
+          />
+        </View>
+        <Text style={labelStyle}>{batteryLabel(status.battery)}</Text>
+      </View>
+      <View style={itemStyle}>
+        <Image source={symbolPath("volume")} style={{ width: 20, height: 16 }} />
+        <Text style={labelStyle}>{volumeLabel(status.volume)}</Text>
+      </View>
       {/* Power button: the tray's only pressable. A text label, not a
           symbol — the tray font (DejaVu Sans) has no power glyph
           (U+23FB), so a symbol would render as tofu. Fixed 64px wide

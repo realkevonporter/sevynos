@@ -40,13 +40,45 @@ check("shell mounts and presents the full frame", () => {
     texts.some((t) => t.includes("Wi-Fi")),
     "wifi in tray",
   );
+  // Tray symbols: wifi + battery + volume drawn next to the labels.
+  const images = last.ops.filter((o) => o.type === "image").map((o) => o.asset);
+  assert.ok(
+    images.some((a) => a.endsWith("symbols/wifi.png")),
+    "wifi symbol in tray",
+  );
+  assert.ok(
+    images.some((a) => a.endsWith("symbols/battery.png")),
+    "battery symbol in tray",
+  );
+  assert.ok(
+    images.some((a) => a.endsWith("symbols/volume.png")),
+    "volume symbol in tray",
+  );
 });
 
 check("dock shows 12 tiles and both chevrons (overflow by design)", () => {
   const last = Sevyn._presents[Sevyn._presents.length - 1];
+  const images = last.ops.filter((o) => o.type === "image").map((o) => o.asset);
+  assert.ok(
+    images.some((a) => a.endsWith("symbols/chevron-left.png")),
+    "left chevron icon",
+  );
+  assert.ok(
+    images.some((a) => a.endsWith("symbols/chevron-right.png")),
+    "right chevron icon",
+  );
+  // 12 dock icons (one per app), staged under /usr/share/sevyn/shell/icons/.
+  const tiles = images.filter(
+    (a) => a.startsWith("/usr/share/sevyn/shell/icons/") && !a.includes("symbols/"),
+  );
+  assert.equal(tiles.length, 12, "12 dock icons, got " + tiles.length);
+  // The monogram glyphs are still rendered underneath the icons: a
+  // missing icon file paints nothing, so the letter shows through
+  // (the fallback third-party apps rely on).
   const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
-  assert.ok(texts.includes("‹"), "left chevron");
-  assert.ok(texts.includes("›"), "right chevron");
+  for (const g of ["F", ">", "B", "S", "M", "P", "C", "N", "=", "O"]) {
+    assert.ok(texts.includes(g), "monogram fallback glyph " + g);
+  }
   // 12 app glyphs: F > B S M P C N = O M S (two Ms, two Ss — count tiles
   // by their pressable rects instead).
   const hits = last.ops.filter((o) => o.nodeId != null && o.nodeId >= 0);
