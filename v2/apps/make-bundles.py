@@ -76,6 +76,7 @@ OVERRIDES = {
     "messages": {"permissions": ["cli.exec"]},
     "video-calls": {"permissions": ["cli.exec"]},
     "voice-calls": {"permissions": ["cli.exec"]},
+    "installer": {"permissions": ["cli.exec"]},
 }
 
 
@@ -166,6 +167,8 @@ def main():
                     help="browser app.hbc (defaults to the template)")
     ap.add_argument("--comms-hbc", default=None,
                     help="comms app.hbc (defaults to the template)")
+    ap.add_argument("--installer-hbc", default=None,
+                    help="installer app.hbc (defaults to the template)")
     ap.add_argument("--out", required=True, help="stock bundles dir")
     ap.add_argument("--trusted-keys-dir", required=True)
     ap.add_argument("--test-bundles-dir", default=None)
@@ -191,6 +194,8 @@ def main():
                         if args.comms_hbc else hbc),
         "voice-calls": (Path(args.comms_hbc).read_bytes()
                         if args.comms_hbc else hbc),
+        "installer": (Path(args.installer_hbc).read_bytes()
+                     if args.installer_hbc else hbc),
     }
     out_dir = Path(args.out)
     trusted_dir = Path(args.trusted_keys_dir)

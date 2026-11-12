@@ -93,18 +93,18 @@ jobs:
             sevynos-v2-deps-
       - name: Build v2 native deps
         run: sh v2/rn/host/build-deps.sh
-      - name: Build v2 (M9 desktop polish) image
+      - name: Build v2 (M11 dual-boot installer) image
         env:
           TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
-          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m9-image.sh
+          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m11-image.sh
           sudo chown -R "$USER" v2/image/build
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
           sha256sum vmlinuz initramfs.cpio.gz sevynos.img > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
-          SevynOS v2 (M9 desktop polish) — bootable image
+          SevynOS v2 (M11 dual-boot installer) — bootable image
           ==============================================
           Kernel + initramfs for QEMU (x86_64), plus sevynos.img — a
           GPT USB-boot disk image for real hardware. Boots to the
@@ -145,6 +145,14 @@ jobs:
           windows drag to move and resize; the stock apps show real
           content (working calculator, real calendar, notes,
           installed-app store) instead of empty windows.
+          M11: the live image installs SevynOS ALONGSIDE Windows 11
+          without wiping it — open the Installer app (or run
+          `sevyn install probe` / `plan` / `install` in the
+          Terminal): it detects the Windows install, installs into
+          free space or replaces an existing SevynOS install, and
+          sets up a GRUB boot menu with entries for SevynOS and
+          Windows 11. It never touches the Windows partition's data
+          and never writes anything before you confirm the plan.
 
           Boot it in QEMU (4 GB RAM: Chromium + Sevyn Code run in the image):
             qemu-system-x86_64 -machine q35 -m 4096 -kernel vmlinuz \
@@ -209,7 +217,7 @@ jobs:
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
 
-            SevynOS v2 (M9 desktop polish) image: vmlinuz + initramfs.cpio.gz + sevynos.img
+            SevynOS v2 (M11 dual-boot installer) image: vmlinuz + initramfs.cpio.gz + sevynos.img
             (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
             status tray, dock with 12 apps — and dock clicks open apps
             in their own windows. Terminal, Settings, Files, and the
@@ -224,6 +232,9 @@ jobs:
             M9: full-screen desktop, wifi in Settings, movable and
             resizable windows, real app content, and in-place updates
             that sync the ESP (no USB re-flash).
+            M11: the live image installs SevynOS alongside Windows 11
+            (Installer app or `sevyn install`) with a GRUB boot menu
+            for both OSes.
             The v1 ISO below is the old
             tree's image. updates-v2.json is the v2 update feed: an
             installed v2 system checks it and updates in place (A/B
@@ -234,5 +245,5 @@ jobs:
           removeArtifacts: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
-          # The v2-* files are the M9 desktop-polish image (kernel + initramfs + GPT disk image).
+          # The v2-* files are the M11 dual-boot-installer image (kernel + initramfs + GPT disk image).
           artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"

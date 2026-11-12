@@ -4,8 +4,8 @@
 // What it proves, in order:
 //   1. The image boots, the shell mounts (SEVYNOS_M2_READY), and appd is
 //      ready with its control serial (APPD ready … ctl=/dev/ttyS2) after
-//      seeding all 14 stock bundles from pristine (12 original +
-//      M10's video-calls + voice-calls).
+//      seeding all 15 stock bundles from pristine (12 original +
+//      M10's video-calls + voice-calls + M11's installer).
 //   2. The shell surface is on screen: top bar, main area, and dock
 //      colours are all present. The dock is appd-driven now, so the
 //      first tile is Browser (alphabetical registry order) — its blue
@@ -389,8 +389,8 @@ async function main() {
     !!appdReady,
     appdReady || "APPD ready line missing or ctl=(none)",
   );
-  const seed = await waitForLog(/APPD seed complete \(14 bundles\)/, 10000);
-  check("boot: appd seeded 14 stock bundles from pristine", !!seed);
+  const seed = await waitForLog(/APPD seed complete \(15 bundles\)/, 10000);
+  check("boot: appd seeded 15 stock bundles from pristine", !!seed);
 
   const qmp = new QMP(qmpSock);
   try {

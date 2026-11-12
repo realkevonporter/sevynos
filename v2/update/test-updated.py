@@ -711,7 +711,24 @@ def main():
         "menuentry \"SevynOS\" {\n"
         "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=A\n"
         "    initrd /initramfs.cpio.gz\n"
+        "}\n"
+        # M11: a dual-boot ESP carries a Windows entry the updater
+        # must preserve verbatim across its grub.cfg rewrite.
+        "menuentry \"Windows 11\" {\n"
+        "    insmod part_gpt\n"
+        "    insmod fat\n"
+        "    search --no-floppy --fs-uuid --set=root ABCD-1234\n"
+        "    chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n"
         "}\n")
+    # M11: mounts + by-partuuid fixtures so the daemon can resolve
+    # the booted data partition's PARTUUID.
+    (tmp / "data-dev").write_bytes(b"fake-data-device\n")
+    (tmp / "mounts").write_text(
+        f"{tmp / 'data-dev'} {data2} ext4 rw 0 0\n")
+    (tmp / "by-partuuid").mkdir()
+    os.symlink(tmp / "data-dev",
+               tmp / "by-partuuid" /
+               "11111111-2222-3333-4444-555555555555")
     (tmp / "os-version").write_text("m9-esp-1\n")
     (tmp / "health.log").write_text("")
 
@@ -729,6 +746,8 @@ def main():
             "SEVYN_UPDATE_HEALTH_FILE": str(tmp / "health.log"),
             "SEVYN_UPDATE_SLOT": slot,
             "SEVYN_UPDATE_ESP_DIR": str(esp),
+            "SEVYN_UPDATE_PROC_MOUNTS": str(tmp / "mounts"),
+            "SEVYN_UPDATE_BY_PARTUUID_DIR": str(tmp / "by-partuuid"),
         }
 
     master2, slave2 = pty.openpty()
@@ -772,6 +791,14 @@ def main():
           "linux /vmlinuz.prev console=tty0 console=ttyS0 sevyn.slot=A"
           in grub and
           "initrd /initramfs.prev.cpio.gz" in grub, grub)
+    check("grub.cfg keeps the Windows 11 entry verbatim",
+          "menuentry \"Windows 11\" {" in grub and
+          "chainloader /EFI/Microsoft/Boot/bootmgfw.efi" in grub and
+          "search --no-floppy --fs-uuid --set=root ABCD-1234" in grub,
+          grub)
+    check("grub.cfg pins the data partition by PARTUUID",
+          "sevyn.data=PARTUUID=11111111-2222-3333-4444-555555555555"
+          in grub, grub)
     check("ESP sync leaves no temp files",
           not list(esp.glob("*.tmp.*")) and
           not list((esp / "EFI" / "ubuntu").glob("*.tmp.*")))
@@ -817,6 +844,10 @@ def main():
     check("grub.cfg default entry back to the good slot",
           "linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=A"
           in grub, grub)
+    check("fallback restore keeps the Windows 11 entry",
+          "menuentry \"Windows 11\" {" in grub and
+          "chainloader /EFI/Microsoft/Boot/bootmgfw.efi" in grub,
+          grub)
     os.close(master2)
     os.close(slave2)
 

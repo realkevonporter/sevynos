@@ -1,0 +1,231 @@
+# SevynOS v2 M11 — build the dual-boot installer image and prove
+# it in QEMU (Kevon, 2026-11-10: SevynOS installs ALONGSIDE Windows
+# 11 without wiping it — detect existing OSes/partitions, install
+# into free space or replace an existing SevynOS install, boot
+# selection via GRUB entries for Windows + SevynOS).
+#
+# Runs on pushes and PRs touching v2/ (the fresh build). The job builds
+# the native deps (Hermes + Yoga, cached), the shell + app bundles, the
+# loader + app daemon + update daemon + CLI + AI daemon, and the M11
+# image (the M9 image plus the installer: `sevyn install` CLI verbs,
+# the Installer system app, the dual-boot-aware updater, and the
+# sevyn.data= init handling), then runs the m11-check harness:
+#   0. the host gate on the CI host: v2/update/test-install.py
+#      (38 host checks against mock Windows disks) +
+#      v2/update/test-updated.py (the updater's dual-boot changes);
+#   1. the regression boot: -kernel/-initrd + the data disk — the M9
+#      stack still intact and the Installer app registered;
+#   2. UEFI live boot + mock Windows disk 1 (Windows ESP + NTFS +
+#      free space): install into free space in-guest; host-side proof
+#      the Windows partitions are byte-identical, the new SevynOS ESP
+#      + data partitions exist, grub.cfg lists both OSes with a
+#      sevyn.data=PARTUUID= pin, and the UEFI boot entry was created;
+#   3. UEFI boot, target disk 1 only: the GRUB menu lists both, the
+#      default boot reaches the shell with /data on the new
+#      partition, and selecting Windows chainloads the mock Windows
+#      bootloader (a GRUB binary standing in for bootmgfw.efi);
+#   4. UEFI live boot + mock Windows disk 2 (Windows + old SevynOS,
+#      no free space): replace the old install; Windows untouched;
+#   5. UEFI boot, target disk 2 only: menu lists both, default boot
+#      reaches the shell;
+#   6. the fallback: the updater restores the ESP from the good slot
+#      on a dual-boot disk — proving it finds the SEVYNESP, not the
+#      Windows ESP — and the restored grub.cfg keeps the Windows
+#      entry.
+# Boot logs, the target disks, and the JSON result are kept as
+# artifacts. sevynos.img itself is NOT uploaded here (1.5 GiB) — the
+# nightly (public-build.yml) publishes it on merge.
+#
+# QEMU has no Windows: the mock disks stand in for it, and the mock
+# bootmgfw.efi is an unsigned GRUB binary (built by the harness with
+# grub-mkimage). A real Windows 11 boot from the chainloader entry
+# and real firmware boot-order behaviour are Kevon's GF65
+# verification after merge — the PR body says so.
+#
+# Tokrah is a PRIVATE repo — CI clones it with the TOKRAH_READ_TOKEN
+# secret (a read-only repo-scoped PAT; Kevon's one-time action), because
+# the image build bundles Tokrah (as M9's did). If the secret is absent
+# the job fails loudly with instructions instead of silently skipping
+# it. The built Tokrah bundle is NEVER committed to this repo; it is
+# built fresh in the job and lives only in the build dir.
+name: SevynOS v2 M11
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m11.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-m11.yml"
+
+jobs:
+  m11-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          # setup-node v5 defaults package-manager-cache to true and
+          # auto-detects pnpm from the repo root's packageManager field —
+          # but this job uses npm only (v2/rn/renderer, v2/shell) and
+          # never installs pnpm, so the cache step fails with "Unable to
+          # locate executable file: pnpm". The Hermes/Yoga deps cache is
+          # handled by the actions/cache step below.
+          package-manager-cache: false
+
+      - name: Install build + boot dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            g++ \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwayland-dev \
+            wayland-protocols \
+            libfreetype-dev \
+            libpng-dev \
+            libssl-dev \
+            weston \
+            seatd \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data \
+            e2fsprogs \
+            curl \
+            unzip \
+            ca-certificates \
+            fontconfig \
+            libnss3 \
+            libnspr4 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libatspi2.0-0 \
+            libcups2 \
+            libasound2t64 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libdbus-1-3 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libxfixes3 \
+            libgbm1 \
+            libdrm2 \
+            libxkbcommon0 \
+            libexpat1 \
+            libxcb1 \
+            libxext6 \
+            libfontconfig1 \
+            libfreetype6 \
+            libharfbuzz0b \
+            libudev1 \
+            libglib2.0-0 \
+            libx11-6 \
+            libxi6 \
+            libxrender1 \
+            libxtst6 \
+            libxss1 \
+            ovmf \
+            wpasupplicant \
+            iw \
+            grub-efi-amd64-signed \
+            grub-efi-amd64 \
+            shim-signed \
+            dosfstools \
+            gdisk \
+            mtools \
+            efibootmgr \
+            ntfs-3g
+
+      - name: Clone Tokrah (private — read-only PAT)
+        run: |
+          if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
+            echo "::error::TOKRAH_READ_TOKEN is not set. Add a read-only repo-scoped PAT as the TOKRAH_READ_TOKEN secret on realkevonporter/sevynos (Kevon's one-time action) — the M11 image build cannot bundle Tokrah without it, and the Tokrah proof must not be skipped silently."
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
+
+      - name: Install yarn (Tokrah's pinned 1.22.22)
+        run: |
+          # yarn 1.22 refuses to run inside a checkout whose
+          # package.json pins a different manager (sevynos pins
+          # pnpm@11.17.0) — corepack failed the same way, and
+          # running from /tmp does not help. Install yarn
+          # globally with npm, then run every yarn command from
+          # the Tokrah consumer app dir, whose package.json pins
+          # yarn@1.22.22. The clone ROOT has no package.json, so
+          # yarn walks up from there and hits sevynos's pnpm pin.
+          # Sevynos itself stays pnpm.
+          npm install -g yarn@1.22.22
+          cd "$GITHUB_WORKSPACE/tokrah/tokrah"
+          yarn config set registry https://registry.npmjs.org
+
+      - name: Cache native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevynos-v2-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}-hermes-0.13.0-yoga-41118bd
+          restore-keys: |
+            sevynos-v2-deps-
+
+      - name: Build native deps
+        run: sh v2/rn/host/build-deps.sh
+
+      - name: Renderer + shell + apps JS checks
+        run: |
+          cd v2/rn/renderer && npm ci --no-audit --no-fund && npm test
+          cd ../../shell && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+          cd ../apps && npm ci --no-audit --no-fund && npm run typecheck && npm run build && npm test
+
+      - name: Loader + appd + updater checks
+        run: |
+          python3 v2/loader/test-loader.py
+          python3 v2/loader/test-appd.py
+          python3 v2/ai/test-aid.py
+          python3 v2/update/test-updated.py
+          python3 v2/update/test-browser.py
+
+      - name: Build the M11 image
+        env:
+          TOKRAH_SRC: ${{ github.workspace }}/tokrah
+        run: |
+          # The harness boots the built image as version m11-test-1,
+          # so the image and the check agree on the version string.
+          sudo env SEVYN_V2_VERSION=m11-test-1 TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m11-image.sh
+
+      - name: Run the M11 check in QEMU
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create m11-boot-*.log (EACCES — the M1 failure mode).
+          sudo chown -R "$USER" v2/image/build
+          node v2/image/m11-check.mjs
+
+      - name: Upload M11 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-m11
+          path: |
+            v2/image/build/m11-boot-*.log
+            v2/image/build/m11-uefi-boot-*.log
+            v2/image/build/m11-check.json
+            v2/image/build/m11-data.img
+            v2/image/build/m11-target1.img
+            v2/image/build/m11-target2.img
+          if-no-files-found: warn

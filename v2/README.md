@@ -1,8 +1,8 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M9 merged (PR #96 + PR #97, 2026-11-10). M10 in progress (PR-ready: KVM check8 40/40 + TCG check24 40/40, 2026-11-11) (comms apps).**
+**Status: M10 merged (PR #101, 2026-11-11). M11 in progress (dual-boot installer).**
 M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
-#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). M4.5 merged 2026-11-07 (PR #91). M5 merged 2026-11-08 (PR #92). M6 merged 2026-11-09 (PR #93). M7 merged 2026-11-09 (PR #94). M9 merged 2026-11-10 (PR #96 + #97). This directory is
+#84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). M4.5 merged 2026-11-07 (PR #91). M5 merged 2026-11-08 (PR #92). M6 merged 2026-11-09 (PR #93). M7 merged 2026-11-09 (PR #94, bare-metal boot verified on the MSI GF65 Thin 9SD). M9 merged 2026-11-10 (PR #96, desktop polish + in-place updates on bare metal; + PR #97, Public build wpasupplicant + iw). M10 merged 2026-11-11 (PR #101, comms apps). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
 architecture and criteria as the original build, **zero old code reused**
 — Sevyn owns the full context from line one, so a fix in one place never
@@ -242,6 +242,23 @@ feed ships unsigned and installed systems refuse it (fail-closed):
   (sevynos.img) boots from USB under UEFI with Secure Boot ON. The old
   public-milestone scope (image published, install guide, first
   external user) is OUT of M7, deferred.
+- **M9 — Desktop polish + in-place updates on bare metal.** Full-screen
+  desktop at panel native resolution; wifi in Settings; windows movable
+  - resizable; stock apps show real content; the A/B updater syncs the
+    ESP so an installed system updates itself in place.
+- **M10 — Comms apps (in progress, parallel branch).** Matrix client +
+  RCS (staged) — SevynOS's FaceTime / FaceTime Audio / iMessage
+  equivalents; names TBD.
+- **M11 — Dual-boot installer (in progress, this branch).** The live
+  image installs SevynOS ALONGSIDE Windows 11 without wiping it:
+  `sevyn install` CLI verbs (probe / plan / install / status) + the
+  Installer system app; installs into free space or replaces an
+  existing SevynOS install; GRUB boot menu with SevynOS + Windows 11;
+  the updater finds the SevynOS ESP by label and preserves the Windows
+  entry. Never touches the Windows partition's data; nothing writes
+  before explicit confirmation. Proven by `m11-check.mjs` in CI
+  (mock Windows disks — QEMU has no Windows); real Windows 11
+  dual-boot is Kevon's GF65 verification after merge.
 
 ## Build + boot the empty image (M0)
 
