@@ -1431,63 +1431,102 @@ async function main() {
       }
     return n;
   };
-  // Find a dock tile by its gradient top colour (position-free).
-  // Gradient tiles never contain the exact base colour, so a finder
-  // on the base colour returns null for every tile. The tile's TOP
-  // rows sit near lighten(base, 0.22): scan the band just below the
-  // dock top (the tile top in both the plain and running-dot
-  // layouts) for the longest run of columns each holding >=4
-  // matching pixels. Returns {x, yTop} (tile centre x, tile top
-  // row) or null. Top colours are pairwise distinct at tol 14
-  // across all 16 apps, so the lookup is unambiguous — but the
-  // find itself uses at most tol 8: in a gradient's middle rows a
-  // neighbour's top colour can come within 14 (tokrah's top is
-  // within 14 of calendar's mid-gradient), while a true tile still
-  // matches >=6 rows at tol 8 and the closest cross-app approach
-  // in the scan band is 9+.
+  // Find a dock tile by its gradient (position-free). Gradient
+  // tiles never contain the exact base colour, so a finder on the
+  // base colour returns null for every tile. The finder tries the
+  // lightened TOP colour in the top band AND the darkened BOTTOM
+  // colour in the bottom band, and takes the longer run: a window
+  // can cover the TOP of the dock (its bottom edge lands mid-tile),
+  // hiding the top rows — the bottom rows stay visible. Returns
+  // {x, yTop} (tile centre x, tile top row) or null. Both colours
+  // are pairwise distinct at tol 8 across all 16 apps, so the
+  // lookup is unambiguous — but the find itself uses at most tol 8:
+  // in a gradient's middle rows a neighbour's top colour can come
+  // within 14 (tokrah's top is within 14 of calendar's
+  // mid-gradient), while a true tile still matches >=6 rows at
+  // tol 8 and the closest cross-app approach in the scan band is 9+.
   const findDockTile = (img, r, g, bl, tol = 14) => {
     const ftol = Math.min(tol, 8);
     const { width: W, height: H, pixels } = img;
-    const want = lighten([r, g, bl], 0.22);
     const y0 = H - 96;
-    const colCount = new Array(W).fill(0);
-    for (let y = y0 + 6; y <= y0 + 21; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 3;
-        if (
-          Math.abs(pixels[i] - want[0]) <= ftol &&
-          Math.abs(pixels[i + 1] - want[1]) <= ftol &&
-          Math.abs(pixels[i + 2] - want[2]) <= ftol
-        ) {
-          colCount[x]++;
+    const scanBand = (want, yStart, yEnd) => {
+      const colCount = new Array(W).fill(0);
+      for (let y = yStart; y <= yEnd; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 3;
+          if (
+            Math.abs(pixels[i] - want[0]) <= ftol &&
+            Math.abs(pixels[i + 1] - want[1]) <= ftol &&
+            Math.abs(pixels[i + 2] - want[2]) <= ftol
+          ) {
+            colCount[x]++;
+          }
         }
       }
-    }
-    let best = null;
-    let runStart = -1;
-    for (let x = 0; x <= W; x++) {
-      const dense = x < W && colCount[x] >= 4;
-      if (dense && runStart < 0) runStart = x;
-      if (!dense && runStart >= 0) {
-        const run = { x0: runStart, x1: x - 1 };
-        if (!best || run.x1 - run.x0 > best.x1 - best.x0) best = run;
-        runStart = -1;
+      let best = null;
+      let runStart = -1;
+      for (let x = 0; x <= W; x++) {
+        const dense = x < W && colCount[x] >= 4;
+        if (dense && runStart < 0) runStart = x;
+        if (!dense && runStart >= 0) {
+          const run = { x0: runStart, x1: x - 1 };
+          if (!best || run.x1 - run.x0 > best.x1 - best.x0) best = run;
+          runStart = -1;
+        }
       }
+      if (!best || best.x1 - best.x0 < 40) return null;
+      return best;
+    };
+    const wantTop = lighten([r, g, bl], 0.22);
+    const wantBottom = darken([r, g, bl], 0.14);
+    const topRun = scanBand(wantTop, y0 + 6, y0 + 21);
+    const botRun = scanBand(wantBottom, y0 + 60, y0 + 88);
+    let run = null;
+    let fromTop = true;
+    if (topRun && botRun) {
+      if (botRun.x1 - botRun.x0 > topRun.x1 - topRun.x0) {
+        run = botRun;
+        fromTop = false;
+      } else {
+        run = topRun;
+      }
+    } else if (topRun) {
+      run = topRun;
+    } else if (botRun) {
+      run = botRun;
+      fromTop = false;
     }
-    if (!best || best.x1 - best.x0 < 40) return null;
-    const cx = Math.round((best.x0 + best.x1) / 2);
-    // Tile top: first row at the centre column matching the top colour.
+    if (!run) return null;
+    const cx = Math.round((run.x0 + run.x1) / 2);
     let yTop = -1;
-    for (let y = y0; y <= y0 + 26; y++) {
-      const i = (y * W + cx) * 3;
-      if (
-        Math.abs(pixels[i] - want[0]) <= ftol &&
-        Math.abs(pixels[i + 1] - want[1]) <= ftol &&
-        Math.abs(pixels[i + 2] - want[2]) <= ftol
-      ) {
-        yTop = y;
-        break;
+    if (fromTop) {
+      // Tile top: first row at the centre column matching the top colour.
+      for (let y = y0; y <= y0 + 26; y++) {
+        const i = (y * W + cx) * 3;
+        if (
+          Math.abs(pixels[i] - wantTop[0]) <= ftol &&
+          Math.abs(pixels[i + 1] - wantTop[1]) <= ftol &&
+          Math.abs(pixels[i + 2] - wantTop[2]) <= ftol
+        ) {
+          yTop = y;
+          break;
+        }
       }
+    } else {
+      // Tile top from the bottom edge: last row matching the bottom
+      // colour at the centre column, minus the 80px tile height.
+      let yBot = -1;
+      for (let y = y0 + 60; y <= y0 + 90; y++) {
+        const i = (y * W + cx) * 3;
+        if (
+          Math.abs(pixels[i] - wantBottom[0]) <= ftol &&
+          Math.abs(pixels[i + 1] - wantBottom[1]) <= ftol &&
+          Math.abs(pixels[i + 2] - wantBottom[2]) <= ftol
+        ) {
+          yBot = y;
+        }
+      }
+      if (yBot >= 0) yTop = yBot - 79;
     }
     if (yTop < 0) return null;
     return { x: cx, yTop };

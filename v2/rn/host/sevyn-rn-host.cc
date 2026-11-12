@@ -1111,6 +1111,16 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
                 size_t) {
            std::vector<AppInfo> apps =
                appClient_ ? appClient_->listApps() : std::vector<AppInfo>{};
+           // Diagnostic (icons PR #102): the dock showed 15 apps
+           // while appd lists 16 — log what the host returns so the
+           // next CI run pins the gap to the host or the shell.
+           std::string ids;
+           for (const auto& a : apps) {
+             if (!ids.empty())
+               ids += ",";
+             ids += a.id;
+           }
+           logLine("HOST listApps %zu apps: %s", apps.size(), ids.c_str());
            jsi::Array arr(rt, apps.size());
            for (size_t i = 0; i < apps.size(); i++) {
              jsi::Object o(rt);

@@ -911,6 +911,16 @@ function getAppsSnapshot() {
     } catch (e) {
       apps = [];
     }
+    // Diagnostic (icons PR #102): the dock showed 15 apps while
+    // appd lists 16 — log what the shell's snapshot holds so the
+    // next CI run pins the gap to the host, the bridge, or the shell.
+    try {
+      Sevyn.log(
+        "apps snapshot " + apps.length + " apps: " + apps.map((a) => a.id).join(","),
+      );
+    } catch (e) {
+      // Logging must never break the snapshot.
+    }
     appsSnapshot = { apps, running: [], lastEvent: null, seq: 0 };
   }
   return appsSnapshot;
