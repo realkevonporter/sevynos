@@ -657,6 +657,11 @@ cat >"$STAGE/init" <<'EOF'
 /bin/busybox mount -t devtmpfs devtmpfs /dev
 /bin/busybox mount -t tmpfs tmpfs /run
 mkdir -p /run /tmp
+# wpa_cli's compiled-in default ctrl path is /var/run/wpa_supplicant
+# while the daemon creates its socket at /run/wpa_supplicant — link
+# the two so a bare wpa_cli/iw invocation (no -p) finds the socket
+# too. sevyn.c passes -p explicitly; this is belt-and-braces.
+/bin/busybox ln -s /run /var/run 2>/dev/null || true
 # Chromium uses /dev/shm for shared memory (even with
 # --disable-dev-shm-usage the renderer maps small shm files).
 mkdir -p /dev/shm
@@ -769,7 +774,10 @@ for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v '^lo$'); do
       printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n' > /data/wifi/wpa_supplicant.conf
       chmod 0600 /data/wifi/wpa_supplicant.conf
     fi
-    /usr/sbin/wpa_supplicant -B -i "$iface" -c /data/wifi/wpa_supplicant.conf -Dnl80211 2>/dev/null && echo "M9 init: wpa_supplicant started on $iface" || echo "M9 init: wpa_supplicant failed on $iface (continuing)"
+    # wpa_supplicant's stderr is NOT swallowed: a daemon-side failure
+    # must land on the console instead of masquerading as "no hardware"
+    # (the 2>/dev/null here used to hide exactly that).
+    /usr/sbin/wpa_supplicant -B -i "$iface" -c /data/wifi/wpa_supplicant.conf -Dnl80211 && echo "M9 init: wpa_supplicant started on $iface" || echo "M9 init: wpa_supplicant failed on $iface (continuing)"
     ;;
   esac
 done
