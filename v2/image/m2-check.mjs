@@ -13,10 +13,15 @@
 // What it proves, in order:
 //   1. The image boots and the shell mounts (SEVYNOS_M2_READY on serial).
 //   2. The shell surface is on screen: top bar, main area, and dock
-//      colours are all present in the first screendump.
-//   3. The dock never overflows: with 12 apps the first tile is fully
-//      visible and the dock's right edge is the scroll chevron, not a
-//      half-cut tile.
+//      colours are all present in the first screendump. The dock is
+//      a floating glass pill — its interior reads (57,57,59): the
+//      edge ring (#ffffff14) paints under the pill too, then the
+//      pill's own #ffffff1f fill composites over it. That glass,
+//      not the old #101014 bar, is the settled signal.
+//   3. The dock fits at 15 apps: the first tile is fully visible,
+//      the pill is floating and centred (no glass at the far edges
+//      of the bottom band), and there is no scroll chevron — the
+//      dock shrinks its tiles to fit instead of scrolling.
 //   4. Click lands on the intended control: clicking the Files tile logs
 //      LAUNCH files, and the main area does NOT change (no "Starting…"
 //      without a real launch — M3 behaviour, see note above). Moving
@@ -357,9 +362,21 @@ async function main() {
       await sleep(1000);
       continue;
     }
-    // Top bar #15151c (21,21,28); dock #101014 (16,16,20).
+    // Top bar #15151c (21,21,28); dock glass (57,57,59) — the pill
+    // interior: the edge ring's #ffffff14 paints under the pill,
+    // then the pill's own #ffffff1f fill composites over it.
+    // (No true backdrop blur: the painter only sees its own surface,
+    // so the glass is a translucent fill + highlight, not a blur of
+    // what's behind.) The band is the bottom 128px of the frame —
+    // the pill sits at the bottom with an 8px margin, so this holds
+    // at any surface size (CI runs at 1280x800, not 1024x768).
     topBar = countColor(img, 21, 21, 28, 10, { x0: 0, y0: 0, x1: img.width, y1: 48 });
-    dockBg = countColor(img, 16, 16, 20, 10, { x0: 0, y0: 672, x1: img.width, y1: 768 });
+    dockBg = countColor(img, 57, 57, 59, 10, {
+      x0: 0,
+      y0: img.height - 128,
+      x1: img.width,
+      y1: img.height,
+    });
     if (topBar > 10000 && dockBg > 2000) break;
     await sleep(1000);
   }
@@ -377,34 +394,81 @@ async function main() {
     `topBar=${topBar} dockBg=${dockBg}`,
   );
 
-  // 3. Dock never overflows at 12 apps: the first tile (Files, #3b82f6)
-  // is fully visible, and the dock's right edge is the scroll chevron
-  // (#1f2937), not a half-cut tile.
-  const filesBlue = countColor(img, 59, 130, 246, 12, {
-    x0: 44,
-    y0: 680,
-    x1: 124,
-    y1: 760,
+  // Dock geometry, mirroring v2/shell/src/Dock.tsx (same constants):
+  // the pill is centered, so its position depends on the frame size —
+  // CI runs at 1280x800, not 1024x768, and hardcoding 1024 geometry
+  // fails there (the first tile lands at x212, not x84, and the pill
+  // extends past x984). Everything below derives from W/H.
+  const scaleAtDistance = (d) => {
+    if (d >= 2.2) return 1;
+    const t = 1 - d / 2.2;
+    const f = t * t * (3 - 2 * t);
+    return Math.round((1 + 0.6 * f) / 0.05) * 0.05;
+  };
+  const maxScaleSum = (n) => {
+    const mid = (n - 1) / 2;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += scaleAtDistance(Math.abs(i - mid));
+    return sum;
+  };
+  const restingTileSize = (n, surfaceWidth) => {
+    const cap = surfaceWidth - 2 * 24;
+    const fixed = 2 * 8 + (n - 1) * 8;
+    return Math.max(40, Math.min(64, Math.floor((cap - fixed) / maxScaleSum(n))));
+  };
+  const restingPillWidth = (n, tile) => 2 * 8 + n * tile + (n - 1) * 8;
+  const restingPillHeight = (tile) => 2 * 8 + tile + 4 + 6;
+  const dockGeom = (n) => {
+    const tile = restingTileSize(n, W);
+    const pillW = restingPillWidth(n, tile);
+    const pillH = restingPillHeight(tile);
+    const pillX = Math.floor((W - pillW) / 2);
+    const pillTop = H - 8 - pillH;
+    return { tile, pillW, pillH, pillX, pillTop };
+  };
+  const dockBand = { x0: 0, y0: H - 128, x1: W, y1: H };
+  const g15 = dockGeom(15);
+
+  // 3. Dock fits at 15 apps: the first tile (Files, #3b82f6) is fully
+  // visible, the pill is floating and centred (no glass at the far
+  // left/right of the bottom band), and there is no scroll chevron
+  // (#1f2937) anywhere in the dock band. Tile 0 sits at
+  // (pillX + 8, pillTop + 1 + 8); at 1280x800 that is x104..168,
+  // y711..775 (at 1024x768 it was x84..148, y677..743).
+  const tile0 = {
+    x0: g15.pillX + 8,
+    y0: g15.pillTop + 1 + 8,
+    x1: g15.pillX + 8 + g15.tile,
+    y1: g15.pillTop + 1 + 8 + g15.tile,
+  };
+  const filesBlue = countColor(img, 59, 130, 246, 12, tile0);
+  const glassLeft = countColor(img, 57, 57, 59, 10, {
+    x0: 0,
+    y0: dockBand.y0,
+    x1: Math.max(0, g15.pillX - 8),
+    y1: H,
   });
-  const rightChevron = countColor(img, 31, 41, 55, 10, {
-    // M9: the shell flex-sizes to the surface (no longer a fixed
-    // 1024px), so the dock — and its right chevron — sit at the
-    // image's right edge, not at x988..1016. The chevron is 28px wide
-    // with 8px dock padding, so it spans img.width-36..img.width-8.
-    x0: img.width - 36,
-    y0: 680,
-    x1: img.width - 8,
-    y1: 760,
+  const glassRight = countColor(img, 57, 57, 59, 10, {
+    x0: g15.pillX + g15.pillW + 8,
+    y0: dockBand.y0,
+    x1: W,
+    y1: H,
   });
+  const chevron = countColor(img, 31, 41, 55, 10, dockBand);
   check(
     "dock: first tile fully visible (Files blue)",
     filesBlue > 1000,
     `blue pixels=${filesBlue}`,
   );
   check(
-    "dock: right edge is the scroll chevron, not a cut tile",
-    rightChevron > 1000,
-    `chevron pixels=${rightChevron}`,
+    "dock: floating pill, no glass at the far edges",
+    glassLeft < 100 && glassRight < 100,
+    `glassLeft=${glassLeft} glassRight=${glassRight}`,
+  );
+  check(
+    "dock: no scroll chevron in the dock band",
+    chevron < 100,
+    `chevron pixels=${chevron}`,
   );
 
   // 4. Click the Files tile: LAUNCH files in the log. The main area
@@ -415,7 +479,14 @@ async function main() {
   const shotBefore = await shot(qmp, join(OUT, "m2-shot-before-click.ppm"));
   {
     const before = logLines().length;
-    await moveTo(84, 720, W, H); // Files tile centre (44..124, 680..760).
+    // Files tile centre, from the computed geometry (at 1280x800
+    // that is (136, 743); the old hardcoded (116, 709) was 1024x768).
+    await moveTo(
+      Math.floor((tile0.x0 + tile0.x1) / 2),
+      Math.floor((tile0.y0 + tile0.y1) / 2),
+      W,
+      H,
+    );
     await sleep(300);
     // The pointer entering the shell surface must make the host set
     // the cursor (enter serial → wl_pointer_set_cursor). The cursor
@@ -428,9 +499,24 @@ async function main() {
     const hit = await waitForLog(/LAUNCH files/, 10000, before);
     check("input: click Files tile logs LAUNCH files", !!hit);
   }
-  await sleep(500);
+  // Move the pointer to the top-left corner before the after-shot:
+  // hovering the dock magnifies it, and the magnified pill grows the
+  // dock ~40px taller, which shrinks the flex:1 main area and moves
+  // the centered welcome text up ~20px — a raw diff would read that
+  // layout shift as a change. With the pointer away the dock is flat
+  // again and the welcome text is back at its original position. The
+  // corner keeps the cursor itself out of the diff region too (the
+  // cursor IS in the screendump; at the screen centre its arrow
+  // alone left 147 differing pixels).
+  await moveTo(0, 0, W, H);
+  await sleep(1000);
   const shotAfter = await shot(qmp, join(OUT, "m2-shot-after-click.ppm"));
-  const mainDiff = diffBox(shotBefore, shotAfter, { x0: 0, y0: 48, x1: W, y1: 672 });
+  // The main area must NOT change: since M3 the shell shows
+  // "Starting…" only when launchApp returns true, and with no appd
+  // in this image it returns false — so a click here logs LAUNCH
+  // but shows no "Starting…". (Real launching, with the
+  // "Starting…" state, is m3-check's job.)
+  const mainDiff = diffBox(shotBefore, shotAfter, { x0: 0, y0: 48, x1: W, y1: H - 128 });
   check(
     "screen: main area unchanged after click (no fake Starting…)",
     mainDiff < 100,
@@ -486,7 +572,12 @@ async function main() {
   const shotFinal = join(OUT, "m2-shot-final.ppm");
   const imgFinal = await shot(qmp, shotFinal);
   const fTop = countColor(imgFinal, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-  const fDock = countColor(imgFinal, 16, 16, 20, 10, { x0: 0, y0: 672, x1: W, y1: 768 });
+  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+    x0: 0,
+    y0: H - 128,
+    x1: W,
+    y1: H,
+  });
   check(
     "screen: shell still visible at end",
     fTop > 10000 && fDock > 2000,

@@ -827,6 +827,43 @@ function handleKey(ev) {
 }
 
 function handlePointer(ev) {
+  // Motion arrives under three type strings, and the dock's hover
+  // needs all of them. The real Wayland host forwards pointer motion
+  // as "motion" (wayland.cc onPointerMotion) and the headless
+  // event-file driver uses "move" (sevyn-rn-host.cc loadHeadlessInput)
+  // — accepting only "move" silently dropped every real hover.
+  // The third string is "enter": the pointer's FIRST contact with
+  // the surface arrives as wl_pointer.enter, not motion — the QMP
+  // tablet's first abs move enters the surface at the target point
+  // and Weston sends no motion for it (verified in QEMU: the hover
+  // move to the Calculator tile produced only an enter, so the dock
+  // never magnified even though the cursor sat on the tile). An
+  // enter carries the real position, so it is a motion event for the
+  // listeners. A "leave" is forwarded as a far-off motion so the
+  // magnification clears when the pointer exits the surface.
+  let moveEv = null;
+  if (ev.type === "move" || ev.type === "motion" || ev.type === "enter") {
+    moveEv = ev;
+  } else if (ev.type === "leave") {
+    moveEv = { type: "motion", x: -10000, y: -10000 };
+  }
+  if (moveEv) {
+    let changed = false;
+    for (const fn of Array.from(pointerMoveListeners)) {
+      try {
+        if (fn(moveEv) === true) changed = true;
+      } catch (e) {
+        Sevyn.log(
+          "pointer-move listener failed: " + (e && e.message ? e.message : String(e)),
+        );
+      }
+    }
+    if (changed) {
+      SevynReconciler.flushSyncWork();
+      presentRoot();
+    }
+    return;
+  }
   if (ev.type !== "button" || !ev.pressed) return;
   const inst = instancesByYogaId.get(ev.nodeId);
   // Pointer debug: which instance a tap resolved to (testID +
@@ -1010,6 +1047,31 @@ function handleWindowState(ev) {
   }
   SevynReconciler.flushSyncWork();
   presentRoot();
+}
+// Pointer-move subscribers (the dock's magnification). Move events
+// arrive at pointer rate, so a listener must return true only when it
+// changed state — the renderer re-presents only then, never once per
+// motion event. The host forwards motion to the single onPointer
+// handler (see handlePointer); the shell must not register its own.
+const pointerMoveListeners = new Set();
+function subscribePointerMove(fn) {
+  pointerMoveListeners.add(fn);
+  return () => pointerMoveListeners.delete(fn);
+}
+
+// Surface-size store for useSyncExternalStore. The snapshot is cached
+// and only replaced (new object identity) when the host reports a
+// resize — the resize handler re-presents but does not re-render
+// React, so without this the dock would keep its old tile size after
+// a resize. Refreshed on first mount in render().
+let surfaceSizeSnapshot = { width: rootWidth, height: rootHeight };
+const surfaceSizeListeners = new Set();
+function getSurfaceSizeSnapshot() {
+  return surfaceSizeSnapshot;
+}
+function subscribeSurfaceSize(fn) {
+  surfaceSizeListeners.add(fn);
+  return () => surfaceSizeListeners.delete(fn);
 }
 
 // ------------------------------------------------------------- host config
@@ -1207,6 +1269,7 @@ function render(element, options) {
   rootWidth = opts.width || 1024;
   rootHeight = opts.height || 768;
   backgroundColor = opts.backgroundColor || "#0b0b0f";
+  surfaceSizeSnapshot = { width: rootWidth, height: rootHeight };
 
   rootContainer = {
     type: "#root",
@@ -1244,6 +1307,16 @@ function render(element, options) {
       if (w === rootWidth && h === rootHeight) return;
       rootWidth = w;
       rootHeight = h;
+      surfaceSizeSnapshot = { width: w, height: h };
+      for (const fn of Array.from(surfaceSizeListeners)) {
+        try {
+          fn();
+        } catch (e) {
+          Sevyn.log(
+            "surface-size listener failed: " + (e && e.message ? e.message : String(e)),
+          );
+        }
+      }
       if (rootContainer) {
         Sevyn.yogaSetStyle(rootContainer.yogaId, {
           width: rootWidth,
@@ -1251,6 +1324,7 @@ function render(element, options) {
           flexDirection: "column",
         });
       }
+      SevynReconciler.flushSyncWork();
       presentRoot();
     });
   }
@@ -1440,6 +1514,9 @@ module.exports = {
   getAppsSnapshot,
   subscribeWindowState,
   getWindowStateSnapshot,
+  subscribePointerMove,
+  subscribeSurfaceSize,
+  getSurfaceSizeSnapshot,
   // Exposed for tests: the live instance map and present pass.
   _instancesByYogaId: instancesByYogaId,
   _presentRoot: presentRoot,

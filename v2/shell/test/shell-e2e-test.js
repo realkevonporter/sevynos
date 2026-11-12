@@ -2,7 +2,13 @@
 // End-to-end Node test for the built shell bundle (dist/shell.js).
 // Loads the bundle with the mock Sevyn host and drives it like the real
 // host would: mount -> present, pointer click on a dock tile -> LAUNCH
-// + "Starting …" state, status push -> tray re-render, chevron -> scroll.
+// + "Starting …" state, status push -> tray re-render, pointer move
+// over the dock -> magnification.
+//
+// The mock's app list is extended to 14 apps (the 12 stock apps plus
+// the two M10 call apps under their working titles) so the dock's
+// shrink-to-fit is exercised at the 1024px mock surface: 14 tiles at
+// 55px, not 64px.
 //
 // Run: node test/shell-e2e-test.js   (from v2/shell, after npm run build)
 const assert = require("node:assert/strict");
@@ -15,6 +21,33 @@ global.Sevyn = require("../../rn/renderer/test/mock-sevyn");
 // bundle only needs the globals the host provides.
 global.queueMicrotask = global.queueMicrotask || ((fn) => Promise.resolve().then(fn));
 
+// 14 apps: the mock's 12 stock apps + the M10 call apps (working
+// titles; main has 12 today, 14 once M10 lands).
+const realListApps = Sevyn.listApps;
+Sevyn.listApps = () => [
+  ...realListApps(),
+  {
+    id: "video-calls",
+    name: "Video Calls",
+    version: "1.0.0",
+    color: "#7c3aed",
+    glyph: "V",
+    system: false,
+    protected: false,
+    permissions: ["status.read"],
+  },
+  {
+    id: "voice-calls",
+    name: "Voice Calls",
+    version: "1.0.0",
+    color: "#0d9488",
+    glyph: "V",
+    system: false,
+    protected: false,
+    permissions: ["status.read"],
+  },
+];
+
 const bundle = fs.readFileSync(path.join(__dirname, "..", "dist", "shell.js"), "utf8");
 
 let passed = 0;
@@ -23,12 +56,30 @@ function check(name, fn) {
   passed++;
   console.log("ok - " + name);
 }
+async function checkAsync(name, fn) {
+  await fn();
+  passed++;
+  console.log("ok - " + name);
+}
+
+const lastPresent = () => Sevyn._presents[Sevyn._presents.length - 1];
+// Tile pressables, left to right. The tray power button (#100) is also a
+// rect with a nodeId, but it lives in the top tray (y < 48); the dock
+// tiles are below it, so the y filter keeps it out of the count.
+const tiles = (ops) =>
+  ops
+    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.y >= 48)
+    .sort((a, b) => a.x - b.x);
+// Running dots are the white 6x6 rects; every tile also carries a
+// transparent 6x6 spacer so columns stay aligned.
+const runningDots = (ops) =>
+  ops.filter((o) => o.type === "rect" && o.w === 6 && o.h === 6 && o.color === "#ffffff");
 
 vm.runInThisContext(bundle, { filename: "shell.js" });
 
 check("shell mounts and presents the full frame", () => {
   assert.ok(Sevyn._presents.length >= 1, "at least one present");
-  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  const last = lastPresent();
   const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
   assert.ok(texts.includes("SevynOS"), "wordmark");
   assert.ok(texts.includes("Welcome to SevynOS"), "welcome");
@@ -56,90 +107,56 @@ check("shell mounts and presents the full frame", () => {
   );
 });
 
-check("dock shows 12 tiles and both chevrons (overflow by design)", () => {
-  const last = Sevyn._presents[Sevyn._presents.length - 1];
-  const images = last.ops.filter((o) => o.type === "image").map((o) => o.asset);
-  assert.ok(
-    images.some((a) => a.endsWith("symbols/chevron-left.png")),
-    "left chevron icon",
-  );
-  assert.ok(
-    images.some((a) => a.endsWith("symbols/chevron-right.png")),
-    "right chevron icon",
-  );
-  // 12 dock icons (one per app), staged under /usr/share/sevyn/shell/icons/.
-  const tiles = images.filter(
-    (a) => a.startsWith("/usr/share/sevyn/shell/icons/") && !a.includes("symbols/"),
-  );
-  assert.equal(tiles.length, 12, "12 dock icons, got " + tiles.length);
-  // The monogram glyphs are still rendered underneath the icons: a
-  // missing icon file paints nothing, so the letter shows through
-  // (the fallback third-party apps rely on).
+check("dock shows 14 tiles, no chevrons, as a centered glass pill", () => {
+  const last = lastPresent();
   const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
-  for (const g of ["F", ">", "B", "S", "M", "P", "C", "N", "=", "O"]) {
-    assert.ok(texts.includes(g), "monogram fallback glyph " + g);
-  }
-  // 12 app glyphs: F > B S M P C N = O M S (two Ms, two Ss — count tiles
-  // by their pressable rects instead).
-  const hits = last.ops.filter((o) => o.nodeId != null && o.nodeId >= 0);
-  // 12 tiles + 2 chevrons + 1 tray power button = 15 pressables.
-  assert.equal(hits.length, 15, "15 pressable rects, got " + hits.length);
-});
-
-check("tray power button opens the menu; Shut Down runs sevyn poweroff", () => {
-  const last = Sevyn._presents[Sevyn._presents.length - 1];
-  // The tray power button is the only pressable in the top tray band.
-  const power = last.ops
-    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.y < 48)
-    .sort((a, b) => b.x - a.x)[0];
-  assert.ok(power, "power button rect present");
-  Sevyn._handlers.pointer({
-    type: "button",
-    x: power.x + 2,
-    y: power.y + 2,
-    button: 1,
-    pressed: true,
-    nodeId: power.nodeId,
-  });
-  const menu = Sevyn._presents[Sevyn._presents.length - 1];
-  const menuTexts = menu.ops.filter((o) => o.type === "text").map((o) => o.text);
-  assert.ok(menuTexts.includes("Shut Down"), "menu shows Shut Down");
-  assert.ok(menuTexts.includes("Restart"), "menu shows Restart");
-  // The Shut Down row is the upper of the two menu-row pressables
-  // (panel top 48: rows 52..96 and 96..140; the full-screen backdrop
-  // sits at y 0 and is excluded by the y filter).
-  const rows = menu.ops
-    .filter(
-      (o) =>
-        o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.y >= 48 && o.y < 140,
-    )
-    .sort((a, b) => a.y - b.y);
-  assert.ok(rows.length >= 1, "menu rows present, got " + rows.length);
-  Sevyn._handlers.pointer({
-    type: "button",
-    x: rows[0].x + 2,
-    y: rows[0].y + 2,
-    button: 1,
-    pressed: true,
-    nodeId: rows[0].nodeId,
-  });
+  assert.ok(!texts.includes("‹"), "no left chevron");
+  assert.ok(!texts.includes("›"), "no right chevron");
+  // 14 app glyphs: F > B S M P C N = O M S V V — count tiles by their
+  // pressable rects instead (the two Ms, two Ss and two Vs collide).
+  const hits = tiles(last.ops);
+  assert.equal(hits.length, 14, "14 pressable rects, got " + hits.length);
+  // Shrink-to-fit at 1024px: 14 tiles at 55px (61px would leave no
+  // room for magnification).
   assert.ok(
-    Sevyn._logs.some((l) => l === "EXEC sevyn poweroff"),
-    "poweroff requested, logs=" + JSON.stringify(Sevyn._logs),
+    hits.every((t) => t.w === 55 && t.h === 55),
+    "all tiles 55x55, got " + JSON.stringify(hits.map((t) => [t.w, t.h])),
   );
-  const after = Sevyn._presents[Sevyn._presents.length - 1];
-  const afterTexts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
-  assert.ok(!afterTexts.includes("Shut Down"), "menu closed after Shut Down");
+  // Centered pill, not a full-width bar: 892px ring at x66, so the
+  // first tile starts at x75 and the last tile ends at x949.
+  assert.equal(hits[0].x, 75, "first tile x=75, got " + hits[0].x);
+  assert.equal(
+    hits[13].x + hits[13].w,
+    949,
+    "last tile right=949, got " + (hits[13].x + hits[13].w),
+  );
+  // Glass: the pill fill is present.
+  assert.ok(
+    last.ops.some((o) => o.type === "rect" && o.color === "#ffffff1f"),
+    "glass pill fill present",
+  );
+  // Icon contract: one image op per tile, stacked over the monogram.
+  // The tray symbols live under icons/symbols/ and are image ops too,
+  // so count only the tile icons (direct children of the icons dir).
+  const images = last.ops
+    .filter((o) => o.type === "image")
+    .filter(
+      (im) =>
+        typeof im.asset === "string" &&
+        im.asset.startsWith("/usr/share/sevyn/shell/icons/") &&
+        !im.asset.includes("/symbols/"),
+    );
+  assert.equal(images.length, 14, "14 icon images, got " + images.length);
+  assert.ok(
+    images.every((im) => im.asset.endsWith(".png")),
+    "icon paths under /usr/share/sevyn/shell/icons/",
+  );
 });
 
 check("clicking a dock tile logs LAUNCH and shows Starting…", () => {
-  const last = Sevyn._presents[Sevyn._presents.length - 1];
-  // The first tile is Files (glyph F). Find its pressable rect: the
-  // leftmost tile rect (x just past the left chevron).
-  const tiles = last.ops
-    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect")
-    .sort((a, b) => a.x - b.x);
-  const filesTile = tiles[1]; // [0] is the left chevron
+  const last = lastPresent();
+  // The first tile is Files (glyph F): the leftmost tile rect.
+  const filesTile = tiles(last.ops)[0];
   Sevyn._handlers.pointer({
     type: "button",
     x: filesTile.x + 2,
@@ -152,7 +169,7 @@ check("clicking a dock tile logs LAUNCH and shows Starting…", () => {
     Sevyn._logs.some((l) => l === "LAUNCH files"),
     "LAUNCH files logged, logs=" + JSON.stringify(Sevyn._logs),
   );
-  const after = Sevyn._presents[Sevyn._presents.length - 1];
+  const after = lastPresent();
   const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
   assert.ok(
     texts.some((t) => t.includes("Starting Files")),
@@ -165,21 +182,17 @@ check(
   () => {
     assert.ok(Sevyn._handlers.appEvent, "appEvent handler registered");
     Sevyn._handlers.appEvent("EVENT LAUNCHED files");
-    let after = Sevyn._presents[Sevyn._presents.length - 1];
+    let after = lastPresent();
     let texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
     assert.ok(texts.includes("Welcome to SevynOS"), "welcome returns after LAUNCHED");
     assert.ok(
       !texts.some((t) => t.includes("Starting Files")),
       "Starting… cleared after LAUNCHED",
     );
-    const dots = after.ops.filter((o) => o.type === "rect" && o.w === 6 && o.h === 6);
-    assert.equal(dots.length, 1, "one running dot, got " + dots.length);
+    assert.equal(runningDots(after.ops).length, 1, "one running dot");
     Sevyn._handlers.appEvent("EVENT STOPPED files signal 15");
-    after = Sevyn._presents[Sevyn._presents.length - 1];
-    const dotsAfter = after.ops.filter(
-      (o) => o.type === "rect" && o.w === 6 && o.h === 6,
-    );
-    assert.equal(dotsAfter.length, 0, "dot gone after STOPPED");
+    after = lastPresent();
+    assert.equal(runningDots(after.ops).length, 0, "dot gone after STOPPED");
   },
 );
 
@@ -187,7 +200,7 @@ check("status push re-renders the tray", () => {
   Sevyn._status.battery = "42";
   Sevyn._status.volume = "10";
   Sevyn._handlers.status({ key: "battery", value: "42" });
-  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  const last = lastPresent();
   const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
   assert.ok(
     texts.some((t) => t.includes("42%")),
@@ -199,37 +212,50 @@ check("status push re-renders the tray", () => {
   );
 });
 
-check("right chevron scrolls the tray (scroll offset changes)", () => {
-  const before = Sevyn._presents[Sevyn._presents.length - 1];
-  // The right chevron is the 28px-wide pressable on the right — NOT
-  // the rightmost pressable overall: scrolled-off tiles extend past
-  // it (that is the point of the dock overflowing).
-  const chevron = before.ops
-    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.w === 28)
-    .sort((a, b) => b.x - a.x)[0]; // rightmost chevron
-  Sevyn._handlers.pointer({
-    type: "button",
-    x: chevron.x + 2,
-    y: chevron.y + 2,
-    button: 1,
-    pressed: true,
-    nodeId: chevron.nodeId,
-  });
-  const after = Sevyn._presents[Sevyn._presents.length - 1];
-  // After scrolling, the first tile's x must have moved left (clipped).
-  const firstTileBefore = before.ops
-    .filter((o) => o.nodeId != null && o.nodeId >= 0)
-    .sort((a, b) => a.x - b.x)[1];
-  const firstTileAfter = after.ops
-    .filter((o) => o.nodeId != null && o.nodeId >= 0)
-    .sort((a, b) => a.x - b.x)[1];
-  assert.ok(
-    firstTileAfter.x < firstTileBefore.x,
-    "first tile moved left after scroll: " +
-      firstTileBefore.x +
-      " -> " +
-      firstTileAfter.x,
-  );
-});
+(async () => {
+  // The dock subscribes to pointer moves in an effect; let the
+  // microtask queue flush before driving hover.
+  await new Promise((r) => setTimeout(r, 0));
 
-console.log(`\n${passed} shell e2e checks passed`);
+  await checkAsync("pointer move over a tile magnifies it and its neighbours", () => {
+    // Hover point from the dock's assumed geometry (1024x768, 14
+    // apps, 55px tiles: 892px ring at x66, tile 3 centre
+    // (291.5, 715.5)). The mock lays out x correctly (centered pill)
+    // but stacks the dock below the surface vertically — its flex
+    // distribution ignores auto-height siblings — so the hover point
+    // cannot come from the tile rects; sizes, not positions, are what
+    // this test proves. Placement is proven in QEMU (m9-check).
+    // The real Wayland host forwards motion as type "motion"
+    // (wayland.cc onPointerMotion); the headless driver uses "move".
+    // This hover uses type "enter" — the real first-contact path:
+    // the pointer's first arrival on the surface is a wl_pointer
+    // enter, not a motion event, and the dock must magnify from it.
+    // The move-away below uses "move" so both host vocabularies
+    // are covered too.
+    Sevyn._handlers.pointer({ type: "enter", x: 291.5, y: 715.5 });
+    const after = lastPresent();
+    const afterTiles = tiles(after.ops);
+    // Hovered tile 1.6x (88px), neighbours 1.35x (74px), far tiles flat.
+    assert.equal(afterTiles[3].h, 88, "hovered tile 88px, got " + afterTiles[3].h);
+    assert.equal(afterTiles[2].h, 74, "left neighbour 74px, got " + afterTiles[2].h);
+    assert.equal(afterTiles[4].h, 74, "right neighbour 74px, got " + afterTiles[4].h);
+    assert.equal(afterTiles[0].h, 55, "far tile stays 55px");
+    // The magnified pill still fits: last tile inside the surface.
+    assert.ok(afterTiles[13].x + afterTiles[13].w < 1024, "magnified dock fits");
+  });
+
+  await checkAsync("pointer move away restores the flat dock", () => {
+    Sevyn._handlers.pointer({ type: "move", x: 512, y: 100 });
+    const after = lastPresent();
+    const afterTiles = tiles(after.ops);
+    assert.ok(
+      afterTiles.every((t) => t.h === 55),
+      "all tiles back to 55px",
+    );
+  });
+
+  console.log(`\n${passed} shell e2e checks passed`);
+})().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

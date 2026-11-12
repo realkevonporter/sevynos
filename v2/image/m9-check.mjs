@@ -607,7 +607,10 @@ async function screenSettled(b, timeoutMs = 30000) {
       });
       // M9: the dock sits at the bottom of the CURRENT frame (1920x1080
       // in this check, not the M7 1024x768) — measure from the frame.
-      const dockBg = countColor(img, 16, 16, 20, 10, {
+      // The settled signal is the dock's glass interior (57,57,59):
+      // the edge ring's #ffffff14 paints under the pill, then the
+      // pill's own #ffffff1f fill composites over it.
+      const dockBg = countColor(img, 57, 57, 59, 10, {
         x0: 0,
         y0: img.height - 96,
         x1: img.width,
@@ -845,6 +848,19 @@ async function termCmdCode(b, cmd, code, timeoutMs = 180000) {
     timeoutMs,
     0,
   );
+}
+
+// Absolute-pointer move on the usb-tablet (axes 0..32767) with NO
+// button press — a pure hover. The shell's magnification listens for
+// pointer-move events, so this is the hover proof (a drag would press
+// the tile and launch the app instead).
+async function pointerMove(qmp, W, H, x, y) {
+  const ax = Math.max(0, Math.min(32767, Math.round((x / W) * 32767)));
+  const ay = Math.max(0, Math.min(32767, Math.round((y / H) * 32767)));
+  await qmp.input([
+    { type: "abs", data: { axis: "x", value: ax } },
+    { type: "abs", data: { axis: "y", value: ay } },
+  ]);
 }
 
 // Absolute-pointer drag on the usb-tablet (axes 0..32767): move to
@@ -1480,7 +1496,7 @@ async function main() {
     const wantTop = lighten([r, g, bl], 0.22);
     const wantBottom = darken([r, g, bl], 0.14);
     const topRun = scanBand(wantTop, y0 + 6, y0 + 21);
-    const botRun = scanBand(wantBottom, y0 + 60, y0 + 88);
+    const botRun = scanBand(wantBottom, y0 + 50, y0 + 68);
     let run = null;
     let fromTop = true;
     if (topRun && botRun) {
@@ -1514,9 +1530,9 @@ async function main() {
       }
     } else {
       // Tile top from the bottom edge: last row matching the bottom
-      // colour at the centre column, minus the 80px tile height.
+      // colour at the centre column, minus the 64px tile height.
       let yBot = -1;
-      for (let y = y0 + 60; y <= y0 + 90; y++) {
+      for (let y = y0 + 50; y <= y0 + 70; y++) {
         const i = (y * W + cx) * 3;
         if (
           Math.abs(pixels[i] - wantBottom[0]) <= ftol &&
@@ -1526,13 +1542,17 @@ async function main() {
           yBot = y;
         }
       }
-      if (yBot >= 0) yTop = yBot - 79;
+      if (yBot >= 0) yTop = yBot - 63;
     }
     if (yTop < 0) return null;
     return { x: cx, yTop };
   };
   let iconsOk = !!settled;
   const iconDetail = [];
+  // Gradient-finder positions, reused by the dock section below: the
+  // icons check already proves every tile paints, so the dock checks
+  // below only need the end tiles' positions (no second scan).
+  const foundTiles = {};
   if (settled) {
     ICON_APPS.forEach(([id, color]) => {
       const [r, g, b] = hexRgb(color);
@@ -1542,15 +1562,15 @@ async function main() {
         iconDetail.push(`${id}: NOT FOUND in dock`);
         return;
       }
+      foundTiles[id] = tile;
       const { x: cx, yTop } = tile;
-      // Samples sit inside the tile in both dock layouts (plain
-      // yTop=992, running-dot yTop=987): top +5, bottom +72,
-      // glyph band +7..+68.
+      // Samples sit inside the 64px glass-pill tile (yTop=990):
+      // top +5, bottom +58, glyph band +7..+56.
       const top = pxAt(settled, cx, yTop + 5);
-      const bottom = pxAt(settled, cx, yTop + 72);
+      const bottom = pxAt(settled, cx, yTop + 58);
       const wantTop = lighten(hexRgb(color), 0.22);
       const wantBottom = darken(hexRgb(color), 0.14);
-      const glyph = whiteIn(settled, cx - 28, yTop + 7, cx + 28, yTop + 68);
+      const glyph = whiteIn(settled, cx - 28, yTop + 7, cx + 28, yTop + 56);
       const ok =
         closeTo(top, wantTop, 14) && closeTo(bottom, wantBottom, 14) && glyph > 100;
       if (!ok) iconsOk = false;
@@ -1562,6 +1582,115 @@ async function main() {
     iconsOk,
     settled ? iconDetail.join(" | ") : "no settled frame",
   );
+  // Dock redesign: the dock is a floating glass pill (macOS 27 style),
+  // not a full-width bar. 16 apps at 64px tiles: pill 1160 wide, ring
+  // 1162, pill x380..1540, tiles y989..1053. First tile Browser at
+  // x388..452 (centre 420), last tile Voice Calls at x1468..1532
+  // (centre 1500), Calculator at x460..524 (centre 492).
+  //
+  // The tiles are gradient icons (#102), so the old solid base-colour
+  // counts read 0 for every tile — a finder on the base colour returns
+  // null. The end tiles are proven by the gradient finder instead:
+  // the icons check above already found each tile, and a tile is
+  // fully visible only if its found centre sits inside its expected
+  // box. The chevron count is likewise scoped to the pill's padding
+  // strips: the old whole-band count matched dark icon gradients
+  // (969px), while a chevron — if one were drawn — would sit in the
+  // padding, where only glass lives.
+  if (settled) {
+    const glassLeft = countColor(settled, 57, 57, 59, 10, {
+      x0: 0,
+      y0: 984,
+      x1: 200,
+      y1: 1080,
+    });
+    const glassRight = countColor(settled, 57, 57, 59, 10, {
+      x0: 1720,
+      y0: 984,
+      x1: 1920,
+      y1: 1080,
+    });
+    check(
+      "dock: floating pill, no glass at the far edges",
+      glassLeft < 100 && glassRight < 100,
+      `glassLeft=${glassLeft} glassRight=${glassRight}`,
+    );
+    const first = foundTiles["browser"];
+    check(
+      "dock: first tile fully visible (Browser gradient)",
+      !!first && first.x >= 388 && first.x <= 452 && Math.abs(first.yTop - 990) <= 4,
+      first
+        ? `browser tile centre x=${first.x} yTop=${first.yTop}`
+        : "browser tile not found",
+    );
+    const last = foundTiles["voice-calls"];
+    check(
+      "dock: last tile fully visible (Voice Calls gradient)",
+      !!last && last.x >= 1468 && last.x <= 1532 && Math.abs(last.yTop - 990) <= 4,
+      last
+        ? `voice-calls tile centre x=${last.x} yTop=${last.yTop}`
+        : "voice-calls tile not found",
+    );
+    const chevron =
+      countColor(settled, 31, 41, 55, 10, { x0: 380, y0: 982, x1: 388, y1: 1072 }) +
+      countColor(settled, 31, 41, 55, 10, { x0: 1532, y0: 982, x1: 1540, y1: 1072 });
+    check(
+      "dock: no scroll chevron in the dock band",
+      chevron < 100,
+      `chevron pixels=${chevron}`,
+    );
+  } else {
+    check("dock: floating pill, no glass at the far edges", false, "no settled frame");
+    check("dock: first tile fully visible (Browser gradient)", false, "no settled frame");
+    check(
+      "dock: last tile fully visible (Voice Calls gradient)",
+      false,
+      "no settled frame",
+    );
+    check("dock: no scroll chevron in the dock band", false, "no settled frame");
+  }
+
+  // Dock magnification: hover the Calculator tile (centre 492,1021)
+  // with a button-free pointer move; the tile grows to ~102px, so
+  // its gradient-top count in the region grows with it. Move away
+  // and it restores. (No true backdrop blur is claimed: the glass
+  // is a translucent fill + highlight, see the PR body.)
+  // The baseline is a fresh pre-hover shot, not the settled frame,
+  // so the comparison holds even if the settle poll was slow.
+  //
+  // The counted colour is the Calculator icon's gradient TOP,
+  // lighten(#8b5cf6, 0.22) = (165,128,248) — measured (160,122,243)
+  // on the settled frame. The old solid purple (139,92,246) never
+  // occurs in a gradient tile, so that count read 0 before and after
+  // (and the restore check passed vacuously). Thresholds are relative
+  // on purpose: only the tile's top ~11 rows match the top colour at
+  // rest (~400-500px), and the magnified tile's top band is ~2.5x
+  // larger, so hovered must clear 1.5x the resting count while the
+  // restore must come back near it.
+  {
+    const hoverRegion = { x0: 420, y0: 940, x1: 580, y1: 1080 };
+    const calcTop = (img) => countColor(img, 165, 128, 248, 12, hoverRegion);
+    const baseImg = await shot(b.qmp, join(OUT, "m9-shot-dock-base.ppm"));
+    const before = calcTop(baseImg);
+    await pointerMove(b.qmp, 1920, 1080, 492, 1021);
+    await sleep(800);
+    const hoverImg = await shot(b.qmp, join(OUT, "m9-shot-dock-hover.ppm"));
+    const hovered = calcTop(hoverImg);
+    check(
+      "dock: hover magnifies the tile (Calculator gradient-top grows)",
+      before > 100 && hovered > 400 && hovered > before * 1.5,
+      `calc-top before=${before} hovered=${hovered}`,
+    );
+    await pointerMove(b.qmp, 1920, 1080, 960, 500);
+    await sleep(800);
+    const awayImg = await shot(b.qmp, join(OUT, "m9-shot-dock-away.ppm"));
+    const restored = calcTop(awayImg);
+    check(
+      "dock: moving away restores the flat dock",
+      restored > 50 && restored < before * 1.3 + 100,
+      `calc-top restored=${restored} (before=${before})`,
+    );
+  }
 
   // The Terminal app: open it once; every headless run is typed here.
   const term = await appdCmd(b, "LAUNCH terminal", /APPD LAUNCH OK terminal/);
@@ -1626,9 +1755,15 @@ async function main() {
   // Bottom edge of a window: scan the padding column just inside
   // its left edge for the last #f9fafb (app body) pixel below the
   // header — the shell desktop behind the window is not #f9fafb.
+  // The scan stops above the dock band (height - 96): the dock's
+  // white monogram glyphs read as #f9fafb at tolerance 10, and a
+  // glyph in this column would otherwise be mistaken for the
+  // window's bottom edge (the dock redesign moved the tiles, so the
+  // Calendar glyph now sits in the Calculator window's column).
   const windowBottom = (img, x, topY) => {
     let last = topY;
-    for (let y = topY; y < img.height; y++) {
+    const stopY = img.height - 96;
+    for (let y = topY; y < stopY; y++) {
       const i = (y * img.width + x) * 3;
       const px = img.pixels;
       if (
@@ -1939,6 +2074,42 @@ async function main() {
     if (!t) return null;
     return { x: t.x, y: img.height - 48 };
   };
+  // Flat-dock tile centres (appd alphabetical seed order, 16 apps at
+  // 64px, pitch 72, first centre x=420, y=height-48). The colour finder
+  // above measures the CURRENT frame, which may show a MAGNIFIED dock
+  // — the pointer sits on a tile after the previous click, so the
+  // magnified centres shift up to ~+47px right of the flat centres
+  // (in CI the settings finder read 1182 instead of 1140 and the
+  // terminal finder 1326 instead of 1284). Clicking the found
+  // coordinate then lands on the NEIGHBOUR tile: the settings click
+  // hit Store, the terminal click hit Tokrah (which then broke the
+  // headless Tokrah run downstream). A tile's centre is invariant
+  // under magnification, so clicks use the flat geometric centre;
+  // the finder stays only as a presence check. The geometry is
+  // anchored by the dock section above (Browser 420, Voice Calls
+  // 1500, pitch 72).
+  const DOCK_ORDER = [
+    "browser",
+    "calculator",
+    "calendar",
+    "camera",
+    "files",
+    "installer",
+    "messages",
+    "music",
+    "notes",
+    "photos",
+    "settings",
+    "store",
+    "terminal",
+    "tokrah",
+    "video-calls",
+    "voice-calls",
+  ];
+  const flatTileCentre = (id) => ({
+    x: 420 + DOCK_ORDER.indexOf(id) * 72,
+    y: 1032,
+  });
   // Click a point on the shell desktop (not covered by any window in
   // `covered`, a list of {x, y, w, h} rects). Tries candidates until
   // one is free; returns the point used, or null.
@@ -2006,7 +2177,8 @@ async function main() {
     const tile = dockTile(covered.img, 139, 92, 246);
     check("window: calculator dock tile found", !!tile, JSON.stringify(tile));
     if (tile) {
-      await pointerClick(b.qmp, covered.img.width, covered.img.height, tile.x, tile.y);
+      const c = flatTileCentre("calculator");
+      await pointerClick(b.qmp, covered.img.width, covered.img.height, c.x, c.y);
       const remap = await waitForLog(b.logPath, /HOST FOCUS remap calculator/, 30000);
       check("window: FOCUS remap logged by the app host", !!remap);
       await sleep(2000);
@@ -2050,13 +2222,8 @@ async function main() {
     // Restore from minimized: dock click → focus remap.
     const tileMin = dockTile(minimized.img, 139, 92, 246);
     if (tileMin) {
-      await pointerClick(
-        b.qmp,
-        minimized.img.width,
-        minimized.img.height,
-        tileMin.x,
-        tileMin.y,
-      );
+      const c = flatTileCentre("calculator");
+      await pointerClick(b.qmp, minimized.img.width, minimized.img.height, c.x, c.y);
       await sleep(2000);
       const unmin = await findHeader("calc-unmin", 139, 92, 246);
       check(
@@ -2152,25 +2319,15 @@ async function main() {
     );
     const calcTile = dockTile(filesMoved.img, 139, 92, 246);
     if (calcTile) {
-      await pointerClick(
-        b.qmp,
-        filesMoved.img.width,
-        filesMoved.img.height,
-        calcTile.x,
-        calcTile.y,
-      );
+      const c = flatTileCentre("calculator");
+      await pointerClick(b.qmp, filesMoved.img.width, filesMoved.img.height, c.x, c.y);
       await sleep(2000);
     }
     const calcFront = await findHeader("calc-front", 139, 92, 246);
     const filesTile = dockTile(calcFront.img, 59, 130, 246);
     if (filesTile) {
-      await pointerClick(
-        b.qmp,
-        calcFront.img.width,
-        calcFront.img.height,
-        filesTile.x,
-        filesTile.y,
-      );
+      const c = flatTileCentre("files");
+      await pointerClick(b.qmp, calcFront.img.width, calcFront.img.height, c.x, c.y);
       await sleep(2000);
     }
     const filesFront = await findHeader("files-front", 59, 130, 246);
@@ -2203,13 +2360,8 @@ async function main() {
       JSON.stringify(settingsTile),
     );
     if (settingsTile) {
-      await pointerClick(
-        b.qmp,
-        settingsH.img.width,
-        settingsH.img.height,
-        settingsTile.x,
-        settingsTile.y,
-      );
+      const c = flatTileCentre("settings");
+      await pointerClick(b.qmp, settingsH.img.width, settingsH.img.height, c.x, c.y);
       await sleep(2000);
       const settingsFront = await findHeader("settings-front", 107, 114, 128);
       check(
@@ -2239,13 +2391,8 @@ async function main() {
   const filesTile2 = dockTile(filesShot, 59, 130, 246);
   if (filesTile2) {
     const filesLinesBefore = logLines(b.logPath).length;
-    await pointerClick(
-      b.qmp,
-      filesShot.width,
-      filesShot.height,
-      filesTile2.x,
-      filesTile2.y,
-    );
+    const c = flatTileCentre("files");
+    await pointerClick(b.qmp, filesShot.width, filesShot.height, c.x, c.y);
     const second = await waitForLog(
       b.logPath,
       /APPD launched files/,
@@ -2294,13 +2441,8 @@ async function main() {
   check("window: terminal dock tile found", !!termTile0, JSON.stringify(termTile0));
   if (termTile0) {
     const termLinesBefore = logLines(b.logPath).length;
-    await pointerClick(
-      b.qmp,
-      termShot0.width,
-      termShot0.height,
-      termTile0.x,
-      termTile0.y,
-    );
+    const c = flatTileCentre("terminal");
+    await pointerClick(b.qmp, termShot0.width, termShot0.height, c.x, c.y);
     const termLaunch = await waitForLog(
       b.logPath,
       /APPD launched terminal/,

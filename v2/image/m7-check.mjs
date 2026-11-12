@@ -538,7 +538,7 @@ async function screenSettled(b, timeoutMs = 30000) {
         x1: img.width,
         y1: 48,
       });
-      const dockBg = countColor(img, 16, 16, 20, 10, {
+      const dockBg = countColor(img, 57, 57, 59, 10, {
         x0: 0,
         y0: 672,
         x1: img.width,

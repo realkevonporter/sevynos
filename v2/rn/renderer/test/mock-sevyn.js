@@ -143,6 +143,7 @@ function dim(v, parent) {
   if (v == null) return null;
   if (typeof v === "number") return v;
   if (typeof v === "string" && v.endsWith("%")) {
+    if (parent == null) return null;
     return (parseFloat(v) / 100) * parent;
   }
   return null;
@@ -185,8 +186,11 @@ function layoutNode(
   // ScrollView took the content width and the dock never overflowed.
   if (w == null && stretchW != null) w = stretchW;
   if (h == null && stretchH != null) h = stretchH;
-  if (w == null) w = 0;
-  if (h == null) h = 0;
+  // NOTE: unresolved sizes stay null through the children loop and
+  // the auto-size block below — zeroing them here pinned
+  // content-sized containers (the dock pill) to zero and disabled
+  // their auto-size fallback. They default to 0 at the layout
+  // assignment at the end of this function.
   // Children flow.
   const row = st.flexDirection === "row";
   const padL = st.paddingLeft || st.paddingHorizontal || st.padding || 0;
@@ -245,15 +249,18 @@ function layoutNode(
     const childFlexW = row && isFlexChild ? flexUnit * flex : null;
     const childFlexH = !row && isFlexChild ? flexUnit * flex : null;
     // Cross-axis stretch for this child (null when it has an
-    // explicit cross size or a measure function).
+    // explicit cross size or a measure function). Null — not 0 —
+    // when the parent's cross size is itself unresolved: stretching
+    // a child to a 0-wide parent pinned content-sized containers
+    // (the dock pill) to zero and disabled their auto-size fallback.
     const cross = row ? cs.height : cs.width;
     const crossAvail = row ? h : w;
     const childStretchW =
-      !row && dim(cross, crossAvail) == null && !c.measure
+      !row && dim(cross, crossAvail) == null && !c.measure && w != null
         ? Math.max(0, w - padL - padR - mL - mR)
         : null;
     const childStretchH =
-      row && dim(cross, crossAvail) == null && !c.measure
+      row && dim(cross, crossAvail) == null && !c.measure && h != null
         ? Math.max(0, h - padT - padB - mT - mB)
         : null;
     const clx = abs ? px + (cs.left || 0) : cx + (row ? mL : 0);
@@ -276,6 +283,41 @@ function layoutNode(
       else cy += cl.height + mT + mB;
     }
   }
+  // justifyContent: center — shift the flow children so the content
+  // is centered in the container. (The mock previously ignored it, so
+  // the dock pill sat at x=0 instead of centered, and the shell's
+  // welcome text sat at the top of the main area.) Layouts are
+  // parent-relative, so shifting a child shifts its whole subtree.
+  // Only "center" is implemented; anything else is flex-start.
+  if (st.justifyContent === "center") {
+    if (row) {
+      const used = cx - px;
+      const free = Math.max(0, w - used - padR);
+      const off = free / 2;
+      if (off > 0) {
+        for (const cid of n.children) {
+          const c = nodes.get(cid);
+          if (!c || !c.layout) continue;
+          const cs = c.style || {};
+          if (cs.position === "absolute") continue;
+          c.layout.x += off;
+        }
+      }
+    } else {
+      const used = cy - py;
+      const free = Math.max(0, h - used - padB);
+      const off = free / 2;
+      if (off > 0) {
+        for (const cid of n.children) {
+          const c = nodes.get(cid);
+          if (!c || !c.layout) continue;
+          const cs = c.style || {};
+          if (cs.position === "absolute") continue;
+          c.layout.y += off;
+        }
+      }
+    }
+  }
   // Auto size from children when the size is genuinely unresolved
   // (no explicit size, no flex share, no stretch, no measure). A
   // stretched or flexed size must NOT be overridden by the content
@@ -286,7 +328,22 @@ function layoutNode(
     dim(st.height, ph) == null && flexH == null && stretchH == null && !n.measure;
   if (wAuto) {
     if (row) w = Math.max(w, cx - px + (st.paddingRight || 0));
-    else w = Math.max(w, 0);
+    else {
+      // Column width from its widest child (real Yoga sizes a column
+      // to its widest child); the mock previously left it 0, which
+      // collapsed content-sized columns like the dock pill's ring.
+      let widest = padL + padR;
+      for (const cid of n.children) {
+        const c = nodes.get(cid);
+        if (!c || !c.layout) continue;
+        const cs = c.style || {};
+        if (cs.position === "absolute") continue;
+        const mL = cs.marginLeft || cs.marginHorizontal || cs.margin || 0;
+        const mR = cs.marginRight || cs.marginHorizontal || cs.margin || 0;
+        widest = Math.max(widest, c.layout.x + c.layout.width + mL + mR + padR);
+      }
+      w = Math.max(w, widest);
+    }
   }
   // Row cross size (M9): a row container with no explicit height
   // sizes to its tallest child, margins included — real Yoga does
@@ -319,8 +376,8 @@ function layoutNode(
   n.layout = {
     x: px - (parentPx || 0),
     y: py - (parentPy || 0),
-    width: w,
-    height: h,
+    width: w == null ? 0 : w,
+    height: h == null ? 0 : h,
   };
   return n.layout;
 }
