@@ -2356,18 +2356,27 @@ static void wifi_escape(const char *in, char *out, size_t cap)
     out[o] = '\0';
 }
 
-/* `wpa_cli -i <iface> <args...>` with stdout captured. args is a
- * NULL-terminated list of at most 5 extra arguments.
+/* `wpa_cli -p /run/wpa_supplicant -i <iface> <args...>` with stdout
+ * captured. args is a NULL-terminated list of at most 5 extra
+ * arguments.
  * GF65 wifi fix: absolute path — the daemon runs under init's PATH,
- * which has no /usr/sbin, so a bare name fails ENOENT in execvp. */
+ * which has no /usr/sbin, so a bare name fails ENOENT in execvp.
+ * GF65 wifi fix 2: `-p /run/wpa_supplicant` — wpa_cli's compiled-in
+ * default ctrl path is /var/run/wpa_supplicant, but the daemon
+ * creates its socket at /run/wpa_supplicant (ctrl_interface in
+ * /data/wifi/wpa_supplicant.conf) and /var/run does not exist in
+ * the image, so every wpa_cli call failed to connect (ENOENT) even
+ * though the daemon was healthy. Point at the real socket. */
 static int wpa_cli(const char *iface, char **out, const char **args)
 {
-    char *argv[9];
+    char *argv[11];
     argv[0] = "/usr/sbin/wpa_cli";
-    argv[1] = "-i";
-    argv[2] = (char *)iface;
-    int n = 3;
-    for (int i = 0; args[i] && n < 8; i++)
+    argv[1] = "-p";
+    argv[2] = WIFI_CTRL_DIR;
+    argv[3] = "-i";
+    argv[4] = (char *)iface;
+    int n = 5;
+    for (int i = 0; args[i] && n < 10; i++)
         argv[n++] = (char *)args[i];
     argv[n] = NULL;
     return run_capture(argv, out);
