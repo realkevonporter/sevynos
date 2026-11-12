@@ -491,10 +491,10 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
 cp "$BUILD_TMP/shell-dist/shell.hbc" "$STAGE/usr/share/sevyn/shell/shell.hbc"
 # App icons (direction C, v2/shell/icons/build_icons.py): the dock,
 # the Store, and the title bars reference them by absolute path, so
-# they are staged with the shell. All 14 dock icons must exist or
+# they are staged with the shell. All 16 dock icons must exist or
 # the build fails — a missing icon would silently fall back to the
 # monogram in the dock and hide a broken asset.
-for f in files terminal browser settings music photos calendar notes calculator camera messages store video-calls voice-calls; do
+for f in files terminal browser settings music photos calendar notes calculator camera messages store video-calls voice-calls installer tokrah; do
   if [ ! -f "$ROOT/shell/icons/$f.png" ]; then
     echo "error: missing app icon $ROOT/shell/icons/$f.png (run v2/shell/icons/build_icons.py)" >&2
     exit 1

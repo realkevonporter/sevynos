@@ -1361,6 +1361,27 @@ async function main() {
   }
   check("m9: top bar spans the full 1920 width", fsEdge);
 
+  // Diagnostic for the dock: ask appd for its LIST over the control
+  // serial and count the apps it reports. The icons check below
+  // proves what the DOCK shows; this proves what appd KNOWS — if
+  // appd lists 16 incl. messages but the dock shows 15, the gap is
+  // between appd and the dock (host/renderer/shell), not the
+  // registry. The serial log duplicates lines, so ids are deduped.
+  const listBefore = logLines(b.logPath).length;
+  b.appd.write("LIST\n");
+  const listOk = await waitForLog(b.logPath, /APPD LIST OK/, 15000, listBefore);
+  const listIds = new Set();
+  for (const l of logLines(b.logPath).slice(listBefore)) {
+    const idx = l.indexOf("APPD LIST ");
+    if (idx < 0 || l.includes("APPD LIST OK")) continue;
+    listIds.add(l.slice(idx + 10).split("|")[0]);
+  }
+  check(
+    "appd LIST returns 16 apps incl. messages",
+    !!listOk && listIds.size === 16 && listIds.has("messages"),
+    `${listIds.size} apps: ${[...listIds].sort().join(",")}`,
+  );
+
   // App icons (direction C): every dock tile paints its staged icon —
   // a vertical gradient in the app colour with a white glyph — instead
   // of the flat tile + monogram. The gradient is the proof: a flat
@@ -1369,18 +1390,17 @@ async function main() {
   //
   // Live dock order is appd's alphabetical seed order (sevyn-appd.c
   // seed_from_pristine qsorts the *.sevyn names), NOT the apps.ts
-  // fallback order — so the list below is alphabetical by id.
-  // Tiles sit at x = 44 + i*88. Vertically the 80px tile is centred
-  // in the 96px dock row (dock top 984): y = 992..1072 when no app is
-  // running, y = 987..1067 when the running dot is shown (the dot
-  // adds 10px to the wrapper). The samples below sit inside the tile
-  // in both cases (top y=997, bottom y=1064, glyph band 999..1060).
+  // fallback order. The icons check below finds each tile by its
+  // gradient top colour, so it does not depend on positions at all —
+  // the dock holds 16 apps (14 stock + installer + tokrah), and any
+  // app missing from the dock fails its own entry, not its neighbour.
   const ICON_APPS = [
     ["browser", "#0ea5e9"],
     ["calculator", "#8b5cf6"],
     ["calendar", "#ef4444"],
     ["camera", "#14b8a6"],
     ["files", "#3b82f6"],
+    ["installer", "#2563eb"],
     ["messages", "#22c55e"],
     ["music", "#ec4899"],
     ["notes", "#eab308"],
@@ -1388,6 +1408,9 @@ async function main() {
     ["settings", "#6b7280"],
     ["store", "#f97316"],
     ["terminal", "#111827"],
+    ["tokrah", "#E52B42"],
+    ["video-calls", "#7c3aed"],
+    ["voice-calls", "#0d9488"],
   ];
   const hexRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
   const lighten = (rgb, f) =>
@@ -1408,16 +1431,87 @@ async function main() {
       }
     return n;
   };
+  // Find a dock tile by its gradient top colour (position-free).
+  // Gradient tiles never contain the exact base colour, so a finder
+  // on the base colour returns null for every tile. The tile's TOP
+  // rows sit near lighten(base, 0.22): scan the band just below the
+  // dock top (the tile top in both the plain and running-dot
+  // layouts) for the longest run of columns each holding >=4
+  // matching pixels. Returns {x, yTop} (tile centre x, tile top
+  // row) or null. Top colours are pairwise distinct at tol 14
+  // across all 16 apps, so the lookup is unambiguous — but the
+  // find itself uses at most tol 8: in a gradient's middle rows a
+  // neighbour's top colour can come within 14 (tokrah's top is
+  // within 14 of calendar's mid-gradient), while a true tile still
+  // matches >=6 rows at tol 8 and the closest cross-app approach
+  // in the scan band is 9+.
+  const findDockTile = (img, r, g, bl, tol = 14) => {
+    const ftol = Math.min(tol, 8);
+    const { width: W, height: H, pixels } = img;
+    const want = lighten([r, g, bl], 0.22);
+    const y0 = H - 96;
+    const colCount = new Array(W).fill(0);
+    for (let y = y0 + 6; y <= y0 + 21; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 3;
+        if (
+          Math.abs(pixels[i] - want[0]) <= ftol &&
+          Math.abs(pixels[i + 1] - want[1]) <= ftol &&
+          Math.abs(pixels[i + 2] - want[2]) <= ftol
+        ) {
+          colCount[x]++;
+        }
+      }
+    }
+    let best = null;
+    let runStart = -1;
+    for (let x = 0; x <= W; x++) {
+      const dense = x < W && colCount[x] >= 4;
+      if (dense && runStart < 0) runStart = x;
+      if (!dense && runStart >= 0) {
+        const run = { x0: runStart, x1: x - 1 };
+        if (!best || run.x1 - run.x0 > best.x1 - best.x0) best = run;
+        runStart = -1;
+      }
+    }
+    if (!best || best.x1 - best.x0 < 40) return null;
+    const cx = Math.round((best.x0 + best.x1) / 2);
+    // Tile top: first row at the centre column matching the top colour.
+    let yTop = -1;
+    for (let y = y0; y <= y0 + 26; y++) {
+      const i = (y * W + cx) * 3;
+      if (
+        Math.abs(pixels[i] - want[0]) <= ftol &&
+        Math.abs(pixels[i + 1] - want[1]) <= ftol &&
+        Math.abs(pixels[i + 2] - want[2]) <= ftol
+      ) {
+        yTop = y;
+        break;
+      }
+    }
+    if (yTop < 0) return null;
+    return { x: cx, yTop };
+  };
   let iconsOk = !!settled;
   const iconDetail = [];
   if (settled) {
-    ICON_APPS.forEach(([id, color], i) => {
-      const cx = 44 + i * 88 + 40;
-      const top = pxAt(settled, cx, 997);
-      const bottom = pxAt(settled, cx, 1064);
+    ICON_APPS.forEach(([id, color]) => {
+      const [r, g, b] = hexRgb(color);
+      const tile = findDockTile(settled, r, g, b, 14);
+      if (!tile) {
+        iconsOk = false;
+        iconDetail.push(`${id}: NOT FOUND in dock`);
+        return;
+      }
+      const { x: cx, yTop } = tile;
+      // Samples sit inside the tile in both dock layouts (plain
+      // yTop=992, running-dot yTop=987): top +5, bottom +72,
+      // glyph band +7..+68.
+      const top = pxAt(settled, cx, yTop + 5);
+      const bottom = pxAt(settled, cx, yTop + 72);
       const wantTop = lighten(hexRgb(color), 0.22);
       const wantBottom = darken(hexRgb(color), 0.14);
-      const glyph = whiteIn(settled, cx - 28, 999, cx + 28, 1060);
+      const glyph = whiteIn(settled, cx - 28, yTop + 7, cx + 28, yTop + 68);
       const ok =
         closeTo(top, wantTop, 14) && closeTo(bottom, wantBottom, 14) && glyph > 100;
       if (!ok) iconsOk = false;
@@ -1425,7 +1519,7 @@ async function main() {
     });
   }
   check(
-    "icons: all 12 dock tiles paint their gradient icon + white glyph",
+    "icons: all 16 dock tiles paint their gradient icon + white glyph",
     iconsOk,
     settled ? iconDetail.join(" | ") : "no settled frame",
   );
@@ -1794,41 +1888,17 @@ async function main() {
     return last;
   };
   // Centre of a dock tile by its colour (the dock band only). The
-  // tile is an 80px-wide solid block, but stray pixels of the same
-  // colour elsewhere in the dock band stretch a plain bounding box
-  // and skew its centre onto the wrong tile (in CI the store tile
-  // caught both the settings and the terminal clicks). Find the tile
-  // by column density instead: the longest run of columns each
-  // holding >= 30 matching pixels.
+  // tile is a gradient, so the finder matches the lightened TOP
+  // colour (see findDockTile) instead of the base colour, which
+  // never appears in the tile. Stray pixels of the same colour
+  // elsewhere in the dock band stretch a plain bounding box and
+  // skew its centre onto the wrong tile (in CI the store tile
+  // caught both the settings and the terminal clicks) — hence the
+  // column-density run, not a bounding box.
   const dockTile = (img, r, g, bl, tol = 12) => {
-    const { width: W, height: H, pixels } = img;
-    const y0 = H - 96;
-    const colCount = new Array(W).fill(0);
-    for (let y = y0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 3;
-        if (
-          Math.abs(pixels[i] - r) <= tol &&
-          Math.abs(pixels[i + 1] - g) <= tol &&
-          Math.abs(pixels[i + 2] - bl) <= tol
-        ) {
-          colCount[x]++;
-        }
-      }
-    }
-    let best = null;
-    let runStart = -1;
-    for (let x = 0; x <= W; x++) {
-      const dense = x < W && colCount[x] >= 30;
-      if (dense && runStart < 0) runStart = x;
-      if (!dense && runStart >= 0) {
-        const run = { x0: runStart, x1: x - 1 };
-        if (!best || run.x1 - run.x0 > best.x1 - best.x0) best = run;
-        runStart = -1;
-      }
-    }
-    if (!best || best.x1 - best.x0 < 40) return null;
-    return { x: Math.round((best.x0 + best.x1) / 2), y: H - 48 };
+    const t = findDockTile(img, r, g, bl, tol);
+    if (!t) return null;
+    return { x: t.x, y: img.height - 48 };
   };
   // Click a point on the shell desktop (not covered by any window in
   // `covered`, a list of {x, y, w, h} rects). Tries candidates until

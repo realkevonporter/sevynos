@@ -33,10 +33,13 @@ OUT = HERE  # icons land next to this script: v2/shell/icons/
 SS = 4  # supersample factor; all glyph coords are in 64-space
 SIZE = 64
 
-# App id -> tile colour. The 12 stock apps match v2/shell/src/apps.ts;
+# App id -> tile colour. The 14 stock apps match v2/shell/src/apps.ts;
 # video-calls / voice-calls are the M10 working titles (M10 plan §3:
 # video-calls #7c3aed, voice-calls #0d9488) — their icons are staged
-# now so the dock shows them the moment M10 lands.
+# now so the dock shows them the moment M10 lands. Installer (M11)
+# and Tokrah (M6, third-party) have no apps.ts entry but are dock
+# apps, so they get icons too — a missing icon would silently fall
+# back to the flat monogram tile.
 APPS = {
     "files": "#3b82f6",
     "terminal": "#111827",
@@ -52,6 +55,8 @@ APPS = {
     "store": "#f97316",
     "video-calls": "#7c3aed",
     "voice-calls": "#0d9488",
+    "installer": "#2563eb",
+    "tokrah": "#E52B42",
 }
 
 
@@ -229,6 +234,22 @@ def g_notes(d, w):
     d.rectangle([(20 * s, 36 * s), (38 * s, 39 * s)], fill=0)
 
 
+def g_installer(d, w):
+    # download arrow: shaft + head + install tray
+    s = SS
+    d.rectangle([(29 * s, 8 * s), (35 * s, 36 * s)], fill=255)
+    d.polygon([(18 * s, 32 * s), (46 * s, 32 * s), (32 * s, 50 * s)],
+              fill=255)
+    d.rectangle([(12 * s, 54 * s), (52 * s, 58 * s)], fill=255)
+
+
+def g_tokrah(d, w):
+    # bold "T" monogram
+    s = SS
+    d.rectangle([(12 * s, 14 * s), (52 * s, 24 * s)], fill=255)
+    d.rectangle([(27 * s, 24 * s), (37 * s, 54 * s)], fill=255)
+
+
 GLYPHS = {
     "terminal": g_terminal,
     "files": g_files,
@@ -244,6 +265,8 @@ GLYPHS = {
     "store": g_store,
     "calendar": g_calendar,
     "notes": g_notes,
+    "installer": g_installer,
+    "tokrah": g_tokrah,
 }
 
 
@@ -393,8 +416,8 @@ def main():
     for name in SYMBOLS:
         draw_symbol(name).save(os.path.join(OUT, "symbols", name + ".png"))
 
-    # Preview sheet: all 14 dock icons in a row on the dock bg.
-    sheet = Image.new("RGBA", (14 * 80 + 13 * 8 + 16, 96), (16, 16, 20, 255))
+    # Preview sheet: all 16 dock icons in a row on the dock bg.
+    sheet = Image.new("RGBA", (16 * 80 + 15 * 8 + 16, 96), (16, 16, 20, 255))
     for i, app in enumerate(APPS):
         tile = Image.open(os.path.join(OUT, app + ".png"))
         sheet.alpha_composite(tile, (8 + i * 88, 8))
