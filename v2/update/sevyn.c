@@ -49,6 +49,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <limits.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -192,6 +193,17 @@ static void print_usage(FILE *f)
             "                              open); saves it for later\n"
             "  sevyn net wifi disconnect   drop the association\n"
             "  sevyn net wifi forget <ssid> remove a saved network\n"
+            "  sevyn install probe [--disk <disk>]\n"
+            "                              list disks, partitions, and\n"
+            "                              detected OSes (read-only)\n"
+            "  sevyn install plan --disk <disk> [--target auto|free|<part>]\n"
+            "                              show the install plan (what\n"
+            "                              will be created, protected,\n"
+            "                              replaced)\n"
+            "  sevyn install install --disk <disk> [--target ...] --yes\n"
+            "                              install SevynOS alongside\n"
+            "                              Windows 11 (needs --yes)\n"
+            "  sevyn install status        installed? dual-boot?\n"
             "  sevyn net fetch --method <m> <url> [--header <N:V>] [--data <b>]\n"
             "                              one plain HTTP request; prints\n"
             "                              status, headers JSON, body\n"
@@ -2255,6 +2267,60 @@ static int run_capture(char *const argv[], char **out)
     return -1;
 }
 
+/* Like run_capture, but the child's stderr goes to /dev/null:
+ * for probes where "not found" is an expected answer (mtools
+ * looking for a bootloader file that simply isn't there). */
+static int run_capture_quiet(char *const argv[], char **out)
+{
+    *out = calloc(1, 1);
+    if (!*out)
+        return -1;
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0)
+            dup2(dn, STDERR_FILENO);
+        close(pipefd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    size_t cap = 65536, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        close(pipefd[0]);
+        return -1;
+    }
+    for (;;) {
+        if (len + 4096 >= cap)
+            break;
+        ssize_t n = read(pipefd[0], buf + len, 4096);
+        if (n <= 0)
+            break;
+        len += (size_t)n;
+    }
+    close(pipefd[0]);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    buf[len] = '\0';
+    free(*out);
+    *out = buf;
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return -1;
+}
+
 /* First wireless interface (wlan* / wlp*) in /sys/class/net, or 0. */
 static int wifi_iface(char *name, size_t cap)
 {
@@ -3040,6 +3106,1895 @@ static int cmd_tokrah(int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ */
+/* install (M11): dual-boot installer                                 */
+/*                                                                    */
+/* The live image boots from USB; the installer puts SevynOS onto    */
+/* an internal disk ALONGSIDE Windows 11 without wiping it. It       */
+/* never touches a Windows partition, never installs onto the boot    */
+/* disk, and never writes without an explicit confirmation (the RN    */
+/* Confirm button, or --yes on the CLI).                              */
+/*                                                                    */
+/* Why its own ESP: a Windows 11 ESP is typically 100-260 MiB,       */
+/* while the SevynOS kernel + initramfs is ~380 MiB (and the M9 ESP  */
+/* sync peaks near 1100 MiB) — SevynOS cannot live on the Windows    */
+/* ESP. The installer creates a SevynOS ESP (1152 MiB, the USB      */
+/* image's size) in free space, and GRUB on it chainloads the        */
+/* Windows Boot Manager from the Windows ESP.                         */
+/*                                                                    */
+/* All disk work goes through the staged tools (sgdisk, mkfs.vfat,   */
+/* mkfs.ext4, mtools, debugfs, blkid, efibootmgr) via run_capture.   */
+/* The verbs accept a disk IMAGE file as well as a device, so the    */
+/* host tests drive the same code against fixture images.            */
+/* ------------------------------------------------------------------ */
+
+#define INST_ESP_TYPE "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+#define INST_LINUX_TYPE "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+#define INST_MS_BASIC_TYPE "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
+#define INST_ESP_MB 1152
+#define INST_DATA_MIN_MB 864
+#define INST_DATA_MAX_MB 8192
+#define INST_MIN_FREE_MB (INST_ESP_MB + INST_DATA_MIN_MB)
+#define INST_ALIGN_SECTORS 2048
+#define INST_SECTOR 512
+#define INST_FILES_DIR "/usr/share/sevyn/install"
+#define INST_OS_VERSION_FILE "/usr/share/sevyn/os-version"
+
+typedef struct {
+    int num;
+    char partuuid[64];
+    char type[64]; /* type GUID, upper case */
+    char name[64];
+    unsigned long long start; /* sectors */
+    unsigned long long end;   /* sectors */
+    char fs[32];              /* blkid TYPE, or "" */
+    char fs_uuid[64];         /* blkid UUID, or "" */
+    char label[64];           /* blkid LABEL, or "" */
+    int is_esp;
+    int is_windows_esp; /* ESP + /EFI/Microsoft/Boot/bootmgfw.efi */
+    int is_sevyn_esp;   /* ESP + /EFI/ubuntu/grub.cfg mentioning SevynOS */
+    int is_windows_data; /* MS basic data + ntfs */
+    int is_sevyn_data;   /* label == SEVYN_DATA */
+} inst_part;
+
+typedef struct {
+    char disk[256]; /* /dev/nvme0n1, or an image file path */
+    char devname[64];
+    int is_file; /* a regular file, not a block device */
+    unsigned long long size_sectors;
+    unsigned long long first_usable;
+    unsigned long long last_usable;
+    inst_part parts[32];
+    int nparts;
+    /* Largest trailing free run (1 MiB aligned), sectors; 0 when none. */
+    unsigned long long free_start;
+    unsigned long long free_end;
+    int is_boot_disk;
+    int has_windows;
+    int has_sevyn;
+    int gpt; /* sgdisk read the table */
+} inst_disk;
+
+typedef struct {
+    char disk[256];
+    int mode; /* 0 = free space, 1 = replace old SevynOS */
+    unsigned long long esp_start, esp_end;   /* sectors */
+    unsigned long long data_start, data_end; /* sectors */
+    int esp_num, data_num;                   /* new partition numbers */
+    int replaced[32];
+    int nreplaced;
+    /* Protected partitions (Windows + Windows ESP + anything else
+     * that is not being replaced), with edge hashes taken at plan
+     * time so install can prove they are untouched afterwards. */
+    int prot[32];
+    int nprot;
+    char prot_hash[32][2][65];
+    char win_esp_uuid[64];
+    char win_esp_partuuid[64];
+    int has_windows;
+} inst_plan;
+
+static const char *inst_files_dir(void)
+{
+    return env_or("SEVYN_INSTALL_FILES_DIR", INST_FILES_DIR);
+}
+
+static const char *inst_live_esp_dir(void)
+{
+    return env_or("SEVYN_INSTALL_LIVE_ESP_DIR", "");
+}
+
+static const char *inst_version(void)
+{
+    const char *v = env_or("SEVYN_INSTALL_VERSION", "");
+    if (*v)
+        return v;
+    static char buf[128];
+    char *f = read_file_cap(INST_OS_VERSION_FILE, sizeof(buf) - 1);
+    if (f) {
+        snprintf(buf, sizeof(buf), "%s", f);
+        free(f);
+        return buf;
+    }
+    return "unknown";
+}
+
+/* Run a command, discarding stdout/stderr. Returns the exit code. */
+static int inst_run_quiet(char **argv)
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDOUT_FILENO);
+            dup2(nullfd, STDERR_FILENO);
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return -1;
+}
+
+/* Trim leading/trailing whitespace in place. */
+static void inst_trim(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' ||
+                     s[n - 1] == '\n' || s[n - 1] == '\r'))
+        s[--n] = '\0';
+    size_t i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        i++;
+    if (i > 0)
+        memmove(s, s + i, strlen(s + i) + 1);
+}
+
+static int inst_is_file(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* Device path of a partition on a real disk: sd-style (sda2) vs
+ * p-style (nvme0n1p2). Same rule as the updater's ESP derivation. */
+static void inst_part_path(const char *disk, int num, char *out, size_t cap)
+{
+    const char *base = strrchr(disk, '/');
+    base = base ? base + 1 : disk;
+    size_t blen = strlen(base);
+    if (blen > 0 && isdigit((unsigned char)base[blen - 1]))
+        snprintf(out, cap, "%sp%d", disk, num);
+    else
+        snprintf(out, cap, "%s%d", disk, num);
+}
+
+/* mtools -i argument for an ESP partition: the device, or
+ * <image>@@<byte-offset> for a partition inside an image file. */
+static void inst_esp_arg(const inst_disk *d, const inst_part *p, char *out,
+                         size_t cap)
+{
+    if (d->is_file)
+        snprintf(out, cap, "%s@@%llu", d->disk,
+                 p->start * INST_SECTOR);
+    else
+        inst_part_path(d->disk, p->num, out, cap);
+}
+
+/* blkid TYPE/UUID/LABEL of a partition (device, or -O offset into
+ * an image file). Returns 0 on success (a filesystem was found). */
+static int inst_blkid(const inst_disk *d, const inst_part *p)
+{
+    char *out = NULL;
+    char off[32];
+    char *argv[12];
+    int n = 0;
+    argv[n++] = "blkid";
+    argv[n++] = "-p";
+    argv[n++] = "-o";
+    argv[n++] = "export";
+    if (d->is_file) {
+        snprintf(off, sizeof(off), "%llu", p->start * INST_SECTOR);
+        argv[n++] = "-O";
+        argv[n++] = off;
+        argv[n++] = (char *)d->disk;
+    } else {
+        char dev[256];
+        inst_part_path(d->disk, p->num, dev, sizeof(dev));
+        argv[n++] = dev;
+    }
+    argv[n] = NULL;
+    int rc = run_capture(argv, &out);
+    if (rc != 0 || !out) {
+        free(out);
+        return -1;
+    }
+    int found = 0;
+    char *save = NULL;
+    char *line = strtok_r(out, "\n", &save);
+    while (line) {
+        if (strncmp(line, "TYPE=", 5) == 0) {
+            snprintf((char *)p->fs, sizeof(p->fs), "%s", line + 5);
+            found = 1;
+        } else if (strncmp(line, "UUID=", 5) == 0) {
+            snprintf((char *)p->fs_uuid, sizeof(p->fs_uuid), "%s", line + 5);
+        } else if (strncmp(line, "LABEL=", 6) == 0) {
+            snprintf((char *)p->label, sizeof(p->label), "%s", line + 6);
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(out);
+    return found ? 0 : -1;
+}
+
+/* --- FAT access on real disks: mount, don't use mtools ---
+ * mtools cannot open a partition device whose CHS geometry
+ * disagrees with the FAT hidden-sector field: NVMe reports a
+ * synthetic geometry (heads=255, sectors/track=63) and the check
+ * fails with "Hidden (2048) does not match sectors (63)" — even
+ * with MTOOLS_SKIP_CHECK=1, which only skips the partition-table
+ * consistency check, not the geometry validation. (Proven in-guest
+ * 2026-11-11: mdir on the live ESP failed exactly this way, and
+ * the same failure silently hid every Windows ESP from the probe —
+ * win_esp_uuid was always empty.) The kernel's vfat driver has no
+ * such check, so on real disks the installer mounts the FAT
+ * partition and uses plain file calls. Image files keep mtools
+ * (no geometry there, and the host tests cannot mount). */
+static int inst_mount_vfat(const char *dev, const char *mnt, int ro)
+{
+    if (mkdir(mnt, 0755) != 0 && errno != EEXIST)
+        return -1;
+    char *m_ro[] = {"/bin/busybox", "mount", "-t", "vfat", "-o", "ro",
+                    (char *)dev, (char *)mnt, NULL};
+    char *m_rw[] = {"/bin/busybox", "mount", "-t", "vfat",
+                    (char *)dev, (char *)mnt, NULL};
+    if (inst_run_quiet(ro ? m_ro : m_rw) != 0) {
+        rmdir(mnt);
+        return -1;
+    }
+    return 0;
+}
+
+static void inst_umount(const char *mnt)
+{
+    char *u[] = {"/bin/busybox", "umount", (char *)mnt, NULL};
+    inst_run_quiet(u);
+    rmdir(mnt);
+}
+
+/* "::/EFI/foo/bar" (mtools guest path) -> "<mnt>/EFI/foo/bar". */
+static void inst_guest_path(const char *mnt, const char *guest,
+                            char *out, size_t cap)
+{
+    const char *p = guest;
+    if (p[0] == ':' && p[1] == ':')
+        p += 2;
+    snprintf(out, cap, "%s%s", mnt, p);
+}
+
+/* Does a FAT (ESP) partition contain this guest path? On a real
+ * disk, mount (read-only) and test the file; in an image file,
+ * mdir exits 0 when the file exists. */
+static int inst_fat_has(const inst_disk *d, const inst_part *p,
+                        const char *guest_path)
+{
+    if (!d->is_file) {
+        char dev[256];
+        inst_part_path(d->disk, p->num, dev, sizeof(dev));
+        char mnt[256];
+        snprintf(mnt, sizeof(mnt), "/tmp/sevyn-inst-mnt-%d",
+                 (int)getpid());
+        if (inst_mount_vfat(dev, mnt, 1) != 0)
+            return 0;
+        char host[PATH_MAX];
+        inst_guest_path(mnt, guest_path, host, sizeof(host));
+        int ok = inst_is_file(host);
+        inst_umount(mnt);
+        return ok;
+    }
+    char esp[512];
+    inst_esp_arg(d, p, esp, sizeof(esp));
+    char *argv[] = {"mdir", "-i", esp, (char *)guest_path, NULL};
+    char *out = NULL;
+    int rc = run_capture_quiet(argv, &out);
+    free(out);
+    return rc == 0;
+}
+
+/* Read a file off a FAT (ESP) partition into a malloc'd buffer.
+ * On a real disk, mount (read-only) and read it; in an image
+ * file, mcopy to stdout. Returns NULL when the file is missing. */
+static char *inst_fat_read(const inst_disk *d, const inst_part *p,
+                           const char *guest_path)
+{
+    if (!d->is_file) {
+        char dev[256];
+        inst_part_path(d->disk, p->num, dev, sizeof(dev));
+        char mnt[256];
+        snprintf(mnt, sizeof(mnt), "/tmp/sevyn-inst-mnt-%d",
+                 (int)getpid());
+        if (inst_mount_vfat(dev, mnt, 1) != 0)
+            return NULL;
+        char host[PATH_MAX];
+        inst_guest_path(mnt, guest_path, host, sizeof(host));
+        char *text = read_file_cap(host, 65536);
+        inst_umount(mnt);
+        return text;
+    }
+    char esp[512];
+    inst_esp_arg(d, p, esp, sizeof(esp));
+    char *argv[] = {"mcopy", "-i", esp, (char *)guest_path, "-", NULL};
+    char *out = NULL;
+    if (run_capture_quiet(argv, &out) != 0) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+/* Parse one `sgdisk -i <n> <disk>` block into the partition slot.
+ * Returns 0 on success. */
+static int inst_sgdisk_info(const inst_disk *d, int num, inst_part *p)
+{
+    char numbuf[16];
+    snprintf(numbuf, sizeof(numbuf), "%d", num);
+    char *argv[] = {"sgdisk", "-i", numbuf, (char *)d->disk, NULL};
+    char *out = NULL;
+    if (run_capture(argv, &out) != 0) {
+        free(out);
+        return -1;
+    }
+    memset(p, 0, sizeof(*p));
+    p->num = num;
+    char *save = NULL;
+    char *line = strtok_r(out, "\n", &save);
+    while (line) {
+        if (strncmp(line, "Partition GUID code: ", 21) == 0) {
+            char *sp = strchr(line + 21, ' ');
+            size_t len = sp ? (size_t)(sp - (line + 21))
+                            : strlen(line + 21);
+            if (len >= sizeof(p->type))
+                len = sizeof(p->type) - 1;
+            memcpy(p->type, line + 21, len);
+            p->type[len] = '\0';
+        } else if (strncmp(line, "Partition unique GUID: ", 23) == 0) {
+            snprintf(p->partuuid, sizeof(p->partuuid), "%s", line + 23);
+            inst_trim(p->partuuid);
+        } else if (strncmp(line, "First sector: ", 14) == 0) {
+            p->start = strtoull(line + 14, NULL, 10);
+        } else if (strncmp(line, "Last sector: ", 13) == 0) {
+            p->end = strtoull(line + 13, NULL, 10);
+        } else if (strncmp(line, "Partition name: ", 16) == 0) {
+            const char *nm = line + 16;
+            if (*nm == '\'')
+                nm++;
+            snprintf(p->name, sizeof(p->name), "%s", nm);
+            size_t nl = strlen(p->name);
+            if (nl > 0 && p->name[nl - 1] == '\'')
+                p->name[nl - 1] = '\0';
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(out);
+    if (p->start == 0 && p->end == 0)
+        return -1;
+    p->is_esp = strcmp(p->type, INST_ESP_TYPE) == 0;
+    return 0;
+}
+
+/* Read a disk's GPT into d. Returns 0 when the table parsed. */
+static int inst_probe_disk(const char *path, inst_disk *d)
+{
+    memset(d, 0, sizeof(*d));
+    snprintf(d->disk, sizeof(d->disk), "%s", path);
+    const char *base = strrchr(path, '/');
+    snprintf(d->devname, sizeof(d->devname), "%s", base ? base + 1 : path);
+    d->is_file = inst_is_file(path);
+    char *out = NULL;
+    char *argv[] = {"sgdisk", "-p", (char *)path, NULL};
+    if (run_capture(argv, &out) != 0) {
+        free(out);
+        return -1;
+    }
+    /* Header: "Disk <path>: <N> sectors" + "First usable sector is
+     * <A>, last usable sector is <B>". */
+    char *save = NULL;
+    char *line = strtok_r(out, "\n", &save);
+    int nums[32];
+    int nnums = 0;
+    while (line) {
+        if (strncmp(line, "Disk ", 5) == 0) {
+            /* "Disk <path>: <N> sectors" — NOT the "Disk identifier
+             * (GUID): ..." line: it has no " sectors" marker, and a
+             * GUID starting with a digit (or 0) would otherwise
+             * clobber the sector count. */
+            char *sectors = strstr(line, " sectors");
+            char *colon = strchr(line, ':');
+            if (sectors && colon && colon < sectors)
+                d->size_sectors = strtoull(colon + 1, NULL, 10);
+        } else if (strstr(line, "First usable sector is ") != NULL) {
+            /* "First usable sector is 34, last usable sector is 4062" */
+            char *a = strstr(line, "is ");
+            if (a)
+                d->first_usable = strtoull(a + 3, NULL, 10);
+            char *comma = strchr(line, ',');
+            if (comma) {
+                char *b = strstr(comma, "is ");
+                if (b)
+                    d->last_usable = strtoull(b + 3, NULL, 10);
+            }
+        } else if (line[0] == ' ' || isdigit((unsigned char)line[0])) {
+            /* Partition rows: num start end size-num size-unit code name */
+            int num = 0;
+            unsigned long long start = 0, end = 0;
+            char szn[16] = "", szu[8] = "", code[8] = "";
+            char name[64] = "";
+            int got = sscanf(line, " %d %llu %llu %15s %7s %7s %63[^\n]",
+                             &num, &start, &end, szn, szu, code, name);
+            if (got >= 6 && num > 0 && nnums < 32) {
+                nums[nnums++] = num;
+                (void)szn;
+                (void)szu;
+                (void)code;
+            }
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(out);
+    if (d->size_sectors == 0 || d->last_usable == 0)
+        return -1;
+    d->gpt = 1;
+    for (int i = 0; i < nnums; i++) {
+        inst_part *p = &d->parts[d->nparts];
+        if (inst_sgdisk_info(d, nums[i], p) != 0)
+            continue;
+        d->nparts++;
+    }
+    /* Classify each partition: filesystem + OS detection. */
+    for (int i = 0; i < d->nparts; i++) {
+        inst_part *p = &d->parts[i];
+        inst_blkid(d, p);
+        if (p->is_esp && strcmp(p->fs, "vfat") == 0) {
+            if (inst_fat_has(d, p, "::/EFI/Microsoft/Boot/bootmgfw.efi"))
+                p->is_windows_esp = 1;
+            char *cfg = inst_fat_read(d, p, "::/EFI/ubuntu/grub.cfg");
+            if (cfg) {
+                if (strstr(cfg, "SevynOS") != NULL)
+                    p->is_sevyn_esp = 1;
+                free(cfg);
+            }
+        }
+        if (strcmp(p->type, INST_MS_BASIC_TYPE) == 0 &&
+            strcmp(p->fs, "ntfs") == 0)
+            p->is_windows_data = 1;
+        if (strcmp(p->label, "SEVYN_DATA") == 0)
+            p->is_sevyn_data = 1;
+        if (p->is_windows_esp || p->is_windows_data)
+            d->has_windows = 1;
+        if (p->is_sevyn_esp || p->is_sevyn_data)
+            d->has_sevyn = 1;
+    }
+    /* Largest trailing free run: from the end of the last partition
+     * to last_usable, 1 MiB aligned. Only trailing free space is
+     * ever used — never carve between existing partitions. */
+    unsigned long long end = d->first_usable;
+    for (int i = 0; i < d->nparts; i++)
+        if (d->parts[i].end >= end)
+            end = d->parts[i].end + 1;
+    unsigned long long aligned =
+        (end + INST_ALIGN_SECTORS - 1) / INST_ALIGN_SECTORS *
+        INST_ALIGN_SECTORS;
+    if (aligned <= d->last_usable) {
+        d->free_start = aligned;
+        d->free_end = d->last_usable;
+    }
+    return 0;
+}
+
+/* The disk carrying the mounted /data (the live USB's disk, or the
+ * installed system's disk). Returns 0 and fills disk_out. */
+static int inst_boot_disk(char *disk_out, size_t cap)
+{
+    const char *mounts =
+        env_or("SEVYN_INSTALL_PROC_MOUNTS", "/proc/mounts");
+    FILE *f = fopen(mounts, "r");
+    if (!f)
+        return -1;
+    char line[1024];
+    char device[256] = "";
+    while (fgets(line, sizeof(line), f)) {
+        char *sp1 = strchr(line, ' ');
+        if (!sp1)
+            continue;
+        char *sp2 = strchr(sp1 + 1, ' ');
+        if (!sp2)
+            continue;
+        if ((size_t)(sp2 - (sp1 + 1)) != 5)
+            continue;
+        if (strncmp(sp1 + 1, "/data", 5) != 0)
+            continue;
+        size_t dl = (size_t)(sp1 - line);
+        if (dl >= sizeof(device))
+            dl = sizeof(device) - 1;
+        memcpy(device, line, dl);
+        device[dl] = '\0';
+        break;
+    }
+    fclose(f);
+    if (!device[0])
+        return -1;
+    char resolved[PATH_MAX];
+    if (realpath(device, resolved) != NULL &&
+        strlen(resolved) < sizeof(device))
+        snprintf(device, sizeof(device), "%s", resolved);
+    /* Strip the partition suffix to get the parent disk. */
+    const char *base = strrchr(device, '/');
+    base = base ? base + 1 : device;
+    size_t blen = strlen(base);
+    size_t i = blen;
+    while (i > 0 && isdigit((unsigned char)base[i - 1]))
+        i--;
+    if (i == blen) {
+        /* Whole disk (e.g. the QEMU -kernel path, or an image file
+         * used as the data device in tests): the device IS the
+         * disk carrying /data. */
+        snprintf(disk_out, cap, "%s", device);
+        return 0;
+    }
+    size_t parent_len = i;
+    if (i > 1 && base[i - 1] == 'p' &&
+        isdigit((unsigned char)base[i - 2]))
+        parent_len = i - 1;
+    char parent[256];
+    size_t dev_len = (size_t)(base - device);
+    if (dev_len + parent_len >= sizeof(parent))
+        return -1;
+    memcpy(parent, device, dev_len);
+    memcpy(parent + dev_len, base, parent_len);
+    parent[dev_len + parent_len] = '\0';
+    snprintf(disk_out, cap, "%s", parent);
+    return 0;
+}
+
+/* sha256 of the first and last 1 MiB of a partition (busybox dd +
+ * sha256sum; the partition is never fully read). For an image file
+ * the offsets are computed from the partition's start sector. */
+static int inst_hash_edges(const inst_disk *d, const inst_part *p,
+                           char out_first[65], char out_last[65])
+{
+    unsigned long long size_mb =
+        (p->end - p->start + 1) * INST_SECTOR / (1024 * 1024);
+    if (size_mb < 2)
+        return -1;
+    /* Next to the image, not /tmp, for image files: a full tmpfs
+     * must not break the install. Real disks hash 1 MiB into /tmp. */
+    char hdir[200] = "/tmp";
+    if (d->is_file) {
+        snprintf(hdir, sizeof(hdir), "%.199s", d->disk);
+        char *slash = strrchr(hdir, '/');
+        if (slash)
+            *slash = '\0';
+        else
+            snprintf(hdir, sizeof(hdir), ".");
+    }
+    for (int edge = 0; edge < 2; edge++) {
+        char tmpfile[256];
+        snprintf(tmpfile, sizeof(tmpfile), "%s/sevyn-inst-hash-%d-%d",
+                 hdir, (int)getpid(), edge);
+        /* Devices are addressed at the partition start already;
+         * image files need the absolute offset. */
+        unsigned long long start_mb =
+            d->is_file ? p->start * INST_SECTOR / (1024 * 1024) : 0;
+        unsigned long long skip_mb =
+            edge == 0 ? start_mb : start_mb + size_mb - 1;
+        char skip[32], infile[512];
+        snprintf(skip, sizeof(skip), "%llu", skip_mb);
+        if (d->is_file)
+            snprintf(infile, sizeof(infile), "%s", d->disk);
+        else
+            inst_part_path(d->disk, p->num, infile, sizeof(infile));
+        char ifarg[600], ofarg[300], skiparg[48];
+        snprintf(ifarg, sizeof(ifarg), "if=%s", infile);
+        snprintf(ofarg, sizeof(ofarg), "of=%s", tmpfile);
+        snprintf(skiparg, sizeof(skiparg), "skip=%s", skip);
+        char *ddv[] = {"/bin/busybox", "dd", "status=none", "bs=1M",
+                       "count=1", ifarg, ofarg, skiparg, NULL};
+        char *discard = NULL;
+        if (run_capture(ddv, &discard) != 0) {
+            free(discard);
+            unlink(tmpfile);
+            return -1;
+        }
+        free(discard);
+        char *sum = NULL;
+        char *argv[] = {"/bin/busybox", "sha256sum", tmpfile, NULL};
+        if (run_capture(argv, &sum) != 0 || !sum) {
+            free(sum);
+            unlink(tmpfile);
+            return -1;
+        }
+        char *dst = edge == 0 ? out_first : out_last;
+        size_t k = 0;
+        while (sum[k] && k < 64 &&
+               ((sum[k] >= '0' && sum[k] <= '9') ||
+                (sum[k] >= 'a' && sum[k] <= 'f')))
+            k++;
+        if (k != 64) {
+            free(sum);
+            unlink(tmpfile);
+            return -1;
+        }
+        memcpy(dst, sum, 64);
+        dst[64] = '\0';
+        free(sum);
+        unlink(tmpfile);
+    }
+    return 0;
+}
+
+/* List disks from /sys/block (sd, nvme, vd, mmcblk, hd, xvd).
+ * Returns the count, or -1. */
+static int inst_list_disks(char disks[][256], int max)
+{
+    DIR *d = opendir("/sys/block");
+    if (!d)
+        return -1;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && n < max) {
+        if (e->d_name[0] == '.')
+            continue;
+        if (strncmp(e->d_name, "loop", 4) == 0 ||
+            strncmp(e->d_name, "ram", 3) == 0)
+            continue;
+        if (strncmp(e->d_name, "sd", 2) != 0 &&
+            strncmp(e->d_name, "nvme", 4) != 0 &&
+            strncmp(e->d_name, "vd", 2) != 0 &&
+            strncmp(e->d_name, "mmcblk", 6) != 0 &&
+            strncmp(e->d_name, "hd", 2) != 0 &&
+            strncmp(e->d_name, "xvd", 3) != 0)
+            continue;
+        snprintf(disks[n], 256, "/dev/%.250s", e->d_name);
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
+static void inst_print_disk(const inst_disk *d)
+{
+    printf("disk: %s\n", d->disk);
+    printf("disk-size-mb: %llu\n",
+           d->size_sectors * INST_SECTOR / (1024 * 1024));
+    printf("disk-gpt: %s\n", d->gpt ? "yes" : "no");
+    printf("disk-boot-disk: %s\n", d->is_boot_disk ? "yes" : "no");
+    printf("disk-windows: %s\n", d->has_windows ? "yes" : "no");
+    printf("disk-sevyn: %s\n", d->has_sevyn ? "yes" : "no");
+    printf("disk-free-mb: %llu\n",
+           d->free_end >= d->free_start
+               ? (d->free_end - d->free_start + 1) * INST_SECTOR /
+                     (1024 * 1024)
+               : 0);
+    for (int i = 0; i < d->nparts; i++) {
+        const inst_part *p = &d->parts[i];
+        const char *os = "";
+        if (p->is_windows_esp)
+            os = "windows-esp";
+        else if (p->is_windows_data)
+            os = "windows";
+        else if (p->is_sevyn_esp)
+            os = "sevyn-esp";
+        else if (p->is_sevyn_data)
+            os = "sevyn-data";
+        else if (p->is_esp)
+            os = "esp";
+        printf("part: %d type: %s start: %llu end: %llu fs: %s "
+               "label: %s uuid: %s partuuid: %s os: %s\n",
+               p->num, p->type, p->start, p->end,
+               p->fs[0] ? p->fs : "-",
+               p->label[0] ? p->label : "-",
+               p->fs_uuid[0] ? p->fs_uuid : "-",
+               p->partuuid[0] ? p->partuuid : "-", os);
+    }
+}
+
+static int cmd_install_probe(const char *disk_arg)
+{
+    char boot[256] = "";
+    inst_boot_disk(boot, sizeof(boot));
+    if (disk_arg) {
+        inst_disk d;
+        if (inst_probe_disk(disk_arg, &d) != 0) {
+            fprintf(stderr, "error: cannot read GPT on %s\n", disk_arg);
+            return 1;
+        }
+        if (boot[0] && strcmp(boot, disk_arg) == 0)
+            d.is_boot_disk = 1;
+        inst_print_disk(&d);
+        return 0;
+    }
+    char disks[16][256];
+    int n = inst_list_disks(disks, 16);
+    if (n < 0) {
+        fprintf(stderr, "error: cannot list disks\n");
+        return 1;
+    }
+    if (n == 0) {
+        printf("disk: none\n");
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        inst_disk d;
+        if (inst_probe_disk(disks[i], &d) != 0) {
+            printf("disk: %s\n", disks[i]);
+            printf("disk-gpt: no\n");
+            continue;
+        }
+        if (boot[0] && strcmp(boot, disks[i]) == 0)
+            d.is_boot_disk = 1;
+        inst_print_disk(&d);
+        if (i + 1 < n)
+            printf("\n");
+    }
+    return 0;
+}
+
+/* Compute the install plan for a probed disk. target: "auto",
+ * "free", or a partition number (replace mode). Returns 0 on
+ * success, 1 with err set on refusal. */
+static int inst_compute_plan(inst_disk *d, const char *target,
+                             inst_plan *plan, char *err, size_t errcap)
+{
+    memset(plan, 0, sizeof(*plan));
+    snprintf(plan->disk, sizeof(plan->disk), "%s", d->disk);
+    plan->has_windows = d->has_windows;
+    for (int i = 0; i < d->nparts; i++)
+        if (d->parts[i].is_windows_esp) {
+            snprintf(plan->win_esp_uuid, sizeof(plan->win_esp_uuid),
+                     "%s", d->parts[i].fs_uuid);
+            snprintf(plan->win_esp_partuuid,
+                     sizeof(plan->win_esp_partuuid), "%s",
+                     d->parts[i].partuuid);
+            break;
+        }
+    if (d->is_boot_disk) {
+        snprintf(err, errcap,
+                 "refusing to install onto the boot disk %s", d->disk);
+        return 1;
+    }
+    if (!d->gpt) {
+        snprintf(err, errcap, "disk %s has no GPT partition table",
+                 d->disk);
+        return 1;
+    }
+    if (!d->has_windows) {
+        /* A dual-boot install needs Windows to dual-boot with; a
+         * Windows-less disk is a fresh-install case, not M11. */
+        snprintf(err, errcap,
+                 "no Windows install found on %s (dual-boot needs "
+                 "Windows to install alongside)",
+                 d->disk);
+        return 1;
+    }
+    unsigned long long free_mb =
+        d->free_end >= d->free_start
+            ? (d->free_end - d->free_start + 1) * INST_SECTOR /
+                  (1024 * 1024)
+            : 0;
+    int want_free = 0, replace_num = 0;
+    if (!target || strcmp(target, "auto") == 0) {
+        if (free_mb >= INST_MIN_FREE_MB)
+            want_free = 1;
+    } else if (strcmp(target, "free") == 0) {
+        want_free = 1;
+    } else {
+        replace_num = atoi(target);
+        if (replace_num <= 0) {
+            snprintf(err, errcap, "bad --target %s", target);
+            return 1;
+        }
+    }
+    if (want_free) {
+        if (free_mb < INST_MIN_FREE_MB) {
+            snprintf(err, errcap,
+                     "not enough free space on %s: %llu MiB free, "
+                     "%d MiB needed",
+                     d->disk, free_mb, INST_MIN_FREE_MB);
+            return 1;
+        }
+        plan->mode = 0;
+        plan->esp_start = d->free_start;
+        plan->esp_end = plan->esp_start + INST_ESP_MB * 2048 - 1;
+        plan->data_start = plan->esp_end + 1;
+        unsigned long long data_max_end =
+            plan->data_start + INST_DATA_MAX_MB * 2048 - 1;
+        plan->data_end = data_max_end < d->free_end ? data_max_end
+                                                    : d->free_end;
+        if ((plan->data_end - plan->data_start + 1) * INST_SECTOR /
+                (1024 * 1024) <
+            INST_DATA_MIN_MB) {
+            snprintf(err, errcap,
+                     "not enough free space on %s for the data "
+                     "partition",
+                     d->disk);
+            return 1;
+        }
+        /* New partition numbers: first free numbers above the max. */
+        int maxn = 0;
+        for (int i = 0; i < d->nparts; i++)
+            if (d->parts[i].num > maxn)
+                maxn = d->parts[i].num;
+        if (maxn + 2 > 128) {
+            snprintf(err, errcap, "no free partition numbers on %s",
+                     d->disk);
+            return 1;
+        }
+        plan->esp_num = maxn + 1;
+        plan->data_num = maxn + 2;
+    } else {
+        /* Replace mode: every old SevynOS partition on the disk is
+         * removed, and the new ESP + data go into the freed run —
+         * which must be one contiguous run of at least the minimum. */
+        int old[32];
+        int nold = 0;
+        for (int i = 0; i < d->nparts; i++)
+            if (d->parts[i].is_sevyn_esp || d->parts[i].is_sevyn_data)
+                old[nold++] = i;
+        if (nold == 0) {
+            snprintf(err, errcap,
+                     "no existing SevynOS install to replace on %s "
+                     "(and only %llu MiB free)",
+                     d->disk, free_mb);
+            return 1;
+        }
+        if (replace_num > 0) {
+            int found = 0;
+            for (int i = 0; i < nold; i++)
+                if (d->parts[old[i]].num == replace_num)
+                    found = 1;
+            if (!found) {
+                snprintf(err, errcap,
+                         "partition %d on %s is not part of an "
+                         "existing SevynOS install",
+                         replace_num, d->disk);
+                return 1;
+            }
+        }
+        /* Sort the old partitions by start and require adjacency. */
+        for (int i = 0; i < nold; i++)
+            for (int j = i + 1; j < nold; j++)
+                if (d->parts[old[j]].start < d->parts[old[i]].start) {
+                    int t = old[i];
+                    old[i] = old[j];
+                    old[j] = t;
+                }
+        unsigned long long run_start = d->parts[old[0]].start;
+        unsigned long long run_end = d->parts[old[0]].end;
+        for (int i = 1; i < nold; i++) {
+            if (d->parts[old[i]].start != run_end + 1) {
+                snprintf(err, errcap,
+                         "existing SevynOS partitions on %s are not "
+                         "contiguous — cannot replace in place",
+                         d->disk);
+                return 1;
+            }
+            run_end = d->parts[old[i]].end;
+        }
+        unsigned long long run_mb =
+            (run_end - run_start + 1) * INST_SECTOR / (1024 * 1024);
+        if (run_mb < INST_MIN_FREE_MB) {
+            snprintf(err, errcap,
+                     "existing SevynOS install on %s is only %llu "
+                     "MiB — too small to replace in place",
+                     d->disk, run_mb);
+            return 1;
+        }
+        plan->mode = 1;
+        plan->esp_start = run_start;
+        plan->esp_end = plan->esp_start + INST_ESP_MB * 2048 - 1;
+        plan->data_start = plan->esp_end + 1;
+        plan->data_end = run_end;
+        if ((plan->data_end - plan->data_start + 1) * INST_SECTOR /
+                (1024 * 1024) <
+            INST_DATA_MIN_MB) {
+            snprintf(err, errcap,
+                     "existing SevynOS install on %s leaves too "
+                     "little room for the data partition",
+                     d->disk);
+            return 1;
+        }
+        /* Reuse the old partition numbers, in start order. With a
+         * single old partition the data partition takes the lowest
+         * free number (esp_num + 1 may already be taken). */
+        plan->esp_num = d->parts[old[0]].num;
+        if (nold > 1) {
+            plan->data_num = d->parts[old[1]].num;
+        } else {
+            int cand = 1;
+            for (;;) {
+                int taken = 0;
+                for (int i = 0; i < d->nparts; i++)
+                    if (d->parts[i].num == cand ||
+                        cand == plan->esp_num)
+                        taken = 1;
+                if (!taken)
+                    break;
+                cand++;
+                if (cand > 128) {
+                    snprintf(err, errcap,
+                             "no free partition numbers on %s", d->disk);
+                    return 1;
+                }
+            }
+            plan->data_num = cand;
+        }
+        for (int i = 0; i < nold; i++)
+            plan->replaced[plan->nreplaced++] =
+                d->parts[old[i]].num;
+    }
+    /* Protected partitions: everything not being replaced. Their
+     * edge hashes are the proof they stay untouched. */
+    for (int i = 0; i < d->nparts; i++) {
+        int is_repl = 0;
+        for (int j = 0; j < plan->nreplaced; j++)
+            if (d->parts[i].num == plan->replaced[j])
+                is_repl = 1;
+        if (is_repl)
+            continue;
+        plan->prot[plan->nprot] = d->parts[i].num;
+        unsigned long long size_mb =
+            (d->parts[i].end - d->parts[i].start + 1) * INST_SECTOR /
+            (1024 * 1024);
+        if (size_mb >= 2) {
+            char h0[65] = "", h1[65] = "";
+            if (inst_hash_edges(d, &d->parts[i], h0, h1) == 0) {
+                snprintf(plan->prot_hash[plan->nprot][0], 65, "%s", h0);
+                snprintf(plan->prot_hash[plan->nprot][1], 65, "%s", h1);
+            }
+        }
+        plan->nprot++;
+    }
+    return 0;
+}
+
+static void inst_print_plan(const inst_disk *d, const inst_plan *plan)
+{
+    printf("plan: ok\n");
+    printf("disk: %s\n", plan->disk);
+    printf("mode: %s\n", plan->mode == 0 ? "free-space" : "replace");
+    printf("new-esp: %d start: %llu end: %llu size-mb: %d\n",
+           plan->esp_num, plan->esp_start, plan->esp_end, INST_ESP_MB);
+    printf("new-data: %d start: %llu end: %llu size-mb: %llu\n",
+           plan->data_num, plan->data_start, plan->data_end,
+           (plan->data_end - plan->data_start + 1) * INST_SECTOR /
+               (1024 * 1024));
+    printf("windows: %s\n", plan->has_windows ? "yes" : "no");
+    printf("windows-esp-uuid: %s\n",
+           plan->win_esp_uuid[0] ? plan->win_esp_uuid : "-");
+    if (plan->nreplaced > 0) {
+        printf("replaced:");
+        for (int i = 0; i < plan->nreplaced; i++)
+            printf(" %d", plan->replaced[i]);
+        printf("\n");
+    }
+    printf("protected:");
+    for (int i = 0; i < plan->nprot; i++)
+        printf(" %d", plan->prot[i]);
+    printf("\n");
+    printf("boot-entry: SevynOS (first in BootOrder)\n");
+    printf("grub: SevynOS + Windows 11\n");
+    (void)d;
+}
+
+static int inst_plan_equal(const inst_plan *a, const inst_plan *b)
+{
+    if (strcmp(a->disk, b->disk) != 0 || a->mode != b->mode ||
+        a->esp_start != b->esp_start || a->esp_end != b->esp_end ||
+        a->data_start != b->data_start || a->data_end != b->data_end ||
+        a->esp_num != b->esp_num || a->data_num != b->data_num ||
+        a->nreplaced != b->nreplaced || a->nprot != b->nprot)
+        return 0;
+    for (int i = 0; i < a->nreplaced; i++)
+        if (a->replaced[i] != b->replaced[i])
+            return 0;
+    for (int i = 0; i < a->nprot; i++) {
+        if (a->prot[i] != b->prot[i])
+            return 0;
+        if (strcmp(a->prot_hash[i][0], b->prot_hash[i][0]) != 0 ||
+            strcmp(a->prot_hash[i][1], b->prot_hash[i][1]) != 0)
+            return 0;
+    }
+    return 1;
+}
+
+static int cmd_install_plan(const char *disk_arg, const char *target)
+{
+    if (!disk_arg) {
+        fprintf(stderr, "error: install plan needs --disk <disk>\n");
+        return 1;
+    }
+    inst_disk d;
+    if (inst_probe_disk(disk_arg, &d) != 0) {
+        fprintf(stderr, "error: cannot read GPT on %s\n", disk_arg);
+        return 1;
+    }
+    char boot[256] = "";
+    if (inst_boot_disk(boot, sizeof(boot)) == 0 &&
+        strcmp(boot, disk_arg) == 0)
+        d.is_boot_disk = 1;
+    inst_plan plan;
+    char err[512];
+    if (inst_compute_plan(&d, target, &plan, err, sizeof(err)) != 0) {
+        printf("plan: impossible\n");
+        fprintf(stderr, "error: %s\n", err);
+        return 1;
+    }
+    inst_print_plan(&d, &plan);
+    return 0;
+}
+
+/* Partition I/O: on a real disk, operations run against the device
+ * directly; inside an image file, they run against a temp file of
+ * the partition's size, which is dd'd into place at the end. */
+typedef struct {
+    int is_file;
+    char dev[256]; /* device path (real disk) */
+    char tmp[256]; /* temp file (image-file case) */
+    char img[256]; /* image path (image-file case) */
+    char mnt[256]; /* mountpoint (real-disk ESP staging) */
+    unsigned long long offset; /* bytes into the image */
+    unsigned long long size;   /* bytes */
+} inst_part_io;
+
+static int inst_io_init(const inst_disk *d, const inst_part *p,
+                        inst_part_io *io)
+{
+    memset(io, 0, sizeof(*io));
+    io->is_file = d->is_file;
+    io->offset = p->start * INST_SECTOR;
+    io->size = (p->end - p->start + 1) * INST_SECTOR;
+    if (d->is_file) {
+        snprintf(io->img, sizeof(io->img), "%s", d->disk);
+        /* Next to the image, not /tmp: the staging file is as big
+         * as the partition (1152 MiB ESP) and /tmp is a small tmpfs
+         * in the sandbox and RAM-backed in the live image. */
+        char dir[200];
+        snprintf(dir, sizeof(dir), "%.199s", d->disk);
+        char *slash = strrchr(dir, '/');
+        if (slash)
+            *slash = '\0';
+        else
+            snprintf(dir, sizeof(dir), ".");
+        snprintf(io->tmp, sizeof(io->tmp),
+                 "%s/sevyn-inst-part-%d-%d", dir, (int)getpid(),
+                 p->num);
+        int fd = open(io->tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0)
+            return -1;
+        if (ftruncate(fd, (off_t)io->size) != 0) {
+            close(fd);
+            unlink(io->tmp);
+            return -1;
+        }
+        close(fd);
+    } else {
+        inst_part_path(d->disk, p->num, io->dev, sizeof(io->dev));
+    }
+    return 0;
+}
+
+static const char *inst_io_target(const inst_part_io *io)
+{
+    return io->is_file ? io->tmp : io->dev;
+}
+
+/* dd the staged temp file into the image at the partition offset. */
+static int inst_io_dd_in(const inst_part_io *io)
+{
+    if (!io->is_file)
+        return 0;
+    char seek[32];
+    snprintf(seek, sizeof(seek), "%llu", io->offset / (1024 * 1024));
+    char ifarg[300], ofarg[300], seekarg[48];
+    snprintf(ifarg, sizeof(ifarg), "if=%s", io->tmp);
+    snprintf(ofarg, sizeof(ofarg), "of=%s", io->img);
+    snprintf(seekarg, sizeof(seekarg), "seek=%s", seek);
+    char *argv[] = {"/bin/busybox", "dd", "status=none", "bs=1M",
+                    "conv=notrunc", ifarg, ofarg, seekarg, NULL};
+    char *out = NULL;
+    int rc = run_capture(argv, &out);
+    free(out);
+    return rc == 0 ? 0 : -1;
+}
+
+static void inst_io_cleanup(inst_part_io *io)
+{
+    if (io->is_file && io->tmp[0])
+        unlink(io->tmp);
+}
+
+static int inst_io_mkfs_vfat(inst_part_io *io)
+{
+    char *argv[] = {"mkfs.vfat", "-F", "32", "-n", "SEVYNESP",
+                    (char *)inst_io_target(io), NULL};
+    char *out = NULL;
+    int rc = run_capture(argv, &out);
+    free(out);
+    return rc == 0 ? 0 : -1;
+}
+
+static int inst_io_mkfs_ext4(inst_part_io *io)
+{
+    char *argv[] = {"mkfs.ext4", "-q", "-F", "-L", "SEVYN_DATA",
+                    (char *)inst_io_target(io), NULL};
+    char *out = NULL;
+    int rc = run_capture(argv, &out);
+    free(out);
+    return rc == 0 ? 0 : -1;
+}
+
+/* Mount a real-disk ESP for staging (mtools cannot write to it:
+ * same CHS geometry validation as the reads). No-op for image
+ * files, which keep mtools on the temp slice. */
+static int inst_esp_mount(inst_part_io *io)
+{
+    if (io->is_file || io->mnt[0])
+        return 0;
+    snprintf(io->mnt, sizeof(io->mnt), "/tmp/sevyn-inst-esp-%d",
+             (int)getpid());
+    if (inst_mount_vfat(io->dev, io->mnt, 0) != 0) {
+        io->mnt[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+static void inst_esp_umount(inst_part_io *io)
+{
+    if (io->mnt[0]) {
+        inst_umount(io->mnt);
+        io->mnt[0] = '\0';
+    }
+}
+
+/* mmd on the ESP (ignores "already exists"). On a real disk, the
+ * ESP is mounted (see inst_esp_mount) and the directory is made
+ * with mkdir; in an image file, mmd on the temp slice. */
+static void inst_esp_mkdir(inst_part_io *io, const char *dir)
+{
+    if (!io->is_file && io->mnt[0]) {
+        char host[PATH_MAX];
+        inst_guest_path(io->mnt, dir, host, sizeof(host));
+        mkdir(host, 0755); /* parent created by the earlier call */
+        return;
+    }
+    char *argv[] = {"mmd", "-i", (char *)inst_io_target(io),
+                    (char *)dir, NULL};
+    char *out = NULL;
+    run_capture(argv, &out);
+    free(out);
+}
+
+/* Copy one or more host files into an ESP directory. On a real
+ * disk, the ESP is mounted and the files are cp'd in; in an image
+ * file, mcopy onto the temp slice. */
+static int inst_esp_copy(inst_part_io *io, char **srcs, int nsrcs,
+                         const char *dest)
+{
+    if (!io->is_file && io->mnt[0]) {
+        char host[PATH_MAX];
+        inst_guest_path(io->mnt, dest, host, sizeof(host));
+        for (int i = 0; i < nsrcs; i++) {
+            char *argv[] = {"/bin/busybox", "cp", srcs[i], host, NULL};
+            char *out = NULL;
+            int rc = run_capture(argv, &out);
+            free(out);
+            if (rc != 0)
+                return -1;
+        }
+        return 0;
+    }
+    char **argv = malloc(sizeof(char *) * (size_t)(nsrcs + 5));
+    if (!argv)
+        return -1;
+    int n = 0;
+    argv[n++] = "mcopy";
+    argv[n++] = "-i";
+    argv[n++] = (char *)inst_io_target(io);
+    for (int i = 0; i < nsrcs; i++)
+        argv[n++] = srcs[i];
+    argv[n++] = (char *)dest;
+    argv[n] = NULL;
+    char *out = NULL;
+    int rc = run_capture(argv, &out);
+    free(out);
+    free(argv);
+    return rc == 0 ? 0 : -1;
+}
+
+/* Copy the live kernel + initramfs into tmpdir. In-guest, they come
+ * from the boot disk's ESP (mounted read-only); in host tests, from
+ * SEVYN_INSTALL_LIVE_ESP_DIR. */
+static int inst_live_kernel(char *tmpdir, size_t cap)
+{
+    const char *dir = inst_live_esp_dir();
+    if (dir[0]) {
+        char k[PATH_MAX], i[PATH_MAX];
+        snprintf(k, sizeof(k), "%s/vmlinuz", dir);
+        snprintf(i, sizeof(i), "%s/initramfs.cpio.gz", dir);
+        if (!inst_is_file(k) || !inst_is_file(i))
+            return -1;
+        snprintf(tmpdir, cap, "%s", dir);
+        return 0;
+    }
+    char boot[256] = "";
+    if (inst_boot_disk(boot, sizeof(boot)) != 0)
+        return -1;
+    /* The boot ESP is partition 1 of the boot disk (USB layout).
+     * Mount it and test for the files directly: an mdir pre-check
+     * cannot open an NVMe partition device (mtools CHS geometry
+     * validation fails on it), but the kernel's vfat driver can. */
+    char esp_dev[256];
+    inst_part_path(boot, 1, esp_dev, sizeof(esp_dev));
+    char mnt[256];
+    snprintf(mnt, sizeof(mnt), "/tmp/sevyn-live-esp-%d", (int)getpid());
+    if (inst_mount_vfat(esp_dev, mnt, 1) != 0)
+        return -1;
+    char k[PATH_MAX], i[PATH_MAX];
+    snprintf(k, sizeof(k), "%s/vmlinuz", mnt);
+    snprintf(i, sizeof(i), "%s/initramfs.cpio.gz", mnt);
+    int ok = inst_is_file(k) && inst_is_file(i);
+    if (ok) {
+        /* Copy out, then unmount: the temp copies are what the
+         * staging steps read. */
+        char td[256];
+        snprintf(td, sizeof(td), "/tmp/sevyn-live-kern-%d", (int)getpid());
+        if (mkdir(td, 0755) != 0 && errno != EEXIST)
+            ok = 0;
+        else {
+            char k2[PATH_MAX], i2[PATH_MAX];
+            snprintf(k2, sizeof(k2), "%s/vmlinuz", td);
+            snprintf(i2, sizeof(i2), "%s/initramfs.cpio.gz", td);
+            char *cp1[] = {"/bin/busybox", "cp", k, k2, NULL};
+            char *cp2[] = {"/bin/busybox", "cp", i, i2, NULL};
+            if (inst_run_quiet(cp1) != 0 || inst_run_quiet(cp2) != 0)
+                ok = 0;
+            else
+                snprintf(tmpdir, cap, "%s", td);
+        }
+    }
+    inst_umount(mnt);
+    return ok ? 0 : -1;
+}
+
+static int inst_write_grub_cfg(const char *path, const char *data_partuuid,
+                               const char *win_esp_uuid)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f,
+            "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
+            "# Written by the SevynOS installer: SevynOS + Windows 11.\n"
+            "set timeout=5\n"
+            "set default=0\n"
+            "menuentry \"SevynOS\" {\n"
+            "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=A "
+            "sevyn.data=PARTUUID=%s\n"
+            "    initrd /initramfs.cpio.gz\n"
+            "}\n",
+            data_partuuid);
+    if (win_esp_uuid && win_esp_uuid[0])
+        fprintf(f,
+                "menuentry \"Windows 11\" {\n"
+                "    search --fs-uuid %s --set=root\n"
+                "    chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n"
+                "}\n",
+                win_esp_uuid);
+    fclose(f);
+    return 0;
+}
+
+/* Write the A/B slot layout into a fresh ext4 data partition
+ * (mirrors make-data-disk.py): /slots/A with the live kernel +
+ * initramfs, empty /slots/B, /slot-state.json. */
+static int inst_write_slots(inst_part_io *io, const char *kern_dir,
+                            const char *version)
+{
+    char cmds[PATH_MAX];
+    snprintf(cmds, sizeof(cmds), "/tmp/sevyn-inst-debugfs-%d",
+             (int)getpid());
+    char state[PATH_MAX];
+    snprintf(state, sizeof(state), "/tmp/sevyn-inst-state-%d",
+             (int)getpid());
+    FILE *f = fopen(state, "w");
+    if (!f)
+        return -1;
+    fprintf(f,
+            "{\n  \"active\": \"A\",\n  \"good\": \"A\",\n  \"attempts\": 0,\n"
+            "  \"version\": \"%s\"\n}\n",
+            version);
+    fclose(f);
+    f = fopen(cmds, "w");
+    if (!f) {
+        unlink(state);
+        return -1;
+    }
+    fprintf(f,
+            "mkdir /slots\n"
+            "mkdir /slots/A\n"
+            "mkdir /slots/B\n"
+            "write %s/vmlinuz /slots/A/vmlinuz\n"
+            "write %s/initramfs.cpio.gz /slots/A/initramfs.cpio.gz\n"
+            "write %s /slot-state.json\n",
+            kern_dir, kern_dir, state);
+    fclose(f);
+    char *argv[] = {"debugfs", "-w", "-f", cmds,
+                    (char *)inst_io_target(io), NULL};
+    char *out = NULL;
+    int rc = run_capture(argv, &out);
+    free(out);
+    unlink(cmds);
+    unlink(state);
+    return rc == 0 ? 0 : -1;
+}
+
+/* Collect *.mod / *.lst / moddep.lst basenames from the install
+ * files dir (the GRUB modules staged by the image build). */
+static int inst_grub_mods(char ***out_names, int *out_n)
+{
+    const char *dir = inst_files_dir();
+    DIR *d = opendir(dir);
+    if (!d)
+        return -1;
+    char **names = NULL;
+    int n = 0, cap = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t len = strlen(e->d_name);
+        int is_mod = (len > 4 && strcmp(e->d_name + len - 4, ".mod") == 0) ||
+                     (len > 4 && strcmp(e->d_name + len - 4, ".lst") == 0) ||
+                     strcmp(e->d_name, "moddep.lst") == 0;
+        if (!is_mod)
+            continue;
+        if (n >= cap) {
+            cap = cap ? cap * 2 : 32;
+            char **nn = realloc(names, sizeof(char *) * (size_t)cap);
+            if (!nn) {
+                closedir(d);
+                return -1;
+            }
+            names = nn;
+        }
+        names[n] = malloc(strlen(dir) + len + 2);
+        if (!names[n]) {
+            closedir(d);
+            return -1;
+        }
+        sprintf(names[n], "%s/%s", dir, e->d_name);
+        n++;
+    }
+    closedir(d);
+    *out_names = names;
+    *out_n = n;
+    return 0;
+}
+
+static int inst_require_file(const char *dir, const char *name)
+{
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/%s", dir, name);
+    return inst_is_file(p) ? 0 : -1;
+}
+
+/* Register the UEFI boot entry (best-effort: without efivars the
+ * fallback /EFI/BOOT/BOOTX64.EFI still boots the new ESP). */
+static void inst_register_boot_entry(const inst_disk *d, int esp_num)
+{
+    if (d->is_file)
+        return; /* image files have no firmware to register with */
+    struct stat st;
+    if (stat("/sys/firmware/efi/efivars", &st) != 0) {
+        printf("warning: no UEFI variables (not booted via UEFI?) — "
+               "boot entry not registered; the fallback BOOTX64.EFI "
+               "still boots the new ESP\n");
+        return;
+    }
+    if (access("/usr/sbin/efibootmgr", X_OK) != 0 &&
+        access("efibootmgr", X_OK) != 0) {
+        printf("warning: efibootmgr not found — boot entry not "
+               "registered; the fallback BOOTX64.EFI still boots "
+               "the new ESP\n");
+        return;
+    }
+    char partnum[16];
+    snprintf(partnum, sizeof(partnum), "%d", esp_num);
+    char *create[] = {"efibootmgr", "--create", "--disk",
+                      (char *)d->disk, "--part", partnum,
+                      "--label", "SevynOS",
+                      "--loader", "/EFI/ubuntu/shimx64.efi", NULL};
+    char *out = NULL;
+    if (run_capture(create, &out) != 0) {
+        free(out);
+        printf("warning: efibootmgr --create failed — boot entry "
+               "not registered; the fallback BOOTX64.EFI still "
+               "boots the new ESP\n");
+        return;
+    }
+    free(out);
+    out = NULL;
+    /* Find the new entry number in the verbose listing. */
+    char *argv[] = {"efibootmgr", "-v", NULL};
+    if (run_capture(argv, &out) != 0 || !out) {
+        free(out);
+        printf("warning: efibootmgr -v failed — cannot confirm the "
+               "new boot entry\n");
+        return;
+    }
+    char newnum[8] = "";
+    char *save = NULL;
+    char *line = strtok_r(out, "\n", &save);
+    while (line) {
+        if (strncmp(line, "Boot", 4) == 0 && strlen(line) >= 8 &&
+            strstr(line, "SevynOS") != NULL) {
+            memcpy(newnum, line + 4, 4);
+            newnum[4] = '\0';
+            break;
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(out);
+    if (!newnum[0]) {
+        printf("warning: new boot entry not found in efibootmgr -v\n");
+        return;
+    }
+    /* Put the new entry first in BootOrder, preserving the rest. */
+    out = NULL;
+    char *argv2[] = {"efibootmgr", NULL};
+    if (run_capture(argv2, &out) != 0 || !out) {
+        free(out);
+        return;
+    }
+    char order[1024] = "";
+    line = strtok_r(out, "\n", &save);
+    while (line) {
+        if (strncmp(line, "BootOrder: ", 11) == 0) {
+            snprintf(order, sizeof(order), "%s", line + 11);
+            break;
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(out);
+    if (!order[0])
+        return;
+    /* Rebuild the order: new first, then the old entries minus new. */
+    char rebuilt[1024];
+    snprintf(rebuilt, sizeof(rebuilt), "%s", newnum);
+    char *tok_save = NULL;
+    char *tok = strtok_r(order, ",", &tok_save);
+    while (tok) {
+        if (strcmp(tok, newnum) != 0) {
+            strncat(rebuilt, ",", sizeof(rebuilt) - strlen(rebuilt) - 1);
+            strncat(rebuilt, tok, sizeof(rebuilt) - strlen(rebuilt) - 1);
+        }
+        tok = strtok_r(NULL, ",", &tok_save);
+    }
+    char *argv3[] = {"efibootmgr", "-o", rebuilt, NULL};
+    char *discard = NULL;
+    if (run_capture(argv3, &discard) != 0)
+        printf("warning: efibootmgr -o failed — BootOrder unchanged\n");
+    else
+        printf("boot-entry: SevynOS (%s) first in BootOrder\n", newnum);
+    free(discard);
+}
+
+static int cmd_install_install(const char *disk_arg, const char *target,
+                               int yes)
+{
+    if (!disk_arg) {
+        fprintf(stderr, "error: install needs --disk <disk>\n");
+        return 1;
+    }
+    if (!yes) {
+        fprintf(stderr,
+                "error: refusing to install without --yes — run "
+                "`sevyn install plan --disk %s` first, review it, "
+                "then re-run with --yes\n",
+                disk_arg);
+        return 1;
+    }
+    inst_disk d;
+    if (inst_probe_disk(disk_arg, &d) != 0) {
+        fprintf(stderr, "error: cannot read GPT on %s\n", disk_arg);
+        return 1;
+    }
+    char boot[256] = "";
+    if (inst_boot_disk(boot, sizeof(boot)) == 0 &&
+        strcmp(boot, disk_arg) == 0)
+        d.is_boot_disk = 1;
+    inst_plan plan;
+    char err[512];
+    if (inst_compute_plan(&d, target, &plan, err, sizeof(err)) != 0) {
+        fprintf(stderr, "error: %s\n", err);
+        return 1;
+    }
+    /* Re-probe: the plan must be identical to the confirmed one —
+     * a disk that changed under us aborts the install. */
+    inst_disk d2;
+    if (inst_probe_disk(disk_arg, &d2) != 0) {
+        fprintf(stderr, "error: cannot re-read GPT on %s\n", disk_arg);
+        return 1;
+    }
+    if (inst_boot_disk(boot, sizeof(boot)) == 0 &&
+        strcmp(boot, disk_arg) == 0)
+        d2.is_boot_disk = 1;
+    inst_plan plan2;
+    if (inst_compute_plan(&d2, target, &plan2, err, sizeof(err)) != 0) {
+        fprintf(stderr, "error: disk changed: %s\n", err);
+        return 1;
+    }
+    if (!inst_plan_equal(&plan, &plan2)) {
+        fprintf(stderr,
+                "error: disk changed since the plan was computed — "
+                "re-run `sevyn install plan` and confirm again\n");
+        return 1;
+    }
+    /* Pre-flight: bootloader files + live kernel must exist before
+     * anything writes. */
+    const char *files = inst_files_dir();
+    const char *need[] = {"shimx64.efi", "grubx64.efi", "mmx64.efi",
+                          "fbx64.efi", "BOOTX64.CSV", "unicode.pf2"};
+    for (size_t i = 0; i < sizeof(need) / sizeof(need[0]); i++)
+        if (inst_require_file(files, need[i]) != 0) {
+            fprintf(stderr, "error: install files missing %s/%s\n",
+                    files, need[i]);
+            return 1;
+        }
+    char kern_dir[PATH_MAX] = "";
+    if (inst_live_kernel(kern_dir, sizeof(kern_dir)) != 0) {
+        fprintf(stderr,
+                "error: cannot find the live kernel + initramfs "
+                "(boot ESP not found)\n");
+        return 1;
+    }
+    char **mods = NULL;
+    int nmods = 0;
+    if (inst_grub_mods(&mods, &nmods) != 0) {
+        fprintf(stderr, "error: cannot list GRUB modules in %s\n", files);
+        return 1;
+    }
+    printf("install: %s mode=%s esp=%d data=%d\n", plan.disk,
+           plan.mode == 0 ? "free-space" : "replace", plan.esp_num,
+           plan.data_num);
+    /* Replace mode: delete the old SevynOS partitions first. */
+    if (plan.nreplaced > 0) {
+        char *argv[8 + 32];
+        int n = 0;
+        argv[n++] = "sgdisk";
+        for (int i = 0; i < plan.nreplaced; i++) {
+            char *a = malloc(32);
+            snprintf(a, 32, "--delete=%d", plan.replaced[i]);
+            argv[n++] = a;
+        }
+        argv[n++] = (char *)disk_arg;
+        argv[n] = NULL;
+        char *out = NULL;
+        int rc = run_capture(argv, &out);
+        free(out);
+        for (int i = 1; i < n - 1; i++)
+            free(argv[i]);
+        if (rc != 0) {
+            fprintf(stderr, "error: sgdisk delete failed\n");
+            return 1;
+        }
+    }
+    /* Create the new partitions. */
+    char newesp[64], newdata[64], typeesp[64], typedata[64],
+        nameesp[48], namedata[48];
+    snprintf(newesp, sizeof(newesp), "--new=%d:%llu:%llu", plan.esp_num,
+             plan.esp_start, plan.esp_end);
+    snprintf(newdata, sizeof(newdata), "--new=%d:%llu:%llu",
+             plan.data_num, plan.data_start, plan.data_end);
+    snprintf(typeesp, sizeof(typeesp), "--typecode=%d:%s", plan.esp_num,
+             INST_ESP_TYPE);
+    snprintf(typedata, sizeof(typedata), "--typecode=%d:%s",
+             plan.data_num, INST_LINUX_TYPE);
+    snprintf(nameesp, sizeof(nameesp), "--change-name=%d:SevynOS ESP",
+             plan.esp_num);
+    snprintf(namedata, sizeof(namedata),
+             "--change-name=%d:SevynOS data", plan.data_num);
+    char *argv[] = {"sgdisk", newesp, newdata, typeesp, typedata,
+                    nameesp, namedata, (char *)disk_arg, NULL};
+    char *out = NULL;
+    if (run_capture(argv, &out) != 0) {
+        free(out);
+        fprintf(stderr, "error: sgdisk create failed\n");
+        return 1;
+    }
+    free(out);
+    /* Re-probe: confirm the new partitions + read their PARTUUIDs. */
+    inst_disk d3;
+    if (inst_probe_disk(disk_arg, &d3) != 0) {
+        fprintf(stderr, "error: cannot re-read GPT after create\n");
+        return 1;
+    }
+    inst_part *esp_part = NULL, *data_part = NULL;
+    for (int i = 0; i < d3.nparts; i++) {
+        if (d3.parts[i].num == plan.esp_num)
+            esp_part = &d3.parts[i];
+        if (d3.parts[i].num == plan.data_num)
+            data_part = &d3.parts[i];
+    }
+    if (!esp_part || !data_part || !esp_part->is_esp ||
+        strcmp(data_part->type, INST_LINUX_TYPE) != 0) {
+        fprintf(stderr,
+                "error: new partitions not found after create\n");
+        return 1;
+    }
+    /* Stage the ESP. */
+    inst_part_io esp_io, data_io;
+    if (inst_io_init(&d3, esp_part, &esp_io) != 0) {
+        fprintf(stderr, "error: cannot stage the new ESP\n");
+        return 1;
+    }
+    if (inst_io_mkfs_vfat(&esp_io) != 0) {
+        fprintf(stderr, "error: mkfs.vfat failed on the new ESP\n");
+        inst_io_cleanup(&esp_io);
+        return 1;
+    }
+    if (inst_esp_mount(&esp_io) != 0) {
+        fprintf(stderr, "error: cannot mount the new ESP\n");
+        inst_io_cleanup(&esp_io);
+        return 1;
+    }
+    inst_esp_mkdir(&esp_io, "::/EFI");
+    inst_esp_mkdir(&esp_io, "::/EFI/BOOT");
+    inst_esp_mkdir(&esp_io, "::/EFI/ubuntu");
+    char shim[PATH_MAX], grub[PATH_MAX], mmx[PATH_MAX], fbx[PATH_MAX],
+        csv[PATH_MAX], pf2[PATH_MAX], kern[PATH_MAX], initrd[PATH_MAX];
+    snprintf(shim, sizeof(shim), "%s/shimx64.efi", files);
+    snprintf(grub, sizeof(grub), "%s/grubx64.efi", files);
+    snprintf(mmx, sizeof(mmx), "%s/mmx64.efi", files);
+    snprintf(fbx, sizeof(fbx), "%s/fbx64.efi", files);
+    snprintf(csv, sizeof(csv), "%s/BOOTX64.CSV", files);
+    snprintf(pf2, sizeof(pf2), "%s/unicode.pf2", files);
+    snprintf(kern, sizeof(kern), "%s/vmlinuz", kern_dir);
+    snprintf(initrd, sizeof(initrd), "%s/initramfs.cpio.gz", kern_dir);
+    char *boot_srcs[] = {shim, grub, mmx, fbx};
+    char *ubuntu_srcs[] = {shim, grub, mmx, csv, pf2};
+    int ok = 1;
+    if (inst_esp_copy(&esp_io, boot_srcs, 1, "::/EFI/BOOT/BOOTX64.EFI") != 0)
+        ok = 0;
+    if (ok && inst_esp_copy(&esp_io, boot_srcs + 1, 1,
+                            "::/EFI/BOOT/grubx64.efi") != 0)
+        ok = 0;
+    if (ok && inst_esp_copy(&esp_io, boot_srcs + 2, 1,
+                            "::/EFI/BOOT/MokManager.efi") != 0)
+        ok = 0;
+    if (ok && inst_esp_copy(&esp_io, boot_srcs + 3, 1,
+                            "::/EFI/BOOT/fbx64.efi") != 0)
+        ok = 0;
+    if (ok && inst_esp_copy(&esp_io, ubuntu_srcs, 5,
+                            "::/EFI/ubuntu/") != 0)
+        ok = 0;
+    if (ok && nmods > 0 &&
+        inst_esp_copy(&esp_io, mods, nmods, "::/EFI/ubuntu/") != 0)
+        ok = 0;
+    if (ok && inst_esp_copy(&esp_io, (char *[]){kern}, 1,
+                            "::/vmlinuz") != 0)
+        ok = 0;
+    if (ok && inst_esp_copy(&esp_io, (char *[]){initrd}, 1,
+                            "::/initramfs.cpio.gz") != 0)
+        ok = 0;
+    char grubcfg[PATH_MAX];
+    snprintf(grubcfg, sizeof(grubcfg), "/tmp/sevyn-inst-grub-%d",
+             (int)getpid());
+    if (ok && inst_write_grub_cfg(grubcfg, data_part->partuuid,
+                                  plan.win_esp_uuid) != 0)
+        ok = 0;
+    if (ok && inst_esp_copy(&esp_io, (char *[]){grubcfg}, 1,
+                            "::/EFI/ubuntu/grub.cfg") != 0)
+        ok = 0;
+    unlink(grubcfg);
+    inst_esp_umount(&esp_io);
+    if (ok && inst_io_dd_in(&esp_io) != 0)
+        ok = 0;
+    if (!ok) {
+        fprintf(stderr, "error: staging the new ESP failed\n");
+        inst_esp_umount(&esp_io);
+        inst_io_cleanup(&esp_io);
+        return 1;
+    }
+    inst_io_cleanup(&esp_io);
+    /* Stage the data partition: slots + slot-state. */
+    if (inst_io_init(&d3, data_part, &data_io) != 0) {
+        fprintf(stderr, "error: cannot stage the new data partition\n");
+        return 1;
+    }
+    if (inst_io_mkfs_ext4(&data_io) != 0) {
+        fprintf(stderr, "error: mkfs.ext4 failed on the new data "
+                        "partition\n");
+        inst_io_cleanup(&data_io);
+        return 1;
+    }
+    if (inst_write_slots(&data_io, kern_dir, inst_version()) != 0) {
+        fprintf(stderr, "error: writing the slot layout failed\n");
+        inst_io_cleanup(&data_io);
+        return 1;
+    }
+    if (inst_io_dd_in(&data_io) != 0) {
+        fprintf(stderr, "error: writing the data partition failed\n");
+        inst_io_cleanup(&data_io);
+        return 1;
+    }
+    inst_io_cleanup(&data_io);
+    /* UEFI boot entry (best-effort; the fallback still boots). */
+    inst_register_boot_entry(&d3, plan.esp_num);
+    /* Verify: re-probe, ESP contents, protected partitions. */
+    inst_disk d4;
+    if (inst_probe_disk(disk_arg, &d4) != 0) {
+        fprintf(stderr, "error: cannot re-read GPT after install\n");
+        return 1;
+    }
+    inst_part *vesp = NULL, *vdata = NULL;
+    for (int i = 0; i < d4.nparts; i++) {
+        if (d4.parts[i].num == plan.esp_num)
+            vesp = &d4.parts[i];
+        if (d4.parts[i].num == plan.data_num)
+            vdata = &d4.parts[i];
+    }
+    if (!vesp || !vdata || !vesp->is_esp ||
+        strcmp(vdata->label, "SEVYN_DATA") != 0) {
+        fprintf(stderr, "error: verification failed — new partitions "
+                        "not found\n");
+        return 1;
+    }
+    if (!inst_fat_has(&d4, vesp, "::/EFI/ubuntu/grub.cfg") ||
+        !inst_fat_has(&d4, vesp, "::/vmlinuz") ||
+        !inst_fat_has(&d4, vesp, "::/initramfs.cpio.gz") ||
+        !inst_fat_has(&d4, vesp, "::/EFI/BOOT/BOOTX64.EFI")) {
+        fprintf(stderr, "error: verification failed — ESP files "
+                        "missing\n");
+        return 1;
+    }
+    char *cfg = inst_fat_read(&d4, vesp, "::/EFI/ubuntu/grub.cfg");
+    if (!cfg || !strstr(cfg, "SevynOS") ||
+        (plan.has_windows && !strstr(cfg, "Windows 11"))) {
+        free(cfg);
+        fprintf(stderr, "error: verification failed — grub.cfg "
+                        "incomplete\n");
+        return 1;
+    }
+    free(cfg);
+    for (int i = 0; i < plan.nprot; i++) {
+        inst_part *p = NULL;
+        for (int j = 0; j < d4.nparts; j++)
+            if (d4.parts[j].num == plan.prot[i])
+                p = &d4.parts[j];
+        if (!p) {
+            fprintf(stderr,
+                    "error: verification failed — protected "
+                    "partition %d vanished\n",
+                    plan.prot[i]);
+            return 1;
+        }
+        if (plan.prot_hash[i][0][0]) {
+            char h0[65] = "", h1[65] = "";
+            if (inst_hash_edges(&d4, p, h0, h1) != 0 ||
+                strcmp(h0, plan.prot_hash[i][0]) != 0 ||
+                strcmp(h1, plan.prot_hash[i][1]) != 0) {
+                fprintf(stderr,
+                        "error: verification failed — protected "
+                        "partition %d changed during install\n",
+                        plan.prot[i]);
+                return 1;
+            }
+        }
+    }
+    printf("install: ok\n");
+    printf("disk: %s\n", plan.disk);
+    printf("esp: %d\n", plan.esp_num);
+    printf("data: %d\n", plan.data_num);
+    printf("windows: untouched\n");
+    return 0;
+}
+
+static int cmd_install_status(void)
+{
+    char boot[256] = "";
+    if (inst_boot_disk(boot, sizeof(boot)) != 0) {
+        printf("installed: no (live image, no data disk)\n");
+        printf("dual-boot: no\n");
+        return 0;
+    }
+    inst_disk d;
+    if (inst_probe_disk(boot, &d) != 0) {
+        printf("installed: unknown (cannot read %s)\n", boot);
+        printf("dual-boot: no\n");
+        return 0;
+    }
+    d.is_boot_disk = 1;
+    int installed = d.has_windows && d.has_sevyn;
+    int dual = 0;
+    for (int i = 0; i < d.nparts; i++) {
+        if (d.parts[i].is_sevyn_esp) {
+            char *cfg = inst_fat_read(&d, &d.parts[i],
+                                      "::/EFI/ubuntu/grub.cfg");
+            if (cfg) {
+                if (strstr(cfg, "Windows 11") != NULL)
+                    dual = 1;
+                free(cfg);
+            }
+        }
+    }
+    printf("installed: %s\n", installed ? "yes" : "no");
+    printf("dual-boot: %s\n", dual ? "yes" : "no");
+    printf("disk: %s\n", boot);
+    printf("version: %s\n", inst_version());
+    return 0;
+}
+
+static int cmd_install(int argc, char **argv)
+{
+    /* mtools reads the drive-letter config unless told to skip it
+     * (the image builders set the same variable). */
+    setenv("MTOOLS_SKIP_CHECK", "1", 1);
+    if (argc < 3) {
+        fprintf(stderr,
+                "usage: sevyn install "
+                "probe|plan|install|status [...]\n");
+        return 1;
+    }
+    const char *disk = NULL, *target = NULL;
+    int yes = 0;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--disk") == 0 && i + 1 < argc)
+            disk = argv[++i];
+        else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc)
+            target = argv[++i];
+        else if (strcmp(argv[i], "--yes") == 0)
+            yes = 1;
+        else {
+            fprintf(stderr, "error: unknown install argument %s\n",
+                    argv[i]);
+            return 1;
+        }
+    }
+    /* Resolve the disk to its canonical device: a /dev/disk/by-id/
+     * symlink (stable across NVMe enumeration swaps) must become
+     * the real /dev/nvmeNn1, or the partition-path derivation and
+     * the boot-disk comparison below would use the symlink text.
+     * A path that does not exist is left as-is; the probe then
+     * fails with "cannot read GPT" as before. */
+    char disk_canon[PATH_MAX] = "";
+    if (disk && realpath(disk, disk_canon) != NULL)
+        disk = disk_canon;
+    if (strcmp(argv[2], "probe") == 0)
+        return cmd_install_probe(disk);
+    if (strcmp(argv[2], "plan") == 0)
+        return cmd_install_plan(disk, target);
+    if (strcmp(argv[2], "install") == 0)
+        return cmd_install_install(disk, target, yes);
+    if (strcmp(argv[2], "status") == 0)
+        return cmd_install_status();
+    fprintf(stderr, "error: unknown install verb %s\n", argv[2]);
+    return 1;
+}
+
+/* --- M11 installer, part 3b ends here --- */
+
+/* --- M11 installer, part 3a ends here --- */
+
+/* --- M11 installer, part 2 ends here --- */
+
+/* --- M11 installer, part 1 ends here --- */
+
+/* ------------------------------------------------------------------ */
 /* dispatch + REPL                                                     */
 /* `sevyn poweroff` / `sevyn reboot`: ask statusd to power the
  * system off or reboot it (statusd signals init, which does the
@@ -3103,6 +5058,8 @@ static int dispatch(int argc, char **argv)
         return cmd_tokrah(argc, argv);
     if (strcmp(argv[1], "app") == 0)
         return cmd_app(argc, argv);
+    if (strcmp(argv[1], "install") == 0)
+        return cmd_install(argc, argv);
     return usage();
 }
 

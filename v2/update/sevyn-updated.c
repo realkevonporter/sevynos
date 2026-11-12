@@ -113,12 +113,25 @@
  *   SEVYN_UPDATE_ESP_DIR (host-test hook: use this directory as the
  *     ESP, skipping device discovery + mount),
  *   SEVYN_UPDATE_PROC_MOUNTS (host-test hook: mounts table to read
- *     for ESP discovery; default /proc/mounts).
+ *     for ESP discovery; default /proc/mounts),
+ *   SEVYN_UPDATE_BY_PARTUUID_DIR (host-test hook: /dev/disk/by-partuuid
+ *     stand-in; default /dev/disk/by-partuuid).
+ *
+ * M11 — dual-boot: the ESP is found by its filesystem label
+ * (SEVYNESP), not by assuming it is partition 1 — on a dual-boot
+ * disk the Windows ESP is partition 1. The ESP sync preserves a
+ * `menuentry "Windows 11"` block in grub.cfg verbatim, and the
+ * SevynOS entries carry sevyn.data=PARTUUID=<uuid> for the data
+ * partition the system booted from (so init finds the right data
+ * partition when another SevynOS install's SEVYN_DATA label is
+ * also present). Without a PARTUUID (single-disk systems) the
+ * entries are unchanged.
  *
  * Build: gcc, libc + libcrypto. Links json.c + verify.c + canonical.c.
  */
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -966,17 +979,75 @@ static int esp_copy_verified(const char *src, const char *dst)
     return 0;
 }
 
+/* Pull the `menuentry "Windows 11" { ... }` block out of an
+ * existing grub.cfg, verbatim (the M11 installer writes it; the
+ * updater must never drop it when it rewrites the menu). Returns a
+ * malloc'd block (including the closing brace line) or NULL. */
+static char *extract_windows_entry(const char *cfg_path)
+{
+    FILE *f = fopen(cfg_path, "r");
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long size = ftell(f);
+    if (size <= 0 || size > 65536) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    char *text = malloc((size_t)size + 1);
+    if (!text) {
+        fclose(f);
+        return NULL;
+    }
+    if (fread(text, 1, (size_t)size, f) != (size_t)size) {
+        free(text);
+        fclose(f);
+        return NULL;
+    }
+    text[size] = '\0';
+    fclose(f);
+    char *start = strstr(text, "menuentry \"Windows 11\" {");
+    if (!start) {
+        free(text);
+        return NULL;
+    }
+    /* The block ends at the line that is exactly "}". */
+    char *end = strstr(start, "\n}\n");
+    if (!end) {
+        free(text);
+        return NULL;
+    }
+    size_t len = (size_t)(end - start) + 3; /* include "}\n" */
+    char *block = malloc(len + 1);
+    if (!block) {
+        free(text);
+        return NULL;
+    }
+    memcpy(block, start, len);
+    block[len] = '\0';
+    free(text);
+    return block;
+}
+
 /* The ESP sync core: operates on a plain directory (the mounted ESP
  * or the SEVYN_UPDATE_ESP_DIR hook), so the host unit tests
  * exercise it directly. new_* are the slot files to boot; prev_*
  * are the kernel to preserve as /vmlinuz.prev (the running kernel
  * on apply, the good slot on restore). Rewrites grub.cfg with the
  * two entries. On any failure the live /vmlinuz is untouched
- * (copies go through temp names + rename) and -1 is returned. */
+ * (copies go through temp names + rename) and -1 is returned.
+ * partuuid (M11, NULL when unknown) pins sevyn.data=PARTUUID=...
+ * on the SevynOS entries; a Windows 11 entry in the existing
+ * grub.cfg is preserved verbatim. */
 static int esp_sync_files(const char *esp_dir,
                           const char *new_kern, const char *new_initrd,
                           const char *prev_kern, const char *prev_initrd,
-                          char active_slot, char good_slot)
+                          char active_slot, char good_slot,
+                          const char *partuuid)
 {
     char dst[PATH_MAX];
     /* Preserve the previous kernel first: if the new copy fails
@@ -1006,9 +1077,20 @@ static int esp_sync_files(const char *esp_dir,
     if (sync_dir(esp_dir) != 0)
         return -1;
     /* grub.cfg: default boots the active slot from /vmlinuz, the
-     * previous entry boots the good slot from /vmlinuz.prev. */
-    char cfg_text[1024];
-    snprintf(cfg_text, sizeof(cfg_text),
+     * previous entry boots the good slot from /vmlinuz.prev. M11:
+     * preserve a Windows 11 entry verbatim, and pin the data
+     * partition by PARTUUID when known. */
+    char cfg_path[PATH_MAX];
+    if (snprintf(cfg_path, sizeof(cfg_path), "%s/%s", esp_dir,
+                 ESP_GRUB_CFG_REL) >= (int)sizeof(cfg_path))
+        return -1;
+    char *win = extract_windows_entry(cfg_path);
+    char data_arg[128] = "";
+    if (partuuid)
+        snprintf(data_arg, sizeof(data_arg),
+                 " sevyn.data=PARTUUID=%s", partuuid);
+    char cfg_text[2048];
+    int n = snprintf(cfg_text, sizeof(cfg_text),
              "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
              "# Written by sevyn-updated (ESP sync): the default entry boots\n"
              "# the active slot from /vmlinuz; the previous entry boots the\n"
@@ -1016,14 +1098,26 @@ static int esp_sync_files(const char *esp_dir,
              "set timeout=3\n"
              "set default=0\n"
              "menuentry \"SevynOS\" {\n"
-             "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=%c\n"
+             "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=%c%s\n"
              "    initrd /initramfs.cpio.gz\n"
              "}\n"
              "menuentry \"SevynOS (previous)\" {\n"
-             "    linux /vmlinuz.prev console=tty0 console=ttyS0 sevyn.slot=%c\n"
+             "    linux /vmlinuz.prev console=tty0 console=ttyS0 sevyn.slot=%c%s\n"
              "    initrd /initramfs.prev.cpio.gz\n"
              "}\n",
-             active_slot, good_slot);
+             active_slot, data_arg, good_slot, data_arg);
+    if (n < 0 || (size_t)n >= sizeof(cfg_text)) {
+        free(win);
+        return -1;
+    }
+    if (win) {
+        if (strlen(cfg_text) + strlen(win) + 1 > sizeof(cfg_text)) {
+            free(win);
+            return -1;
+        }
+        strcat(cfg_text, win);
+        free(win);
+    }
     char efi_dir[PATH_MAX];
     if (snprintf(efi_dir, sizeof(efi_dir), "%s/EFI/ubuntu", esp_dir) >=
         (int)sizeof(efi_dir))
@@ -1032,20 +1126,14 @@ static int esp_sync_files(const char *esp_dir,
      * create it if a test ESP is bare. */
     if (mkdir_p(efi_dir) != 0)
         return -1;
-    char cfg_path[PATH_MAX];
-    if (snprintf(cfg_path, sizeof(cfg_path), "%s/%s", esp_dir,
-                 ESP_GRUB_CFG_REL) >= (int)sizeof(cfg_path))
-        return -1;
     if (write_file_atomic(cfg_path, cfg_text) != 0)
         return -1;
     return 0;
 }
 
-/* Find the ESP device: partition 1 of the disk carrying the data
- * partition (from the mounts table). Returns a malloc'd "/dev/..."
- * or NULL when there is no ESP (whole-disk data device, ESP device
- * absent, or the mounts table has no data entry). */
-static char *esp_find_device(void)
+/* The device carrying the data partition (from the mounts table),
+ * realpath-resolved. Returns a malloc'd "/dev/..." or NULL. */
+static char *data_device(void)
 {
     const char *mounts_path =
         g_proc_mounts ? g_proc_mounts : "/proc/mounts";
@@ -1086,6 +1174,74 @@ static char *esp_find_device(void)
         if (!device)
             return NULL;
     }
+    return device;
+}
+
+/* M11: the SevynOS ESP by its filesystem label. Returns a malloc'd
+ * device path or NULL when the label is absent. */
+static char *esp_find_by_label(void)
+{
+    const char *label_path = "/dev/disk/by-label/SEVYNESP";
+    struct stat st;
+    if (stat(label_path, &st) != 0 || !S_ISBLK(st.st_mode))
+        return NULL;
+    char resolved[PATH_MAX];
+    if (realpath(label_path, resolved) == NULL)
+        return NULL;
+    return strdup(resolved);
+}
+
+/* M11: the PARTUUID of the data partition the system booted from
+ * (so the updater's grub.cfg can pin sevyn.data=PARTUUID=...).
+ * Returns a malloc'd UUID or NULL when it cannot be resolved. */
+static char *data_partuuid(void)
+{
+    char *device = data_device();
+    if (!device)
+        return NULL;
+    const char *dir = getenv("SEVYN_UPDATE_BY_PARTUUID_DIR");
+    if (!dir || !*dir)
+        dir = "/dev/disk/by-partuuid";
+    DIR *d = opendir(dir);
+    if (!d) {
+        free(device);
+        return NULL;
+    }
+    char *uuid = NULL;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        char link[PATH_MAX];
+        if (snprintf(link, sizeof(link), "%s/%s", dir, e->d_name) >=
+            (int)sizeof(link))
+            continue;
+        char resolved[PATH_MAX];
+        if (realpath(link, resolved) == NULL)
+            continue;
+        if (strcmp(resolved, device) == 0) {
+            uuid = strdup(e->d_name);
+            break;
+        }
+    }
+    closedir(d);
+    free(device);
+    return uuid;
+}
+
+/* Find the ESP device: the SevynOS ESP by label (M11 dual-boot),
+ * falling back to partition 1 of the disk carrying the data
+ * partition (from the mounts table). Returns a malloc'd "/dev/..."
+ * or NULL when there is no ESP (whole-disk data device, ESP device
+ * absent, or the mounts table has no data entry). */
+static char *esp_find_device(void)
+{
+    char *by_label = esp_find_by_label();
+    if (by_label)
+        return by_label;
+    char *device = data_device();
+    if (!device)
+        return NULL;
     /* Derive the parent disk + partition 1. Two layouts:
      *   sd-style: sda2 / vda2 -> parent sda / vda, ESP sda1 / vda1
      *     (the part before the trailing digits has no digits);
@@ -1216,8 +1372,10 @@ static int esp_sync_apply(const char *slot_dir, char idle, char good,
         esp_release(mounted);
         return -1;
     }
+    char *partuuid = data_partuuid();
     int r = esp_sync_files(esp, new_kern, new_initrd, prev_kern,
-                           prev_initrd, idle, good);
+                           prev_initrd, idle, good, partuuid);
+    free(partuuid);
     esp_release(mounted);
     if (r != 0)
         snprintf(err, errcap, "ESP sync failed");
@@ -1242,7 +1400,10 @@ static int esp_sync_restore(const char *slot_dir, char good,
     int rc = esp_resolve(&esp, &mounted, err, errcap);
     if (rc != 0)
         return rc == 1 ? 0 : -1;
-    int r = esp_sync_files(esp, kern, initrd, kern, initrd, good, good);
+    char *partuuid = data_partuuid();
+    int r = esp_sync_files(esp, kern, initrd, kern, initrd, good, good,
+                           partuuid);
+    free(partuuid);
     esp_release(mounted);
     if (r != 0)
         snprintf(err, errcap, "ESP restore failed");

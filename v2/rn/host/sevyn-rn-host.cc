@@ -147,6 +147,17 @@ std::string runSevyn(const std::string& cmdline) {
   }
   if (tokens.empty() || tokens[0] != "sevyn")
     return "ERR only the sevyn command is allowed";
+  // `sevyn install install` copies ~400 MiB (kernel + initramfs) onto
+  // the new ESP and builds the data partition — a legitimate
+  // long-running disk operation. Under TCG it takes well over the
+  // 10 s exec deadline (on KVM it is ~5 s), so the host would SIGKILL
+  // it with exit 124 and the install would never complete. Give the
+  // install verb a 300 s deadline (matching the M11 check's termCmd
+  // timeout); every other command keeps the 10 s limit so a hung
+  // command still cannot block the UI for long.
+  const bool isInstall =
+      tokens.size() >= 3 && tokens[1] == "install" && tokens[2] == "install";
+  const int execTimeoutSec = isInstall ? 300 : 10;
   std::vector<char*> argv;
   for (auto& t : tokens)
     argv.push_back(t.data());
@@ -178,8 +189,8 @@ std::string runSevyn(const std::string& cmdline) {
   close(pipefd[1]);
   std::string out;
   char buf[4096];
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::seconds(execTimeoutSec);
   int status = 0;
   bool timedOut = false;
   while (out.size() < 65536) {
