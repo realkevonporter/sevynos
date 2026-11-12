@@ -247,6 +247,53 @@ export function Settings(): React.ReactElement {
     );
   }
 
+  function passwordPrompt(ssid: string): React.ReactElement {
+    return (
+      <View style={{ marginTop: 12 }}>
+        <Text style={{ fontSize: 14, color: "#374151" }}>Password for {ssid}</Text>
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          secureTextEntry={true}
+          style={{
+            height: 36,
+            backgroundColor: "#ffffff",
+            borderRadius: 8,
+            paddingLeft: 12,
+            paddingRight: 12,
+            marginTop: 8,
+            fontSize: 15,
+            color: "#111827",
+          }}
+        />
+        <Pressable
+          onPress={() => void connectWifi(ssid, password)}
+          style={{
+            width: 120,
+            height: 36,
+            borderRadius: 8,
+            backgroundColor: connecting ? "#9ca3af" : "#111827",
+            justifyContent: "center",
+            alignItems: "center",
+            marginTop: 12,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: 15,
+              fontWeight: "bold",
+              color: "#ffffff",
+              textAlign: "center",
+            }}
+          >
+            {connecting === ssid ? "Connecting…" : "Connect"}
+          </Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   function aiButton(label: string, value: string): React.ReactElement {
     const active = ai.selected === value;
     return (
@@ -419,53 +466,12 @@ export function Settings(): React.ReactElement {
               </Pressable>
             ) : null}
           </View>
-          {networks.map((n) => networkRow(n))}
-          {selected ? (
-            <View style={{ marginTop: 12 }}>
-              <Text style={{ fontSize: 14, color: "#374151" }}>
-                Password for {selected}
-              </Text>
-              <TextInput
-                value={password}
-                onChangeText={setPassword}
-                placeholder="Password"
-                secureTextEntry={true}
-                style={{
-                  height: 36,
-                  backgroundColor: "#ffffff",
-                  borderRadius: 8,
-                  paddingLeft: 12,
-                  paddingRight: 12,
-                  marginTop: 8,
-                  fontSize: 15,
-                  color: "#111827",
-                }}
-              />
-              <Pressable
-                onPress={() => void connectWifi(selected, password)}
-                style={{
-                  width: 120,
-                  height: 36,
-                  borderRadius: 8,
-                  backgroundColor: connecting ? "#9ca3af" : "#111827",
-                  justifyContent: "center",
-                  alignItems: "center",
-                  marginTop: 12,
-                }}
-              >
-                <Text
-                  style={{
-                    fontSize: 15,
-                    fontWeight: "bold",
-                    color: "#ffffff",
-                    textAlign: "center",
-                  }}
-                >
-                  {connecting === selected ? "Connecting…" : "Connect"}
-                </Text>
-              </Pressable>
-            </View>
-          ) : null}
+          {networks.map((n) => (
+            <React.Fragment key={n.ssid}>
+              {networkRow(n)}
+              {n.ssid === selected ? passwordPrompt(n.ssid) : null}
+            </React.Fragment>
+          ))}
           {wifiMessage ? (
             <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
               {wifiMessage}
