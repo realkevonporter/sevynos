@@ -258,8 +258,16 @@ void Wayland::onRegistryGlobal(void* data, wl_registry* registry,
       wl_output_add_listener(self->output_, &kOutputListener, self);
     }
   } else if (strcmp(interface, wl_seat_interface.name) == 0) {
+    // Bind at min(advertised, 5): the scroll path flushes in
+    // onPointerFrame, and frame/axis_discrete/axis_source are
+    // wl_pointer version-5 events. Binding the seat at 1 made the
+    // pointer version 1, so Weston sent axis but never frame — axis
+    // deltas accumulated forever and no scroll event ever reached
+    // JS (GF65: trackpad AND mouse wheel both dead, zero SCROLL
+    // lines). Same class of bug as the compositor bind above.
+    uint32_t v = version < 5 ? version : 5;
     self->seat_ = static_cast<wl_seat*>(
-        wl_registry_bind(registry, name, &wl_seat_interface, 1));
+        wl_registry_bind(registry, name, &wl_seat_interface, v));
     wl_seat_add_listener(self->seat_, &kSeatListener, self);
   } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
     self->xdgWmBase_ = static_cast<xdg_wm_base*>(
@@ -339,6 +347,11 @@ void Wayland::onSeatCapabilities(void* data, wl_seat* seat,
   if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !self->pointer_) {
     self->pointer_ = wl_seat_get_pointer(seat);
     wl_pointer_add_listener(self->pointer_, &kPointerListener, self);
+    // The scroll path needs pointer frame events (version 5+); log
+    // the bound version so the M9 check can assert the gate is open.
+    logLine("WAYLAND pointer version %d",
+            wl_proxy_get_version(
+                reinterpret_cast<wl_proxy*>(self->pointer_)));
   }
   if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !self->keyboard_) {
     self->keyboard_ = wl_seat_get_keyboard(seat);

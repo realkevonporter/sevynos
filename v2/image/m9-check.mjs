@@ -2876,6 +2876,22 @@ async function main() {
   );
   check("headless D: mock live session ENDED", !!ended);
 
+  // --- Scroll gate: the desktop host must bind the pointer at
+  // version 5+, or Weston never sends frame events and axis deltas
+  // accumulate forever (GF65: trackpad AND mouse wheel both dead,
+  // zero SCROLL lines). The host logs the bound version at startup;
+  // assert the gate is open before the synthetic scroll phases run.
+  const pointerVersion = await waitForLog(
+    b.logPath,
+    /WAYLAND pointer version [5-9]/,
+    30000,
+  );
+  check(
+    "m9: pointer bound at version 5+ (frame events arrive)",
+    !!pointerVersion,
+    pointerVersion || "no pointer version line in host log",
+  );
+
   // --- Headless S: stock-app ScrollViews scroll (GF65 fix). ---
   // The Store list (12+ apps) is taller than its 800x500 window, so
   // it only reaches its tail after a scroll — this proves the
