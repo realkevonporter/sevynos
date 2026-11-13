@@ -495,22 +495,12 @@ async function main() {
   // CI runs at 1280x800, not 1024x768, and hardcoding 1024 geometry
   // fails there (the first tile lands at x212, not x84, and the pill
   // extends past x984). Everything below derives from W/H.
-  const scaleAtDistance = (d) => {
-    if (d >= 2.2) return 1;
-    const t = 1 - d / 2.2;
-    const f = t * t * (3 - 2 * t);
-    return Math.round((1 + 0.6 * f) / 0.05) * 0.05;
-  };
-  const maxScaleSum = (n) => {
-    const mid = (n - 1) / 2;
-    let sum = 0;
-    for (let i = 0; i < n; i++) sum += scaleAtDistance(Math.abs(i - mid));
-    return sum;
-  };
+  // No magnification: tiles stay flat, so the resting size divides the
+  // available width by the app count (mirrors Dock.tsx).
   const restingTileSize = (n, surfaceWidth) => {
     const cap = surfaceWidth - 2 * 24;
     const fixed = 2 * 8 + (n - 1) * 8;
-    return Math.max(40, Math.min(64, Math.floor((cap - fixed) / maxScaleSum(n))));
+    return Math.max(40, Math.min(64, Math.floor((cap - fixed) / n)));
   };
   const restingPillWidth = (n, tile) => 2 * 8 + n * tile + (n - 1) * 8;
   const restingPillHeight = (tile) => 2 * 8 + tile + 4 + 6;

@@ -11,19 +11,14 @@
 //
 // Behaviour (macOS 27):
 //   - icons shrink to fit the surface (no chevron scrolling);
-//   - magnification on hover: the icon under the pointer grows to
-//     1.6x with a smooth falloff over its neighbours;
+//   - no magnification: tiles stay flat at their resting size, even
+//     under the pointer — the hover grow effect was removed;
 //   - a white dot under each running app;
 //   - icons come from /usr/share/sevyn/shell/icons/<id>.png (the icons
 //     PR's contract), stacked over the monogram tile — a missing file
 //     draws nothing, so the monogram shows. The icon PNGs carry their
 //     own rounded corners (transparent corners); the Image op draws
 //     them square.
-//
-// Pointer motion reaches the shell through the renderer's
-// subscribePointerMove; magnification scales are quantized to 0.05
-// steps and the dock only re-renders when the profile changes, so a
-// pointer sweep costs a handful of presents, not one per motion event.
 //
 // No separator: macOS separates apps from Trash / minimized windows,
 // but SevynOS has neither yet — when minimize lands, minimized
@@ -33,7 +28,6 @@ import * as React from "react";
 import { View, Text, Pressable, Image } from "./host";
 import { type ShellApp } from "./apps";
 import {
-  subscribePointerMove,
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
 } from "../../rn/renderer/sevyn-renderer";
@@ -56,9 +50,6 @@ export const DOCK_SIDE_MARGIN = 24;
 export const DOCK_DOT = 6;
 export const DOCK_DOT_GAP = 4;
 export const DOCK_RADIUS = 24;
-export const DOCK_MAX_SCALE = 1.6;
-export const DOCK_FALLOFF_TILES = 2.2;
-export const DOCK_SCALE_STEP = 0.05;
 
 // Glass: the pill's #ffffff1f fill composites over the #0b0b0f
 // desktop — but the edge ring is a slightly larger View BEHIND the
@@ -78,42 +69,15 @@ export function iconPath(appId: string): string {
   return "/usr/share/sevyn/shell/icons/" + appId + ".png";
 }
 
-// Magnification falloff at a distance of d tile pitches from the
-// pointer: 1 at the pointer, 0 past DOCK_FALLOFF_TILES, smoothstep
-// between. Quantized so the dock only re-renders when a tile's scale
-// bucket actually changes.
-function scaleAtDistance(d: number): number {
-  if (d >= DOCK_FALLOFF_TILES) return 1;
-  const t = 1 - d / DOCK_FALLOFF_TILES;
-  const f = t * t * (3 - 2 * t);
-  const s = 1 + (DOCK_MAX_SCALE - 1) * f;
-  return Math.round(s / DOCK_SCALE_STEP) * DOCK_SCALE_STEP;
-}
-
-// Worst-case total of the magnification scales: pointer centered on
-// a middle tile. The falloff is pitch-normalized, so this sum depends
-// only on the app count, not on the tile size.
-function maxScaleSum(n: number): number {
-  if (n <= 0) return 0;
-  const mid = (n - 1) / 2;
-  let sum = 0;
-  for (let i = 0; i < n; i++) sum += scaleAtDistance(Math.abs(i - mid));
-  return sum;
-}
-
 // Resting tile size for n apps on a surface of width surfaceWidth: as
 // large as possible up to DOCK_MAX_TILE, shrinking so the whole pill
-// fits between the side margins — AND so a fully magnified dock still
-// fits (macOS shrinks a crowded dock the same way; without the
-// headroom the magnification cap would crush every hover to ~1.0).
+// fits between the side margins. (Tiles never grow — there is no
+// magnification — so no headroom is reserved for a magnified dock.)
 export function restingTileSize(n: number, surfaceWidth: number): number {
   if (n <= 0) return DOCK_MAX_TILE;
   const cap = surfaceWidth - 2 * DOCK_SIDE_MARGIN;
   const fixed = 2 * DOCK_PAD_X + (n - 1) * DOCK_GAP;
-  return Math.max(
-    DOCK_MIN_TILE,
-    Math.min(DOCK_MAX_TILE, Math.floor((cap - fixed) / maxScaleSum(n))),
-  );
+  return Math.max(DOCK_MIN_TILE, Math.min(DOCK_MAX_TILE, Math.floor((cap - fixed) / n)));
 }
 
 export function restingPillWidth(n: number, tile: number): number {
@@ -125,92 +89,11 @@ export function restingPillHeight(tile: number): number {
   return 2 * DOCK_PAD_Y + tile + DOCK_DOT_GAP + DOCK_DOT;
 }
 
-// Magnification profile for pointer (x, y): per-tile scale, quantized.
-// Resting geometry: the pill is centered, tiles sit on the pill's
-// bottom padding with the running dot below. Outside the hover band
-// (above the magnified growth, or horizontally clear of the pill) the
-// profile is flat 1.0. The total magnified width is capped to the
-// side margins by shrinking the excess uniformly.
-export function magnificationProfile(
-  x: number,
-  y: number,
-  n: number,
-  tile: number,
-  surfaceWidth: number,
-  surfaceHeight: number,
-): number[] {
-  const flat = new Array<number>(n).fill(1);
-  if (n <= 0) return flat;
-  const pillW = restingPillWidth(n, tile);
-  const pillH = restingPillHeight(tile);
-  const pillX = (surfaceWidth - pillW) / 2;
-  const pillTop = surfaceHeight - DOCK_BOTTOM_MARGIN - pillH;
-  const maxGrowth = tile * (DOCK_MAX_SCALE - 1);
-  const inBand =
-    y >= pillTop - maxGrowth &&
-    y <= surfaceHeight &&
-    x >= pillX - tile &&
-    x <= pillX + pillW + tile;
-  if (!inBand) return flat;
-  const pitch = tile + DOCK_GAP;
-  const scales: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const cx = pillX + DOCK_PAD_X + i * pitch + tile / 2;
-    const d = Math.abs(x - cx) / pitch;
-    scales.push(scaleAtDistance(d));
-  }
-  // Cap the magnified width to the side margins.
-  const magW =
-    2 * DOCK_PAD_X + scales.reduce((a, s) => a + tile * s, 0) + (n - 1) * DOCK_GAP;
-  const cap = surfaceWidth - 2 * DOCK_SIDE_MARGIN;
-  if (magW > cap) {
-    const baseW = restingPillWidth(n, tile);
-    const k = Math.max(0, (cap - baseW) / (magW - baseW));
-    for (let i = 0; i < n; i++) {
-      scales[i] =
-        Math.round((1 + (scales[i] - 1) * k) / DOCK_SCALE_STEP) * DOCK_SCALE_STEP;
-    }
-  }
-  return scales;
-}
-
-function sameProfile(a: number[] | null, b: number[]): boolean {
-  if (!a || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
 export function Dock(props: DockProps): React.ReactElement {
   const size = React.useSyncExternalStore(subscribeSurfaceSize, getSurfaceSizeSnapshot);
   const surfaceWidth = size.width;
-  const surfaceHeight = size.height;
   const n = props.apps.length;
   const tile = restingTileSize(n, surfaceWidth);
-
-  const [profile, setProfile] = React.useState<number[] | null>(null);
-  const profileRef = React.useRef<number[] | null>(null);
-  const geomRef = React.useRef({ n, tile, surfaceWidth, surfaceHeight });
-  geomRef.current = { n, tile, surfaceWidth, surfaceHeight };
-
-  React.useEffect(() => {
-    return subscribePointerMove((ev: { x: number; y: number }) => {
-      const g = geomRef.current;
-      const next = magnificationProfile(
-        ev.x,
-        ev.y,
-        g.n,
-        g.tile,
-        g.surfaceWidth,
-        g.surfaceHeight,
-      );
-      if (sameProfile(profileRef.current, next)) return false;
-      profileRef.current = next;
-      setProfile(next);
-      return true;
-    });
-  }, []);
-
-  const scales = profile && profile.length === n ? profile : new Array<number>(n).fill(1);
 
   return (
     <View
@@ -242,7 +125,7 @@ export function Dock(props: DockProps): React.ReactElement {
           }}
         >
           {props.apps.map((app, i) => {
-            const ts = Math.round(tile * scales[i]);
+            const ts = tile;
             const radius = Math.max(8, Math.round(ts * 0.225));
             return (
               <View

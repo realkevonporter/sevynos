@@ -827,20 +827,20 @@ function handleKey(ev) {
 }
 
 function handlePointer(ev) {
-  // Motion arrives under three type strings, and the dock's hover
-  // needs all of them. The real Wayland host forwards pointer motion
-  // as "motion" (wayland.cc onPointerMotion) and the headless
-  // event-file driver uses "move" (sevyn-rn-host.cc loadHeadlessInput)
-  // — accepting only "move" silently dropped every real hover.
+  // Motion arrives under three type strings, and pointer-move
+  // listeners need all of them. The real Wayland host forwards
+  // pointer motion as "motion" (wayland.cc onPointerMotion) and the
+  // headless event-file driver uses "move" (sevyn-rn-host.cc
+  // loadHeadlessInput) — accepting only "move" silently dropped
+  // every real hover.
   // The third string is "enter": the pointer's FIRST contact with
   // the surface arrives as wl_pointer.enter, not motion — the QMP
   // tablet's first abs move enters the surface at the target point
   // and Weston sends no motion for it (verified in QEMU: the hover
-  // move to the Calculator tile produced only an enter, so the dock
-  // never magnified even though the cursor sat on the tile). An
-  // enter carries the real position, so it is a motion event for the
-  // listeners. A "leave" is forwarded as a far-off motion so the
-  // magnification clears when the pointer exits the surface.
+  // move to the Calculator tile produced only an enter). An enter
+  // carries the real position, so it is a motion event for the
+  // listeners. A "leave" is forwarded as a far-off motion so
+  // listeners see the pointer leave the surface.
   let moveEv = null;
   if (ev.type === "move" || ev.type === "motion" || ev.type === "enter") {
     moveEv = ev;
@@ -1048,7 +1048,7 @@ function handleWindowState(ev) {
   SevynReconciler.flushSyncWork();
   presentRoot();
 }
-// Pointer-move subscribers (the dock's magnification). Move events
+// Pointer-move subscribers. Move events
 // arrive at pointer rate, so a listener must return true only when it
 // changed state — the renderer re-presents only then, never once per
 // motion event. The host forwards motion to the single onPointer

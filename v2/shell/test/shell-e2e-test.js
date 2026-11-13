@@ -3,12 +3,12 @@
 // Loads the bundle with the mock Sevyn host and drives it like the real
 // host would: mount -> present, pointer click on a dock tile -> LAUNCH
 // + "Starting …" state, status push -> tray re-render, pointer move
-// over the dock -> magnification.
+// over the dock -> no magnification (tiles stay flat).
 //
 // The mock's app list is extended to 14 apps (the 12 stock apps plus
 // the two M10 call apps under their working titles) so the dock's
 // shrink-to-fit is exercised at the 1024px mock surface: 14 tiles at
-// 55px, not 64px.
+// 61px, not 64px.
 //
 // Run: node test/shell-e2e-test.js   (from v2/shell, after npm run build)
 const assert = require("node:assert/strict");
@@ -116,19 +116,19 @@ check("dock shows 14 tiles, no chevrons, as a centered glass pill", () => {
   // pressable rects instead (the two Ms, two Ss and two Vs collide).
   const hits = tiles(last.ops);
   assert.equal(hits.length, 14, "14 pressable rects, got " + hits.length);
-  // Shrink-to-fit at 1024px: 14 tiles at 55px (61px would leave no
-  // room for magnification).
+  // Shrink-to-fit at 1024px: 14 tiles at 61px.
   assert.ok(
-    hits.every((t) => t.w === 55 && t.h === 55),
-    "all tiles 55x55, got " + JSON.stringify(hits.map((t) => [t.w, t.h])),
+    hits.every((t) => t.w === 61 && t.h === 61),
+    "all tiles 61x61, got " + JSON.stringify(hits.map((t) => [t.w, t.h])),
   );
-  // Centered pill, not a full-width bar: 892px ring at x66, so the
-  // first tile starts at x75 and the last tile ends at x949.
-  assert.equal(hits[0].x, 75, "first tile x=75, got " + hits[0].x);
+  // Centered pill, not a full-width bar: 974px pill (976px ring) at
+  // x25, so the first tile starts at x33 and the last tile ends at
+  // x991.
+  assert.equal(hits[0].x, 33, "first tile x=33, got " + hits[0].x);
   assert.equal(
     hits[13].x + hits[13].w,
-    949,
-    "last tile right=949, got " + (hits[13].x + hits[13].w),
+    991,
+    "last tile right=991, got " + (hits[13].x + hits[13].w),
   );
   // Glass: the pill fill is present.
   assert.ok(
@@ -213,14 +213,13 @@ check("status push re-renders the tray", () => {
 });
 
 (async () => {
-  // The dock subscribes to pointer moves in an effect; let the
-  // microtask queue flush before driving hover.
+  // Let the microtask queue flush before driving the pointer.
   await new Promise((r) => setTimeout(r, 0));
 
-  await checkAsync("pointer move over a tile magnifies it and its neighbours", () => {
+  await checkAsync("pointer move over a tile does not magnify it", () => {
     // Hover point from the dock's assumed geometry (1024x768, 14
-    // apps, 55px tiles: 892px ring at x66, tile 3 centre
-    // (291.5, 715.5)). The mock lays out x correctly (centered pill)
+    // apps, 61px tiles: 974px pill at x25, tile 3 centre
+    // (270.5, 715.5)). The mock lays out x correctly (centered pill)
     // but stacks the dock below the surface vertically — its flex
     // distribution ignores auto-height siblings — so the hover point
     // cannot come from the tile rects; sizes, not positions, are what
@@ -229,28 +228,25 @@ check("status push re-renders the tray", () => {
     // (wayland.cc onPointerMotion); the headless driver uses "move".
     // This hover uses type "enter" — the real first-contact path:
     // the pointer's first arrival on the surface is a wl_pointer
-    // enter, not a motion event, and the dock must magnify from it.
-    // The move-away below uses "move" so both host vocabularies
-    // are covered too.
-    Sevyn._handlers.pointer({ type: "enter", x: 291.5, y: 715.5 });
+    // enter, not a motion event. The move-away below uses "move" so
+    // both host vocabularies are covered too.
+    Sevyn._handlers.pointer({ type: "enter", x: 270.5, y: 715.5 });
     const after = lastPresent();
     const afterTiles = tiles(after.ops);
-    // Hovered tile 1.6x (88px), neighbours 1.35x (74px), far tiles flat.
-    assert.equal(afterTiles[3].h, 88, "hovered tile 88px, got " + afterTiles[3].h);
-    assert.equal(afterTiles[2].h, 74, "left neighbour 74px, got " + afterTiles[2].h);
-    assert.equal(afterTiles[4].h, 74, "right neighbour 74px, got " + afterTiles[4].h);
-    assert.equal(afterTiles[0].h, 55, "far tile stays 55px");
-    // The magnified pill still fits: last tile inside the surface.
-    assert.ok(afterTiles[13].x + afterTiles[13].w < 1024, "magnified dock fits");
+    // No magnification: every tile stays 61px under the pointer.
+    assert.ok(
+      afterTiles.every((t) => t.h === 61),
+      "all tiles stay 61px, got " + JSON.stringify(afterTiles.map((t) => t.h)),
+    );
   });
 
-  await checkAsync("pointer move away restores the flat dock", () => {
+  await checkAsync("pointer move away leaves every tile flat", () => {
     Sevyn._handlers.pointer({ type: "move", x: 512, y: 100 });
     const after = lastPresent();
     const afterTiles = tiles(after.ops);
     assert.ok(
-      afterTiles.every((t) => t.h === 55),
-      "all tiles back to 55px",
+      afterTiles.every((t) => t.h === 61),
+      "all tiles stay 61px",
     );
   });
 
