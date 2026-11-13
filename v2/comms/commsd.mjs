@@ -620,6 +620,17 @@ function onTimeline(ev, room) {
     if (!call || call.direction !== "outgoing" || call.state !== "ringing") return;
     const answer = content.answer;
     if (!answer || answer.type !== "answer") return;
+    // The answer arrived, so the invite's 180 s ring clock has done its
+    // job. Replace it with a fresh 180 s for the handshake itself:
+    // under TCG the answer can land near the end of the ring window,
+    // and the old timer would end the call mid-handshake (M10 attempt
+    // 2: invite 16:47:08, bob answered 16:48:55, alice logged zero
+    // media-state lines — her call was already gone).
+    if (call.timer) clearTimeout(call.timer);
+    call.timer = setTimeout(() => {
+      if (call.state === "ringing") void endCall(callId, "timeout");
+    }, 180000);
+    call.timer.unref?.();
     getBridge()
       .setRemoteAnswer(call, answer.sdp)
       .then(() => {
