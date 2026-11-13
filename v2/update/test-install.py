@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Host-side tests for `sevyn install` (M11 dual-boot installer).
+"""Host-side tests for `sevyn install` (M11 dual-boot installer +
+installer v2: any disk, whole-disk format, portable USB).
 
-Builds the sevyn CLI with the host gcc, builds mock Windows disks
-with v2/image/make-mock-windows-disk.py, then drives the install
+Builds the sevyn CLI with the host gcc, builds mock disks with
+v2/image/make-mock-windows-disk.py, then drives the install
 verbs against image files (never a real disk).
 
 Coverage:
-  - probe: detects Windows (ESP + NTFS), old SevynOS, free space
-  - plan: free-space / replace / auto modes, refusals (no free
-    space, no Windows, boot disk, bad target)
-  - install --yes: free-space and replace installs; the new ESP +
-    data partitions appear, grub.cfg lists SevynOS + Windows 11,
-    the slot layout lands on the data partition, and the Windows
-    partitions are byte-identical before/after
+  - probe: detects Windows (ESP + NTFS), Linux (ESP + ext4 root),
+    old SevynOS, free space, model/transport/removable, and a
+    raw disk with no partition table (gpt: no)
+  - plan: free-space / replace / auto / whole-disk / portable
+    modes, refusals (no free space with the shrink-Windows hint,
+    boot disk, bad target, portable on a non-removable disk)
+  - install --yes: free-space, replace, beside-Linux, whole-disk
+    and portable installs; the new ESP + data partitions appear,
+    grub.cfg lists SevynOS + every detected OS, the slot layout
+    lands on the data partition, and the protected partitions are
+    byte-identical before/after
   - install without --yes refuses and writes nothing
   - status: installed / dual-boot reporting
 
@@ -197,8 +202,8 @@ def main():
               "mode: free-space" in r.stdout and
               "protected: 1 2" in r.stdout, r.stdout[:300])
         r = sevyn_install("plan", "--disk", str(d_nofree), expect=1)
-        check("plan auto on nofree disk refuses",
-              "no existing SevynOS install to replace" in r.stderr,
+        check("plan auto on nofree disk refuses with the shrink hint",
+              "Shrink Windows 11 by ~10 GB" in r.stderr,
               r.stdout[:200] + r.stderr[:200])
         r = sevyn_install("plan", "--disk", str(d_old), expect=0)
         check("plan auto on old-SevynOS disk is replace mode",
@@ -216,15 +221,23 @@ def main():
         check("plan --target 1 (Windows ESP) refuses",
               r.returncode != 0, r.stdout[:200] + r.stderr[:200])
 
-        # Plain GPT disk with no Windows at all.
+        # Plain GPT disk with no OS at all: installer v2 installs
+        # into its free space (M11 refused Windows-less disks).
         plain = td / "plain.img"
         with open(plain, "wb") as f:
             f.truncate(64 * 1024 * 1024)
         run(["sgdisk", "--zap-all", "--clear", str(plain)])
         r = sevyn_install("plan", "--disk", str(plain), expect=1)
-        check("plan on a disk with no Windows refuses",
-              "no Windows" in r.stderr or "no Windows" in r.stdout,
+        check("plan on a 64 MiB empty GPT disk refuses (too small)",
+              "too small" in r.stderr or "not enough" in r.stderr,
               r.stdout[:200] + r.stderr[:200])
+        big_plain = td / "big-plain.img"
+        with open(big_plain, "wb") as f:
+            f.truncate(6144 * 1024 * 1024)
+        run(["sgdisk", "--zap-all", "--clear", str(big_plain)])
+        r = sevyn_install("plan", "--disk", str(big_plain), expect=0)
+        check("plan on an empty GPT disk is free-space mode",
+              "mode: free-space" in r.stdout, r.stdout[:300])
 
         # Boot-disk protection: /data lives on the target disk.
         mounts_boot = td / "mounts-boot"
@@ -304,6 +317,151 @@ def main():
         check("replace grub.cfg lists SevynOS + Windows 11",
               cfg is not None and b"SevynOS" in cfg and
               b"Windows 11" in cfg, (cfg or b"")[:200])
+
+        # --- installer v2: probe of the new layouts ---
+        d_linux = build_disk("linux-free.img", "linux-free")
+        d_usb = build_disk("usb-free.img", "usb-free")
+        d_empty = build_disk("empty.img", "empty")
+        d_whole = build_disk("win-whole.img", "windows-free")
+
+        r = sevyn_install("probe", "--disk", str(d_linux))
+        check("probe linux-free finds Linux, no Windows",
+              "disk-linux: yes" in r.stdout and
+              "disk-windows: no" in r.stdout and
+              "disk-os-list: Linux" in r.stdout and
+              "os: linux-esp" in r.stdout and
+              "os: linux" in r.stdout,
+              r.stdout[:400])
+        r = sevyn_install("probe", "--disk", str(d_usb))
+        check("probe usb-free finds an unknown FAT32 part, file transport",
+              "disk-os-list: Other" in r.stdout and
+              "disk-windows: no" in r.stdout and
+              "disk-transport: file" in r.stdout,
+              r.stdout[:400])
+        r = sevyn_install("probe", "--disk", str(d_empty))
+        check("probe empty disk reports no GPT but a size",
+              "disk-gpt: no" in r.stdout and
+              "disk-size-mb: 6144" in r.stdout,
+              r.stdout[:300])
+
+        # An MBR disk: same non-GPT gate (sgdisk would convert it
+        # in memory — the installer must not be fooled).
+        d_mbr = build_disk("mbr.img", "mbr")
+        r = sevyn_install("probe", "--disk", str(d_mbr))
+        check("probe MBR disk reports no GPT but a size",
+              "disk-gpt: no" in r.stdout and
+              "disk-size-mb: 6144" in r.stdout,
+              r.stdout[:300])
+        r = sevyn_install("plan", "--disk", str(d_mbr),
+                          "--target", "whole", expect=0)
+        check("plan --target whole on an MBR disk is whole-disk",
+              "mode: whole-disk" in r.stdout and
+              "destroyed: none (non-GPT" in r.stdout,
+              r.stdout[:400])
+
+        # --- installer v2: plan modes ---
+        r = sevyn_install("plan", "--disk", str(d_linux), expect=0)
+        check("plan auto beside Linux is free-space with a Linux entry",
+              "mode: free-space" in r.stdout and
+              "grub: SevynOS + Ubuntu" in r.stdout and
+              "linux: yes" in r.stdout, r.stdout[:400])
+        r = sevyn_install("plan", "--disk", str(d_empty),
+                          "--target", "whole", expect=0)
+        check("plan --target whole on an empty disk is whole-disk",
+              "mode: whole-disk" in r.stdout and
+              "wipe: yes" in r.stdout and
+              "destroyed: none" in r.stdout and
+              "new-esp: 1" in r.stdout and "new-data: 2" in r.stdout,
+              r.stdout[:400])
+        r = sevyn_install("plan", "--disk", str(d_empty), expect=1)
+        check("plan auto on an empty (non-GPT) disk refuses, names whole",
+              "no GPT partition table" in r.stderr and
+              "--target whole" in r.stderr,
+              r.stdout[:200] + r.stderr[:200])
+        env_usb = dict(env)
+        env_usb["SEVYN_INSTALL_FORCE_REMOVABLE"] = "1"
+        r = run([str(sevyn), "install", "plan", "--disk", str(d_usb),
+                 "--target", "portable"], env=env_usb)
+        check("plan --target portable on a removable stick is portable",
+              r.returncode == 0 and "mode: portable" in r.stdout and
+              "boot-entry: none (portable" in r.stdout,
+              r.stdout[:400] + r.stderr[:200])
+        r = sevyn_install("plan", "--disk", str(d_free),
+                          "--target", "portable", expect=1)
+        check("plan --target portable on a non-removable disk refuses",
+              "not a removable USB drive" in r.stderr,
+              r.stdout[:200] + r.stderr[:200])
+        r = sevyn_install("plan", "--disk", str(d_whole),
+                          "--target", "whole", expect=0)
+        check("plan --target whole on a Windows disk names the wipe",
+              "mode: whole-disk" in r.stdout and
+              "destroyed: 1 2" in r.stdout and
+              "protected: none" in r.stdout, r.stdout[:400])
+
+        # --- installer v2: install beside Linux ---
+        lin_esp_before = region_hash(d_linux, 1)
+        lin_root_before = region_hash(d_linux, 2)
+        r = sevyn_install("install", "--disk", str(d_linux), "--yes",
+                          expect=0)
+        check("install beside Linux succeeds",
+              "install: ok" in r.stdout, r.stdout[:300] + r.stderr[:300])
+        check("Linux partitions byte-identical after beside-Linux install",
+              region_hash(d_linux, 1) == lin_esp_before and
+              region_hash(d_linux, 2) == lin_root_before)
+        cfg = esp_file(d_linux, 3, "/EFI/ubuntu/grub.cfg")
+        check("beside-Linux grub.cfg lists SevynOS + Ubuntu",
+              cfg is not None and b"SevynOS" in cfg and
+              b'menuentry "Ubuntu"' in cfg and
+              b"/EFI/ubuntu/grubx64.efi" in cfg,
+              (cfg or b"")[:300])
+        check("beside-Linux grub.cfg has no Windows entry",
+              cfg is not None and b"Windows 11" not in cfg,
+              (cfg or b"")[:300])
+
+        # --- installer v2: whole-disk install on an empty disk ---
+        r = sevyn_install("install", "--disk", str(d_empty),
+                          "--target", "whole", "--yes", expect=0)
+        check("install --target whole on an empty disk succeeds",
+              "install: ok" in r.stdout, r.stdout[:300] + r.stderr[:300])
+        r = sevyn_install("probe", "--disk", str(d_empty))
+        check("probe after whole-disk install finds SevynOS, GPT",
+              "disk-gpt: yes" in r.stdout and
+              "disk-sevyn: yes" in r.stdout, r.stdout[:300])
+        cfg = esp_file(d_empty, 1, "/EFI/ubuntu/grub.cfg")
+        check("whole-disk grub.cfg is SevynOS-only",
+              cfg is not None and b"SevynOS" in cfg and
+              b"Windows 11" not in cfg and b"Ubuntu" not in cfg,
+              (cfg or b"")[:300])
+        state = data_file(d_empty, 2, "/slot-state.json")
+        check("whole-disk data partition carries the slot layout",
+              state is not None and b'"active": "A"' in state,
+              (state or b"")[:200])
+
+        # --- installer v2: portable install on a USB stick ---
+        r = run([str(sevyn), "install", "install", "--disk", str(d_usb),
+                 "--target", "portable", "--yes"], env=env_usb)
+        check("install --target portable on a USB stick succeeds",
+              r.returncode == 0 and "install: ok" in r.stdout,
+              r.stdout[:300] + r.stderr[:300])
+        cfg = esp_file(d_usb, 2, "/EFI/ubuntu/grub.cfg")
+        check("portable grub.cfg is SevynOS-only",
+              cfg is not None and b"SevynOS" in cfg and
+              b"Windows 11" not in cfg, (cfg or b"")[:300])
+        check("portable ESP carries the fallback bootloader",
+              esp_file(d_usb, 2, "/EFI/BOOT/BOOTX64.EFI") is not None)
+        check("portable install kept the stick's old partition",
+              esp_file(d_usb, 1, "/README.txt") is not None)
+
+        # --- installer v2: whole-disk install erases a Windows disk ---
+        r = sevyn_install("install", "--disk", str(d_whole),
+                          "--target", "whole", "--yes", expect=0)
+        check("install --target whole on a Windows disk succeeds",
+              "install: ok" in r.stdout, r.stdout[:300] + r.stderr[:300])
+        out = subprocess.run(["sgdisk", "-p", str(d_whole)],
+                             capture_output=True, text=True).stdout
+        check("whole-disk install removed the Windows partitions",
+              "Windows" not in out and "SevynOS ESP" in out,
+              out[:300])
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} install checks passed")

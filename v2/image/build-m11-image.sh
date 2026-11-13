@@ -710,12 +710,19 @@ fi
 # iocharset is iso8859-1); without them the ESP mount fails with
 # EINVAL ("FAT-fs: IO charset iso8859-1 not found") and the
 # in-place update cannot sync the ESP.
+# Installer v2: usb-storage + uas + sd_mod — the USB storage stack.
+# Without them the live system cannot see a USB disk at all (no
+# /dev/sd*, no /sys/block/sda): the portable install target is
+# unprovable in QEMU and unusable on real hardware. xhci-hcd is
+# built into the kernel; xhci-pci was already staged. The dep
+# closure (scsi_mod) resolves via modinfo.
 python3 "$ROOT/image/stage-modules.py" "$SYSROOT" "$kernel_version" "$STAGE" \
   virtio-gpu usbhid hid-generic xhci-pci virtio-blk virtio-net ext4 \
   i915 iwlwifi iwlmvm mac80211 cfg80211 nvme alx \
   snd-hda-intel snd-hda-codec-realtek snd-hda-codec-generic snd-hda-codec-hdmi \
   i2c-hid-acpi i2c-hid hid-multitouch intel-lpss-pci \
-  nls_iso8859-1 nls_utf8
+  nls_iso8859-1 nls_utf8 \
+  usb-storage uas sd_mod
 
 # M7: firmware for the real hardware (stage-firmware.py decompresses
 # the sysroot's .zst firmware into the stage). iwlwifi firmware is

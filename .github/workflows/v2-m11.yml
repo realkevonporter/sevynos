@@ -2,7 +2,9 @@
 # it in QEMU (Kevon, 2026-11-10: SevynOS installs ALONGSIDE Windows
 # 11 without wiping it — detect existing OSes/partitions, install
 # into free space or replace an existing SevynOS install, boot
-# selection via GRUB entries for Windows + SevynOS).
+# selection via GRUB entries for Windows + SevynOS; Kevon,
+# 2026-11-12: installer v2 — any disk, whole-disk format, portable
+# USB install).
 #
 # Runs on pushes and PRs touching v2/ (the fresh build). The job builds
 # the native deps (Hermes + Yoga, cached), the shell + app bundles, the
@@ -11,8 +13,9 @@
 # the Installer system app, the dual-boot-aware updater, and the
 # sevyn.data= init handling), then runs the m11-check harness:
 #   0. the host gate on the CI host: v2/update/test-install.py
-#      (38 host checks against mock Windows disks) +
-#      v2/update/test-updated.py (the updater's dual-boot changes);
+#      (host checks against mock Windows, Linux, empty and USB
+#      disks) + v2/update/test-updated.py (the updater's
+#      dual-boot changes);
 #   1. the regression boot: -kernel/-initrd + the data disk — the M9
 #      stack still intact and the Installer app registered;
 #   2. UEFI live boot + mock Windows disk 1 (Windows ESP + NTFS +
@@ -28,7 +31,14 @@
 #      no free space): replace the old install; Windows untouched;
 #   5. UEFI boot, target disk 2 only: menu lists both, default boot
 #      reaches the shell;
-#   6. the fallback: the updater restores the ESP from the good slot
+#   6. UEFI live boot + mock Linux disk + empty disk + USB stick:
+#      beside-Linux and whole-disk plans succeed, the boot disk
+#      refuses, and the portable install lands on the stick
+#      (Linux + the stick's old partition byte-identical);
+#   7. UEFI boot from the USB stick alone, with fresh firmware
+#      variables: the fallback BOOTX64.EFI boots the portable
+#      install on its own;
+#   8. the fallback: the updater restores the ESP from the good slot
 #      on a dual-boot disk — proving it finds the SEVYNESP, not the
 #      Windows ESP — and the restored grub.cfg keeps the Windows
 #      entry.
@@ -64,7 +74,7 @@ on:
 jobs:
   m11-check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -228,4 +238,7 @@ jobs:
             v2/image/build/m11-data.img
             v2/image/build/m11-target1.img
             v2/image/build/m11-target2.img
+            v2/image/build/m11-target3.img
+            v2/image/build/m11-usbstick.img
+            v2/image/build/m11-empty.img
           if-no-files-found: warn

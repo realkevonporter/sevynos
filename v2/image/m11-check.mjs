@@ -1,23 +1,29 @@
 // M11 check: prove the dual-boot installer (Kevon, 2026-11-10:
-// SevynOS installs ALONGSIDE Windows 11 without wiping it).
+// SevynOS installs ALONGSIDE Windows 11 without wiping it) and
+// the installer-v2 modes (Kevon, 2026-11-12: any disk, whole-disk
+// format, portable USB install).
 //
 //   0. Host gate (on the CI host, before QEMU): v2/update/
-//      test-install.py (38 host checks: probe/plan/install/status
-//      against mock Windows disks) + v2/update/test-updated.py
-//      (the updater's dual-boot changes: SEVYNESP discovery,
-//      Windows-entry preservation, PARTUUID pinning). Exit 0 = pass.
+//      test-install.py (host checks: probe/plan/install/status
+//      against mock Windows, Linux, empty and USB disks) +
+//      v2/update/test-updated.py (the updater's dual-boot changes:
+//      SEVYNESP discovery, other-OS-entry preservation, PARTUUID
+//      pinning). Exit 0 = pass.
 //   1. Regression boot (-kernel/-initrd + a data disk): the M9
 //      stack still intact (SEVYNOS_M5_READY, M4.5 ready, Terminal
 //      launches) and the Installer app is registered — a headless
-//      `app run installer` renders "Install SevynOS alongside
-//      Windows".
+//      `app run installer` renders the disk picker with the
+//      "No disk available to install onto." state (the boot disk
+//      is the only disk here).
 //   2. UEFI live boot + mock Windows disk 1 (Windows ESP + NTFS +
 //      free space): `sevyn install probe/plan/install --yes`
 //      in-guest; host-side proof the Windows partitions are
 //      byte-identical, the new SevynOS ESP + data partitions exist,
 //      grub.cfg lists SevynOS + Windows 11 with a
 //      sevyn.data=PARTUUID= pin, the slot layout landed, and the
-//      UEFI boot entry was created first in BootOrder.
+//      UEFI boot entry was created first in BootOrder. The wizard
+//      auto-picks the single installable disk and renders its plan
+//      ("Install SevynOS alongside Windows").
 //   3. UEFI boot, target disk 1 only: the GRUB menu lists both
 //      entries (rendered on serial for the harness); the default
 //      boot reaches the shell with /data on the new partition via
@@ -32,7 +38,23 @@
 //      old SevynOS partitions gone.
 //   5. UEFI boot, target disk 2 only: menu lists both; default boot
 //      reaches the shell.
-//   6. Fallback (updater ESP discovery on a dual-boot disk): the
+//   6. Installer v2 — UEFI live boot + a mock Linux disk (Ubuntu
+//      ESP + ext4 root + free space), an empty disk (no partition
+//      table), and a USB stick (usb-storage): probe lists all three
+//      (Linux detected, USB removable); plan beside-Linux and plan
+//      whole-disk-on-empty succeed; plan on the boot disk refuses;
+//      `install --target portable` on the stick succeeds; host-side
+//      proof the Linux partitions and the stick's old partition are
+//      byte-identical, the stick carries a SevynOS-only grub.cfg +
+//      the fallback BOOTX64.EFI + the slot layout, and the wizard
+//      renders the disk picker ("Choose a disk") with several
+//      disks to choose from.
+//   7. Installer v2 — UEFI boot from the USB stick alone (fresh
+//      firmware variables, so no NVRAM entry exists): the GRUB menu
+//      lists SevynOS, the default boot reaches the shell with
+//      /data on the stick's data partition — the portable install
+//      boots on its own.
+//   8. Fallback (updater ESP discovery on a dual-boot disk): the
 //      slot state on target 1 is tampered (attempts=2, active=B,
 //      good=A); the daemon restores the ESP from the good slot —
 //      which must be the SEVYNESP (partition 3), not the Windows
@@ -49,17 +71,18 @@
 // booting from the chainloader entry, and real firmware boot-order
 // behaviour — is Kevon's GF65 verification after merge.
 // The fixture disks are built by v2/image/make-mock-windows-disk.py
-// (windows-free / windows-oldsevyn layouts); the live image's
-// grub.cfg is pinned with sevyn.data=PARTUUID=<live p2 uuid> for the live
-// boots so /data always mounts from the live image even when the
-// target disk carries its own SEVYN_DATA partition, and restored
-// before the check exits. PARTUUID, not a /dev/nvmeNn1 path: the
-// guest kernel enumerates the two NVMe controllers in either order
-// across boots, so a device path is not stable.
+// (windows-free / windows-oldsevyn / linux-free / empty / usb-free
+// layouts); the live image's grub.cfg is pinned with
+// sevyn.data=PARTUUID=<live p2 uuid> for the live boots so /data
+// always mounts from the live image even when the target disk
+// carries its own SEVYN_DATA partition, and restored before the
+// check exits. PARTUUID, not a /dev/nvmeNn1 path: the guest kernel
+// enumerates the two NVMe controllers in either order across boots,
+// so a device path is not stable.
 //
 // Usage: node v2/image/m11-check.mjs
 // Env: SEVYN_V2_BUILD_DIR (default v2/image/build),
-//      SEVYN_V2_M11_TIMEOUT (seconds, default 10800 — seven boots),
+//      SEVYN_V2_M11_TIMEOUT (seconds, default 12600 — nine boots),
 //      SEVYN_V2_SYSROOT (default / — the OVMF files live under
 //      $SYSROOT/usr/share/OVMF),
 //      SEVYN_V2_OVMF_CODE / SEVYN_V2_OVMF_VARS (OVMF firmware paths;
@@ -88,6 +111,12 @@ const DISK = join(OUT, "m11-data.img");
 const IMAGE = join(OUT, "sevynos.img");
 const TARGET1 = join(OUT, "m11-target1.img");
 const TARGET2 = join(OUT, "m11-target2.img");
+// Installer v2 fixtures: a mock Linux disk, an empty disk (no
+// partition table), and a USB stick (attached via usb-storage, so
+// the guest sees a real removable /dev/sda).
+const TARGET3 = join(OUT, "m11-target3.img");
+const USBSTICK = join(OUT, "m11-usbstick.img");
+const EMPTYDISK = join(OUT, "m11-empty.img");
 // In-guest /dev/disk/by-id names for the target disks. The QEMU
 // NVMe serials (sevynos0 / target1 / target2, set in boot()) make
 // these stable across boots; the guest kernel enumerates the two
@@ -96,8 +125,14 @@ const TARGET2 = join(OUT, "m11-target2.img");
 // by-id path to the real device via realpath().
 const TARGET1_BYID = "/dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_target1";
 const TARGET2_BYID = "/dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_target2";
+const TARGET3_BYID = "/dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_target3";
+const EMPTY_BYID = "/dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_empty1";
+const BOOT_BYID = "/dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_sevynos0";
+// The USB stick: the guest kernel names the first usb-storage
+// device /dev/sda (no other sd devices are attached).
+const USB_DEV = "/dev/sda";
 const MOCK_EFI = join(OUT, "mock-bootmgfw.efi");
-const TIMEOUT_S = Number(process.env.SEVYN_V2_M11_TIMEOUT || 10800);
+const TIMEOUT_S = Number(process.env.SEVYN_V2_M11_TIMEOUT || 12600);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
 // QEMU accelerator: "tcg" in the sandbox (no /dev/kvm), "kvm" on a
 // box with real KVM.
@@ -225,7 +260,9 @@ class QMP {
 // boot image on NVMe (nvme0) + optional extra drives (nvme1, ...).
 // opts.image overrides the boot image (a target disk boots alone);
 // opts.extraDrives is [{ file, id }] attached as further NVMe
-// devices. The live boots pass the target disk as an extra drive;
+// devices; opts.usbDrives is [{ file, id }] attached as USB
+// storage devices (the guest sees them as removable /dev/sdX).
+// The live boots pass the target disk as an extra drive;
 // the target-alone boots pass the target as the image.
 async function boot(tag, opts = {}) {
   const mode = opts.mode || "kernel";
@@ -308,6 +345,22 @@ async function boot(tag, opts = {}) {
         `nvme,drive=nvme${n},serial=${d.serial || `target${n}`}`,
       );
     });
+    // USB sticks: usb-storage on the xhci controller, which must be
+    // created BEFORE any usb-storage device — QEMU resolves the usb
+    // bus at device-creation time, so a later -device qemu-xhci is
+    // too late ("No 'usb-bus' bus found"). removable=on: real USB
+    // sticks report themselves removable, and the portable install
+    // requires a removable drive; QEMU defaults removable to off.
+    // The guest sees a removable SCSI disk.
+    args.push("-device", "qemu-xhci");
+    (opts.usbDrives || []).forEach((d, i) => {
+      args.push(
+        "-drive",
+        `file=${d.file},format=raw,if=none,id=usb${i}`,
+        "-device",
+        `usb-storage,drive=usb${i},removable=on`,
+      );
+    });
   } else {
     args.push(
       "-kernel",
@@ -351,17 +404,14 @@ async function boot(tag, opts = {}) {
   if (!uefi) {
     args.push("-drive", `file=${DISK},format=raw,if=virtio`);
   }
-  args.push(
-    "-device",
-    "virtio-gpu-pci,xres=1920,yres=1080",
-    "-device",
-    "qemu-xhci",
-    "-device",
-    "usb-tablet",
-    "-nic",
-    "user,model=virtio-net-pci",
-    "-no-reboot",
-  );
+  args.push("-device", "virtio-gpu-pci,xres=1920,yres=1080");
+  if (!uefi) {
+    // UEFI boots got their xhci controller up in the drive block,
+    // before the usb-storage devices; kernel boots need one here
+    // for the usb-tablet.
+    args.push("-device", "qemu-xhci");
+  }
+  args.push("-device", "usb-tablet", "-nic", "user,model=virtio-net-pci", "-no-reboot");
   const qemu = spawn(QEMU, args, { stdio: ["ignore", "pipe", "pipe"] });
   qemu.stdout.on("data", appendLog);
   qemu.stderr.on("data", appendLog);
@@ -588,6 +638,25 @@ function latestOps(b, sinceLines = 0) {
   return null;
 }
 
+// Wait until the latest PARSED ops snapshot contains `text`.
+// The ops lines flush asynchronously and a long snapshot can land
+// in the log in two chunks: a plain log grep (waitForLog) can hit
+// the first chunk while latestOps still sees only the previous
+// (loading-shell) snapshot, because the JSON is not complete yet.
+// Polling the parsed snapshot closes that hole.
+async function waitForOpsText(b, sinceLines, text, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let ops = null;
+  let texts = [];
+  while (Date.now() < deadline) {
+    ops = latestOps(b, sinceLines);
+    texts = (ops?.texts || []).map((t) => t.t);
+    if (texts.includes(text)) return { ops, texts };
+    await sleep(500);
+  }
+  return { ops, texts };
+}
+
 function textCenter(ops, text) {
   const t = (ops?.texts || []).find((t) => t.t === text);
   if (!t) return null;
@@ -792,9 +861,9 @@ async function main() {
   // any QEMU work.
   try {
     await execAsync("python3", [join(ROOT, "update", "test-install.py")]);
-    check("host: test-install.py passes 38/38", true);
+    check("host: test-install.py passes", true);
   } catch (e) {
-    check("host: test-install.py passes 38/38", false, e.message);
+    check("host: test-install.py passes", false, e.message);
     finish(false, { host_gate: "test-install.py" });
     return;
   }
@@ -896,6 +965,51 @@ async function main() {
     "setup: mock Windows disks built (free-space + old-SevynOS)",
     existsSync(TARGET1) && existsSync(TARGET2),
   );
+  // Installer v2 fixtures: a mock Linux disk, an empty disk (no
+  // partition table), and a USB stick.
+  await execAsync("python3", [
+    join(ROOT, "image", "make-mock-windows-disk.py"),
+    "--out",
+    TARGET3,
+    "--layout",
+    "linux-free",
+    "--linux-esp-mb",
+    "100",
+    "--linux-root-mb",
+    "512",
+    "--free-mb",
+    "3072",
+  ]);
+  await execAsync("python3", [
+    join(ROOT, "image", "make-mock-windows-disk.py"),
+    "--out",
+    USBSTICK,
+    "--layout",
+    "usb-free",
+    "--usb-part-mb",
+    "512",
+    "--free-mb",
+    "2200",
+  ]);
+  await execAsync("python3", [
+    join(ROOT, "image", "make-mock-windows-disk.py"),
+    "--out",
+    EMPTYDISK,
+    "--layout",
+    "empty",
+    "--empty-mb",
+    "6144",
+  ]);
+  check(
+    "setup: installer-v2 disks built (Linux + USB stick + empty)",
+    existsSync(TARGET3) && existsSync(USBSTICK) && existsSync(EMPTYDISK),
+  );
+  // Linux partitions, hashed before anything writes — the
+  // untouched proof for the beside-Linux plan step.
+  const linEsp = await partHash(TARGET3, 1);
+  const linRoot = await partHash(TARGET3, 2);
+  const usbOld = await partHash(USBSTICK, 1);
+  check("setup: Linux + USB partitions hashed", true);
   // Windows partitions, hashed before anything writes — the
   // untouched proof.
   const win1Esp = await partHash(TARGET1, 1);
@@ -924,28 +1038,26 @@ async function main() {
     "app run installer --permissions cli.exec --seconds 20 --width 800 --height 500 --out /tmp/m11-ops-installer.json",
   );
   check("installer: headless app run completes", !!installerRun);
-  // The regression boot has no target disk, so the installer
-  // correctly reports "No Windows disk found to install alongside"
-  // — the plan screen (and its "Install SevynOS alongside Windows"
-  // button) only renders when a Windows disk is present, which is
+  // The regression boot has no installable disk (the data disk is
+  // the boot disk), so the installer correctly shows the disk
+  // picker with "No disk available to install onto." — the plan
+  // screen (and its "Install SevynOS alongside Windows" button)
+  // only renders when an installable disk is present, which is
   // proven on live1 below. Here we assert the app launches, runs
-  // its probe, and renders its (correct) no-disk state. Wait for
-  // the error text in an ops snapshot first: the ops lines flush
-  // asynchronously, and reading latestOps immediately after the
-  // headless run returns can catch only the loading shell.
-  await waitForLog(
-    b.logPath,
-    /No Windows disk found to install alongside\./,
-    60000,
+  // its probe, and renders its (correct) no-disk state, waiting
+  // for the text inside a parsed ops snapshot (not just in the
+  // raw log — see waitForOpsText).
+  const { ops: installerOps, texts: installerTexts } = await waitForOpsText(
+    b,
     beforeOps,
+    "No disk available to install onto.",
+    60000,
   );
-  const installerOps = latestOps(b, beforeOps);
-  const installerTexts = (installerOps?.texts || []).map((t) => t.t);
   check(
-    "installer: app renders (Installer + no-Windows-disk state)",
+    "installer: app renders (Installer + no-disk state)",
     !!installerOps &&
       installerTexts.includes("Installer") &&
-      installerTexts.includes("No Windows disk found to install alongside."),
+      installerTexts.includes("No disk available to install onto."),
     installerOps ? `${installerTexts.length} texts` : "no ops",
   );
   b.ctl.write("POWEROFF\n");
@@ -987,17 +1099,15 @@ async function main() {
     live1,
     "app run installer --permissions cli.exec --seconds 45 --width 800 --height 500 --out /tmp/m11-ops-installer.json",
   );
-  const wiz1Hit = await waitForLog(
-    live1.logPath,
-    /Install SevynOS alongside Windows/,
-    30000,
+  const { ops: wiz1Ops, texts: wiz1Texts } = await waitForOpsText(
+    live1,
     beforeWiz1,
+    "Install SevynOS alongside Windows",
+    30000,
   );
-  const wiz1Ops = latestOps(live1, beforeWiz1);
-  const wiz1Texts = (wiz1Ops?.texts || []).map((t) => t.t);
   check(
     "live1: installer wizard renders the plan (Install SevynOS alongside Windows)",
-    !!wiz1Run && !!wiz1Hit && wiz1Texts.includes("Install SevynOS alongside Windows"),
+    !!wiz1Run && wiz1Texts.includes("Install SevynOS alongside Windows"),
     wiz1Ops ? `${wiz1Texts.length} texts` : "no ops",
   );
   const install1 = await termCmd(
@@ -1280,7 +1390,200 @@ async function main() {
     }
   }
 
-  // Step 6: fallback — the updater's ESP discovery on a dual-boot
+  // Step 6: installer v2 — UEFI live boot + Linux disk, empty disk,
+  // and USB stick. Probe lists all three; beside-Linux and
+  // whole-disk plans succeed; the boot disk refuses; the portable
+  // install lands on the stick.
+  const liveGrubOrig3 = await pinLiveGrub();
+  check("live3: grub.cfg pinned with sevyn.data=PARTUUID=", true);
+  const live3 = await boot("live3", {
+    mode: "uefi",
+    extraDrives: [
+      { file: TARGET3, id: "t3", serial: "target3" },
+      { file: EMPTYDISK, id: "te", serial: "empty1" },
+    ],
+    usbDrives: [{ file: USBSTICK, id: "usb0" }],
+  });
+  await connectSockets(live3);
+  const live3Ready = await waitForLog(live3.logPath, /SEVYNOS_M5_READY/, 600000);
+  check("live3: SEVYNOS_M5_READY (UEFI live boot)", !!live3Ready);
+  const live3Term = await appdCmd(live3, "LAUNCH terminal", /APPD LAUNCH OK terminal/);
+  check("live3: terminal launches", !!live3Term);
+  await sleep(5000);
+  const probe3 = await termCmd(live3, "install probe");
+  check("live3: sevyn install probe lists the Linux + USB + empty disks", !!probe3);
+  const plan3linux = await termCmd(
+    live3,
+    `install plan --disk ${TARGET3_BYID} --target auto`,
+  );
+  check("live3: sevyn install plan beside Linux succeeds", !!plan3linux);
+  const plan3whole = await termCmd(
+    live3,
+    `install plan --disk ${EMPTY_BYID} --target whole`,
+  );
+  check(
+    "live3: sevyn install plan --target whole on the empty disk succeeds",
+    !!plan3whole,
+  );
+  const plan3port = await termCmd(
+    live3,
+    `install plan --disk ${USB_DEV} --target portable`,
+  );
+  check(
+    "live3: sevyn install plan --target portable on the USB stick succeeds",
+    !!plan3port,
+  );
+  const plan3boot = await termCmdCode(
+    live3,
+    `install plan --disk ${BOOT_BYID} --target auto`,
+    1,
+  );
+  check("live3: sevyn install plan on the boot disk refuses (exit 1)", !!plan3boot);
+  // The wizard sees three installable disks, so it shows the disk
+  // picker (no auto-pick) — assert it renders with the USB disk.
+  const beforeWiz3 = logLines(live3.logPath).length;
+  const wiz3Run = await termCmd(
+    live3,
+    "app run installer --permissions cli.exec --seconds 45 --width 800 --height 500 --out /tmp/m11-ops-installer3.json",
+  );
+  const { ops: wiz3Ops, texts: wiz3Texts } = await waitForOpsText(
+    live3,
+    beforeWiz3,
+    "Choose a disk",
+    30000,
+  );
+  check(
+    "live3: installer wizard renders the disk picker (Choose a disk + /dev/sda)",
+    !!wiz3Run &&
+      wiz3Texts.includes("Choose a disk") &&
+      wiz3Texts.some((t) => t.startsWith("/dev/sda")),
+    wiz3Ops ? `${wiz3Texts.length} texts` : "no ops",
+  );
+  const install3 = await termCmd(
+    live3,
+    `install install --disk ${USB_DEV} --target portable --yes`,
+    300000,
+  );
+  check("live3: sevyn install install --target portable --yes succeeds", !!install3);
+  live3.ctl.write("POWEROFF\n");
+  const exitedLive3 = await waitExit(live3, 30000);
+  check("live3: guest powers off on request", exitedLive3);
+  closeBoot(live3);
+  await restoreLiveGrub(liveGrubOrig3);
+  check("live3: grub.cfg restored on the live image", true);
+  // Host-side proof of the portable install.
+  check(
+    "live3: Linux ESP byte-identical (plan only, nothing installed there)",
+    (await partHash(TARGET3, 1)) === linEsp,
+  );
+  check(
+    "live3: Linux root byte-identical (plan only, nothing installed there)",
+    (await partHash(TARGET3, 2)) === linRoot,
+  );
+  check(
+    "live3: USB stick's old partition byte-identical after portable install",
+    (await partHash(USBSTICK, 1)) === usbOld,
+  );
+  const sgdisk3 = await execAsync("sgdisk", ["-p", USBSTICK]);
+  const hasP23 = /^\s*2\s/m.test(sgdisk3) && /^\s*3\s/m.test(sgdisk3);
+  check(
+    "live3: new ESP (p2) + data (p3) partitions exist on the stick",
+    hasP23,
+    sgdisk3.split("\n").slice(0, 8).join(" | "),
+  );
+  if (hasP23 && install3) {
+    const grub3Path = join(OUT, "m11-usbstick-grub.cfg");
+    await espRead(USBSTICK, 2, "/EFI/ubuntu/grub.cfg", grub3Path);
+    const grub3 = readFileSync(grub3Path, "utf8");
+    check(
+      "live3: stick grub.cfg is SevynOS-only (no Windows entry)",
+      grub3.includes('menuentry "SevynOS"') && !grub3.includes('menuentry "Windows 11"'),
+      grub3.slice(0, 200),
+    );
+    check(
+      "live3: stick grub.cfg pins sevyn.data=PARTUUID=",
+      /sevyn\.data=PARTUUID=[0-9A-Fa-f-]{36}/.test(grub3),
+    );
+    const state3 = parseJsonSafe(await dataRead(USBSTICK, 3, "/slot-state.json"));
+    check(
+      "live3: slot layout landed on the stick (active A, good A, attempts 0)",
+      !!state3 && state3.active === "A" && state3.good === "A" && state3.attempts === 0,
+      state3 ? JSON.stringify(state3) : "slot-state.json missing/unparseable",
+    );
+    // The fallback bootloader is the portable boot path — it must
+    // exist even though no NVRAM entry was registered.
+    let bootx64 = false;
+    try {
+      await espRead(
+        USBSTICK,
+        2,
+        "/EFI/BOOT/BOOTX64.EFI",
+        join(OUT, "m11-usbstick-bootx64.efi"),
+      );
+      bootx64 = true;
+    } catch {
+      bootx64 = false;
+    }
+    check("live3: stick ESP carries the fallback BOOTX64.EFI", bootx64);
+  } else {
+    check(
+      "live3: stick grub.cfg is SevynOS-only (no Windows entry)",
+      false,
+      "no p2 (install wrote nothing)",
+    );
+    check(
+      "live3: stick grub.cfg pins sevyn.data=PARTUUID=",
+      false,
+      "no p2 (install wrote nothing)",
+    );
+    check(
+      "live3: slot layout landed on the stick (active A, good A, attempts 0)",
+      false,
+      "no p3 (install wrote nothing)",
+    );
+    check("live3: stick ESP carries the fallback BOOTX64.EFI", false, "no p2");
+  }
+
+  // Step 7: installer v2 — UEFI boot from the USB stick alone, with
+  // FRESH firmware variables (no NVRAM entry was ever registered
+  // for the portable install): the fallback BOOTX64.EFI must boot
+  // the stick on its own.
+  if (hasP23 && install3) {
+    await serialGrubCfg(USBSTICK, 2);
+    const usb = await boot("usbboot", {
+      mode: "uefi",
+      image: USBSTICK,
+    });
+    await connectSockets(usb);
+    const usbMenu = await waitForLog(usb.logPath, /SevynOS/, 600000);
+    check("usbboot: GRUB menu lists SevynOS on the stick", !!usbMenu);
+    const usbReady = await waitForLog(usb.logPath, /SEVYNOS_M5_READY/, 600000);
+    check("usbboot: SEVYNOS_M5_READY (portable boot from the stick)", !!usbReady);
+    const usbData = await waitForLog(
+      usb.logPath,
+      /M11 init: sevyn\.data=PARTUUID=/,
+      60000,
+    );
+    check("usbboot: /data mounts via sevyn.data=PARTUUID=", !!usbData);
+    const usbTerm = await appdCmd(usb, "LAUNCH terminal", /APPD LAUNCH OK terminal/);
+    check("usbboot: terminal launches on the portable system", !!usbTerm);
+    usb.ctl.write("POWEROFF\n");
+    const exitedUsb = await waitExit(usb, 30000);
+    check("usbboot: guest powers off on request", exitedUsb);
+    closeBoot(usb);
+  } else {
+    for (const name of [
+      "usbboot: GRUB menu lists SevynOS on the stick",
+      "usbboot: SEVYNOS_M5_READY (portable boot from the stick)",
+      "usbboot: /data mounts via sevyn.data=PARTUUID=",
+      "usbboot: terminal launches on the portable system",
+      "usbboot: guest powers off on request",
+    ]) {
+      check(name, false, "portable install did not run");
+    }
+  }
+
+  // Step 8: fallback — the updater's ESP discovery on a dual-boot
   // disk. Tamper target 1's slot state (attempts=2, active=B,
   // good=A); the daemon must restore the ESP from the good slot —
   // the SEVYNESP (p3), not the Windows ESP (p1) — and reboot.
@@ -1417,6 +1720,8 @@ function finish(ok, extra = {}) {
       join(OUT, "m11-uefi-boot-target1.log"),
       join(OUT, "m11-uefi-boot-live2.log"),
       join(OUT, "m11-uefi-boot-target2.log"),
+      join(OUT, "m11-uefi-boot-live3.log"),
+      join(OUT, "m11-uefi-boot-usbboot.log"),
       join(OUT, "m11-uefi-boot-fallback.log"),
       join(OUT, "m11-uefi-boot-restored.log"),
     ]) {
