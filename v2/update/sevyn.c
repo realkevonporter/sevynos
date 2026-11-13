@@ -18,6 +18,9 @@
  *   sevyn files cat <path>      print a file (64 KB cap)
  *   sevyn files mkdir <path>    create a directory
  *   sevyn files write <path> <text...>  write text to a file (create/truncate)
+ *   sevyn input list          list /dev/input/event* devices + names
+ *   sevyn input absinfo [dev] dump kernel absinfo (min/max/res) of a
+ *                               device (default: the touchpad)
  *   sevyn code status           Sevyn Code: running, serving, version,
  *                               terminal shell
  *   sevyn browser open [url]    open a URL (launch Chromium if needed).
@@ -50,6 +53,7 @@
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <limits.h>
+#include <linux/input.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -58,6 +62,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -206,6 +211,9 @@ static void print_usage(FILE *f)
             "                              on a whole disk, or portably\n"
             "                              on a USB stick (needs --yes)\n"
             "  sevyn install status        installed? dual-boot?\n"
+            "  sevyn input list            list /dev/input/event* devices\n"
+            "  sevyn input absinfo [dev]   dump kernel absinfo of a device\n"
+            "                              (default: the touchpad; read-only)\n"
             "  sevyn net fetch --method <m> <url> [--header <N:V>] [--data <b>]\n"
             "                              one plain HTTP request; prints\n"
             "                              status, headers JSON, body\n"
@@ -825,6 +833,216 @@ static int cmd_files(int argc, char **argv)
         fclose(f);
         printf("wrote %zu bytes to %s\n", total, argv[3]);
         return 0;
+    }
+    return usage();
+}
+
+/* ------------------------------------------------------------------ */
+/* input — read-only evdev diagnostics (M9 follow-up: the GF65 scroll   */
+/* investigation). Dumps the kernel absinfo (value/min/max/fuzz/flat/  */
+/* resolution) of a /dev/input/event* device. Only getter ioctls are   */
+/* used (EVIOCGNAME, EVIOCGBIT, EVIOCGABS, EVIOCGID): nothing is       */
+/* written and no events are read, so this works even while Weston /   */
+/* libinput holds the device grabbed — a grab blocks event delivery    */
+/* to other fds, not ioctls. The resolution is the number that         */
+/* decides the scroll hypothesis: libinput converts finger movement    */
+/* to millimetres with it, so a wrong (too high) kernel resolution     */
+/* makes real movement compute as < 1mm and the scroll threshold is    */
+/* never crossed.                                                      */
+
+#define INPUT_MAX_EVENT 64
+
+static const char *abs_axis_name(unsigned int code)
+{
+    switch (code) {
+    case ABS_X: return "ABS_X";
+    case ABS_Y: return "ABS_Y";
+    case ABS_Z: return "ABS_Z";
+    case ABS_RX: return "ABS_RX";
+    case ABS_RY: return "ABS_RY";
+    case ABS_RZ: return "ABS_RZ";
+    case ABS_THROTTLE: return "ABS_THROTTLE";
+    case ABS_RUDDER: return "ABS_RUDDER";
+    case ABS_WHEEL: return "ABS_WHEEL";
+    case ABS_GAS: return "ABS_GAS";
+    case ABS_BRAKE: return "ABS_BRAKE";
+    case ABS_MISC: return "ABS_MISC";
+    case ABS_MT_SLOT: return "ABS_MT_SLOT";
+    case ABS_MT_TOUCH_MAJOR: return "ABS_MT_TOUCH_MAJOR";
+    case ABS_MT_TOUCH_MINOR: return "ABS_MT_TOUCH_MINOR";
+    case ABS_MT_WIDTH_MAJOR: return "ABS_MT_WIDTH_MAJOR";
+    case ABS_MT_WIDTH_MINOR: return "ABS_MT_WIDTH_MINOR";
+    case ABS_MT_ORIENTATION: return "ABS_MT_ORIENTATION";
+    case ABS_MT_POSITION_X: return "ABS_MT_POSITION_X";
+    case ABS_MT_POSITION_Y: return "ABS_MT_POSITION_Y";
+    case ABS_MT_TOOL_TYPE: return "ABS_MT_TOOL_TYPE";
+    case ABS_MT_BLOB_ID: return "ABS_MT_BLOB_ID";
+    case ABS_MT_TRACKING_ID: return "ABS_MT_TRACKING_ID";
+    case ABS_MT_PRESSURE: return "ABS_MT_PRESSURE";
+    case ABS_MT_DISTANCE: return "ABS_MT_DISTANCE";
+    case ABS_MT_TOOL_X: return "ABS_MT_TOOL_X";
+    case ABS_MT_TOOL_Y: return "ABS_MT_TOOL_Y";
+    default: return NULL;
+    }
+}
+
+/* Open /dev/input/event<n> read-only; on success return the fd and
+ * (when name is non-NULL) fill it with the device name. */
+static int input_open_event(int n, char *name, size_t name_cap)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/dev/input/event%d", n);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    if (name) {
+        if (ioctl(fd, EVIOCGNAME(name_cap), name) < 0)
+            name[0] = '\0';
+    }
+    return fd;
+}
+
+static int cmd_input_list(void)
+{
+    int found = 0;
+    for (int n = 0; n < INPUT_MAX_EVENT; n++) {
+        char name[256];
+        int fd = input_open_event(n, name, sizeof(name));
+        if (fd < 0)
+            continue;
+        printf("event%d: %s\n", n, name[0] ? name : "(no name)");
+        close(fd);
+        found++;
+    }
+    if (!found) {
+        fprintf(stderr, "error: no /dev/input/event* devices\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* Resolve the device argument: "18" -> /dev/input/event18, "event18"
+ * -> /dev/input/event18, a path -> as-is. With no argument, find
+ * the first device whose name contains "touchpad". */
+static int input_resolve(const char *arg, char *path, size_t cap)
+{
+    if (arg) {
+        if (strchr(arg, '/')) {
+            snprintf(path, cap, "%s", arg);
+            return 0;
+        }
+        int n = -1;
+        if (sscanf(arg, "event%d", &n) == 1 || sscanf(arg, "%d", &n) == 1) {
+            snprintf(path, cap, "/dev/input/event%d", n);
+            return 0;
+        }
+        snprintf(path, cap, "%s", arg);
+        return 0;
+    }
+    for (int n = 0; n < INPUT_MAX_EVENT; n++) {
+        char name[256];
+        int fd = input_open_event(n, name, sizeof(name));
+        if (fd < 0)
+            continue;
+        close(fd);
+        if (strcasestr(name, "touchpad")) {
+            snprintf(path, cap, "/dev/input/event%d", n);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int cmd_input_absinfo(const char *arg)
+{
+    char path[128];
+    if (input_resolve(arg, path, sizeof(path)) != 0) {
+        fprintf(stderr, "error: no touchpad found "
+                        "(run `sevyn input list`)\n");
+        return 1;
+    }
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "error: cannot open %s: %s\n", path,
+                strerror(errno));
+        return 1;
+    }
+    char name[256] = "";
+    if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) < 0)
+        name[0] = '\0';
+    struct input_id id;
+    if (ioctl(fd, EVIOCGID, &id) == 0)
+        printf("%s: %s\nid: bus=%04x vendor=%04x product=%04x\n",
+               path, name[0] ? name : "(no name)",
+               id.bustype, id.vendor, id.product);
+    else
+        printf("%s: %s\n", path, name[0] ? name : "(no name)");
+    unsigned long bits[2] = { 0, 0 };
+    if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(bits)), bits) < 0) {
+        fprintf(stderr, "error: cannot read abs bits: %s\n",
+                strerror(errno));
+        close(fd);
+        return 1;
+    }
+    struct input_absinfo mt_x = { 0 }, mt_y = { 0 };
+    int have_mt_x = 0, have_mt_y = 0;
+    int axes = 0;
+    for (unsigned int code = 0; code <= ABS_MAX; code++) {
+        if (!(bits[code / (8 * sizeof(unsigned long))] &
+              (1UL << (code % (8 * sizeof(unsigned long))))))
+            continue;
+        struct input_absinfo abs;
+        if (ioctl(fd, EVIOCGABS(code), &abs) < 0)
+            continue;
+        axes++;
+        const char *aname = abs_axis_name(code);
+        char label[32];
+        if (aname)
+            snprintf(label, sizeof(label), "%s", aname);
+        else
+            snprintf(label, sizeof(label), "ABS_0x%02x", code);
+        if (abs.resolution > 0 && abs.maximum > abs.minimum)
+            printf("%-20s val=%-6d min=%-6d max=%-6d res=%-4d %.1fmm\n",
+                   label, abs.value, abs.minimum, abs.maximum,
+                   abs.resolution,
+                   (double)(abs.maximum - abs.minimum) / abs.resolution);
+        else
+            printf("%-20s val=%-6d min=%-6d max=%-6d res=%d\n",
+                   label, abs.value, abs.minimum, abs.maximum,
+                   abs.resolution);
+        if (code == ABS_MT_POSITION_X) {
+            mt_x = abs;
+            have_mt_x = 1;
+        }
+        if (code == ABS_MT_POSITION_Y) {
+            mt_y = abs;
+            have_mt_y = 1;
+        }
+    }
+    if (!axes)
+        printf("no absolute axes\n");
+    if (have_mt_x && have_mt_y && mt_x.resolution > 0 &&
+        mt_y.resolution > 0)
+        printf("touchpad size: %.1f x %.1f mm\n",
+               (double)(mt_x.maximum - mt_x.minimum) / mt_x.resolution,
+               (double)(mt_y.maximum - mt_y.minimum) / mt_y.resolution);
+    close(fd);
+    return 0;
+}
+
+static int cmd_input(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    if (strcmp(argv[2], "list") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_input_list();
+    }
+    if (strcmp(argv[2], "absinfo") == 0) {
+        if (argc != 3 && argc != 4)
+            return usage();
+        return cmd_input_absinfo(argc == 4 ? argv[3] : NULL);
     }
     return usage();
 }
@@ -5651,6 +5869,8 @@ static int dispatch(int argc, char **argv)
         return cmd_app(argc, argv);
     if (strcmp(argv[1], "install") == 0)
         return cmd_install(argc, argv);
+    if (strcmp(argv[1], "input") == 0)
+        return cmd_input(argc, argv);
     return usage();
 }
 
