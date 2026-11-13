@@ -157,7 +157,17 @@ std::string runSevyn(const std::string& cmdline) {
   // command still cannot block the UI for long.
   const bool isInstall =
       tokens.size() >= 3 && tokens[1] == "install" && tokens[2] == "install";
-  const int execTimeoutSec = isInstall ? 300 : 10;
+  // `sevyn net wifi connect` associates with the AP (up to a 30 s poll
+  // for wpa_supplicant COMPLETED) and then brings up DHCP via udhcpc
+  // (20 s cap) plus wpa_cli calls and save_config — on real hardware
+  // association alone takes ~10 s, so the 10 s exec deadline SIGKILLs
+  // it mid-association with exit 124 and Settings reports "Could not
+  // connect" for secured and open networks alike. Scan takes ~4-5 s
+  // and stays under the deadline, so it needs no carve-out. Give
+  // connect a 90 s deadline (30 s association + 20 s DHCP + margin).
+  const bool isWifiConnect = tokens.size() >= 4 && tokens[1] == "net" &&
+                             tokens[2] == "wifi" && tokens[3] == "connect";
+  const int execTimeoutSec = isInstall ? 300 : (isWifiConnect ? 90 : 10);
   std::vector<char*> argv;
   for (auto& t : tokens)
     argv.push_back(t.data());
