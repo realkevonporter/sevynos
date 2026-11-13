@@ -119,8 +119,10 @@
  *
  * M11 — dual-boot: the ESP is found by its filesystem label
  * (SEVYNESP), not by assuming it is partition 1 — on a dual-boot
- * disk the Windows ESP is partition 1. The ESP sync preserves a
- * `menuentry "Windows 11"` block in grub.cfg verbatim, and the
+ * disk the Windows ESP is partition 1. The ESP sync preserves
+ * every non-SevynOS `menuentry` block in grub.cfg verbatim (the
+ * Windows 11 / Linux chainload entries the installer writes),
+ * and the
  * SevynOS entries carry sevyn.data=PARTUUID=<uuid> for the data
  * partition the system booted from (so init finds the right data
  * partition when another SevynOS install's SEVYN_DATA label is
@@ -657,7 +659,7 @@ static int fetch_feed(struct feed *feed, char *err, size_t errcap)
     snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.%ld.json",
              g_tmp_dir, (long)getpid());
     if (run_wget(g_url, manifest_path, WGET_MANIFEST_TIMEOUT) != 0) {
-        snprintf(err, errcap, "download failed: %s", g_url);
+        snprintf(err, errcap, "download failed: %.400s", g_url);
         unlink(manifest_path);
         return -1;
     }
@@ -804,7 +806,9 @@ static int fetch_feed(struct feed *feed, char *err, size_t errcap)
         if (ed25519_verify(keys[i].pub, sig, (const unsigned char *)body,
                            strlen(body))) {
             verified = 1;
-            snprintf(verified_kid, sizeof(verified_kid), "%s",
+            /* Key ids are short in practice, but the JSON string
+             * is unbounded — bound the copy to the buffer. */
+            snprintf(verified_kid, sizeof(verified_kid), "%.120s",
                      keys[i].key_id);
             free(sig);
             break;
@@ -849,7 +853,7 @@ static int download_verified(const struct feed_artifact *fa,
                              const char *out_path, char *err, size_t errcap)
 {
     if (run_wget(fa->url, out_path, WGET_ARTIFACT_TIMEOUT) != 0) {
-        snprintf(err, errcap, "download failed: %s", fa->url);
+        snprintf(err, errcap, "download failed: %.400s", fa->url);
         unlink(out_path);
         return -1;
     }
@@ -979,11 +983,12 @@ static int esp_copy_verified(const char *src, const char *dst)
     return 0;
 }
 
-/* Pull the `menuentry "Windows 11" { ... }` block out of an
- * existing grub.cfg, verbatim (the M11 installer writes it; the
- * updater must never drop it when it rewrites the menu). Returns a
- * malloc'd block (including the closing brace line) or NULL. */
-static char *extract_windows_entry(const char *cfg_path)
+/* Pull every `menuentry "..." { ... }` block that is NOT a SevynOS
+ * entry out of an existing grub.cfg, verbatim (the installer
+ * writes the Windows / Linux chainload entries; the updater must
+ * never drop them when it rewrites the menu). Returns a malloc'd
+ * concatenation of the blocks, or NULL when there are none. */
+static char *extract_other_entries(const char *cfg_path)
 {
     FILE *f = fopen(cfg_path, "r");
     if (!f)
@@ -1010,27 +1015,44 @@ static char *extract_windows_entry(const char *cfg_path)
     }
     text[size] = '\0';
     fclose(f);
-    char *start = strstr(text, "menuentry \"Windows 11\" {");
-    if (!start) {
-        free(text);
-        return NULL;
+    /* Walk the menuentry blocks; keep every block whose title is
+     * not "SevynOS" or "SevynOS (previous)". */
+    char *kept = NULL;
+    size_t kept_len = 0;
+    char *scan = text;
+    for (;;) {
+        char *start = strstr(scan, "menuentry \"");
+        if (!start)
+            break;
+        char *title_end = strchr(start + 11, '"');
+        if (!title_end)
+            break;
+        size_t title_len = (size_t)(title_end - (start + 11));
+        int is_sevyn =
+            (title_len == 7 && strncmp(start + 11, "SevynOS", 7) == 0) ||
+            (title_len == 18 &&
+             strncmp(start + 11, "SevynOS (previous)", 18) == 0);
+        /* The block ends at the line that is exactly "}". */
+        char *end = strstr(title_end, "\n}\n");
+        if (!end)
+            break;
+        size_t len = (size_t)(end - start) + 3; /* include "}\n" */
+        if (!is_sevyn) {
+            char *nkept = realloc(kept, kept_len + len + 1);
+            if (!nkept) {
+                free(kept);
+                free(text);
+                return NULL;
+            }
+            kept = nkept;
+            memcpy(kept + kept_len, start, len);
+            kept_len += len;
+            kept[kept_len] = '\0';
+        }
+        scan = end + 3;
     }
-    /* The block ends at the line that is exactly "}". */
-    char *end = strstr(start, "\n}\n");
-    if (!end) {
-        free(text);
-        return NULL;
-    }
-    size_t len = (size_t)(end - start) + 3; /* include "}\n" */
-    char *block = malloc(len + 1);
-    if (!block) {
-        free(text);
-        return NULL;
-    }
-    memcpy(block, start, len);
-    block[len] = '\0';
     free(text);
-    return block;
+    return kept;
 }
 
 /* The ESP sync core: operates on a plain directory (the mounted ESP
@@ -1041,8 +1063,8 @@ static char *extract_windows_entry(const char *cfg_path)
  * two entries. On any failure the live /vmlinuz is untouched
  * (copies go through temp names + rename) and -1 is returned.
  * partuuid (M11, NULL when unknown) pins sevyn.data=PARTUUID=...
- * on the SevynOS entries; a Windows 11 entry in the existing
- * grub.cfg is preserved verbatim. */
+ * on the SevynOS entries; the other OS entries (Windows 11,
+ * Linux, ...) in the existing grub.cfg are preserved verbatim. */
 static int esp_sync_files(const char *esp_dir,
                           const char *new_kern, const char *new_initrd,
                           const char *prev_kern, const char *prev_initrd,
@@ -1078,13 +1100,13 @@ static int esp_sync_files(const char *esp_dir,
         return -1;
     /* grub.cfg: default boots the active slot from /vmlinuz, the
      * previous entry boots the good slot from /vmlinuz.prev. M11:
-     * preserve a Windows 11 entry verbatim, and pin the data
+     * preserve the other OS entries verbatim, and pin the data
      * partition by PARTUUID when known. */
     char cfg_path[PATH_MAX];
     if (snprintf(cfg_path, sizeof(cfg_path), "%s/%s", esp_dir,
                  ESP_GRUB_CFG_REL) >= (int)sizeof(cfg_path))
         return -1;
-    char *win = extract_windows_entry(cfg_path);
+    char *other = extract_other_entries(cfg_path);
     char data_arg[128] = "";
     if (partuuid)
         snprintf(data_arg, sizeof(data_arg),
@@ -1107,16 +1129,16 @@ static int esp_sync_files(const char *esp_dir,
              "}\n",
              active_slot, data_arg, good_slot, data_arg);
     if (n < 0 || (size_t)n >= sizeof(cfg_text)) {
-        free(win);
+        free(other);
         return -1;
     }
-    if (win) {
-        if (strlen(cfg_text) + strlen(win) + 1 > sizeof(cfg_text)) {
-            free(win);
+    if (other) {
+        if (strlen(cfg_text) + strlen(other) + 1 > sizeof(cfg_text)) {
+            free(other);
             return -1;
         }
-        strcat(cfg_text, win);
-        free(win);
+        strcat(cfg_text, other);
+        free(other);
     }
     char efi_dir[PATH_MAX];
     if (snprintf(efi_dir, sizeof(efi_dir), "%s/EFI/ubuntu", esp_dir) >=
@@ -1229,6 +1251,31 @@ static char *data_partuuid(void)
     return uuid;
 }
 
+/* The filesystem label of a device, via blkid (in the image at
+ * /usr/sbin/blkid; the init uses it for the same job). Returns 1
+ * when the label matches, 0 otherwise — including when blkid is
+ * absent or fails. A missing answer is never a yes. */
+static int esp_label_is(const char *dev, const char *label)
+{
+    if (strncmp(dev, "/dev/", 5) != 0)
+        return 0;
+    char cmd[PATH_MAX + 64];
+    if (snprintf(cmd, sizeof(cmd), "blkid -s LABEL -o value %s "
+                 "2>/dev/null", dev) >= (int)sizeof(cmd))
+        return 0;
+    FILE *f = popen(cmd, "r");
+    if (!f)
+        return 0;
+    char got[128] = "";
+    if (!fgets(got, sizeof(got), f)) {
+        pclose(f);
+        return 0;
+    }
+    pclose(f);
+    got[strcspn(got, "\r\n")] = '\0';
+    return strcmp(got, label) == 0;
+}
+
 /* Find the ESP device: the SevynOS ESP by label (M11 dual-boot),
  * falling back to partition 1 of the disk carrying the data
  * partition (from the mounts table). Returns a malloc'd "/dev/..."
@@ -1239,6 +1286,19 @@ static char *esp_find_device(void)
     char *by_label = esp_find_by_label();
     if (by_label)
         return by_label;
+    /* udev's trigger is async (the init says so twice): the
+     * by-label symlink may not exist yet when the daemon starts
+     * at boot and runs the fallback restore. Poll up to 5s for
+     * it before falling back — the init already waited for the
+     * data disk's symlink from the same trigger batch, so the
+     * ESP's event is imminent, not minutes away. (Kept short
+     * deliberately: the host test's apply wait loop is 10s.) */
+    for (int i = 0; i < 50; i++) {
+        (void)poll(NULL, 0, 100);
+        by_label = esp_find_by_label();
+        if (by_label)
+            return by_label;
+    }
     char *device = data_device();
     if (!device)
         return NULL;
@@ -1291,12 +1351,29 @@ static char *esp_find_device(void)
         strcat(esp, "p1");
     else
         strcat(esp, "1");
-    free(device);
     struct stat st;
     if (stat(esp, &st) != 0 || !S_ISBLK(st.st_mode)) {
         free(esp);
+        free(device);
         return NULL;
     }
+    /* The partition-1 fallback predates dual-boot: on a disk with
+     * another OS, partition 1 is that OS's ESP, not SevynOS's.
+     * Writing there corrupts it (observed in the v2 harness: the
+     * fallback restore copied vmlinuz.prev onto the Windows ESP,
+     * then the 374 MB initramfs copy failed for space and the
+     * restore aborted). Only trust partition 1 when its
+     * filesystem label is SEVYNESP; otherwise refuse (no ESP)
+     * rather than guess. */
+    if (!esp_label_is(esp, "SEVYNESP")) {
+        log_line("UPDATE refusing to use %s as the ESP: its label "
+                 "is not SEVYNESP (dual-boot disk?)",
+                 esp);
+        free(esp);
+        free(device);
+        return NULL;
+    }
+    free(device);
     return esp;
 }
 

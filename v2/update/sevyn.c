@@ -196,13 +196,15 @@ static void print_usage(FILE *f)
             "  sevyn install probe [--disk <disk>]\n"
             "                              list disks, partitions, and\n"
             "                              detected OSes (read-only)\n"
-            "  sevyn install plan --disk <disk> [--target auto|free|<part>]\n"
+            "  sevyn install plan --disk <disk> [--target auto|free|\n"
+            "                              replace|whole|portable|<part>]\n"
             "                              show the install plan (what\n"
             "                              will be created, protected,\n"
-            "                              replaced)\n"
+            "                              replaced, or destroyed)\n"
             "  sevyn install install --disk <disk> [--target ...] --yes\n"
-            "                              install SevynOS alongside\n"
-            "                              Windows 11 (needs --yes)\n"
+            "                              install SevynOS beside any OS,\n"
+            "                              on a whole disk, or portably\n"
+            "                              on a USB stick (needs --yes)\n"
             "  sevyn install status        installed? dual-boot?\n"
             "  sevyn net fetch --method <m> <url> [--header <N:V>] [--data <b>]\n"
             "                              one plain HTTP request; prints\n"
@@ -3115,13 +3117,16 @@ static int cmd_tokrah(int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ */
-/* install (M11): dual-boot installer                                 */
+/* install (M11 + installer v2): install SevynOS onto any disk  */
 /*                                                                    */
 /* The live image boots from USB; the installer puts SevynOS onto    */
-/* an internal disk ALONGSIDE Windows 11 without wiping it. It       */
-/* never touches a Windows partition, never installs onto the boot    */
-/* disk, and never writes without an explicit confirmation (the RN    */
-/* Confirm button, or --yes on the CLI).                              */
+/* an internal disk ALONGSIDE any detected OS (Windows, Linux,       */
+/* macOS), onto a whole disk (explicitly confirmed — it erases       */
+/* everything on that disk), or portably onto a USB stick (boot      */
+/* it on any machine, no NVRAM entry). It never touches another      */
+/* OS partition's bytes, never installs onto the boot disk, and      */
+/* never writes without an explicit confirmation (the RN Confirm    */
+/* button, or --yes on the CLI).                                      */
 /*                                                                    */
 /* Why its own ESP: a Windows 11 ESP is typically 100-260 MiB,       */
 /* while the SevynOS kernel + initramfs is ~380 MiB (and the M9 ESP  */
@@ -3139,6 +3144,8 @@ static int cmd_tokrah(int argc, char **argv)
 #define INST_ESP_TYPE "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 #define INST_LINUX_TYPE "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 #define INST_MS_BASIC_TYPE "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
+#define INST_APFS_TYPE "7C3457EF-0000-11AA-AA11-00306543ECAC"
+#define INST_HFS_TYPE "48465300-0000-11AA-AA11-00306543ECAC"
 #define INST_ESP_MB 1152
 #define INST_DATA_MIN_MB 864
 #define INST_DATA_MAX_MB 8192
@@ -3163,6 +3170,20 @@ typedef struct {
     int is_sevyn_esp;   /* ESP + /EFI/ubuntu/grub.cfg mentioning SevynOS */
     int is_windows_data; /* MS basic data + ntfs */
     int is_sevyn_data;   /* label == SEVYN_DATA */
+    /* Installer v2: generic OS detection — the installer is no
+     * longer Windows-only. A Linux ESP is an ESP whose grub.cfg
+     * lives under a distro directory and is not SevynOS; a Linux
+     * data partition is a Linux-type (or MS-basic) partition with
+     * a Linux filesystem and no SEVYN_DATA label. macOS is an
+     * APFS or HFS+ partition. Anything else with a readable
+     * filesystem is "other" — reported honestly, never claimed
+     * to be an OS it is not. */
+    int is_linux_esp;
+    int is_linux_data;
+    int is_macos_data;
+    int is_other;
+    char linux_distro[32]; /* distro dir, e.g. "ubuntu" */
+    char linux_boot[128];  /* guest path of its bootloader */
 } inst_part;
 
 typedef struct {
@@ -3180,26 +3201,50 @@ typedef struct {
     int is_boot_disk;
     int has_windows;
     int has_sevyn;
+    int has_linux;
+    int has_macos;
+    int has_other;
     int gpt; /* sgdisk read the table */
+    /* Installer v2: what the disk is, for the disk picker. */
+    char model[64];     /* /sys/block/<dev>/device/model, or "-" */
+    char transport[16]; /* usb | nvme | sata | virtio | mmc | file */
+    int removable;      /* /sys/block/<dev>/removable == 1 */
+    char os_list[128];  /* "Windows 11, Linux" — detected OSes */
 } inst_disk;
 
 typedef struct {
     char disk[256];
-    int mode; /* 0 = free space, 1 = replace old SevynOS */
+    /* 0 = free space, 1 = replace old SevynOS, 2 = whole-disk
+     * format, 3 = portable USB install. */
+    int mode;
+    int wipe;     /* mode 2, or mode 3 when the stick is wiped */
+    int portable; /* mode 3: no NVRAM entry, fallback bootloader */
     unsigned long long esp_start, esp_end;   /* sectors */
     unsigned long long data_start, data_end; /* sectors */
     int esp_num, data_num;                   /* new partition numbers */
     int replaced[32];
     int nreplaced;
-    /* Protected partitions (Windows + Windows ESP + anything else
-     * that is not being replaced), with edge hashes taken at plan
-     * time so install can prove they are untouched afterwards. */
+    /* Whole-disk / wipe-portable: every existing partition is
+     * destroyed (named in the plan; the UI confirms separately). */
+    int destroyed[32];
+    int ndestroyed;
+    /* Protected partitions (everything not being replaced or
+     * destroyed), with edge hashes taken at plan time so install
+     * can prove they are untouched afterwards. */
     int prot[32];
     int nprot;
     char prot_hash[32][2][65];
     char win_esp_uuid[64];
     char win_esp_partuuid[64];
     int has_windows;
+    /* Installer v2: the first detected Linux ESP, for the GRUB
+     * chainload entry, and the other detected OSes. */
+    char linux_esp_uuid[64];
+    char linux_boot[128];
+    char linux_label[32];
+    int has_linux;
+    int has_macos;
+    char os_list[128];
 } inst_plan;
 
 static const char *inst_files_dir(void)
@@ -3496,6 +3541,208 @@ static int inst_sgdisk_info(const inst_disk *d, int num, inst_part *p)
     return 0;
 }
 
+/* Installer v2: display name for a distro directory on the ESP. */
+static void inst_distro_label(const char *dir, char *out, size_t cap)
+{
+    static const struct {
+        const char *dir;
+        const char *label;
+    } map[] = {
+        {"ubuntu", "Ubuntu"}, {"fedora", "Fedora"},
+        {"debian", "Debian"}, {"arch", "Arch Linux"},
+        {"opensuse", "openSUSE"}, {"gentoo", "Gentoo"},
+        {"pop", "Pop!_OS"}, {"manjaro", "Manjaro"},
+        {"linuxmint", "Linux Mint"}, {"kali", "Kali"},
+        {"zorin", "Zorin OS"}, {"elementary", "elementary OS"},
+        {"centos", "CentOS"}, {"rhel", "RHEL"},
+        {"suse", "SUSE"}, {"slackware", "Slackware"},
+        {"void", "Void Linux"}, {"nixos", "NixOS"},
+        {"endeavouros", "EndeavourOS"}, {"garuda", "Garuda"},
+        {"clearlinux", "Clear Linux"},
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if (strcmp(dir, map[i].dir) == 0) {
+            snprintf(out, cap, "%s", map[i].label);
+            return;
+        }
+    if (strcmp(dir, "grub") == 0) {
+        snprintf(out, cap, "Linux");
+        return;
+    }
+    /* Unknown dir: capitalise it ("zorin" -> "Zorin"). */
+    snprintf(out, cap, "%s", dir);
+    if (out[0] >= 'a' && out[0] <= 'z')
+        out[0] = (char)(out[0] - 'a' + 'A');
+}
+
+/* ESP directories a Linux distro's GRUB lives under. */
+static const char *INST_LINUX_DIRS[] = {
+    "ubuntu", "fedora", "debian", "arch", "opensuse", "gentoo", "pop",
+    "manjaro", "linuxmint", "kali", "endeavouros", "garuda", "zorin",
+    "elementary", "centos", "rhel", "suse", "slackware", "void", "nixos",
+    "clearlinux", "grub", NULL,
+};
+
+/* Detect a Linux ESP: a grub.cfg under a distro directory that is
+ * not SevynOS (the SevynOS check runs first and wins). Fills the
+ * distro dir and the bootloader's guest path for the GRUB
+ * chainload entry. Returns 1 on a hit. */
+static int inst_detect_linux_esp(const inst_disk *d, const inst_part *p,
+                                 char *distro, size_t dcap,
+                                 char *boot, size_t bcap)
+{
+    for (int i = 0; INST_LINUX_DIRS[i]; i++) {
+        const char *dir = INST_LINUX_DIRS[i];
+        char guest[128];
+        snprintf(guest, sizeof(guest), "::/EFI/%s/grub.cfg", dir);
+        char *cfg = inst_fat_read(d, p, guest);
+        if (!cfg)
+            continue;
+        int is_linux = strstr(cfg, "menuentry") != NULL ||
+                       strstr(cfg, "linux /") != NULL ||
+                       strstr(cfg, "linuxefi /") != NULL;
+        int is_sevyn = strstr(cfg, "SevynOS") != NULL;
+        free(cfg);
+        if (!is_linux || is_sevyn)
+            continue;
+        snprintf(distro, dcap, "%s", dir);
+        snprintf(guest, sizeof(guest), "::/EFI/%s/grubx64.efi", dir);
+        if (inst_fat_has(d, p, guest)) {
+            snprintf(boot, bcap, "/EFI/%s/grubx64.efi", dir);
+            return 1;
+        }
+        snprintf(guest, sizeof(guest), "::/EFI/%s/shimx64.efi", dir);
+        if (inst_fat_has(d, p, guest)) {
+            snprintf(boot, bcap, "/EFI/%s/shimx64.efi", dir);
+            return 1;
+        }
+        snprintf(boot, bcap, "/EFI/%s/grubx64.efi", dir);
+        return 1;
+    }
+    return 0;
+}
+
+/* Read a small sysfs file into buf (trimmed). Returns 0 on success. */
+static int inst_read_sysfs(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    if (!fgets(buf, (int)cap, f)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    inst_trim(buf);
+    return 0;
+}
+
+/* Installer v2: model / transport / removable for a real disk.
+ * Image files report transport "file" and are never removable
+ * (the host tests force removable with
+ * SEVYN_INSTALL_FORCE_REMOVABLE=1). */
+static void inst_disk_attrs(inst_disk *d)
+{
+    snprintf(d->model, sizeof(d->model), "-");
+    snprintf(d->transport, sizeof(d->transport), "unknown");
+    d->removable = 0;
+    if (d->is_file) {
+        snprintf(d->transport, sizeof(d->transport), "file");
+        const char *force = getenv("SEVYN_INSTALL_FORCE_REMOVABLE");
+        if (force && strcmp(force, "1") == 0)
+            d->removable = 1;
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "/sys/block/%s/device/model",
+             d->devname);
+    char model[64];
+    if (inst_read_sysfs(path, model, sizeof(model)) == 0) {
+        size_t n = strlen(model);
+        while (n > 0 && model[n - 1] == ' ')
+            model[--n] = '\0';
+        if (n > 0)
+            snprintf(d->model, sizeof(d->model), "%s", model);
+    }
+    snprintf(path, sizeof(path), "/sys/block/%s/removable", d->devname);
+    char rem[16];
+    if (inst_read_sysfs(path, rem, sizeof(rem)) == 0 &&
+        strcmp(rem, "1") == 0)
+        d->removable = 1;
+    if (strncmp(d->devname, "nvme", 4) == 0)
+        snprintf(d->transport, sizeof(d->transport), "nvme");
+    else if (strncmp(d->devname, "vd", 2) == 0)
+        snprintf(d->transport, sizeof(d->transport), "virtio");
+    else if (strncmp(d->devname, "mmcblk", 6) == 0)
+        snprintf(d->transport, sizeof(d->transport), "mmc");
+    else {
+        /* sd/hd/xvd: USB when the sysfs path runs through a USB
+         * controller, SATA otherwise. */
+        char link[512];
+        snprintf(path, sizeof(path), "/sys/block/%s", d->devname);
+        ssize_t n = readlink(path, link, sizeof(link) - 1);
+        if (n > 0) {
+            link[n] = '\0';
+            if (strstr(link, "/usb") != NULL)
+                snprintf(d->transport, sizeof(d->transport), "usb");
+            else
+                snprintf(d->transport, sizeof(d->transport), "sata");
+        } else {
+            snprintf(d->transport, sizeof(d->transport), "sata");
+        }
+    }
+}
+
+/* Size of a disk in sectors, without a partition table: the file
+ * size for an image; for a device, /sys/block/<dev>/size (always
+ * present — no tool needed in the live image), falling back to
+ * blockdev --getsz. Returns 0 when the size cannot be learned
+ * (a missing path). */
+static unsigned long long inst_disk_size_sectors(const inst_disk *d)
+{
+    if (d->is_file) {
+        struct stat st;
+        if (stat(d->disk, &st) == 0 && S_ISREG(st.st_mode))
+            return (unsigned long long)st.st_size / INST_SECTOR;
+        return 0;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "/sys/block/%s/size", d->devname);
+    char size[32];
+    if (inst_read_sysfs(path, size, sizeof(size)) == 0) {
+        unsigned long long n = strtoull(size, NULL, 10);
+        if (n > 0)
+            return n;
+    }
+    char *out = NULL;
+    char *argv[] = {"blockdev", "--getsz", (char *)d->disk, NULL};
+    if (run_capture(argv, &out) != 0 || !out) {
+        free(out);
+        return 0;
+    }
+    unsigned long long n = strtoull(out, NULL, 10);
+    free(out);
+    return n;
+}
+
+/* Does the disk carry a real on-disk GPT? sgdisk -p returns 0
+ * for blank disks (it invents an empty GPT in memory) and for MBR
+ * disks (it converts the MBR to GPT in memory) — so the installer
+ * checks LBA1 for the "EFI PART" signature itself. A blank or MBR
+ * disk reports gpt: no, and only the whole-disk format path
+ * touches it (it re-partitions explicitly; free-space mode must
+ * never silently convert an MBR disk to GPT). */
+static int inst_has_gpt_signature(const char *path)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    char sig[8] = "";
+    ssize_t n = pread(fd, sig, sizeof(sig), INST_SECTOR);
+    close(fd);
+    return n == (ssize_t)sizeof(sig) && memcmp(sig, "EFI PART", 8) == 0;
+}
+
 /* Read a disk's GPT into d. Returns 0 when the table parsed. */
 static int inst_probe_disk(const char *path, inst_disk *d)
 {
@@ -3508,7 +3755,20 @@ static int inst_probe_disk(const char *path, inst_disk *d)
     char *argv[] = {"sgdisk", "-p", (char *)path, NULL};
     if (run_capture(argv, &out) != 0) {
         free(out);
-        return -1;
+        /* No GPT (a blank or MBR disk): the disk still exists and
+         * has a size, so report it with gpt=0 — the whole-disk
+         * format path re-partitions it. A disk with no size at
+         * all (a missing path) still fails. */
+        unsigned long long size = inst_disk_size_sectors(d);
+        if (size < 4096)
+            return -1;
+        d->size_sectors = size;
+        d->first_usable = INST_ALIGN_SECTORS;
+        d->last_usable = size - 34;
+        d->free_start = INST_ALIGN_SECTORS;
+        d->free_end = d->last_usable;
+        inst_disk_attrs(d);
+        return 0;
     }
     /* Header: "Disk <path>: <N> sectors" + "First usable sector is
      * <A>, last usable sector is <B>". */
@@ -3555,8 +3815,34 @@ static int inst_probe_disk(const char *path, inst_disk *d)
         line = strtok_r(NULL, "\n", &save);
     }
     free(out);
-    if (d->size_sectors == 0 || d->last_usable == 0)
-        return -1;
+    if (d->size_sectors == 0 || d->last_usable == 0) {
+        /* sgdisk ran but found no table (a blank disk it did not
+         * fail on): same fallback as the sgdisk-failure path. */
+        unsigned long long size = inst_disk_size_sectors(d);
+        if (size < 4096)
+            return -1;
+        d->size_sectors = size;
+        d->first_usable = INST_ALIGN_SECTORS;
+        d->last_usable = size - 34;
+        d->free_start = INST_ALIGN_SECTORS;
+        d->free_end = d->last_usable;
+        inst_disk_attrs(d);
+        return 0;
+    }
+    if (!inst_has_gpt_signature(path)) {
+        /* sgdisk invented an in-memory GPT (blank or MBR disk) —
+         * the on-disk table is not GPT. Report gpt: no with the
+         * whole disk free; only the whole-disk format path may
+         * write to it. */
+        d->gpt = 0;
+        d->nparts = 0;
+        d->first_usable = INST_ALIGN_SECTORS;
+        d->last_usable = d->size_sectors - 34;
+        d->free_start = INST_ALIGN_SECTORS;
+        d->free_end = d->last_usable;
+        inst_disk_attrs(d);
+        return 0;
+    }
     d->gpt = 1;
     for (int i = 0; i < nnums; i++) {
         inst_part *p = &d->parts[d->nparts];
@@ -3577,16 +3863,66 @@ static int inst_probe_disk(const char *path, inst_disk *d)
                     p->is_sevyn_esp = 1;
                 free(cfg);
             }
+            /* Installer v2: a non-SevynOS distro GRUB on the ESP. */
+            if (!p->is_sevyn_esp && !p->is_windows_esp) {
+                char distro[32] = "", boot[128] = "";
+                if (inst_detect_linux_esp(d, p, distro, sizeof(distro),
+                                          boot, sizeof(boot))) {
+                    p->is_linux_esp = 1;
+                    snprintf(p->linux_distro, sizeof(p->linux_distro),
+                             "%s", distro);
+                    snprintf(p->linux_boot, sizeof(p->linux_boot),
+                             "%s", boot);
+                }
+            }
         }
         if (strcmp(p->type, INST_MS_BASIC_TYPE) == 0 &&
             strcmp(p->fs, "ntfs") == 0)
             p->is_windows_data = 1;
         if (strcmp(p->label, "SEVYN_DATA") == 0)
             p->is_sevyn_data = 1;
+        /* Installer v2: Linux root + macOS + other. A Linux-type
+         * (or MS-basic) partition with a Linux filesystem that is
+         * not the SevynOS data partition is a Linux install. */
+        if (!p->is_sevyn_data &&
+            (strcmp(p->type, INST_LINUX_TYPE) == 0 ||
+             strcmp(p->type, INST_MS_BASIC_TYPE) == 0) &&
+            (strcmp(p->fs, "ext4") == 0 ||
+             strcmp(p->fs, "btrfs") == 0 ||
+             strcmp(p->fs, "xfs") == 0))
+            p->is_linux_data = 1;
+        if (strcmp(p->type, INST_APFS_TYPE) == 0 ||
+            strcmp(p->type, INST_HFS_TYPE) == 0)
+            p->is_macos_data = 1;
+        if (p->fs[0] && !p->is_windows_esp && !p->is_windows_data &&
+            !p->is_sevyn_esp && !p->is_sevyn_data &&
+            !p->is_linux_esp && !p->is_linux_data &&
+            !p->is_macos_data && !p->is_esp)
+            p->is_other = 1;
         if (p->is_windows_esp || p->is_windows_data)
             d->has_windows = 1;
         if (p->is_sevyn_esp || p->is_sevyn_data)
             d->has_sevyn = 1;
+        if (p->is_linux_esp || p->is_linux_data)
+            d->has_linux = 1;
+        if (p->is_macos_data)
+            d->has_macos = 1;
+        if (p->is_other)
+            d->has_other = 1;
+    }
+    /* The detected-OS summary, for the picker and the plan. */
+    d->os_list[0] = '\0';
+    const char *os_names[] = {"Windows 11", "Linux", "macOS", "Other"};
+    int os_flags[] = {d->has_windows, d->has_linux, d->has_macos,
+                      d->has_other};
+    for (int i = 0; i < 4; i++) {
+        if (!os_flags[i])
+            continue;
+        if (d->os_list[0])
+            strncat(d->os_list, ", ",
+                    sizeof(d->os_list) - strlen(d->os_list) - 1);
+        strncat(d->os_list, os_names[i],
+                sizeof(d->os_list) - strlen(d->os_list) - 1);
     }
     /* Largest trailing free run: from the end of the last partition
      * to last_usable, 1 MiB aligned. Only trailing free space is
@@ -3602,6 +3938,7 @@ static int inst_probe_disk(const char *path, inst_disk *d)
         d->free_start = aligned;
         d->free_end = d->last_usable;
     }
+    inst_disk_attrs(d);
     return 0;
 }
 
@@ -3782,8 +4119,15 @@ static void inst_print_disk(const inst_disk *d)
            d->size_sectors * INST_SECTOR / (1024 * 1024));
     printf("disk-gpt: %s\n", d->gpt ? "yes" : "no");
     printf("disk-boot-disk: %s\n", d->is_boot_disk ? "yes" : "no");
+    printf("disk-model: %s\n", d->model[0] ? d->model : "-");
+    printf("disk-transport: %s\n", d->transport);
+    printf("disk-removable: %s\n", d->removable ? "yes" : "no");
     printf("disk-windows: %s\n", d->has_windows ? "yes" : "no");
     printf("disk-sevyn: %s\n", d->has_sevyn ? "yes" : "no");
+    printf("disk-linux: %s\n", d->has_linux ? "yes" : "no");
+    printf("disk-macos: %s\n", d->has_macos ? "yes" : "no");
+    printf("disk-other: %s\n", d->has_other ? "yes" : "no");
+    printf("disk-os-list: %s\n", d->os_list[0] ? d->os_list : "-");
     printf("disk-free-mb: %llu\n",
            d->free_end >= d->free_start
                ? (d->free_end - d->free_start + 1) * INST_SECTOR /
@@ -3800,6 +4144,14 @@ static void inst_print_disk(const inst_disk *d)
             os = "sevyn-esp";
         else if (p->is_sevyn_data)
             os = "sevyn-data";
+        else if (p->is_linux_esp)
+            os = "linux-esp";
+        else if (p->is_linux_data)
+            os = "linux";
+        else if (p->is_macos_data)
+            os = "macos";
+        else if (p->is_other)
+            os = "other";
         else if (p->is_esp)
             os = "esp";
         printf("part: %d type: %s start: %llu end: %llu fs: %s "
@@ -3853,15 +4205,22 @@ static int cmd_install_probe(const char *disk_arg)
     return 0;
 }
 
-/* Compute the install plan for a probed disk. target: "auto",
- * "free", or a partition number (replace mode). Returns 0 on
- * success, 1 with err set on refusal. */
+/* Compute the install plan for a probed disk. target: "auto"
+ * (free space, else replace an old SevynOS install, else refuse
+ * with the fix), "free", "replace", "whole" (erase the whole
+ * disk), "portable" (a removable USB stick: free space if it
+ * fits, else erase the stick), or a partition number (replace
+ * that SevynOS install). Returns 0 on success, 1 with err set
+ * on refusal. */
 static int inst_compute_plan(inst_disk *d, const char *target,
                              inst_plan *plan, char *err, size_t errcap)
 {
     memset(plan, 0, sizeof(*plan));
     snprintf(plan->disk, sizeof(plan->disk), "%s", d->disk);
     plan->has_windows = d->has_windows;
+    plan->has_linux = d->has_linux;
+    plan->has_macos = d->has_macos;
+    snprintf(plan->os_list, sizeof(plan->os_list), "%s", d->os_list);
     for (int i = 0; i < d->nparts; i++)
         if (d->parts[i].is_windows_esp) {
             snprintf(plan->win_esp_uuid, sizeof(plan->win_esp_uuid),
@@ -3871,52 +4230,165 @@ static int inst_compute_plan(inst_disk *d, const char *target,
                      d->parts[i].partuuid);
             break;
         }
+    for (int i = 0; i < d->nparts; i++)
+        if (d->parts[i].is_linux_esp) {
+            snprintf(plan->linux_esp_uuid,
+                     sizeof(plan->linux_esp_uuid), "%s",
+                     d->parts[i].fs_uuid);
+            snprintf(plan->linux_boot, sizeof(plan->linux_boot), "%s",
+                     d->parts[i].linux_boot);
+            inst_distro_label(d->parts[i].linux_distro,
+                              plan->linux_label,
+                              sizeof(plan->linux_label));
+            break;
+        }
     if (d->is_boot_disk) {
         snprintf(err, errcap,
-                 "refusing to install onto the boot disk %s", d->disk);
-        return 1;
-    }
-    if (!d->gpt) {
-        snprintf(err, errcap, "disk %s has no GPT partition table",
+                 "refusing to install onto the boot disk %s — boot "
+                 "SevynOS from one USB stick and install to a "
+                 "different disk",
                  d->disk);
         return 1;
     }
-    if (!d->has_windows) {
-        /* A dual-boot install needs Windows to dual-boot with; a
-         * Windows-less disk is a fresh-install case, not M11. */
-        snprintf(err, errcap,
-                 "no Windows install found on %s (dual-boot needs "
-                 "Windows to install alongside)",
-                 d->disk);
-        return 1;
+    /* The OS in the way, for the shrink hint: the GF65 case — a
+     * full Windows disk with 1 MiB free — must tell the user to
+     * shrink Windows, not just say "impossible". */
+    const char *blocking_os = "another OS";
+    if (d->has_windows)
+        blocking_os = "Windows 11";
+    else if (d->has_linux)
+        blocking_os = "Linux";
+    else if (d->has_macos)
+        blocking_os = "macOS";
+    /* The "not enough free space" tail: name the fix. An OS using
+     * the disk means shrink it; a small empty disk is just small
+     * (never blame an OS that is not there). */
+    char nospace_tail[256];
+    if (d->has_windows || d->has_linux || d->has_macos) {
+        snprintf(nospace_tail, sizeof(nospace_tail),
+                 " — %s is using the disk. Shrink %s by ~10 GB from "
+                 "inside %s, then run the installer again",
+                 blocking_os, blocking_os, blocking_os);
+    } else {
+        snprintf(nospace_tail, sizeof(nospace_tail),
+                 " — the disk is too small for SevynOS");
     }
     unsigned long long free_mb =
         d->free_end >= d->free_start
             ? (d->free_end - d->free_start + 1) * INST_SECTOR /
                   (1024 * 1024)
             : 0;
-    int want_free = 0, replace_num = 0;
+    int want_free = 0, want_whole = 0, want_portable = 0,
+        replace_num = 0;
     if (!target || strcmp(target, "auto") == 0) {
         if (free_mb >= INST_MIN_FREE_MB)
             want_free = 1;
+        else if (!d->has_sevyn) {
+            unsigned long long disk_mb =
+                d->size_sectors * INST_SECTOR / (1024 * 1024);
+            snprintf(err, errcap,
+                     "not enough free space on %s: %llu MiB free, "
+                     "%d MiB needed%s%s",
+                     d->disk, free_mb, INST_MIN_FREE_MB, nospace_tail,
+                     disk_mb >= INST_MIN_FREE_MB + 4
+                         ? " (or erase the disk with --target whole, "
+                           "which deletes everything on it)"
+                         : "");
+            return 1;
+        }
+        /* else: an old SevynOS install exists — replace mode below. */
     } else if (strcmp(target, "free") == 0) {
         want_free = 1;
+    } else if (strcmp(target, "replace") == 0) {
+        /* replace mode below */
+    } else if (strcmp(target, "whole") == 0) {
+        want_whole = 1;
+    } else if (strcmp(target, "portable") == 0) {
+        want_portable = 1;
     } else {
         replace_num = atoi(target);
         if (replace_num <= 0) {
             snprintf(err, errcap, "bad --target %s", target);
             return 1;
         }
+        /* replace mode below */
     }
-    if (want_free) {
-        if (free_mb < INST_MIN_FREE_MB) {
+    /* A disk with no GPT can only be whole-disk formatted (or
+     * wiped as a portable stick) — the format path re-partitions
+     * it explicitly. */
+    if (!d->gpt && !want_whole && !want_portable) {
+        snprintf(err, errcap,
+                 "disk %s has no GPT partition table — use --target "
+                 "whole to erase it and install SevynOS (this "
+                 "deletes everything on the disk)",
+                 d->disk);
+        return 1;
+    }
+    if (want_portable) {
+        if (!d->removable) {
             snprintf(err, errcap,
-                     "not enough free space on %s: %llu MiB free, "
-                     "%d MiB needed",
-                     d->disk, free_mb, INST_MIN_FREE_MB);
+                     "disk %s is not a removable USB drive — a "
+                     "portable install needs a USB stick",
+                     d->disk);
             return 1;
         }
-        plan->mode = 0;
+        plan->portable = 1;
+        if (free_mb >= INST_MIN_FREE_MB)
+            want_free = 1;
+        else
+            want_whole = 1; /* wipe the stick; named in the plan */
+    }
+    if (want_whole) {
+        /* Whole-disk format: fresh GPT, ESP + data at the start.
+         * The disk must hold the install plus the GPT head/tail. */
+        unsigned long long disk_mb =
+            d->size_sectors * INST_SECTOR / (1024 * 1024);
+        if (disk_mb < INST_MIN_FREE_MB + 4) {
+            snprintf(err, errcap,
+                     "disk %s is too small to install onto: %llu "
+                     "MiB, %d MiB needed",
+                     d->disk, disk_mb, INST_MIN_FREE_MB);
+            return 1;
+        }
+        plan->mode = plan->portable ? 3 : 2;
+        plan->wipe = 1;
+        plan->esp_num = 1;
+        plan->data_num = 2;
+        plan->esp_start = INST_ALIGN_SECTORS;
+        plan->esp_end = plan->esp_start + INST_ESP_MB * 2048 - 1;
+        plan->data_start = plan->esp_end + 1;
+        unsigned long long data_max_end =
+            plan->data_start + INST_DATA_MAX_MB * 2048 - 1;
+        plan->data_end = data_max_end < d->last_usable ? data_max_end
+                                                       : d->last_usable;
+        if ((plan->data_end - plan->data_start + 1) * INST_SECTOR /
+                (1024 * 1024) <
+            INST_DATA_MIN_MB) {
+            snprintf(err, errcap,
+                     "not enough room on %s for the data partition",
+                     d->disk);
+            return 1;
+        }
+        for (int i = 0; i < d->nparts; i++)
+            plan->destroyed[plan->ndestroyed++] = d->parts[i].num;
+    } else if (want_free) {
+        if (free_mb < INST_MIN_FREE_MB) {
+            unsigned long long disk_mb =
+                d->size_sectors * INST_SECTOR / (1024 * 1024);
+            snprintf(err, errcap,
+                     "not enough free space on %s: %llu MiB free, "
+                     "%d MiB needed%s%s",
+                     d->disk, free_mb, INST_MIN_FREE_MB, nospace_tail,
+                     d->has_sevyn
+                         ? " (or replace the existing SevynOS install "
+                           "with --target replace)"
+                         : disk_mb >= INST_MIN_FREE_MB + 4
+                             ? " (or erase the disk with --target "
+                               "whole, which deletes everything on it)"
+                             : "");
+            return 1;
+        }
+        plan->mode = plan->portable ? 3 : 0;
         plan->esp_start = d->free_start;
         plan->esp_end = plan->esp_start + INST_ESP_MB * 2048 - 1;
         plan->data_start = plan->esp_end + 1;
@@ -4046,9 +4518,11 @@ static int inst_compute_plan(inst_disk *d, const char *target,
             plan->replaced[plan->nreplaced++] =
                 d->parts[old[i]].num;
     }
-    /* Protected partitions: everything not being replaced. Their
-     * edge hashes are the proof they stay untouched. */
-    for (int i = 0; i < d->nparts; i++) {
+    /* Protected partitions: everything not being replaced or
+     * destroyed. Their edge hashes are the proof they stay
+     * untouched. A wiped disk has nothing protected — every
+     * partition on it is named in "destroyed" instead. */
+    for (int i = 0; i < d->nparts && !plan->wipe; i++) {
         int is_repl = 0;
         for (int j = 0; j < plan->nreplaced; j++)
             if (d->parts[i].num == plan->replaced[j])
@@ -4071,45 +4545,101 @@ static int inst_compute_plan(inst_disk *d, const char *target,
     return 0;
 }
 
+static const char *inst_mode_name(int mode)
+{
+    switch (mode) {
+    case 0:
+        return "free-space";
+    case 1:
+        return "replace";
+    case 2:
+        return "whole-disk";
+    case 3:
+        return "portable";
+    default:
+        return "unknown";
+    }
+}
+
 static void inst_print_plan(const inst_disk *d, const inst_plan *plan)
 {
     printf("plan: ok\n");
     printf("disk: %s\n", plan->disk);
-    printf("mode: %s\n", plan->mode == 0 ? "free-space" : "replace");
+    printf("mode: %s\n", inst_mode_name(plan->mode));
+    printf("wipe: %s\n", plan->wipe ? "yes" : "no");
+    printf("portable: %s\n", plan->portable ? "yes" : "no");
     printf("new-esp: %d start: %llu end: %llu size-mb: %d\n",
            plan->esp_num, plan->esp_start, plan->esp_end, INST_ESP_MB);
     printf("new-data: %d start: %llu end: %llu size-mb: %llu\n",
            plan->data_num, plan->data_start, plan->data_end,
            (plan->data_end - plan->data_start + 1) * INST_SECTOR /
                (1024 * 1024));
+    printf("os-list: %s\n", plan->os_list[0] ? plan->os_list : "-");
     printf("windows: %s\n", plan->has_windows ? "yes" : "no");
+    printf("linux: %s\n", plan->has_linux ? "yes" : "no");
+    printf("macos: %s\n", plan->has_macos ? "yes" : "no");
     printf("windows-esp-uuid: %s\n",
            plan->win_esp_uuid[0] ? plan->win_esp_uuid : "-");
+    printf("linux-esp-uuid: %s\n",
+           plan->linux_esp_uuid[0] ? plan->linux_esp_uuid : "-");
     if (plan->nreplaced > 0) {
         printf("replaced:");
         for (int i = 0; i < plan->nreplaced; i++)
             printf(" %d", plan->replaced[i]);
         printf("\n");
     }
+    if (plan->wipe) {
+        printf("destroyed:");
+        if (plan->ndestroyed == 0)
+            printf(" none (non-GPT disk — the whole disk is "
+                   "re-partitioned)");
+        for (int i = 0; i < plan->ndestroyed; i++)
+            printf(" %d", plan->destroyed[i]);
+        printf("\n");
+    }
     printf("protected:");
+    if (plan->nprot == 0)
+        printf(" none");
     for (int i = 0; i < plan->nprot; i++)
         printf(" %d", plan->prot[i]);
     printf("\n");
-    printf("boot-entry: SevynOS (first in BootOrder)\n");
-    printf("grub: SevynOS + Windows 11\n");
+    if (plan->portable)
+        printf("boot-entry: none (portable — boots from the fallback "
+               "BOOTX64.EFI)\n");
+    else
+        printf("boot-entry: SevynOS (first in BootOrder)\n");
+    /* The GRUB menu: SevynOS plus a chainload entry for every
+     * other OS found on the disk. */
+    printf("grub: SevynOS");
+    if (plan->has_windows)
+        printf(" + Windows 11");
+    if (plan->has_linux && plan->linux_label[0])
+        printf(" + %s", plan->linux_label);
+    else if (plan->has_linux)
+        printf(" + Linux");
+    if (plan->has_macos)
+        printf(" + macOS (firmware boot menu)");
+    if (plan->portable)
+        printf(" (portable)");
+    printf("\n");
     (void)d;
 }
 
 static int inst_plan_equal(const inst_plan *a, const inst_plan *b)
 {
     if (strcmp(a->disk, b->disk) != 0 || a->mode != b->mode ||
+        a->wipe != b->wipe || a->portable != b->portable ||
         a->esp_start != b->esp_start || a->esp_end != b->esp_end ||
         a->data_start != b->data_start || a->data_end != b->data_end ||
         a->esp_num != b->esp_num || a->data_num != b->data_num ||
-        a->nreplaced != b->nreplaced || a->nprot != b->nprot)
+        a->nreplaced != b->nreplaced || a->ndestroyed != b->ndestroyed ||
+        a->nprot != b->nprot)
         return 0;
     for (int i = 0; i < a->nreplaced; i++)
         if (a->replaced[i] != b->replaced[i])
+            return 0;
+    for (int i = 0; i < a->ndestroyed; i++)
+        if (a->destroyed[i] != b->destroyed[i])
             return 0;
     for (int i = 0; i < a->nprot; i++) {
         if (a->prot[i] != b->prot[i])
@@ -4137,7 +4667,7 @@ static int cmd_install_plan(const char *disk_arg, const char *target)
         strcmp(boot, disk_arg) == 0)
         d.is_boot_disk = 1;
     inst_plan plan;
-    char err[512];
+    char err[1024];
     if (inst_compute_plan(&d, target, &plan, err, sizeof(err)) != 0) {
         printf("plan: impossible\n");
         fprintf(stderr, "error: %s\n", err);
@@ -4381,15 +4911,23 @@ static int inst_live_kernel(char *tmpdir, size_t cap)
     return ok ? 0 : -1;
 }
 
+/* Installer v2: the boot menu carries a chainload entry for every
+ * OS detected on the disk — Windows via its Boot Manager, Linux
+ * via its distro GRUB. macOS has no chainloadable EFI binary the
+ * installer can name, so it is noted as a firmware-boot-menu
+ * entry instead of a menuentry that would not boot. */
 static int inst_write_grub_cfg(const char *path, const char *data_partuuid,
-                               const char *win_esp_uuid)
+                               const char *win_esp_uuid,
+                               const char *linux_esp_uuid,
+                               const char *linux_boot,
+                               const char *linux_label, int has_macos)
 {
     FILE *f = fopen(path, "w");
     if (!f)
         return -1;
     fprintf(f,
             "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
-            "# Written by the SevynOS installer: SevynOS + Windows 11.\n"
+            "# Written by the SevynOS installer.\n"
             "set timeout=5\n"
             "set default=0\n"
             "menuentry \"SevynOS\" {\n"
@@ -4405,6 +4943,19 @@ static int inst_write_grub_cfg(const char *path, const char *data_partuuid,
                 "    chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n"
                 "}\n",
                 win_esp_uuid);
+    if (linux_esp_uuid && linux_esp_uuid[0] && linux_boot &&
+        linux_boot[0])
+        fprintf(f,
+                "menuentry \"%s\" {\n"
+                "    search --fs-uuid %s --set=root\n"
+                "    chainloader %s\n"
+                "}\n",
+                linux_label && linux_label[0] ? linux_label : "Linux",
+                linux_esp_uuid, linux_boot);
+    if (has_macos)
+        fprintf(f,
+                "# macOS was detected on this disk — boot it from "
+                "your firmware boot menu.\n");
     fclose(f);
     return 0;
 }
@@ -4627,7 +5178,7 @@ static int cmd_install_install(const char *disk_arg, const char *target,
         strcmp(boot, disk_arg) == 0)
         d.is_boot_disk = 1;
     inst_plan plan;
-    char err[512];
+    char err[1024];
     if (inst_compute_plan(&d, target, &plan, err, sizeof(err)) != 0) {
         fprintf(stderr, "error: %s\n", err);
         return 1;
@@ -4678,8 +5229,19 @@ static int cmd_install_install(const char *disk_arg, const char *target,
         return 1;
     }
     printf("install: %s mode=%s esp=%d data=%d\n", plan.disk,
-           plan.mode == 0 ? "free-space" : "replace", plan.esp_num,
-           plan.data_num);
+           inst_mode_name(plan.mode), plan.esp_num, plan.data_num);
+    /* Whole-disk format (or wiping a portable stick): remove the
+     * old table first, so the new partitions start clean. */
+    if (plan.wipe) {
+        char *argv[] = {"sgdisk", "--zap-all", (char *)disk_arg, NULL};
+        char *out = NULL;
+        int rc = run_capture(argv, &out);
+        free(out);
+        if (rc != 0) {
+            fprintf(stderr, "error: sgdisk --zap-all failed\n");
+            return 1;
+        }
+    }
     /* Replace mode: delete the old SevynOS partitions first. */
     if (plan.nreplaced > 0) {
         char *argv[8 + 32];
@@ -4804,7 +5366,10 @@ static int cmd_install_install(const char *disk_arg, const char *target,
     snprintf(grubcfg, sizeof(grubcfg), "/tmp/sevyn-inst-grub-%d",
              (int)getpid());
     if (ok && inst_write_grub_cfg(grubcfg, data_part->partuuid,
-                                  plan.win_esp_uuid) != 0)
+                                  plan.win_esp_uuid,
+                                  plan.linux_esp_uuid, plan.linux_boot,
+                                  plan.linux_label,
+                                  plan.has_macos) != 0)
         ok = 0;
     if (ok && inst_esp_copy(&esp_io, (char *[]){grubcfg}, 1,
                             "::/EFI/ubuntu/grub.cfg") != 0)
@@ -4842,8 +5407,15 @@ static int cmd_install_install(const char *disk_arg, const char *target,
         return 1;
     }
     inst_io_cleanup(&data_io);
-    /* UEFI boot entry (best-effort; the fallback still boots). */
-    inst_register_boot_entry(&d3, plan.esp_num);
+    /* UEFI boot entry (best-effort; the fallback still boots). A
+     * portable install deliberately registers nothing: its boot
+     * entries must not depend on NVRAM, which does not travel
+     * between machines — the fallback BOOTX64.EFI is the boot
+     * path. */
+    if (!plan.portable)
+        inst_register_boot_entry(&d3, plan.esp_num);
+    else
+        printf("boot-entry: none (portable — fallback BOOTX64.EFI)\n");
     /* Verify: re-probe, ESP contents, protected partitions. */
     inst_disk d4;
     if (inst_probe_disk(disk_arg, &d4) != 0) {
@@ -4873,7 +5445,9 @@ static int cmd_install_install(const char *disk_arg, const char *target,
     }
     char *cfg = inst_fat_read(&d4, vesp, "::/EFI/ubuntu/grub.cfg");
     if (!cfg || !strstr(cfg, "SevynOS") ||
-        (plan.has_windows && !strstr(cfg, "Windows 11"))) {
+        (plan.has_windows && !strstr(cfg, "Windows 11")) ||
+        (plan.has_linux && plan.linux_label[0] &&
+         !strstr(cfg, plan.linux_label))) {
         free(cfg);
         fprintf(stderr, "error: verification failed — grub.cfg "
                         "incomplete\n");
@@ -4907,9 +5481,12 @@ static int cmd_install_install(const char *disk_arg, const char *target,
     }
     printf("install: ok\n");
     printf("disk: %s\n", plan.disk);
+    printf("mode: %s\n", inst_mode_name(plan.mode));
     printf("esp: %d\n", plan.esp_num);
     printf("data: %d\n", plan.data_num);
-    printf("windows: untouched\n");
+    printf("protected: untouched\n");
+    if (plan.has_windows)
+        printf("windows: untouched\n");
     return 0;
 }
 
@@ -4928,21 +5505,26 @@ static int cmd_install_status(void)
         return 0;
     }
     d.is_boot_disk = 1;
-    int installed = d.has_windows && d.has_sevyn;
+    int installed = d.has_sevyn;
     int dual = 0;
     for (int i = 0; i < d.nparts; i++) {
         if (d.parts[i].is_sevyn_esp) {
             char *cfg = inst_fat_read(&d, &d.parts[i],
                                       "::/EFI/ubuntu/grub.cfg");
             if (cfg) {
-                if (strstr(cfg, "Windows 11") != NULL)
+                if (strstr(cfg, "Windows 11") != NULL ||
+                    strstr(cfg, "chainloader") != NULL)
                     dual = 1;
                 free(cfg);
             }
         }
     }
+    if (!dual)
+        dual = d.has_sevyn &&
+               (d.has_windows || d.has_linux || d.has_macos);
     printf("installed: %s\n", installed ? "yes" : "no");
     printf("dual-boot: %s\n", dual ? "yes" : "no");
+    printf("os-list: %s\n", d.os_list[0] ? d.os_list : "-");
     printf("disk: %s\n", boot);
     printf("version: %s\n", inst_version());
     return 0;

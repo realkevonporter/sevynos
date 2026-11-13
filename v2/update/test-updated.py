@@ -714,11 +714,17 @@ def main():
         "}\n"
         # M11: a dual-boot ESP carries a Windows entry the updater
         # must preserve verbatim across its grub.cfg rewrite.
+        # Installer v2: a Linux entry too — the updater preserves
+        # every non-SevynOS entry, not just Windows.
         "menuentry \"Windows 11\" {\n"
         "    insmod part_gpt\n"
         "    insmod fat\n"
         "    search --no-floppy --fs-uuid --set=root ABCD-1234\n"
         "    chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n"
+        "}\n"
+        "menuentry \"Ubuntu\" {\n"
+        "    search --fs-uuid DEAD-BEEF --set=root\n"
+        "    chainloader /EFI/ubuntu/grubx64.efi\n"
         "}\n")
     # M11: mounts + by-partuuid fixtures so the daemon can resolve
     # the booted data partition's PARTUUID.
@@ -796,6 +802,11 @@ def main():
           "chainloader /EFI/Microsoft/Boot/bootmgfw.efi" in grub and
           "search --no-floppy --fs-uuid --set=root ABCD-1234" in grub,
           grub)
+    check("grub.cfg keeps the Linux entry verbatim",
+          "menuentry \"Ubuntu\" {" in grub and
+          "chainloader /EFI/ubuntu/grubx64.efi" in grub and
+          "search --fs-uuid DEAD-BEEF --set=root" in grub,
+          grub)
     check("grub.cfg pins the data partition by PARTUUID",
           "sevyn.data=PARTUUID=11111111-2222-3333-4444-555555555555"
           in grub, grub)
@@ -847,6 +858,10 @@ def main():
     check("fallback restore keeps the Windows 11 entry",
           "menuentry \"Windows 11\" {" in grub and
           "chainloader /EFI/Microsoft/Boot/bootmgfw.efi" in grub,
+          grub)
+    check("fallback restore keeps the Linux entry",
+          "menuentry \"Ubuntu\" {" in grub and
+          "chainloader /EFI/ubuntu/grubx64.efi" in grub,
           grub)
     os.close(master2)
     os.close(slave2)
