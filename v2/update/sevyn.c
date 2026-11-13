@@ -2560,10 +2560,10 @@ static int cmd_net_wifi_status(void)
 
 static int cmd_net_wifi_connect(int argc, char **argv)
 {
-    if (argc < 4 || argc > 5)
+    if (argc < 5 || argc > 6)
         return usage();
-    const char *ssid = argv[3];
-    const char *psk = argc == 5 ? argv[4] : NULL;
+    const char *ssid = argv[4];
+    const char *psk = argc == 6 ? argv[5] : NULL;
     if (strlen(ssid) == 0 || strlen(ssid) > 32) {
         fprintf(stderr, "error: ssid must be 1-32 characters\n");
         return 1;
@@ -2658,10 +2658,11 @@ static int cmd_net_wifi_connect(int argc, char **argv)
     wpa_cli(iface, &out, (const char *[]){"select_network", id, NULL});
     free(out);
     out = NULL;
-    /* Wait for association (up to ~10 s), then DHCP on the wifi
-     * interface — association alone gives no address. */
+    /* Wait for association (up to ~30 s — the host gives connect a
+     * 90 s exec deadline: 30 s here + DHCP + margin), then DHCP on
+     * the wifi interface — association alone gives no address. */
     int associated = 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 30; i++) {
         sleep(1);
         if (wpa_cli(iface, &out, (const char *[]){"status", NULL}) != 0) {
             free(out);
