@@ -496,6 +496,7 @@ mkdir -p "$STAGE/bin" "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/run" \
          "$STAGE/usr/share/sevyn/ai/backends" \
          "$STAGE/usr/share/sevyn/test-bundles" \
          "$STAGE/usr/share/sevyn/tokrah" "$STAGE/usr/share/sevyn/tokrah-mock" \
+         "$STAGE/usr/share/sevyn/comms" "$STAGE/usr/share/sevyn/comms-mock" \
          "$STAGE/usr/share/sevyn/trusted-keys" "$STAGE/var/lib/sevyn/apps" \
          "$STAGE/usr/share/sevyn/install"
 
@@ -593,6 +594,71 @@ cp "$ROOT/shell/icons/hero/"*.png "$STAGE/usr/share/sevyn/shell/icons/hero/"
 cp "$ROOT/shell/icons/small/"*.png "$STAGE/usr/share/sevyn/shell/icons/small/"
 cp "$ROOT/shell/icons/title/"*.png "$STAGE/usr/share/sevyn/shell/icons/title/"
 cp "$ROOT/shell/icons/symbols/"*.png "$STAGE/usr/share/sevyn/shell/icons/symbols/"
+# --- commsd (M10) ---------------------------------------------------------
+# The Matrix daemon + its node_modules (npm ci --omit=dev; the SDK
+# has no runtime dev deps), the Chromium media-bridge page, and the
+# mock homeserver + mock ACS/IMS (dependency-free, no install).
+# Node >= 22 is required (matrix-js-sdk 45 engines). Prefer
+# code-server's bundled node when it is >= 22 — it is already staged
+# by the copy-closure above, so comms/node becomes a symlink to it.
+# Otherwise download a pinned standalone Node 24.22.2 tarball
+# (sha256-verified) and stage that binary as comms/node instead.
+# Either way init runs ONE fixed path: /usr/share/sevyn/comms/node.
+# The build FAILS LOUDLY if neither node is >= 22.
+COMMS_DIR="$ROOT/comms"
+if [ ! -d "$COMMS_DIR/node_modules" ]; then
+  (cd "$COMMS_DIR" && npm ci --omit=dev --no-audit --no-fund) \
+    || { echo "error: commsd npm ci failed" >&2; exit 1; }
+fi
+mkdir -p "$BUILD_TMP/comms" "$BUILD_TMP/comms-mock"
+cp "$COMMS_DIR/commsd.mjs" "$COMMS_DIR/bridge.mjs" "$COMMS_DIR/bridge.html" \
+   "$COMMS_DIR/rcs.mjs" "$BUILD_TMP/comms/"
+cp -r "$COMMS_DIR/node_modules" "$BUILD_TMP/comms/node_modules"
+cp "$COMMS_DIR/harness/mock-matrix.js" "$COMMS_DIR/harness/mock-acs.js" \
+   "$BUILD_TMP/comms-mock/"
+COMMS_NODE_SRC=""
+CS_NODE_VERSION="$("$CODE_SERVER_DIR/lib/node" --version 2>/dev/null | sed 's/^v//')"
+CS_NODE_MAJOR="$(echo "$CS_NODE_VERSION" | cut -d. -f1)"
+if [ -n "$CS_NODE_MAJOR" ] && [ "$CS_NODE_MAJOR" -ge 22 ] 2>/dev/null; then
+  echo "commsd node: code-server bundled node $CS_NODE_VERSION (>= 22)"
+else
+  NODE_VERSION="24.22.2"
+  NODE_SHA256="48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75"
+  NODE_TARBALL="${NODE_TARBALL:-}"
+  if [ -z "$NODE_TARBALL" ]; then
+    NODE_TARBALL="$BUILD_TMP/node.tar.xz"
+    curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$NODE_TARBALL" \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+      || { echo "error: Node $NODE_VERSION download failed" >&2; exit 1; }
+  fi
+  echo "$NODE_SHA256  $NODE_TARBALL" | sha256sum -c - \
+    || { echo "error: Node tarball sha256 mismatch" >&2; exit 1; }
+  mkdir -p "$BUILD_TMP/node24"
+  tar xf "$NODE_TARBALL" -C "$BUILD_TMP/node24"
+  COMMS_NODE_SRC="$BUILD_TMP/node24/node-v${NODE_VERSION}-linux-x64/bin/node"
+  [ -x "$COMMS_NODE_SRC" ] || { echo "error: Node tarball has no bin/node" >&2; exit 1; }
+  NODE24_VERSION="$("$COMMS_NODE_SRC" --version)"
+  echo "commsd node: standalone Node $NODE24_VERSION (code-server node was ${CS_NODE_VERSION:-missing}, < 22)"
+fi
+
+# commsd (M10): daemon + bridge + RCS skeleton + its node_modules, and
+# the mock homeserver + mock ACS (started by init only with
+# sevyn.mockcomms=1). The node binary: a symlink to code-server's
+# node when it is >= 22, else the pinned standalone Node 24 binary
+# (with its library closure).
+cp "$BUILD_TMP/comms/commsd.mjs" "$BUILD_TMP/comms/bridge.mjs" \
+   "$BUILD_TMP/comms/bridge.html" "$BUILD_TMP/comms/rcs.mjs" \
+   "$STAGE/usr/share/sevyn/comms/"
+cp -r "$BUILD_TMP/comms/node_modules" "$STAGE/usr/share/sevyn/comms/node_modules"
+cp "$BUILD_TMP/comms-mock/mock-matrix.js" "$BUILD_TMP/comms-mock/mock-acs.js" \
+   "$STAGE/usr/share/sevyn/comms-mock/"
+if [ -n "$COMMS_NODE_SRC" ]; then
+  python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
+    "$COMMS_NODE_SRC:/usr/share/sevyn/comms/node" \
+    || { echo "error: commsd node closure failed" >&2; exit 1; }
+else
+  ln -s ../code-server/lib/node "$STAGE/usr/share/sevyn/comms/node"
+fi
 cp "$BUILD_TMP/pristine/"*.sevyn "$STAGE/usr/share/sevyn/pristine/"
 cp "$BUILD_TMP/test-bundles/"*.sevyn "$STAGE/usr/share/sevyn/test-bundles/"
 cp "$BUILD_TMP/trusted-keys/"*.pub "$STAGE/usr/share/sevyn/trusted-keys/"
@@ -967,6 +1033,47 @@ fi
 # statusd so its first ASK can reach both. The harness drives it over
 # /dev/ttyS4; the Terminal and Settings drive it through `sevyn ai`.
 /usr/local/bin/sevyn-aid &
+# commsd (M10): owns /run/sevyn-comms.sock (Matrix account, E2EE,
+# call signaling). Starts after appd + statusd so its first STATUS
+# can reach both; the apps drive it through `sevyn comms`. The
+# Chromium media bridge runs per call from
+# /usr/share/sevyn/chromium/chrome with the bridge page at
+# /usr/share/sevyn/comms/bridge.html. Account + crypto store under
+# /data/comms/ (0600, root-only). Its log goes to /data/logs/
+# commsd.log — /data is the persistent data disk, so the log survives
+# a reboot/poweroff (a /tmp log would be destroyed with the guest);
+# the console only gets a one-line start marker.
+# comms mocks (M10): test doubles, never system services — they
+# start ONLY when the kernel cmdline carries sevyn.mockcomms=1
+# (the M10 check boots with it). The mock Matrix homeserver on
+# 127.0.0.1:7071 + the mock ACS/IMS (SIP 5060, MSRP 5061) let the
+# check prove messaging, E2EE, calls, and the RCS skeleton with no
+# network and no real accounts. Fake media follows the same flag:
+# the check has no camera/mic, so the bridge uses the synthetic
+# device; real hardware uses the real camera/mic.
+for a in $(cat /proc/cmdline); do case "$a" in sevyn.mockcomms=*) MOCKCOMMS=${a#sevyn.mockcomms=};; esac; done
+mkdir -p /data/comms /data/logs
+/usr/share/sevyn/comms/node /usr/share/sevyn/comms/commsd.mjs \
+  --bridge chromium --chrome /usr/share/sevyn/chromium/chrome \
+  --bridge-page /usr/share/sevyn/comms/bridge.html \
+  --fake-media "${MOCKCOMMS:-0}" >/data/logs/commsd.log 2>&1 &
+echo "M10 init: commsd started @ $(cut -d" " -f1 /proc/uptime)s"
+if [ "${MOCKCOMMS:-0}" = "1" ]; then
+  /usr/share/sevyn/comms/node /usr/share/sevyn/comms-mock/mock-matrix.js >/dev/console 2>&1 &
+  /usr/share/sevyn/comms/node /usr/share/sevyn/comms-mock/mock-acs.js >/dev/console 2>&1 &
+  # Second commsd for the peer user (bob): the check logs bob in
+  # against it with `sevyn comms --socket /tmp/commsd-bob.sock ...`
+  # (the Terminal has no shell env assignment, so the socket rides
+  # on the command line). Same Chromium bridge + fake media as the
+  # system daemon; its log goes to /data/logs/commsd-bob.log.
+  mkdir -p /tmp/comms-bob
+  /usr/share/sevyn/comms/node /usr/share/sevyn/comms/commsd.mjs \
+    --socket /tmp/commsd-bob.sock --data /tmp/comms-bob \
+    --bridge chromium --chrome /usr/share/sevyn/chromium/chrome \
+    --bridge-page /usr/share/sevyn/comms/bridge.html \
+    --fake-media 1 >/data/logs/commsd-bob.log 2>&1 &
+  echo "M10 init: comms mocks started (sevyn.mockcomms=1)"
+fi
 # Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
 # (localhost only — the browser that paints it arrives in M5). It
 # needs HOME for its user-data dir (the staged settings file lives

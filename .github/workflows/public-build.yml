@@ -105,6 +105,12 @@ jobs:
           for f in files terminal browser settings music photos calendar notes calculator camera messages store video-calls voice-calls installer tokrah; do
             grep -qx "usr/share/sevyn/shell/icons/$f.png" /tmp/initramfs-list.txt || { echo "error: missing icon usr/share/sevyn/shell/icons/$f.png in initramfs" >&2; exit 1; }
           done
+      - name: Guard v2 commsd + mock comms servers in initramfs
+        run: |
+          zcat v2/image/build/initramfs.cpio.gz | cpio -t 2>/dev/null > /tmp/initramfs-list.txt
+          grep -qx "usr/share/sevyn/comms/commsd.mjs" /tmp/initramfs-list.txt || { echo "error: missing commsd usr/share/sevyn/comms/commsd.mjs in initramfs" >&2; exit 1; }
+          grep -qx "usr/share/sevyn/comms-mock/mock-matrix.js" /tmp/initramfs-list.txt || { echo "error: missing mock homeserver usr/share/sevyn/comms-mock/mock-matrix.js in initramfs" >&2; exit 1; }
+          grep -qx "usr/share/sevyn/comms-mock/mock-acs.js" /tmp/initramfs-list.txt || { echo "error: missing mock ACS usr/share/sevyn/comms-mock/mock-acs.js in initramfs" >&2; exit 1; }
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
