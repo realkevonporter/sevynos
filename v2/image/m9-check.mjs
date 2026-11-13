@@ -851,9 +851,9 @@ async function termCmdCode(b, cmd, code, timeoutMs = 180000) {
 }
 
 // Absolute-pointer move on the usb-tablet (axes 0..32767) with NO
-// button press — a pure hover. The shell's magnification listens for
-// pointer-move events, so this is the hover proof (a drag would press
-// the tile and launch the app instead).
+// button press — a pure hover (a drag would press the tile and launch
+// the app instead). The dock no longer magnifies on hover, so this
+// move only proves the tile does not grow — see the dock section.
 async function pointerMove(qmp, W, H, x, y) {
   const ax = Math.max(0, Math.min(32767, Math.round((x / W) * 32767)));
   const ay = Math.max(0, Math.min(32767, Math.round((y / H) * 32767)));
@@ -1650,23 +1650,19 @@ async function main() {
     check("dock: no scroll chevron in the dock band", false, "no settled frame");
   }
 
-  // Dock magnification: hover the Calculator tile (centre 492,1021)
-  // with a button-free pointer move; the tile grows to ~102px, so
-  // its gradient-top count in the region grows with it. Move away
-  // and it restores. (No true backdrop blur is claimed: the glass
-  // is a translucent fill + highlight, see the PR body.)
+  // Dock hover: hovering the Calculator tile must NOT grow it — the
+  // magnification is removed, so the tile stays 64px and its
+  // gradient-top count in the region stays at its resting value.
+  // (No true backdrop blur is claimed: the glass is a translucent
+  // fill + highlight, see the PR body.)
   // The baseline is a fresh pre-hover shot, not the settled frame,
   // so the comparison holds even if the settle poll was slow.
   //
   // The counted colour is the Calculator icon's gradient TOP,
   // lighten(#8b5cf6, 0.22) = (165,128,248) — measured (160,122,243)
-  // on the settled frame. The old solid purple (139,92,246) never
-  // occurs in a gradient tile, so that count read 0 before and after
-  // (and the restore check passed vacuously). Thresholds are relative
-  // on purpose: only the tile's top ~11 rows match the top colour at
-  // rest (~400-500px), and the magnified tile's top band is ~2.5x
-  // larger, so hovered must clear 1.5x the resting count while the
-  // restore must come back near it.
+  // on the settled frame. Thresholds are relative on purpose: only
+  // the tile's top ~11 rows match the top colour at rest
+  // (~400-500px), so hovered must stay near the resting count.
   {
     const hoverRegion = { x0: 420, y0: 940, x1: 580, y1: 1080 };
     const calcTop = (img) => countColor(img, 165, 128, 248, 12, hoverRegion);
@@ -1677,8 +1673,8 @@ async function main() {
     const hoverImg = await shot(b.qmp, join(OUT, "m9-shot-dock-hover.ppm"));
     const hovered = calcTop(hoverImg);
     check(
-      "dock: hover magnifies the tile (Calculator gradient-top grows)",
-      before > 100 && hovered > 400 && hovered > before * 1.5,
+      "dock: hover does not magnify the tile (Calculator gradient-top unchanged)",
+      before > 100 && hovered > 50 && hovered < before * 1.3 + 100,
       `calc-top before=${before} hovered=${hovered}`,
     );
     await pointerMove(b.qmp, 1920, 1080, 960, 500);
@@ -1686,7 +1682,7 @@ async function main() {
     const awayImg = await shot(b.qmp, join(OUT, "m9-shot-dock-away.ppm"));
     const restored = calcTop(awayImg);
     check(
-      "dock: moving away restores the flat dock",
+      "dock: moving away leaves the flat dock",
       restored > 50 && restored < before * 1.3 + 100,
       `calc-top restored=${restored} (before=${before})`,
     );
@@ -2075,19 +2071,11 @@ async function main() {
     return { x: t.x, y: img.height - 48 };
   };
   // Flat-dock tile centres (appd alphabetical seed order, 16 apps at
-  // 64px, pitch 72, first centre x=420, y=height-48). The colour finder
-  // above measures the CURRENT frame, which may show a MAGNIFIED dock
-  // — the pointer sits on a tile after the previous click, so the
-  // magnified centres shift up to ~+47px right of the flat centres
-  // (in CI the settings finder read 1182 instead of 1140 and the
-  // terminal finder 1326 instead of 1284). Clicking the found
-  // coordinate then lands on the NEIGHBOUR tile: the settings click
-  // hit Store, the terminal click hit Tokrah (which then broke the
-  // headless Tokrah run downstream). A tile's centre is invariant
-  // under magnification, so clicks use the flat geometric centre;
-  // the finder stays only as a presence check. The geometry is
-  // anchored by the dock section above (Browser 420, Voice Calls
-  // 1500, pitch 72).
+  // 64px, pitch 72, first centre x=420, y=height-48). Tiles never
+  // grow — the dock has no magnification — so the flat geometric
+  // centre is always the true centre; the finder stays only as a
+  // presence check. The geometry is anchored by the dock section
+  // above (Browser 420, Voice Calls 1500, pitch 72).
   const DOCK_ORDER = [
     "browser",
     "calculator",

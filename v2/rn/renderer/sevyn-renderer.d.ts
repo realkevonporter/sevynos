@@ -47,7 +47,7 @@ export interface WindowStateSnapshot {
 }
 export function subscribeWindowState(fn: () => void): () => void;
 export function getWindowStateSnapshot(): WindowStateSnapshot;
-// Pointer-move subscribers (the dock's magnification). A listener
+// Pointer-move subscribers. A listener
 // receives {x, y} and returns true only when it changed state.
 export interface PointerMoveEvent {
   x: number;

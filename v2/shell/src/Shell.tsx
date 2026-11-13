@@ -4,7 +4,7 @@
 //   top bar (48px): "SevynOS" wordmark + live status tray
 //   main area (flex 1): welcome view, or "Starting <app>…" after a launch
 //   dock: floating Liquid Glass pill, centered, sized to its apps
-//         (see Dock.tsx — macOS 27 style, magnification on hover)
+//         (see Dock.tsx — macOS 27 style, no magnification)
 //
 // The dock renders from appd's app list (the renderer's app store,
 // useSyncExternalStore): the installed stock apps, with a running dot

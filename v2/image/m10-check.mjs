@@ -1338,12 +1338,23 @@ async function main() {
   // start screen. If the Terminal is still wedged (no ops), the
   // hangup itself is the proof — a successful HANGUP verb ends the
   // call in the daemon, and KVM check8 proved the start screen
-  // follows.
-  const callsOps2 = await appRun(
-    "video-calls",
-    "--name VideoCalls --color #7c3aed --glyph V --permissions cli.exec",
-  );
-  const callsTexts2 = opsTexts(callsOps2);
+  // follows. The probe is retried up to 3 times: under TCG the app
+  // repaint lags the daemon state, so a single probe can catch a
+  // stale call screen minutes after a clean hangup (PR #109 CI,
+  // 2026-11-12: 11 texts, no START A CALL, hangup itself fine).
+  // The assertion is unchanged — some probe must still show the
+  // real start screen; only the single-shot timing is relaxed.
+  let callsOps2 = null;
+  let callsTexts2 = [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    callsOps2 = await appRun(
+      "video-calls",
+      "--name VideoCalls --color #7c3aed --glyph V --permissions cli.exec",
+    );
+    callsTexts2 = opsTexts(callsOps2);
+    if (callsTexts2.includes("START A CALL") || !callsOps2) break;
+    if (attempt < 3) await sleep(60000);
+  }
   check(
     "comms: no active call after hangup (start screen back)",
     (!!callsOps2 && callsTexts2.includes("START A CALL")) || (hangupOk && !callsOps2),
