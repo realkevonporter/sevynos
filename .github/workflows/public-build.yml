@@ -99,6 +99,12 @@ jobs:
         run: |
           sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m11-image.sh
           sudo chown -R "$USER" v2/image/build
+      - name: Guard v2 shell icons in initramfs
+        run: |
+          zcat v2/image/build/initramfs.cpio.gz | cpio -t 2>/dev/null > /tmp/initramfs-list.txt
+          for f in files terminal browser settings music photos calendar notes calculator camera messages store video-calls voice-calls installer tokrah; do
+            grep -qx "usr/share/sevyn/shell/icons/$f.png" /tmp/initramfs-list.txt || { echo "error: missing icon usr/share/sevyn/shell/icons/$f.png in initramfs" >&2; exit 1; }
+          done
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
