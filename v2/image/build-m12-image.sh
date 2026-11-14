@@ -1297,7 +1297,19 @@ esac
 # writes to /dev/console (the serial the harness reads) AND stderr, so
 # stderr is captured to a file for the READY wait while the serial keeps
 # the live stream (LAUNCH lines, errors).
-/usr/local/bin/sevyn-rn-host 2>/tmp/sevyn-host.log &
+# M12 root cause #8 (PROVEN 2026-11-14 from Mesa's own egldisplay.c,
+# _eglGetNativePlatform): EGL_PLATFORM takes precedence over
+# native-display detection — with EGL_PLATFORM=gbm in the host's env,
+# the host's eglGetDisplay(wl_display) is forced onto the GBM platform
+# and Mesa reads the wl_display pointer as a gbm_device, so
+# eglInitialize fails EGL_NOT_INITIALIZED (0x3001) before any driver
+# loads (the 078bfc6a boot log: Weston runs the GL renderer, but the
+# host prints "GENESIS EGL unavailable: eglInitialize failed
+# (0x3001)"). EGL_PLATFORM=gbm is Weston's setting (it calls
+# eglGetDisplay(EGL_DEFAULT_DISPLAY)); the host is a Wayland client
+# and must not inherit it — unset it for the host launch only, so the
+# host auto-detects Wayland from the wl_display pointer.
+env -u EGL_PLATFORM /usr/local/bin/sevyn-rn-host 2>/tmp/sevyn-host.log &
 HOST_PID=$!
 # If the host dies, dump weston + host logs to the console (the serial
 # the harness captures) so a blank screen is diagnosable from the
