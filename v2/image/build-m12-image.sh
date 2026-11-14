@@ -1206,6 +1206,15 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # rasterizer for KMS devices (llvmpipe rendering into the
 # virtio-gpu dumb buffers) — the driver this CPU-only path needs.
 export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
+# M12 root cause #6 (PROVEN 2026-11-14 from the 1524409a boot log's
+# LD_DEBUG trace): libEGL and gl-renderer load, but Mesa never
+# dlopens ANY dri driver — eglGetDisplay(EGL_DEFAULT_DISPLAY) fails
+# before driver selection. With no EGL_EXT_platform_base, Weston
+# falls back to eglGetDisplay, and Mesa cannot pick a platform on
+# its own. EGL_PLATFORM=gbm selects the GBM platform explicitly:
+# Mesa opens /dev/dri/card0 via GBM and loads the driver for that
+# fd (kms_swrast, via the override above) — the software path.
+export EGL_PLATFORM=gbm
 # M12 diagnostic (probe, not a fix): the kms_swrast override changed
 # nothing on c89c989d — two identical failures, no llvmpipe, no
 # MESA-LOADER line — so make the driver selection VISIBLE instead of
@@ -1224,7 +1233,7 @@ export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
 # printed EGL_LOG_LEVEL=<unset> even when the export worked).
 export EGL_LOG_LEVEL=debug
 export MESA_DEBUG=1
-echo "GENESIS mesa env: MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-<unset>} LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-<unset>} EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-<unset>} MESA_DEBUG=${MESA_DEBUG:-<unset>}"
+echo "GENESIS mesa env: MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-<unset>} LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-<unset>} EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-<unset>} MESA_DEBUG=${MESA_DEBUG:-<unset>} EGL_PLATFORM=${EGL_PLATFORM:-<unset>}"
 ls -l /usr/lib/x86_64-linux-gnu/dri/kms_swrast_dri.so /usr/lib/x86_64-linux-gnu/dri/virtio_gpu_dri.so /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so 2>&1
 # M12 Genesis: try the GL renderer first (GPU compositing); fall back
 # to pixman if Weston cannot start on GL, so a GPU failure can never
