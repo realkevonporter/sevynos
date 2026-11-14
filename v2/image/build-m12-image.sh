@@ -1201,6 +1201,15 @@ if [ ! -S /run/wayland-0 ]; then
   echo "GENESIS weston GL renderer failed to start; falling back to pixman"
   kill "$WESTON_PID" 2>/dev/null
   sleep 1
+  # Save the GL attempt's weston log before the pixman fallback
+  # overwrites it: --log=/tmp/weston.log is shared, and /tmp is
+  # tmpfs (lost on shutdown), so without this the GL failure's
+  # reason never reaches any artifact. /data/logs rides the data
+  # disk (in the CI artifact); the console dump puts it in the
+  # boot log the check reads first.
+  cp /tmp/weston.log /data/logs/weston-gl.log 2>/dev/null || true
+  echo "--- weston GL attempt log (/tmp/weston.log) ---"
+  cat /tmp/weston.log 2>/dev/null || echo "(no weston log)"
   GENESIS_RENDERER=pixman
   /usr/bin/weston --backend=drm-backend.so --renderer=pixman --socket=wayland-0 \
     --config=/etc/xdg/weston/weston.ini --log=/tmp/weston.log &
