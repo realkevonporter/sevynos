@@ -16,11 +16,15 @@
 #   libgbm copies from M11 stay (iris on the GF65, virtio_gpu for
 #   dumb scanout). The DRI drivers link libgallium-*.so from the lib
 #   dir (not dri/), which the copy-closure misses — stage it
-#   explicitly or Mesa's loader cannot open any driver. CPU-only:
-#   the init forces llvmpipe with LIBGL_ALWAYS_SOFTWARE, so
-#   swrast_dri.so is required at build time — the virgl route is
-#   dead in CI (egl-headless needs a host DRM render node runners
-#   don't have).
+#   explicitly or Mesa's loader cannot open any driver. libgallium
+#   in turn links libLLVM.so.20.1 (+ libffi/libedit/libzstd/libxml2/
+#   libicu*...), also missed — instead of staging one .so per
+#   failure, an ldd pass over every staged Mesa lib closes the whole
+#   dependency set at build time and fails loudly on anything
+#   unresolved. CPU-only: the init forces llvmpipe with
+#   LIBGL_ALWAYS_SOFTWARE, so swrast_dri.so is required at build
+#   time — the virgl route is dead in CI (egl-headless needs a host
+#   DRM render node runners don't have).
 # - Host compile: genesis-presenter.cc joins sevyn-rn-host with
 #   -DSEVYN_HAVE_EGL=1 (fails loudly without libegl-dev/libgles-dev).
 #
@@ -817,6 +821,30 @@ cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" "$STAGE/usr/lib/x86_64-l
 GALLIUM_LIB="$(ls "$SYSROOT"/usr/lib/x86_64-linux-gnu/libgallium-*.so 2>/dev/null | head -n 1)"
 [ -n "$GALLIUM_LIB" ] || { echo "error: no libgallium staged (install libgl1-mesa-dri)" >&2; exit 1; }
 cp "$GALLIUM_LIB" "$STAGE/usr/lib/x86_64-linux-gnu/$(basename "$GALLIUM_LIB")"
+# libgallium links libLLVM.so.20.1, which the copy-closure misses the
+# same way — proven by the e0cc1537 guest boot log ("failed to open
+# dri: libLLVM.so.20.1: cannot open shared object file"). Staging one
+# .so per failure never ends (libLLVM alone pulls libffi, libedit,
+# libzstd, libxml2, libicu*, ...), so close the whole Mesa dependency
+# set at build time instead: run ldd over every staged Mesa lib and
+# copy each resolved dependency out of the sysroot (ldd reports the
+# full transitive closure), then fail loudly if anything is still
+# unresolved. The staged libs all live in the lib dir the loader
+# already searches, so the soname basename is the right target.
+MESA_MISSING=""
+for _mesa_lib in "$STAGE/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" \
+    "$STAGE/usr/lib/x86_64-linux-gnu"/libgallium-*.so \
+    "$STAGE/usr/lib/x86_64-linux-gnu/dri"/*.so; do
+  [ -f "$_mesa_lib" ] || continue
+  for _dep in $(ldd "$_mesa_lib" 2>/dev/null | awk '/=> not found/ {print "MISSING:"$1} /=> \// {print $3}'); do
+    case "$_dep" in
+      MISSING:*) MESA_MISSING="$MESA_MISSING ${_dep#MISSING:}" ;;
+      *) _target="$STAGE/usr/lib/x86_64-linux-gnu/$(basename "$_dep")"
+         [ -f "$_target" ] || cp "$_dep" "$_target" || { echo "error: cannot stage Mesa dep $_dep" >&2; exit 1; } ;;
+    esac
+  done
+done
+[ -z "$MESA_MISSING" ] || { echo "error: Mesa deps not found in sysroot:$MESA_MISSING" >&2; exit 1; }
 [ -d "$STAGE/usr/lib/x86_64-linux-gnu/dri" ] && [ -n "$(ls -A "$STAGE/usr/lib/x86_64-linux-gnu/dri" 2>/dev/null)" ] || { echo "error: no DRI drivers staged (install libgl1-mesa-dri)" >&2; exit 1; }
 # CPU-only software GL: the init forces llvmpipe with
 # LIBGL_ALWAYS_SOFTWARE, so swrast_dri.so must be staged — without it
