@@ -811,6 +811,20 @@ done
 # copy-closure (the host binary links them when SEVYN_HAVE_EGL).
 [ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" ] || { echo "error: missing libEGL_mesa.so.0 (install libgl1-mesa-dri)" >&2; exit 1; }
 cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" "$STAGE/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0"
+# M12 root cause #7 (PROVEN 2026-11-14 from the 58f8538d boot log's
+# LD_DEBUG trace): libEGL.so.1 is libglvnd's dispatch library — it
+# finds vendor EGL implementations ONLY through
+# /usr/share/glvnd/egl_vendor.d/*.json. The image staged the Mesa
+# plugin (libEGL_mesa.so.0, above) but never the vendor JSON, so
+# glvnd found zero vendors and eglGetDisplay returned EGL_NO_DISPLAY
+# without ever loading Mesa — which is why the kms_swrast override,
+# EGL_PLATFORM=gbm, and the EGL/Mesa debug knobs changed NOTHING
+# across eight heads, and why LD_DEBUG shows libEGL loading but no
+# libEGL_mesa dlopen at all. Stage the vendor dir and fail loudly
+# without the Mesa entry.
+[ -f "$SYSROOT/usr/share/glvnd/egl_vendor.d/50_mesa.json" ] || { echo "error: missing glvnd EGL vendor config 50_mesa.json (install libegl-mesa0)" >&2; exit 1; }
+mkdir -p "$STAGE/usr/share/glvnd"
+cp -a "$SYSROOT/usr/share/glvnd/egl_vendor.d" "$STAGE/usr/share/glvnd/"
 # The DRI drivers link libgallium-*.so, which lives in the lib dir
 # (not dri/) and is likewise invisible to ldd on the host binary —
 # the copy-closure misses it, and without it Mesa's loader cannot
