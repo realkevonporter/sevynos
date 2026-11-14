@@ -858,6 +858,17 @@ for d in "$SYSROOT"/usr/lib/x86_64-linux-gnu/libweston-*; do
     cp -a "$d" "$STAGE/$rel"
   fi
 done
+# Weston 13's GL renderer is a loadable module, NOT built into
+# libweston — the pixman renderer IS built in, which is why the
+# pixman fallback always works while GL never starts. The
+# libweston-* dir copy above should have brought it, but the
+# b8956218 guest proved it absent — weston.log: "Failed to load
+# module: .../libweston-13/gl-renderer.so: cannot open shared
+# object file" → "failed to initialize egl" → "fatal: failed to
+# create compositor backend". Stage it explicitly (it ships in
+# libweston-13-0) and fail loudly without it.
+[ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libweston-13/gl-renderer.so" ] || { echo "error: missing gl-renderer.so (install libweston-13-0)" >&2; exit 1; }
+cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libweston-13/gl-renderer.so" "$STAGE/usr/lib/x86_64-linux-gnu/libweston-13/gl-renderer.so"
 mkdir -p "$STAGE/usr/share/icons"
 if [ -d "$SYSROOT/usr/share/icons/Adwaita" ]; then
   mkdir -p "$STAGE/usr/share/icons/Adwaita"
