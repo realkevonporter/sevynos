@@ -14,10 +14,13 @@
 # - Mesa staging: the EGL platform plugin (libEGL_mesa.so.0, dlopened
 #   by libEGL) is copied explicitly and required; the DRI drivers +
 #   libgbm copies from M11 stay (iris on the GF65, virtio_gpu for
-#   dumb scanout). CPU-only: the init forces llvmpipe with
-#   LIBGL_ALWAYS_SOFTWARE, so swrast_dri.so is required at build
-#   time — the virgl route is dead in CI (egl-headless needs a host
-#   DRM render node runners don't have).
+#   dumb scanout). The DRI drivers link libgallium-*.so from the lib
+#   dir (not dri/), which the copy-closure misses — stage it
+#   explicitly or Mesa's loader cannot open any driver. CPU-only:
+#   the init forces llvmpipe with LIBGL_ALWAYS_SOFTWARE, so
+#   swrast_dri.so is required at build time — the virgl route is
+#   dead in CI (egl-headless needs a host DRM render node runners
+#   don't have).
 # - Host compile: genesis-presenter.cc joins sevyn-rn-host with
 #   -DSEVYN_HAVE_EGL=1 (fails loudly without libegl-dev/libgles-dev).
 #
@@ -804,6 +807,16 @@ done
 # copy-closure (the host binary links them when SEVYN_HAVE_EGL).
 [ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" ] || { echo "error: missing libEGL_mesa.so.0 (install libgl1-mesa-dri)" >&2; exit 1; }
 cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" "$STAGE/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0"
+# The DRI drivers link libgallium-*.so, which lives in the lib dir
+# (not dri/) and is likewise invisible to ldd on the host binary —
+# the copy-closure misses it, and without it Mesa's loader cannot
+# open ANY driver ("failed to open dri: libgallium-*.so: cannot
+# open shared object file"), so EGL never inits and Weston falls
+# back to pixman. Proven by the 624b0318 guest boot log. Stage it
+# (versioned name — glob) and fail loudly without it.
+GALLIUM_LIB="$(ls "$SYSROOT"/usr/lib/x86_64-linux-gnu/libgallium-*.so 2>/dev/null | head -n 1)"
+[ -n "$GALLIUM_LIB" ] || { echo "error: no libgallium staged (install libgl1-mesa-dri)" >&2; exit 1; }
+cp "$GALLIUM_LIB" "$STAGE/usr/lib/x86_64-linux-gnu/$(basename "$GALLIUM_LIB")"
 [ -d "$STAGE/usr/lib/x86_64-linux-gnu/dri" ] && [ -n "$(ls -A "$STAGE/usr/lib/x86_64-linux-gnu/dri" 2>/dev/null)" ] || { echo "error: no DRI drivers staged (install libgl1-mesa-dri)" >&2; exit 1; }
 # CPU-only software GL: the init forces llvmpipe with
 # LIBGL_ALWAYS_SOFTWARE, so swrast_dri.so must be staged — without it
