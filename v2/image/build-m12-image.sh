@@ -13,8 +13,11 @@
 #   CPU path (the fallback boot the M12 check proves).
 # - Mesa staging: the EGL platform plugin (libEGL_mesa.so.0, dlopened
 #   by libEGL) is copied explicitly and required; the DRI drivers +
-#   libgbm copies from M11 stay (iris on the GF65, virtio_gpu under
-#   virgl, kms_swrast/swrast for QEMU without virgl).
+#   libgbm copies from M11 stay (iris on the GF65, virtio_gpu for
+#   dumb scanout). CPU-only: the init forces llvmpipe with
+#   LIBGL_ALWAYS_SOFTWARE, so swrast_dri.so is required at build
+#   time — the virgl route is dead in CI (egl-headless needs a host
+#   DRM render node runners don't have).
 # - Host compile: genesis-presenter.cc joins sevyn-rn-host with
 #   -DSEVYN_HAVE_EGL=1 (fails loudly without libegl-dev/libgles-dev).
 #
@@ -802,6 +805,10 @@ done
 [ -f "$SYSROOT/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" ] || { echo "error: missing libEGL_mesa.so.0 (install libgl1-mesa-dri)" >&2; exit 1; }
 cp "$SYSROOT/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0" "$STAGE/usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0"
 [ -d "$STAGE/usr/lib/x86_64-linux-gnu/dri" ] && [ -n "$(ls -A "$STAGE/usr/lib/x86_64-linux-gnu/dri" 2>/dev/null)" ] || { echo "error: no DRI drivers staged (install libgl1-mesa-dri)" >&2; exit 1; }
+# CPU-only software GL: the init forces llvmpipe with
+# LIBGL_ALWAYS_SOFTWARE, so swrast_dri.so must be staged — without it
+# no GL renderer can start in this image at all.
+[ -f "$STAGE/usr/lib/x86_64-linux-gnu/dri/swrast_dri.so" ] || { echo "error: no swrast DRI driver staged (CPU-only software GL needs llvmpipe; install libgl1-mesa-dri)" >&2; exit 1; }
 [ -d "$STAGE/usr/lib/x86_64-linux-gnu/gbm" ] || { echo "error: no libgbm staged (install libgbm1)" >&2; exit 1; }
 for d in "$SYSROOT"/usr/lib/x86_64-linux-gnu/libweston-*; do
   if [ -d "$d" ]; then
@@ -1124,11 +1131,25 @@ echo "M4 init: starting weston @ $(cut -d" " -f1 /proc/uptime)s"
 # ignores WAYLAND_DISPLAY and picks the first free wayland-N name starting
 # at wayland-1, so the socket would land at /run/wayland-1 while this init
 # and the shell host both wait on /run/wayland-0 (the M1 failure mode).
+# CPU-only software GL (M12, Kevon 2026-11-13: SevynOS must run on
+# CPU-only devices): this image has no 3D-capable GPU — virtio-gpu
+# exposes dumb scanout buffers only (no virgl) — so Mesa must use its
+# software driver. LIBGL_ALWAYS_SOFTWARE makes Mesa's loader pick
+# swrast (llvmpipe) for every EGL/GBM context: Weston's GL renderer
+# and the host's EGL presenter both render in software into the
+# virtio-gpu dumb buffers, which is exactly the shape a real CPU-only
+# machine has (basic display controller, no GPU). The virgl route is
+# dead in CI: -display egl-headless needs a host DRM render node and
+# GitHub runners have none (QEMU fails to start: "egl: no drm render
+# node available"). On hardware WITH a real GPU the nightly's init
+# must not set this unconditionally — it is the CPU-only path.
+export LIBGL_ALWAYS_SOFTWARE=1
 # M12 Genesis: try the GL renderer first (GPU compositing); fall back
 # to pixman if Weston cannot start on GL, so a GPU failure can never
 # brick the boot. The active renderer is logged to the console for
 # the M12 check (which FAILS if the fallback engaged — QEMU must
-# prove GL init works via kms_swrast/llvmpipe).
+# prove GL init works via llvmpipe, forced by LIBGL_ALWAYS_SOFTWARE
+# above, since there is no 3D device in this image).
 GENESIS_RENDERER=gl
 /usr/bin/weston --backend=drm-backend.so --renderer=gl --socket=wayland-0 \
   --config=/etc/xdg/weston/weston.ini --log=/tmp/weston.log &

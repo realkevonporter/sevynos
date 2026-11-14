@@ -22,11 +22,15 @@
 # sevynos.img itself is NOT uploaded here (1.5 GiB) — the nightly
 # (public-build.yml) publishes it on merge.
 #
-# QEMU has no GPU: Mesa runs on kms_swrast/llvmpipe (software GL) over
-# virtio-gpu dumb buffers. The fps sample is a liveness signal only —
-# the check asserts the line exists, never its value. Real-hardware
-# behaviour (iris on the GF65 Intel iGPU, 60 fps) is Kevon's GF65
-# verification after merge — the PR body says so.
+# QEMU has no GPU: the guest init forces Mesa's software driver
+# (LIBGL_ALWAYS_SOFTWARE=1 → swrast/llvmpipe) so Weston and the host
+# render GL in software into virtio-gpu dumb buffers — the CPU-only
+# product path, not a CI workaround. The virgl route is dead here:
+# -display egl-headless needs a host DRM render node and GitHub
+# runners have none, so QEMU fails to start. The fps sample is a
+# liveness signal only — the check asserts the line exists, never its
+# value. Real-hardware behaviour (iris on the GF65 Intel iGPU, 60 fps)
+# is Kevon's GF65 verification after merge — the PR body says so.
 #
 # Tokrah is a PRIVATE repo — CI clones it with the TOKRAH_READ_TOKEN
 # secret (a read-only repo-scoped PAT; Kevon's one-time action), because
@@ -70,7 +74,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             qemu-system-x86 \
-            qemu-system-modules-opengl \
             linux-image-generic \
             busybox-static \
             cpio \

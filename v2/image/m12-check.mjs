@@ -5,14 +5,17 @@
 //
 //   1. Genesis boot (-kernel/-initrd + the data disk): Weston starts
 //      on the GL renderer (FAIL if the pixman fallback engaged —
-//      QEMU must expose virgl (virtio-gpu-pci,virgl=on + egl-headless
-//      display) so the guest has a real 3D device; without virgl the
-//      guest reports -virgl / 0 cap sets and Weston falls back to
-//      pixman, which is a harness gap, not a Genesis bug); the
-//      host's GPU present path is live (GENESIS EGL renderer line +
-//      GENESIS present path=gpu + GENESIS first present); frames flow
-//      (a GENESIS fps sample); the shell mounts (SEVYNOS_M2_READY)
-//      and paints (screendump: top bar + dock present, as m7-check).
+//      the guest has no 3D device at all: plain virtio-gpu-pci with
+//      dumb scanout buffers only, and the guest init forces Mesa's
+//      software driver (LIBGL_ALWAYS_SOFTWARE=1 → swrast/llvmpipe),
+//      so GL is proven in software — the CPU-only product path, not
+//      a harness gap. The virgl route is dead in CI: -display
+//      egl-headless needs a host DRM render node, GitHub runners
+//      have none, and QEMU fails to start); the host's GPU present
+//      path is live (GENESIS EGL renderer line + GENESIS present
+//      path=gpu + GENESIS first present); frames flow (a GENESIS fps
+//      sample); the shell mounts (SEVYNOS_M2_READY) and paints
+//      (screendump: top bar + dock present, as m7-check).
 //   2. Fallback boot (same image, sevyn.genesis=0 on the cmdline):
 //      the host reports Genesis disabled, never takes the GPU path,
 //      and the shell still mounts and paints on the CPU painter —
@@ -279,7 +282,7 @@ async function boot(tag, extraAppend = "") {
     "-append",
     `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockapi=1${extraAppend}`,
     "-display",
-    "egl-headless",
+    "none",
     "-vga",
     "none",
     "-monitor",
@@ -309,7 +312,7 @@ async function boot(tag, extraAppend = "") {
     "-drive",
     `file=${DISK},format=raw,if=virtio`,
     "-device",
-    "virtio-gpu-pci,virgl=on",
+    "virtio-gpu-pci",
     "-device",
     "qemu-xhci",
     "-device",
@@ -495,6 +498,11 @@ async function main() {
   );
   const egl = await waitForLog(b.logPath, /GENESIS EGL renderer=/, 120000);
   check("genesis: host EGL initialized", !!egl, egl ? egl.trim().slice(0, 200) : "");
+  check(
+    "genesis: EGL renderer is software (llvmpipe — CPU-only path)",
+    !!egl && /llvmpipe/i.test(egl),
+    egl ? egl.trim().slice(0, 200) : "no GENESIS EGL renderer line",
+  );
   const gpuPath = await waitForLog(b.logPath, /GENESIS present path=gpu/, 120000);
   check("genesis: host GPU present path live", !!gpuPath);
   const first = await waitForLog(b.logPath, /GENESIS first present/, 120000);
