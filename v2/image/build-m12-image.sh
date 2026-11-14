@@ -1206,6 +1206,17 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # rasterizer for KMS devices (llvmpipe rendering into the
 # virtio-gpu dumb buffers) — the driver this CPU-only path needs.
 export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
+# M12 diagnostic (probe, not a fix): the kms_swrast override changed
+# nothing on c89c989d — two identical failures, no llvmpipe, no
+# MESA-LOADER line — so make the driver selection VISIBLE instead of
+# guessing again. Echo the env + prove the driver files are actually
+# staged in the image, and turn on EGL/Mesa debug logging so the
+# weston.log dump shows which driver Mesa loads and where
+# eglGetDisplay fails. Remove once the path is understood.
+echo "GENESIS mesa env: MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-<unset>} LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-<unset>} EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-<unset>}"
+ls -l /usr/lib/x86_64-linux-gnu/dri/kms_swrast_dri.so /usr/lib/x86_64-linux-gnu/dri/virtio_gpu_dri.so /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so 2>&1
+export EGL_LOG_LEVEL=debug
+export MESA_DEBUG=1
 # M12 Genesis: try the GL renderer first (GPU compositing); fall back
 # to pixman if Weston cannot start on GL, so a GPU failure can never
 # brick the boot. The active renderer is logged to the console for
