@@ -91,6 +91,11 @@ class Wayland {
   // Non-blocking dispatch round. Returns false if the display is gone.
   bool dispatch(int timeoutMs);
 
+  // M12: evaluate the Genesis fps sample window on the host
+  // main-loop tick (see GenesisPresenter::maybeLogFps). No-op when
+  // Genesis is not live.
+  void tickGenesis();
+
   void setPointerHandler(PointerHandler h) { pointerHandler_ = h; }
   void setScrollHandler(ScrollHandler h) { scrollHandler_ = h; }
   void setKeyHandler(KeyHandler h) { keyHandler_ = h; }
@@ -148,10 +153,6 @@ class Wayland {
   bool ensureGenesis();
   void requestFrame();
   void flushPending();
-  // M12: evaluate the Genesis fps sample window on the host
-  // main-loop tick (see GenesisPresenter::maybeLogFps). No-op when
-  // Genesis is not live.
-  void tickGenesis();
   // Set the pointer cursor (default arrow) from the enter serial.
   // Loads the theme lazily on first enter; a no-op until then.
   void setCursor(uint32_t serial);
