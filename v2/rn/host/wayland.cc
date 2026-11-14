@@ -98,6 +98,9 @@ void Wayland::remap() {
   if (!surface_ || fullscreen_)
     return;
   logLine("WAYLAND remap (focus restore)");
+  // Genesis: the EGL surface hangs off the surface being destroyed;
+  // drop it here — the next present re-inits on the new surface.
+  genesis_.reset();
   // Drop the pending frame callback: destroying the surface orphans
   // it, and a stale framePending_ would block later frame requests.
   if (frameCallback_) {
@@ -188,6 +191,9 @@ void Wayland::unmaximize() {
 }
 
 Wayland::~Wayland() {
+  // Genesis first: its wl_egl_window hangs off the surface, so the
+  // EGL surface must die before wl_surface_destroy below.
+  genesis_.reset();
   if (frameCallback_)
     wl_callback_destroy(frameCallback_);
   if (buffers_[0])
@@ -534,6 +540,9 @@ void Wayland::resize(int width, int height) {
   }
   width_ = width;
   height_ = height;
+  // Genesis: the EGL window surface tracks the surface size.
+  if (genesis_)
+    genesis_->resize(width, height);
   // The size handler re-lays out JS and presents at the new size.
   // If it does not present synchronously (the usual case under TCG —
   // the JS re-layout takes seconds), force a present of the last
@@ -904,6 +913,20 @@ void Wayland::doPresent() {
     havePending_ = true;
     return;
   }
+  // Genesis (M12): the GPU path owns the present when it is live.
+  // A failed present (lost GL context) falls through to the CPU
+  // painter for this frame and every later one — the desktop never
+  // goes black because the GPU did.
+  if (ensureGenesis()) {
+    if (genesis_->present(pendingOps_, pendingBg_, *painters_[0])) {
+      havePending_ = false;
+      requestFrame();
+      return;
+    }
+    logLine("GENESIS present failed; falling back to CPU painter");
+    genesis_.reset();
+    genesisDead_ = true;
+  }
   // Present into the back buffer unconditionally and alternate.
   // Weston never releases these SHM buffers in this guest and
   // stops sending frame callbacks after the first frames (0
@@ -942,6 +965,29 @@ void Wayland::doPresent() {
   back_ = 1 - idx;
   havePending_ = false;
   requestFrame();
+}
+
+bool Wayland::ensureGenesis() {
+  if (genesis_)
+    return true;
+  if (genesisDead_)
+    return false;
+  // SEVYN_GENESIS=0 forces the CPU painter (fallback boot, debugging).
+  // The init script sets it from the sevyn.genesis=0 kernel flag.
+  const char* env = getenv("SEVYN_GENESIS");
+  if (env && strcmp(env, "0") == 0) {
+    logLine("GENESIS disabled (SEVYN_GENESIS=0); using CPU painter");
+    genesisDead_ = true;
+    return false;
+  }
+  genesis_ = std::make_unique<GenesisPresenter>();
+  if (!genesis_->init(display_, surface_, width_, height_)) {
+    logLine("GENESIS unavailable; using CPU painter");
+    genesis_.reset();
+    genesisDead_ = true;
+    return false;
+  }
+  return true;
 }
 
 void Wayland::flushPending() {
