@@ -1196,6 +1196,16 @@ echo "M4 init: starting weston @ $(cut -d" " -f1 /proc/uptime)s"
 # node available"). On hardware WITH a real GPU the nightly's init
 # must not set this unconditionally — it is the CPU-only path.
 export LIBGL_ALWAYS_SOFTWARE=1
+# M12 Genesis: Mesa's loader picks the DRI driver from the DRM
+# device's kernel name — virtio-gpu maps to virtio_gpu_dri.so (the
+# virgl driver), which cannot create a screen with no virgl cap
+# sets, so eglGetDisplay returns EGL_NO_DISPLAY ("failed to create
+# display" in weston.log) and GL never starts. LIBGL_ALWAYS_SOFTWARE
+# does NOT change which driver binary loads, so it cannot fix this.
+# MESA_LOADER_DRIVER_OVERRIDE=kms_swrast forces Mesa's software
+# rasterizer for KMS devices (llvmpipe rendering into the
+# virtio-gpu dumb buffers) — the driver this CPU-only path needs.
+export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
 # M12 Genesis: try the GL renderer first (GPU compositing); fall back
 # to pixman if Weston cannot start on GL, so a GPU failure can never
 # brick the boot. The active renderer is logged to the console for
