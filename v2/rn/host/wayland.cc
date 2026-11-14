@@ -995,6 +995,11 @@ void Wayland::flushPending() {
     doPresent();
 }
 
+void Wayland::tickGenesis() {
+  if (genesis_)
+    genesis_->maybeLogFps();
+}
+
 void Wayland::present(const std::vector<DrawOp>& ops, uint32_t bg) {
   pendingOps_ = ops;
   pendingBg_ = bg;

@@ -58,6 +58,17 @@ class GenesisPresenter {
   // back to the CPU painter permanently.
   bool present(const std::vector<DrawOp>& ops, uint32_t bg,
                Painter& textSource);
+  // Evaluate the fps sample window from the host main-loop tick.
+  // The window's time bound is otherwise checked only inside
+  // present(), and the shell presents on state changes only — on an
+  // idle desktop the first present is also the last, so the window
+  // never closes and the GENESIS fps sample never logs (M12 attempt
+  // 2, 2026-11-14: first present + desktop paints, no fps sample in
+  // 300 s). Evaluating here makes the time bound real: the sample
+  // logs ~30 s after the first present even when nothing else
+  // presents. The value stays honest — on an idle desktop it reads
+  // ~0 fps, which is the truth for an event-driven presenter.
+  void maybeLogFps();
 
   const std::string& renderer() const { return renderer_; }
   long long presents() const { return presents_; }
@@ -68,6 +79,8 @@ class GenesisPresenter {
 
  private:
   bool initGl();
+  // Log the fps sample for the current window and start a fresh one.
+  void logFpsSample(long long now);
   // Upload one glyph bitmap into the atlas; returns its UV rect, or
   // false when the atlas is full (the caller clears it and retries
   // once).

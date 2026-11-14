@@ -687,20 +687,32 @@ bool GenesisPresenter::present(const std::vector<DrawOp>& ops, uint32_t bg,
   // Log a frame-rate sample every 10 presents, or 30 s after the
   // first present in the window — whichever comes first. The shell
   // presents on state changes, not on a timer, so a count-only
-  // window might never fill on an idle desktop; the time bound
-  // guarantees the check sees a sample whenever frames flow at all.
-  // The number is a liveness signal under TCG/llvmpipe, never a bar:
-  // only the GF65 proves 60 fps.
+  // window might never fill on an idle desktop; the time bound is
+  // also evaluated on the host main-loop tick (maybeLogFps), so the
+  // check sees a sample whenever frames flow at all. The number is
+  // a liveness signal under TCG/llvmpipe, never a bar: only the
+  // GF65 proves 60 fps.
   if (fpsWindowPresents_ >= 10 ||
-      (fpsWindowPresents_ >= 1 && now - fpsWindowStartMs_ >= 30000)) {
-    long long dt = now - fpsWindowStartMs_;
-    if (dt > 0)
-      fps_ = (double)fpsWindowPresents_ * 1000.0 / (double)dt;
-    logLine("GENESIS fps %.1f (presents=%lld)", fps_, presents_);
-    fpsWindowStartMs_ = now;
-    fpsWindowPresents_ = 0;
-  }
+      (fpsWindowPresents_ >= 1 && now - fpsWindowStartMs_ >= 30000))
+    logFpsSample(now);
   return true;
+}
+
+void GenesisPresenter::logFpsSample(long long now) {
+  long long dt = now - fpsWindowStartMs_;
+  if (dt > 0)
+    fps_ = (double)fpsWindowPresents_ * 1000.0 / (double)dt;
+  logLine("GENESIS fps %.1f (presents=%lld)", fps_, presents_);
+  fpsWindowStartMs_ = now;
+  fpsWindowPresents_ = 0;
+}
+
+void GenesisPresenter::maybeLogFps() {
+  if (fpsWindowStartMs_ == 0 || fpsWindowPresents_ == 0)
+    return;
+  long long now = nowMs();
+  if (now - fpsWindowStartMs_ >= 30000)
+    logFpsSample(now);
 }
 
 #else // !SEVYN_HAVE_EGL
@@ -717,6 +729,8 @@ bool GenesisPresenter::init(wl_display*, wl_surface*, int, int) {
 void GenesisPresenter::resize(int, int) {}
 
 void GenesisPresenter::shutdown() {}
+
+void GenesisPresenter::maybeLogFps() {}
 
 bool GenesisPresenter::present(const std::vector<DrawOp>&, uint32_t,
                               Painter&) {
