@@ -1229,26 +1229,6 @@ export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
 # Mesa opens /dev/dri/card0 via GBM and loads the driver for that
 # fd (kms_swrast, via the override above) — the software path.
 export EGL_PLATFORM=gbm
-# M12 diagnostic (probe, not a fix): the kms_swrast override changed
-# nothing on c89c989d — two identical failures, no llvmpipe, no
-# MESA-LOADER line — so make the driver selection VISIBLE instead of
-# guessing again. Echo the env + prove the driver files are actually
-# staged in the image, and turn on EGL/Mesa debug logging so the
-# weston.log dump shows which driver Mesa loads and where
-# eglGetDisplay fails. Remove once the path is understood.
-# 4fb2439a verdict: env + staging CONFIRMED, but EGL_LOG_LEVEL/MESA_DEBUG
-# printed NOTHING — Mesa stays silent on the driver-load success path,
-# so the debug knobs cannot answer "which driver". The decisive
-# instrument is the dynamic linker: LD_DEBUG=libs, scoped to the GL
-# Weston launch only (an export would flood the whole boot), prints
-# every .so Weston dlopens to the console, including which dri/*.so
-# Mesa actually opens (kms_swrast vs virtio_gpu). The echo below now
-# runs AFTER the exports (it previously ran before them, so it always
-# printed EGL_LOG_LEVEL=<unset> even when the export worked).
-export EGL_LOG_LEVEL=debug
-export MESA_DEBUG=1
-echo "GENESIS mesa env: MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-<unset>} LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-<unset>} EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-<unset>} MESA_DEBUG=${MESA_DEBUG:-<unset>} EGL_PLATFORM=${EGL_PLATFORM:-<unset>}"
-ls -l /usr/lib/x86_64-linux-gnu/dri/kms_swrast_dri.so /usr/lib/x86_64-linux-gnu/dri/virtio_gpu_dri.so /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so 2>&1
 # M12 Genesis: try the GL renderer first (GPU compositing); fall back
 # to pixman if Weston cannot start on GL, so a GPU failure can never
 # brick the boot. The active renderer is logged to the console for
@@ -1256,7 +1236,7 @@ ls -l /usr/lib/x86_64-linux-gnu/dri/kms_swrast_dri.so /usr/lib/x86_64-linux-gnu/
 # prove GL init works via llvmpipe, forced by LIBGL_ALWAYS_SOFTWARE
 # above, since there is no 3D device in this image).
 GENESIS_RENDERER=gl
-LD_DEBUG=libs /usr/bin/weston --backend=drm-backend.so --renderer=gl --socket=wayland-0 \
+/usr/bin/weston --backend=drm-backend.so --renderer=gl --socket=wayland-0 \
   --config=/etc/xdg/weston/weston.ini --log=/tmp/weston.log &
 WESTON_PID=$!
 i=0
