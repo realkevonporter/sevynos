@@ -1,6 +1,6 @@
 # SevynOS v2 — fresh rebuild
 
-**Status: M11 merged (PR #105, 2026-11-11; installer v2 PR #110, 2026-11-13). M12 in progress (Genesis GPU compositor).**
+**Status: M12 merged (PR #116, 2026-11-14). M13 in progress (browser embed).**
 M0 merged 2026-11-06 (PR #81). M1 merged 2026-11-06 (PR #82, + follow-ups
 #84 and #86). M2 merged 2026-11-07 (PR #85). M3 merged 2026-11-07 (PR #87). M8 merged 2026-11-07 (PR #88). M4 merged 2026-11-07 (PR #90). M4.5 merged 2026-11-07 (PR #91). M5 merged 2026-11-08 (PR #92). M6 merged 2026-11-09 (PR #93). M7 merged 2026-11-09 (PR #94, bare-metal boot verified on the MSI GF65 Thin 9SD). M9 merged 2026-11-10 (PR #96, desktop polish + in-place updates on bare metal; + PR #97, Public build wpasupplicant + iw). M10 merged 2026-11-11 (PR #101, comms apps). This directory is
 the fresh SevynOS rebuild, started 2026-11-06 on Kevon's word. Same
@@ -260,7 +260,7 @@ feed ships unsigned and installed systems refuse it (fail-closed):
   before explicit confirmation. Proven by `m11-check.mjs` in CI
   (mock Windows disks — QEMU has no Windows); real Windows 11
   dual-boot is Kevon's GF65 verification after merge.
-- **M12 — Genesis, the GPU compositor (in progress, this branch).**
+- **M12 — Genesis, the GPU compositor (merged, PR #116, 2026-11-14).**
   The whole desktop (shell, dock, system apps) paints through
   EGL/GLES2 on the GPU instead of the CPU painter: Weston runs its
   GL renderer, and the RN host presents each frame as a GL texture
@@ -272,6 +272,19 @@ feed ships unsigned and installed systems refuse it (fail-closed):
   merge — QEMU/TCG software rendering cannot prove it). Proven by
   `m12-check.mjs` in CI (GL renderer live via kms_swrast/llvmpipe,
   GPU present path, frames flowing, CPU fallback boot).
+- **M13 — Browser embed (in progress, this branch).**
+  Chromium runs as a chromeless app-mode content window paired with
+  the Browser app window (tabs + address bar are the only chrome),
+  sized to the Browser window's content rect (800x348). `sevyn
+browser` tries the GPU first with a software fallback; Chromium's
+  lifecycle is pidfile/state-file driven (`sevyn browser quit`,
+  `gpu:` in `browser status`). CDP stays the control plane. Bar:
+  60 fps on the GF65 (Kevon's hardware proof after merge — QEMU/TCG
+  software rendering cannot prove it). Proven by `m13-check.mjs`
+  in CI (browser status + CDP, a real page rendering, address-bar
+  typing, in-page click navigation, tab switching, the chromeless
+  heuristic, close killing Chromium, the m12 regression, clean
+  poweroff).
 
 ## Build + boot the empty image (M0)
 

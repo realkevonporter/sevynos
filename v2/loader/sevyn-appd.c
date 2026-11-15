@@ -670,6 +670,37 @@ static int launch_app(const char *id, char *err, size_t errcap)
     return 0;
 }
 
+/* Stop Chromium when the Browser app closes (M13): the `sevyn
+ * browser` CLI writes "pid=<n>" + "gpu=..." to /data/chromium.state
+ * at launch, and the Browser app is Chromium's only owner — so any
+ * close path other than the in-app X (which calls `browser quit`
+ * itself) left Chromium running with no window. Same effect as
+ * `sevyn browser quit`, best-effort: a missing state file, a dead
+ * pid, or a parse failure is silently ignored. The path honours
+ * SEVYN_CHROMIUM_STATE, as the CLI does. */
+#define CHROMIUM_STATE "/data/chromium.state"
+
+static void browser_quit_best_effort(void)
+{
+    const char *path = getenv("SEVYN_CHROMIUM_STATE");
+    if (!path || !*path)
+        path = CHROMIUM_STATE;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    char line[128];
+    pid_t pid = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "pid=", 4) == 0) {
+            pid = (pid_t)atoi(line + 4);
+            break;
+        }
+    }
+    fclose(f);
+    if (pid > 0)
+        kill(pid, SIGTERM); /* dead pid: ESRCH, ignored */
+}
+
 /* Close an app: SIGTERM every running instance of the id (a
  * multi-instance app closes all its windows). Returns 0 when at
  * least one instance was signalled. */
@@ -691,6 +722,8 @@ static int close_app(const char *id, char *err, size_t errcap)
         snprintf(err, errcap, "not-running");
         return -1;
     }
+    if (strcmp(id, "browser") == 0)
+        browser_quit_best_effort();
     return 0;
 }
 
