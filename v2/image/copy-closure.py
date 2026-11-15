@@ -14,7 +14,22 @@ stage ends up with the same layout the loader expects.
 Symlinks are preserved (and their targets copied too). The loader itself
 is copied as well. Run `ldconfig -r <stage>` afterwards to build the
 ld.so.cache (see build-m1-image.sh).
+
+After all pairs are copied, duplicate libraries are deduped: the sysroot
+carries the same library in both /lib and /usr/lib, and the closure
+copies both. Byte-identical duplicates are replaced with relative
+symlinks to one kept copy (preferring /usr/lib), which saves ~16 MB
+gzipped in the initramfs — the M12 image was over GitHub's 2 GiB
+release-asset cap without it. Scoped to the stage lib dirs only;
+the canonical /lib64 loader copy stays a real file, and
+/usr/share/sevyn/* (Chromium's $ORIGIN libs) is untouched.
+`--dedupe-only <stage>` runs just that pass over an already-assembled
+stage: the image build's explicit Mesa/Weston staging copies
+libraries to /usr/lib/... after the closure runs, so those duplicates
+only exist once all staging is done — the build calls it right
+before ldconfig.
 """
+import hashlib
 import os
 import shutil
 import subprocess
@@ -110,7 +125,83 @@ def copy_into(sysroot, stage, host_path):
         shutil.copy2(host_path, dest)
 
 
+def dedupe_stage_libs(stage):
+    """Replace byte-identical duplicate libraries in the stage lib dirs
+    with relative symlinks to a single kept copy.
+
+    Returns (freed_bytes, replaced_count). Safe to run after every
+    invocation (idempotent: symlinks are skipped, and a later copy
+    writing identical bytes through a symlink changes nothing).
+    Byte-identical files have identical SONAMEs, so the loader treats
+    the kept copy and the symlink exactly the same; ldconfig runs
+    afterwards and records the deduped layout.
+    """
+    # Walk /usr/lib first (preferred home), then /lib; shallow paths
+    # before nested ones so a canonical copy is kept and a nested
+    # copy (e.g. libweston-13/libweston-13/) becomes the symlink.
+    lib_roots = [
+        os.path.join(stage, "usr", "lib"),
+        os.path.join(stage, "lib"),
+    ]
+    # The canonical loader copy must stay a real file (see main()).
+    protected = {os.path.join(stage, "lib64", "ld-linux-x86-64.so.2")}
+    candidates = []
+    for root_idx, root in enumerate(lib_roots):
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for name in sorted(filenames):
+                p = os.path.join(dirpath, name)
+                if os.path.islink(p) or not os.path.isfile(p):
+                    continue
+                if p in protected:
+                    continue
+                candidates.append(
+                    (root_idx, p.count(os.sep), p))
+    candidates.sort()
+    by_hash = {}
+    freed = 0
+    replaced = 0
+    for _, _, p in candidates:
+        st = os.stat(p)
+        if st.st_size == 0:
+            continue
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        digest = h.hexdigest()
+        keep = by_hash.get(digest)
+        if keep is not None:
+            # Same inode already (hardlinked): already one copy.
+            if os.stat(keep).st_ino == st.st_ino:
+                continue
+            rel = os.path.relpath(keep, os.path.dirname(p))
+            os.unlink(p)
+            os.symlink(rel, p)
+            freed += st.st_size
+            replaced += 1
+        else:
+            by_hash[digest] = p
+    return freed, replaced
+
+
 def main():
+    # --dedupe-only <stage>: dedupe a stage dir that was assembled by
+    # other steps too (the image build's explicit Mesa/Weston staging
+    # copies libraries to /usr/lib/... after the closure runs, so the
+    # duplicates only exist once all staging is done — run this right
+    # before ldconfig in the image build).
+    if len(sys.argv) == 3 and sys.argv[1] == "--dedupe-only":
+        stage = os.path.abspath(sys.argv[2])
+        freed, replaced = dedupe_stage_libs(stage)
+        if replaced:
+            print(f"deduped {replaced} duplicate libraries, "
+                  f"freed {freed / (1024 * 1024):.1f} MiB")
+        else:
+            print("dedupe: no duplicate libraries")
+        return 0
     if len(sys.argv) < 4:
         print(__doc__, file=sys.stderr)
         return 2
@@ -154,6 +245,14 @@ def main():
                     os.unlink(dest)
                 shutil.copy2(os.path.realpath(loader), dest)
                 os.chmod(dest, 0o755)
+    # Dedupe after all pairs (and the loader copy): the same library
+    # lands in both /lib and /usr/lib, and a second invocation must
+    # re-dedupe whatever it added. Runs before ldconfig in the image
+    # build, so the cache reflects the deduped layout.
+    freed, replaced = dedupe_stage_libs(stage)
+    if replaced:
+        print(f"deduped {replaced} duplicate libraries, "
+              f"freed {freed / (1024 * 1024):.1f} MiB")
     print(f"closure copied into {stage}")
     return 0
 

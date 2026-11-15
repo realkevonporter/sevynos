@@ -223,6 +223,27 @@ jobs:
           # shellcheck disable=SC2086
           python3 v2/image/make-v2-feed.py --build-dir v2/image/build \
             --out v2/image/build/updates-v2.json $KEY_ARGS $ANCHOR_ARGS
+      - name: Guard release assets under the 2 GiB cap
+        run: |
+          # GitHub caps release assets at 2 GiB (2147483648 bytes). The
+          # M12 image crossed it and the publish only warned, so the
+          # nightly shipped with no sevynos.img. Fail here, before
+          # publishing, if any v2 asset is at or over the cap.
+          python3 - <<'EOF'
+          import os, sys
+          CAP = 2147483648
+          bad = []
+          for name in ("vmlinuz", "initramfs.cpio.gz", "sevynos.img"):
+              p = os.path.join("v2/image/build", name)
+              size = os.path.getsize(p)
+              print(f"{name}: {size} bytes")
+              if size >= CAP:
+                  bad.append(f"{name} is {size} bytes (>= 2 GiB cap)")
+          if bad:
+              print("ERROR: " + "; ".join(bad), file=sys.stderr)
+              sys.exit(1)
+          print("all v2 release assets under the 2 GiB cap")
+          EOF
       - name: Publish nightly release
         uses: ncipollo/release-action@v1
         with:
@@ -265,6 +286,12 @@ jobs:
           makeLatest: false
           allowUpdates: true
           removeArtifacts: true
+          # The M12 image hit 2,190,475,264 bytes — over GitHub's 2 GiB
+          # release-asset cap — and the publish step only warned, so
+          # the nightly shipped with no fresh-install image and the
+          # job stayed green. Both guards below make a missing image
+          # fail the build loudly instead.
+          artifactErrorsFailBuild: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
           # The v2-* files are the M12 Genesis image (kernel + initramfs + GPT disk image).
