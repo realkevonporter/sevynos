@@ -164,6 +164,68 @@ async function waitForLog(path, pattern, timeoutMs, sinceLines = 0) {
   return null;
 }
 
+// Round 9 (PR #117, run 43720789371, head 242ad0ba): a
+// Terminal-SCOPED EXEC wait. The shared boot log carries EXEC lines
+// from every app, and the Browser app's refresh loop emits the
+// SAME `EXEC sevyn browser status/tabs/open` lines the Terminal
+// emits — so waitForLog on an EXEC pattern "verifies" focus and
+// "proves" a command ran while the Terminal never received input
+// at all (m5 check 43: zero `JS TERMINAL` lines after frame
+// 420000, yet every verifyFocus + exec-wait passed on the
+// Browser app's own traffic for ~8 minutes). The discriminator,
+// proven on both 242ad0ba boot logs: the Terminal echoes every
+// command it runs as `JS TERMINAL browser-<verb> ...` 2–46 ms
+// after its EXEC line, while the Browser app echoes `JS BROWSER
+// ...` after its own. So an EXEC line counts as
+// Terminal-originated ONLY when its own verb's `JS TERMINAL`
+// echo follows it within 16 log lines and 5000 guest-ms (the
+// serial log duplicates every line, so 16 lines is ~8 logical
+// lines; the echo is normally 1–2). A `JS BROWSER` line first
+// ends the search for that EXEC — the echo belongs to a later
+// Terminal command, not this one. Returns the EXEC line, or null
+// on timeout. Callers that pass no echoRe (verbs the Browser app
+// never emits) keep using waitForLog directly.
+async function waitForTerminalExec(path, execRe, echoRe, timeoutMs, sinceLines = 0) {
+  const deadline = Date.now() + timeoutMs;
+  const guestMs = (line) => {
+    const m = line.match(/^\[(\d+)\]/);
+    return m ? parseInt(m[1], 10) : null;
+  };
+  while (Date.now() < deadline) {
+    const lines = logLines(path).slice(sinceLines);
+    for (let i = 0; i < lines.length; i++) {
+      if (!execRe.test(lines[i])) continue;
+      for (let j = i + 1; j < Math.min(i + 17, lines.length); j++) {
+        if (/JS BROWSER /.test(lines[j])) break;
+        if (echoRe.test(lines[j])) {
+          const eMs = guestMs(lines[i]);
+          const tMs = guestMs(lines[j]);
+          if (eMs === null || tMs === null || (tMs - eMs >= 0 && tMs - eMs <= 5000))
+            return lines[i];
+          break;
+        }
+      }
+    }
+    await sleep(500);
+  }
+  return null;
+}
+
+// The Terminal app's per-verb echo for a `browser ...` command, or
+// null when the verb has no echo. `activate`/`close` have no `JS
+// TERMINAL` echo at all (both 242ad0ba logs: their EXEC lines are
+// followed by no JS line within 16 lines) — but no other app runs
+// those verbs either (the Browser app only ever runs open/status/
+// tabs), so their EXEC lines are already Terminal-specific and
+// need no scoping. `quit` is likewise never waited on via termCmd.
+function terminalEchoRe(cmd) {
+  const verb = cmd.split(" ")[1];
+  if (verb === "status") return /JS TERMINAL browser-status/;
+  if (verb === "tabs") return /JS TERMINAL browser-tabs/;
+  if (verb === "open") return /JS TERMINAL browser-open/;
+  return null;
+}
+
 // --- PPM parsing + pixel counting (as m2/m3-check) ---
 function parsePPM(path) {
   const buf = readFileSync(path);
@@ -1539,6 +1601,32 @@ async function main() {
   // execRe overrides the expected EXEC line (the default is `-> 0`);
   // pass /-> [01]/ when the command legitimately exits 1, e.g.
   // `browser status` while Chromium is still starting (or dead).
+  // Round 9 (PR #117, run 43720789371, head 242ad0ba): re-click
+  // the Terminal's input immediately before typing a command. The
+  // refocus click that verified focus can LAND (nodeId 56,
+  // TextInput) and the typed text still go nowhere — in the
+  // failing run the Terminal never executed `browser tabs` in 8
+  // minutes while the refocus click had landed, most plausibly
+  // lost to a focus transition while Chromium was still
+  // mapping/raising. So the click that focuses the input for THIS
+  // command is taken from a FRESH frame right before typing,
+  // guarded by refocusInputPointSafe (the point must provably be
+  // the input row — a blind click at the last-known point can land
+  // on a dock icon when the Terminal is hidden). When the guard
+  // refuses, the command is typed anyway (same as before — the
+  // caller already refocused); the re-click is best-effort, never
+  // a gate.
+  const clickTerminalInputNow = async () => {
+    if (!termPos) return false;
+    const frame = await shot(b.qmp, join(OUT, "m13-shot-termcmd-input.ppm"));
+    const pt = refocusInputPointSafe(termPos, frame, frame.width, frame.height);
+    if (!pt) return false;
+    await moveTo(pt.x, pt.y, frame.width, frame.height);
+    await sleep(300);
+    await click();
+    await sleep(300);
+    return true;
+  };
   const termCmd = async (cmd, marker = null, execRe = null, execTimeoutMs = 120000) => {
     const before = logLines(b.logPath).length;
     // Round 3 (runs 43690022156/43690022280): CLEAR the input
@@ -1561,15 +1649,22 @@ async function main() {
     // partial text); the Terminal app itself is untouched.
     await key("ret");
     await sleep(2000);
+    await clickTerminalInputNow();
     await typeText(cmd);
     await key("ret");
-    const exec = await waitForLog(
-      b.logPath,
+    // Round 9: the EXEC wait is Terminal-scoped (see
+    // waitForTerminalExec) — an unscoped wait passes on the
+    // Browser app's refresh-loop traffic while the Terminal never
+    // ran the command. Verbs with no Terminal echo (activate,
+    // close) are never emitted by any other app, so they keep the
+    // plain wait.
+    const execPattern =
       execRe ??
-        new RegExp(`EXEC sevyn ${cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} -> 0`),
-      execTimeoutMs,
-      before,
-    );
+      new RegExp(`EXEC sevyn ${cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} -> 0`);
+    const echoRe = terminalEchoRe(cmd);
+    const exec = echoRe
+      ? await waitForTerminalExec(b.logPath, execPattern, echoRe, execTimeoutMs, before)
+      : await waitForLog(b.logPath, execPattern, execTimeoutMs, before);
     let hit = null;
     if (marker) {
       hit = await waitForLog(b.logPath, marker, 15000, before);
@@ -2218,6 +2313,60 @@ async function main() {
     return moved ? { before, after } : null;
   };
 
+  // Drag the Browser window BACK to where an earlier drag moved it
+  // from (round 8: the verified drag-back, extracted here in round
+  // 9 so steps 5–6 reuse the exact same loop). `aside` is the
+  // { before, after } record of the aside drag; the return is by
+  // the ACTUAL move — never the requested delta. The after rect's
+  // left edge is screen-clamped (0) when the window was dragged
+  // partly off-screen, so a left-edge delta understates the move
+  // (dbdda2ae: left 107->0 suggests -107, but the right edge
+  // 904->597 proves -307): use the right edge when the left is
+  // clamped at 0, else the left edge. Retried up to twice by the
+  // measured REMAINING delta, verified against the pre-drag
+  // position within REFOCUS_JUMP_PX. Returns { ok, detail,
+  // attempts }; a window that never returns is reported by the
+  // caller as its own failing check, never silently accepted.
+  const dragBrowserBack = async (aside, tagBase) => {
+    let backOk = false;
+    let backDetail = "";
+    let backAttempts = 0;
+    let backCur = aside.after;
+    for (let attempt = 0; attempt < 3 && !backOk; attempt++) {
+      const dxLeft = aside.before.left - backCur.left;
+      const dxRight = aside.before.right - backCur.right;
+      const dxBack = backCur.left > 0 ? dxLeft : dxRight;
+      const dyBack = aside.before.top - backCur.top;
+      const back = await dragBrowserWindow(
+        dxBack,
+        dyBack,
+        attempt === 0 ? tagBase : `${tagBase}-retry${attempt}`,
+      );
+      backAttempts++;
+      if (back?.after) {
+        backOk = rectsWithin(back.after, aside.before, REFOCUS_JUMP_PX);
+        backDetail =
+          `attempt ${backAttempts}: ${JSON.stringify(backCur)} -> ` +
+          `${JSON.stringify(back.after)} (target ${JSON.stringify(aside.before)})`;
+        backCur = back.after;
+      } else if (back?.before) {
+        // The drag ran but its after-frame shows no header (still
+        // covered, or the drag had no effect): the window is where
+        // the before frame saw it — retry from there.
+        backDetail =
+          `attempt ${backAttempts}: no header in the after frame ` +
+          `(before ${JSON.stringify(back.before)})`;
+        backCur = back.before;
+      } else {
+        // No header in the before frame either: no position to
+        // compute a retry delta from — stop.
+        backDetail = `attempt ${backAttempts}: no Browser header in the before frame`;
+        break;
+      }
+    }
+    return { ok: backOk, detail: backDetail, attempts: backAttempts };
+  };
+
   // Terminal launch (setup for step 2: every `browser ...` command
   // below is typed into it).
   {
@@ -2691,43 +2840,14 @@ async function main() {
         // has not returned FAILS the drag-back step explicitly
         // instead of the run proceeding to refocus with the
         // Terminal covered and no record of why.
-        let backOk = false;
-        let backDetail = "";
-        let backAttempts = 0;
-        let backCur = aside.after;
-        for (let attempt = 0; attempt < 3 && !backOk; attempt++) {
-          const dxLeft = aside.before.left - backCur.left;
-          const dxRight = aside.before.right - backCur.right;
-          const dxBack = backCur.left > 0 ? dxLeft : dxRight;
-          const dyBack = aside.before.top - backCur.top;
-          const back = await dragBrowserWindow(
-            dxBack,
-            dyBack,
-            attempt === 0 ? "back" : `back-retry${attempt}`,
-          );
-          backAttempts++;
-          if (back?.after) {
-            backOk = rectsWithin(back.after, aside.before, REFOCUS_JUMP_PX);
-            backDetail =
-              `attempt ${backAttempts}: ${JSON.stringify(backCur)} -> ` +
-              `${JSON.stringify(back.after)} (target ${JSON.stringify(aside.before)})`;
-            backCur = back.after;
-          } else if (back?.before) {
-            // The drag ran but its after-frame shows no header
-            // (still covered, or the drag had no effect): the
-            // window is where the before frame saw it — retry
-            // from there.
-            backDetail =
-              `attempt ${backAttempts}: no header in the after frame ` +
-              `(before ${JSON.stringify(back.before)})`;
-            backCur = back.before;
-          } else {
-            // No header in the before frame either: no position
-            // to compute a retry delta from — stop.
-            backDetail = `attempt ${backAttempts}: no Browser header in the before frame`;
-            break;
-          }
-        }
+        // Round 9: the verified drag-back loop lives in
+        // dragBrowserBack now (steps 5–6 reuse it) — same tags,
+        // same deltas, same detail strings as the round-8 inline
+        // loop it replaces.
+        const back = await dragBrowserBack(aside, "back");
+        const backOk = back.ok;
+        const backDetail = back.detail;
+        const backAttempts = back.attempts;
         check(
           "browser-app: Browser window dragged back to its place after the green raise",
           backOk,
@@ -2803,6 +2923,24 @@ async function main() {
   // this can be told apart from page A, which is red.
   let linkFrame = null;
   let linkClick = null;
+  // Round 9 (run 43720789358, head 242ad0ba): the Browser window's
+  // aside record for the steps 5–6 occlusion raise. After step 4's
+  // drag-back the Browser window is back on top and the refocus
+  // raised the Terminal frontmost, so Chromium sits ENTIRELY
+  // behind Browser + Terminal — the 242ad0ba link-before frame has
+  // zero blue/red/green pixels in 60 s of polling, and the raise
+  // helpers can only click a VISIBLE page pixel, so they can never
+  // raise it (chicken-and-egg). The fix reuses step 4's proven
+  // move: drag the Browser window aside again (same -400,+260
+  // drag) to expose Chromium's top strip — the Browser header is
+  // fully visible in the occluded frame (rows y193–234, x107–904),
+  // so the drag starts on a verified header pixel — then raise
+  // from the exposed strip. The window stays aside through step 6
+  // (its chromeless raise needs the same exposure) and is dragged
+  // back, verified, after the chromeless measurement, before step
+  // 7 — so step 8's close-button click still finds the window in
+  // place.
+  let aside5 = null;
   {
     await refocusTerminal();
     const { exec } = await termCmd("browser open http://10.0.2.2:18080/m13-link.html");
@@ -2820,11 +2958,23 @@ async function main() {
     );
   }
   {
+    // Round 9: drag the Browser window aside FIRST — with Chromium
+    // fully occluded there is no visible blue pixel to raise from,
+    // and raiseChromiumCorner would poll 60 s and fail. The drag
+    // is the same one step 4 uses; if it cannot start (no header)
+    // the raise below still runs and fails explicitly, exactly as
+    // before — the drag is never a silent precondition.
+    aside5 = await dragBrowserWindow(-400, 260, "aside-link");
     const raised = await raiseChromiumCorner(0, 0, 255, "link");
     check(
       "link-nav: the link page's blue viewport is on screen",
       !!raised && raised.count > 40000,
-      raised ? `blue=${raised.count}px` : "no blue on screen",
+      raised
+        ? `blue=${raised.count}px` +
+            (aside5?.after
+              ? ` (Browser window dragged aside ${JSON.stringify(aside5.before)} -> ${JSON.stringify(aside5.after)} to expose Chromium)`
+              : " (no aside drag — Browser window header not found)")
+        : "no blue on screen",
     );
     if (raised) {
       // Frontmost assert, from a fresh settled frame taken after
@@ -3016,6 +3166,36 @@ async function main() {
       ? `measured Chromium window ${chromeWidth}x${chromeHeight} aspect=${chromeAspect.toFixed(2)} (launched 800x348) ${JSON.stringify(chromeBox)}`
       : "no red bbox (page never rendered)",
   );
+  // Round 9: drag the Browser window back after the steps 5–6
+  // occlusion raise (same verified dragBrowserBack as step 4) —
+  // steps 7–8 need it in place, and step 8's close-button click
+  // re-derives its header fresh. A window that never returns
+  // FAILS this check explicitly instead of the run proceeding
+  // with the Terminal covered and no record of why. When no aside
+  // drag ran (Chromium was raisable without one) there is nothing
+  // to return; when the aside drag ran but its after-frame showed
+  // no header, there is no verified position to drag back from,
+  // and that fails explicitly too.
+  {
+    let back5Ok = true;
+    let back5Note = "no aside drag ran (Chromium was raisable without one)";
+    if (aside5?.after) {
+      const back5 = await dragBrowserBack(aside5, "back-link");
+      back5Ok = back5.ok;
+      back5Note = back5.ok
+        ? `${back5.detail} — verified within ${REFOCUS_JUMP_PX}px`
+        : `${back5.detail} after ${back5.attempts} attempt(s) — the window did not return; the Terminal may still be covered`;
+    } else if (aside5) {
+      back5Ok = false;
+      back5Note =
+        "aside drag ran but its after-frame showed no Browser header — no verified position to drag back from";
+    }
+    check(
+      "link-nav/chromeless: Browser window dragged back after the occlusion raise",
+      back5Ok,
+      back5Note,
+    );
+  }
 
   // 7. Close-tab (was: tab switching — CANNOT work under the
   // single-tab contract: the red tab from step 3 was closed when
@@ -3121,15 +3301,64 @@ async function main() {
       );
       await sleep(300);
       await click();
-      await sleep(1000);
-      const shotAfter = await shot(b.qmp, join(OUT, "m13-shot-close-after.ppm"));
-      if (!findWindowHeader(shotAfter, 14, 165, 233)) {
+      // Round 9 (run 43720789358, head 242ad0ba): the click WORKED
+      // but the check failed anyway — the quit-Chromium-then-close
+      // path takes longer than 1 s, so the single +1 s frame still
+      // showed the window (`m13-shot-close-after.ppm`: cursor on
+      // the X, window still present) and the code declared a miss.
+      // The boot log proves the click: `[1180749] EXEC sevyn
+      // browser quit -> 0` and `[1181080] HOST app exiting`, and
+      // the final frame confirms the window is gone. So poll for
+      // the window's disappearance (bounded, up to 10 s) instead
+      // of one +1 s shot — gone means BOTH the strict and the
+      // partial header scans find nothing, so a partly-covered
+      // header is never mistaken for a closed window. The close
+      // still fails explicitly when the window is still present
+      // after the poll.
+      let gone = false;
+      for (let i = 0; i < 10 && !gone; i++) {
+        await sleep(1000);
+        const shotAfter = await shot(b.qmp, join(OUT, "m13-shot-close-after.ppm"));
+        gone =
+          !findWindowHeader(shotAfter, 14, 165, 233) &&
+          !findWindowHeaderPartial(shotAfter, 14, 165, 233);
+      }
+      if (gone) {
         closedHow = "close-button click";
       } else {
         closeNote =
-          "close-button click missed (Browser window still present); falling back to appd CLOSE";
+          "close-button click did not close the window within 10s; falling back to appd CLOSE";
         const closeOk = await appdCmd(b, "CLOSE browser", /APPD CLOSE OK browser/);
-        if (closeOk) closedHow = "appd CLOSE browser (fallback — close click missed)";
+        if (closeOk) {
+          closedHow = "appd CLOSE browser (fallback — close click missed)";
+        } else {
+          // Round 9 race: the click DID work (the quit line ran)
+          // but the app exited between the last poll shot and the
+          // fallback, so appd reports `APPD CLOSE FAIL browser
+          // not-running` — that is already-closed, not a failed
+          // close. Both halves are required: the quit line proves
+          // the in-app teardown ran, and the not-running line
+          // proves the fallback found nothing left to close. A
+          // not-running without a quit line still fails below.
+          const quitLine = await waitForLog(
+            b.logPath,
+            /EXEC sevyn browser quit -> 0/,
+            2000,
+            closeBefore,
+          );
+          const notRunning = await waitForLog(
+            b.logPath,
+            /APPD CLOSE FAIL browser not-running/,
+            2000,
+            closeBefore,
+          );
+          if (quitLine && notRunning) {
+            closedHow =
+              "close-button click (appd CLOSE reported not-running — already closed)";
+            closeNote =
+              "close-button click closed the app; the appd CLOSE fallback raced the exit (not-running)";
+          }
+        }
       }
     } else {
       closeNote = "Browser window not found in screendump; trying appd CLOSE";
@@ -3144,7 +3373,10 @@ async function main() {
     (closedHow || "could not close the Browser app") +
       (closeNote ? ` — ${closeNote}` : ""),
   );
-  if (closedHow === "close-button click") {
+  // Round 9: closedHow may carry a suffix now (the not-running
+  // race above) — the quit-line proof still applies to any
+  // close-button path.
+  if (closedHow?.startsWith("close-button click")) {
     // The in-app path: the app's close button runs `sevyn browser
     // quit` (via the host exec bridge, which logs the EXEC line)
     // before closing itself. The line must appear after the close

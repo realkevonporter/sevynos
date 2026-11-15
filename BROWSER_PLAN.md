@@ -308,6 +308,63 @@ viewport proves the link rendered).
 Harness test: `~/workspace/ci-watch/r7-harness-test.mjs` (real
 dbdda2ae frames + boot logs in `~/workspace/ci-watch/`).
 
+Round 8 (PR #117 CI, head 0f82d7d9, run 43715706248): 16/18 —
+the round-7 refocus work landed: the drag-back ran instead of
+returning null (partial before-scan + verified retry loop + its
+own explicit failing check), and the dock-relaunch readiness wait
+(30 s, frame-proven) stopped the verify window expiring while the
+relaunched Terminal was still booting. Harness test:
+`~/workspace/ci-watch/r8-harness-test.mjs`.
+
+Round 9 (PR #117 CI, head 242ad0ba, runs 43720789371 (m5) /
+43720789358 (m13)): 16/18 — m5 46/47, m13 56/62. Round 8 fixed
+the refocus (steps 5–9 ran for the first time; the new drag-back
+check passed on attempt 1). The two remaining failures are both
+harness, not product:
+(1) Occlusion (m13 checks 46–48, 50–51): after step 4's
+drag-back the Browser window is back on top and the refocus
+raised the Terminal frontmost, so Chromium sits ENTIRELY behind
+Browser + Terminal — the link-before frame has zero blue/red/
+green pixels in 60 s of polling, and the raise helpers can only
+click a VISIBLE page pixel. Fix: reuse step 4's drag — drag the
+Browser window aside again (same -400,+260; the header is fully
+visible in the occluded frame, rows y193–234, x107–904, so the
+drag starts on a verified header pixel) to expose Chromium's top
+strip, raise from it, keep the window aside through step 6, and
+drag it back verified (dragBrowserBack, now shared with step 4)
+after the chromeless measurement, with its own explicit failing
+check. The raise itself is the frame proof (post-click count +
+width >= 400); a failed aside drag never silently proceeds
+occluded — the raise still runs and fails explicitly.
+(2) Lifecycle close (m13 check 56, FALSE failure): the X click
+worked (boot log `[1180749] EXEC sevyn browser quit -> 0`,
+`[1181080] HOST app exiting`, final frame confirms the window
+gone) but the single +1 s verify shot still showed the window,
+so the code declared a miss and its appd CLOSE fallback raced
+the exit (`APPD CLOSE FAIL browser not-running`). Fix: poll for
+the window's disappearance up to 10 s (strict AND partial scans
+both null), and treat post-quit not-running as already-closed
+(quit line + not-running line both required); the close still
+fails explicitly if the window is present after the poll.
+(3) Focus hole (m5 check 43, and latent in m13): the Terminal
+never executed `browser tabs` in 8 minutes (zero `JS TERMINAL`
+lines after frame 420000) while every verifyFocus + exec-wait
+"passed" on the Browser app's refresh loop, which emits the SAME
+`EXEC sevyn browser status/tabs/open` lines. Discriminator,
+proven on both 242ad0ba boot logs: the Terminal echoes every
+command it runs as `JS TERMINAL browser-<verb> ...` 2–46 ms
+after its EXEC line; the Browser app echoes `JS BROWSER ...`.
+Fix: termCmd's EXEC wait is Terminal-scoped
+(waitForTerminalExec: EXEC + its own verb's echo within 16 log
+lines and 5000 guest-ms; a `JS BROWSER` line first ends the
+search). `activate`/`close` have no echo but no other app runs
+those verbs, so their EXEC lines need no scoping. termCmd also
+re-clicks the Terminal input from a FRESH guarded frame
+immediately before typing, so the click that focuses the input
+is the one for that exact command.
+Harness test: `~/workspace/ci-watch/r9-harness-test.mjs` (real
+242ad0ba frames + boot logs in `~/workspace/ci-watch/`).
+
 ### Single-tab by design (M13)
 
 M13 is single-tab by design: each `browser open` replaces the

@@ -117,6 +117,68 @@ async function waitForLog(path, pattern, timeoutMs, sinceLines = 0) {
   return null;
 }
 
+// Round 9 (PR #117, run 43720789371, head 242ad0ba): a
+// Terminal-SCOPED EXEC wait. The shared boot log carries EXEC lines
+// from every app, and the Browser app's refresh loop emits the
+// SAME `EXEC sevyn browser status/tabs/open` lines the Terminal
+// emits — so waitForLog on an EXEC pattern "verifies" focus and
+// "proves" a command ran while the Terminal never received input
+// at all (m5 check 43: zero `JS TERMINAL` lines after frame
+// 420000, yet every verifyFocus + exec-wait passed on the
+// Browser app's own traffic for ~8 minutes). The discriminator,
+// proven on both 242ad0ba boot logs: the Terminal echoes every
+// command it runs as `JS TERMINAL browser-<verb> ...` 2–46 ms
+// after its EXEC line, while the Browser app echoes `JS BROWSER
+// ...` after its own. So an EXEC line counts as
+// Terminal-originated ONLY when its own verb's `JS TERMINAL`
+// echo follows it within 16 log lines and 5000 guest-ms (the
+// serial log duplicates every line, so 16 lines is ~8 logical
+// lines; the echo is normally 1–2). A `JS BROWSER` line first
+// ends the search for that EXEC — the echo belongs to a later
+// Terminal command, not this one. Returns the EXEC line, or null
+// on timeout. Callers that pass no echoRe (verbs the Browser app
+// never emits) keep using waitForLog directly.
+async function waitForTerminalExec(path, execRe, echoRe, timeoutMs, sinceLines = 0) {
+  const deadline = Date.now() + timeoutMs;
+  const guestMs = (line) => {
+    const m = line.match(/^\[(\d+)\]/);
+    return m ? parseInt(m[1], 10) : null;
+  };
+  while (Date.now() < deadline) {
+    const lines = logLines(path).slice(sinceLines);
+    for (let i = 0; i < lines.length; i++) {
+      if (!execRe.test(lines[i])) continue;
+      for (let j = i + 1; j < Math.min(i + 17, lines.length); j++) {
+        if (/JS BROWSER /.test(lines[j])) break;
+        if (echoRe.test(lines[j])) {
+          const eMs = guestMs(lines[i]);
+          const tMs = guestMs(lines[j]);
+          if (eMs === null || tMs === null || (tMs - eMs >= 0 && tMs - eMs <= 5000))
+            return lines[i];
+          break;
+        }
+      }
+    }
+    await sleep(500);
+  }
+  return null;
+}
+
+// The Terminal app's per-verb echo for a `browser ...` command, or
+// null when the verb has no echo. `activate`/`close` have no `JS
+// TERMINAL` echo at all (both 242ad0ba logs: their EXEC lines are
+// followed by no JS line within 16 lines) — but no other app runs
+// those verbs either (the Browser app only ever runs open/status/
+// tabs), so their EXEC lines are already Terminal-specific and
+// need no scoping. `quit` is likewise never waited on via termCmd.
+function terminalEchoRe(cmd) {
+  const verb = cmd.split(" ")[1];
+  if (verb === "status") return /JS TERMINAL browser-status/;
+  if (verb === "tabs") return /JS TERMINAL browser-tabs/;
+  if (verb === "open") return /JS TERMINAL browser-open/;
+  return null;
+}
+
 // --- PPM parsing + pixel counting (as m2/m3-check) ---
 function parsePPM(path) {
   const buf = readFileSync(path);
@@ -1363,6 +1425,32 @@ async function main() {
   // execRe overrides the expected EXEC line (the default is `-> 0`);
   // pass /-> [01]/ when the command legitimately exits 1, e.g.
   // `browser status` while Chromium is still starting.
+  // Round 9 (PR #117, run 43720789371, head 242ad0ba): re-click
+  // the Terminal's input immediately before typing a command. The
+  // refocus click that verified focus can LAND (nodeId 56,
+  // TextInput) and the typed text still go nowhere — in the
+  // failing run the Terminal never executed `browser tabs` in 8
+  // minutes while the refocus click had landed, most plausibly
+  // lost to a focus transition while Chromium was still
+  // mapping/raising. So the click that focuses the input for THIS
+  // command is taken from a FRESH frame right before typing,
+  // guarded by refocusInputPointSafe (the point must provably be
+  // the input row — a blind click at the last-known point can land
+  // on a dock icon when the Terminal is hidden). When the guard
+  // refuses, the command is typed anyway (same as before — the
+  // caller already refocused); the re-click is best-effort, never
+  // a gate.
+  const clickTerminalInputNow = async () => {
+    if (!termPos) return false;
+    const frame = await shot(b.qmp, join(OUT, "m5-shot-termcmd-input.ppm"));
+    const pt = refocusInputPointSafe(termPos, frame, frame.width, frame.height);
+    if (!pt) return false;
+    await moveTo(pt.x, pt.y, frame.width, frame.height);
+    await sleep(300);
+    await click();
+    await sleep(300);
+    return true;
+  };
   const termCmd = async (cmd, marker = null, execRe = null, execTimeoutMs = 120000) => {
     const before = logLines(b.logPath).length;
     // Round 3 (run 43690022156): CLEAR the input before typing.
@@ -1385,15 +1473,22 @@ async function main() {
     // partial text); the Terminal app itself is untouched.
     await key("ret");
     await sleep(2000);
+    await clickTerminalInputNow();
     await typeText(cmd);
     await key("ret");
-    const exec = await waitForLog(
-      b.logPath,
+    // Round 9: the EXEC wait is Terminal-scoped (see
+    // waitForTerminalExec) — an unscoped wait passes on the
+    // Browser app's refresh-loop traffic while the Terminal never
+    // ran the command. Verbs with no Terminal echo (activate,
+    // close) are never emitted by any other app, so they keep the
+    // plain wait.
+    const execPattern =
       execRe ??
-        new RegExp(`EXEC sevyn ${cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} -> 0`),
-      execTimeoutMs,
-      before,
-    );
+      new RegExp(`EXEC sevyn ${cmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} -> 0`);
+    const echoRe = terminalEchoRe(cmd);
+    const exec = echoRe
+      ? await waitForTerminalExec(b.logPath, execPattern, echoRe, execTimeoutMs, before)
+      : await waitForLog(b.logPath, execPattern, execTimeoutMs, before);
     let hit = null;
     if (marker) {
       hit = await waitForLog(b.logPath, marker, 15000, before);
