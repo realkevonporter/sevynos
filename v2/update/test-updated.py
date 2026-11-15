@@ -16,6 +16,11 @@ Coverage:
     channel-mismatch / no-trusted-keys — all refused (fail-closed)
   - apply: verified artifacts land in the idle slot, state flips,
     reboot requested; a bad-hash apply changes nothing
+  - ESP sync geometry (M12 Genesis): an update whose three-copy peak
+    would overflow a small ESP lands with the reworked sync (two-copy
+    peak), a too-small ESP refuses loudly BEFORE copying (ESP
+    byte-identical, state unflipped), and a missing good slot
+    degrades .prev explicitly (update lands, no "previous" entry)
   - the sevyn CLI (status / check / channel / apply, ai list /
     select / status / ask)
   - no-data-disk degradation
@@ -865,6 +870,247 @@ def main():
           grub)
     os.close(master2)
     os.close(slave2)
+
+    # --- ESP sync geometry: the M12 Genesis nightly ---------------
+    # The old sync preserved .prev FIRST, so at the peak the ESP held
+    # old + .prev + temp-new — three copies of the boot set. Once the
+    # initramfs grew past ~366 MiB that peak passed the 1152 MiB ESP
+    # and the update died mid-copy with ENOSPC (the M12 nightly's
+    # sevynos.img went missing for the same growth, and the fd584a34
+    # in-place update never landed on the GF65 for this reason).
+    # The rework deletes .prev first and re-creates it from the good
+    # slot afterwards (peak: two copies), and refuses loudly BEFORE
+    # copying when even that would not fit.
+    # SEVYN_UPDATE_ESP_SIZE_BYTES caps the fixture ESP so the host
+    # tests prove the space logic on a small ESP.
+    # Geometry (MiB): old kernel/initramfs 1/48, new 1/52, ESP 144.
+    #   Old order peak: 49 (start) + 1 (.prev kern) + 48 (.prev init)
+    #     + 1 (new kern tmp) + 52 (new init tmp) = 151 > 144 — fails.
+    #   New order peak: 49 + 52 (new init tmp) = 101, then 53 + 1 + 48
+    #     (.prev re-creation) = 102; 102 + 32 margin = 134 <= 144 —
+    #     lands, .prev preserved. The old/new gap (49 MiB) must exceed
+    #     the 32 MiB margin, or no ESP size discriminates the two.
+    def big_image(name, size_bytes, marker):
+        p = server_dir / name
+        data = marker.encode()
+        with open(p, "wb") as f:
+            f.write(data)
+            remaining = size_bytes - len(data)
+            block = b"\0" * (1024 * 1024)
+            while remaining > 0:
+                n = min(len(block), remaining)
+                f.write(block[:n])
+                remaining -= n
+        return p
+
+    # The three cases share one set of feed files: /tmp on some hosts
+    # is a small tmpfs, so each case's fixture dirs are removed once
+    # their assertions are done.
+    kern_a_geo = big_image("vmlinuz-geo-a", 1024 * 1024, "VMLINUZ-GEO-A\n")
+    init_a_geo = big_image("initramfs-geo-a.cpio.gz", 48 * 1024 * 1024,
+                           "INITRAMFS-GEO-A\n")
+    kern_b_geo = big_image("vmlinuz-geo-b", 1024 * 1024, "VMLINUZ-GEO-B\n")
+    init_b_geo = big_image("initramfs-geo-b.cpio.gz", 52 * 1024 * 1024,
+                           "INITRAMFS-GEO-B\n")
+
+    def geo_fixture(tag, esp_bytes, with_good_slot=True):
+        """A fresh data dir + ESP dir with 1 MiB / 48 MiB old files.
+        Returns (data_dir, esp_dir, kern_b, init_b)."""
+        gd = tmp / f"data-{tag}"
+        (gd / "slots" / "A").mkdir(parents=True)
+        (gd / "slots" / "B").mkdir(parents=True)
+        (gd / "slots" / "A" / "vmlinuz").write_bytes(kern_a_geo.read_bytes())
+        (gd / "slots" / "A" / "initramfs.cpio.gz").write_bytes(
+            init_a_geo.read_bytes())
+        (gd / "slot-state.json").write_text(json.dumps(
+            {"active": "A", "good": "A", "attempts": 0,
+             "version": f"geo-{tag}-1"}, indent=2) + "\n")
+        (gd / "update-config.json").write_text(json.dumps(
+            {"channel": "nightly", "url": feed_url}, indent=2) + "\n")
+        gesp = tmp / f"esp-{tag}"
+        (gesp / "EFI" / "ubuntu").mkdir(parents=True)
+        (gesp / "vmlinuz").write_bytes(kern_a_geo.read_bytes())
+        (gesp / "initramfs.cpio.gz").write_bytes(init_a_geo.read_bytes())
+        (gesp / "EFI" / "ubuntu" / "grub.cfg").write_text(
+            "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
+            "set timeout=3\n"
+            "set default=0\n"
+            "menuentry \"SevynOS\" {\n"
+            "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=A\n"
+            "    initrd /initramfs.cpio.gz\n"
+            "}\n")
+        (tmp / f"os-version-{tag}").write_text(f"geo-{tag}-1\n")
+        (tmp / f"health-{tag}.log").write_text("")
+        (tmp / f"mounts-{tag}").write_text(
+            f"{tmp / 'data-dev'} {gd} ext4 rw 0 0\n")
+        if not with_good_slot:
+            (gd / "slots" / "A" / "vmlinuz").unlink()
+            (gd / "slots" / "A" / "initramfs.cpio.gz").unlink()
+        return gd, gesp, kern_b_geo, init_b_geo
+
+    def geo_env(tag, gd, gesp, esp_bytes):
+        return {
+            "SEVYN_UPDATE_SOCK": str(tmp / f"update-geo-{tag}.sock"),
+            "SEVYN_UPDATE_DATA": str(gd),
+            "SEVYN_UPDATE_TRUSTED_KEYS":
+                str(tmp / "trusted-update-keys.json"),
+            "SEVYN_UPDATE_VERSION_FILE": str(tmp / f"os-version-{tag}"),
+            "SEVYN_UPDATE_TMP": str(tmp / "dl"),
+            "SEVYN_UPDATE_HEALTH_FILE": str(tmp / f"health-{tag}.log"),
+            "SEVYN_UPDATE_SLOT": "A",
+            "SEVYN_UPDATE_ESP_DIR": str(gesp),
+            "SEVYN_UPDATE_ESP_SIZE_BYTES": str(esp_bytes),
+            "SEVYN_UPDATE_PROC_MOUNTS": str(tmp / f"mounts-{tag}"),
+            "SEVYN_UPDATE_BY_PARTUUID_DIR": str(tmp / "by-partuuid"),
+        }
+
+    def geo_reboots():
+        return len(reboot_marker.read_text().splitlines()) \
+            if reboot_marker.exists() else 0
+
+    def geo_wait_reboot(n_before, timeout=10.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if geo_reboots() > n_before:
+                return True
+            time.sleep(0.1)
+        return False
+
+    # Case 1 — fits with the reworked order, would overflow the old
+    # three-copy order: the update lands and .prev is preserved.
+    gd1, gesp1, kern_b1, init_b1 = geo_fixture("fits", 144 * 1024 * 1024)
+    master3, slave3 = pty.openpty()
+    env_geo1 = geo_env("fits", gd1, gesp1, 144 * 1024 * 1024)
+    env_geo1["SEVYN_UPDATE_CTL"] = os.ttyname(slave3)
+    d_geo1 = Daemon(tmp, env_geo1)
+    check("geometry: daemon starts (144 MiB ESP)", d_geo1.start())
+    write_feed(server_dir, key_file, "geo-fits-2", "nightly",
+               artifacts_for(kern_b1, init_b1))
+    n_rb = geo_reboots()
+    check("geometry: APPLY accepted",
+          d_geo1.sock("APPLY") == "OK applying geo-fits-2")
+    check("geometry: apply requested a reboot",
+          geo_wait_reboot(n_rb))
+    st_geo1 = json.loads((gd1 / "slot-state.json").read_text())
+    check("geometry: apply flipped state to B (good stays A)",
+          st_geo1["active"] == "B" and st_geo1["good"] == "A" and
+          st_geo1["version"] == "geo-fits-2", str(st_geo1))
+    check("geometry: ESP /vmlinuz is the new kernel",
+          sha256_file(gesp1 / "vmlinuz") == sha256_file(kern_b1))
+    check("geometry: ESP /initramfs.cpio.gz is the new initramfs",
+          sha256_file(gesp1 / "initramfs.cpio.gz") ==
+          sha256_file(init_b1))
+    check("geometry: ESP /vmlinuz.prev preserves the old kernel",
+          sha256_file(gesp1 / "vmlinuz.prev") ==
+          sha256_file(kern_a_geo))
+    check("geometry: ESP /initramfs.prev.cpio.gz preserves the old "
+          "initramfs",
+          sha256_file(gesp1 / "initramfs.prev.cpio.gz") ==
+          sha256_file(init_a_geo))
+    grub_geo1 = (gesp1 / "EFI" / "ubuntu" / "grub.cfg").read_text()
+    check("geometry: grub.cfg keeps the previous entry",
+          "linux /vmlinuz.prev console=tty0 console=ttyS0 sevyn.slot=A"
+          in grub_geo1 and
+          "initrd /initramfs.prev.cpio.gz" in grub_geo1, grub_geo1)
+    check("geometry: ESP sync leaves no temp files",
+          not list(gesp1.glob("*.tmp.*")))
+    d_geo1.stop()
+    os.close(master3)
+    os.close(slave3)
+    shutil.rmtree(gd1)
+    shutil.rmtree(gesp1)
+
+    # Case 2 — too small even for the reworked order: the update is
+    # refused LOUDLY before copying anything. The ESP stays
+    # byte-identical and the slot state is not flipped.
+    gd2, gesp2, kern_b2, init_b2 = geo_fixture("nofit", 96 * 1024 * 1024)
+    grub_before = (gesp2 / "EFI" / "ubuntu" / "grub.cfg").read_text()
+    master4, slave4 = pty.openpty()
+    env_geo2 = geo_env("nofit", gd2, gesp2, 96 * 1024 * 1024)
+    env_geo2["SEVYN_UPDATE_CTL"] = os.ttyname(slave4)
+    d_geo2 = Daemon(tmp, env_geo2)
+    check("geometry no-fit: daemon starts (96 MiB ESP)", d_geo2.start())
+    write_feed(server_dir, key_file, "geo-nofit-2", "nightly",
+               artifacts_for(kern_b2, init_b2))
+    n_rb = geo_reboots()
+    check("geometry no-fit: APPLY accepted",
+          d_geo2.sock("APPLY") == "OK applying geo-nofit-2")
+    check("geometry no-fit: refusal is loud (pre-check message)",
+          d_geo2.watcher.wait_for("ESP sync needs", timeout=15) and
+          d_geo2.watcher.wait_for("refusing before copying",
+                                  timeout=15))
+    time.sleep(1.0)
+    check("geometry no-fit: no reboot requested",
+          geo_reboots() == n_rb)
+    st_geo2 = json.loads((gd2 / "slot-state.json").read_text())
+    check("geometry no-fit: slot state not flipped",
+          st_geo2["active"] == "A" and st_geo2["good"] == "A" and
+          st_geo2["version"] == "geo-nofit-1", str(st_geo2))
+    check("geometry no-fit: ESP /vmlinuz unchanged",
+          sha256_file(gesp2 / "vmlinuz") ==
+          sha256_file(kern_a_geo))
+    check("geometry no-fit: ESP /initramfs.cpio.gz unchanged",
+          sha256_file(gesp2 / "initramfs.cpio.gz") ==
+          sha256_file(init_a_geo))
+    check("geometry no-fit: no .prev files created",
+          not (gesp2 / "vmlinuz.prev").exists() and
+          not (gesp2 / "initramfs.prev.cpio.gz").exists())
+    check("geometry no-fit: grub.cfg unchanged",
+          (gesp2 / "EFI" / "ubuntu" / "grub.cfg").read_text() ==
+          grub_before)
+    check("geometry no-fit: ESP sync leaves no temp files",
+          not list(gesp2.glob("*.tmp.*")))
+    d_geo2.stop()
+    os.close(master4)
+    os.close(slave4)
+    shutil.rmtree(gd2)
+    shutil.rmtree(gesp2)
+
+    # Case 3 — the good slot's files are gone: .prev degrades
+    # explicitly. The update still lands, the GRUB "previous" entry
+    # is omitted, and the degradation is logged loudly.
+    gd3, gesp3, kern_b3, init_b3 = geo_fixture(
+        "degraded", 144 * 1024 * 1024, with_good_slot=False)
+    master5, slave5 = pty.openpty()
+    env_geo3 = geo_env("degraded", gd3, gesp3, 144 * 1024 * 1024)
+    env_geo3["SEVYN_UPDATE_CTL"] = os.ttyname(slave5)
+    d_geo3 = Daemon(tmp, env_geo3)
+    check("geometry degraded: daemon starts", d_geo3.start())
+    write_feed(server_dir, key_file, "geo-degraded-2", "nightly",
+               artifacts_for(kern_b3, init_b3))
+    n_rb = geo_reboots()
+    check("geometry degraded: APPLY accepted",
+          d_geo3.sock("APPLY") == "OK applying geo-degraded-2")
+    check("geometry degraded: apply requested a reboot",
+          geo_wait_reboot(n_rb))
+    check("geometry degraded: degradation is logged loudly",
+          d_geo3.watcher.wait_for("previous' entry will be omitted",
+                                  timeout=15))
+    st_geo3 = json.loads((gd3 / "slot-state.json").read_text())
+    check("geometry degraded: apply flipped state to B",
+          st_geo3["active"] == "B" and st_geo3["good"] == "A" and
+          st_geo3["version"] == "geo-degraded-2", str(st_geo3))
+    check("geometry degraded: ESP /vmlinuz is the new kernel",
+          sha256_file(gesp3 / "vmlinuz") == sha256_file(kern_b3))
+    check("geometry degraded: ESP /initramfs.cpio.gz is the new "
+          "initramfs",
+          sha256_file(gesp3 / "initramfs.cpio.gz") ==
+          sha256_file(init_b3))
+    check("geometry degraded: no .prev files on the ESP",
+          not (gesp3 / "vmlinuz.prev").exists() and
+          not (gesp3 / "initramfs.prev.cpio.gz").exists())
+    grub_geo3 = (gesp3 / "EFI" / "ubuntu" / "grub.cfg").read_text()
+    check("geometry degraded: grub.cfg has the default entry",
+          "linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=B"
+          in grub_geo3, grub_geo3)
+    check("geometry degraded: grub.cfg omits the previous entry",
+          "vmlinuz.prev" not in grub_geo3 and
+          "SevynOS (previous)" not in grub_geo3, grub_geo3)
+    d_geo3.stop()
+    os.close(master5)
+    os.close(slave5)
+    shutil.rmtree(gd3)
+    shutil.rmtree(gesp3)
 
     server.shutdown()
     os.close(master_fd)

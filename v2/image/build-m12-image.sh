@@ -715,6 +715,14 @@ cp "$ROOT/ai/grant.json" "$STAGE/usr/share/sevyn/ai/grant.json"
 # the REPL mode is what it gets). The settings file is the config the
 # M4 harness reads back through `sevyn files cat`.
 cp -a "$CODE_SERVER_DIR/." "$STAGE/usr/share/sevyn/code-server/"
+# Source maps are devtools-only (517 files, ~36 MB gzipped in the
+# initramfs, ~72 MB on the disk image) and code-server never reads
+# them at runtime. Dropping them is what keeps the M12 image under
+# GitHub's 2 GiB release-asset cap — the initramfs grew 366.5 -> 437.2
+# MiB with Genesis and the raw image hit 2,190,475,264 bytes.
+MAP_COUNT=$(find "$STAGE/usr/share/sevyn/code-server" -name '*.map' -type f | wc -l)
+find "$STAGE/usr/share/sevyn/code-server" -name '*.map' -type f -delete
+echo "code-server: dropped $MAP_COUNT *.map files (devtools-only)"
 cat >"$STAGE/root/.local/share/code-server/User/settings.json" <<'EOF'
 {
   "terminal.integrated.defaultProfile.linux": "sevyn",

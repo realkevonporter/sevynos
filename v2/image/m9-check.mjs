@@ -28,7 +28,11 @@
 //      driven over the updater control serial; the VM reboots; the
 //      harness then proves from the host that the ESP holds the new
 //      kernel + initramfs, the old ones are preserved as .prev, and
-//      grub.cfg has the default + previous entries.
+//      grub.cfg has the default + previous entries. The marker
+//      initramfs is padded with random bytes so the OLD sync's
+//      three-copy peak overflows the 1152 MiB ESP while the reworked
+//      two-copy peak lands — the phase must fail against the old
+//      daemon, or the regression ships silently (M12 Genesis).
 //   3. UEFI boot — post-apply: the updated image boots the NEW
 //      initramfs (the marker file reads back from the Terminal) and
 //      the new slot marks itself good.
@@ -1120,6 +1124,57 @@ async function buildTestFeed() {
     `gzip -dc ${join(OUT, "initramfs.cpio.gz")} | (cd ${markerDir} && cpio -id --quiet)`,
   ]);
   writeFileSync(join(markerDir, "m9-esp-marker"), "M9-ESP-TEST-2\n");
+  // ESP-sync geometry padding (M12 Genesis): the old sync preserved
+  // .prev FIRST, so its peak held THREE copies of the boot set
+  // (old + .prev + temp-new) on the 1152 MiB ESP. The M9 image's
+  // initramfs is small enough that three copies still fit, so the
+  // esp-apply phase would pass against the OLD daemon too and the
+  // regression would ship silently — exactly how the fd584a34
+  // in-place update died on the GF65. Pad the marker initramfs with
+  // incompressible random bytes so the old peak overflows the ESP
+  // while the reworked two-copy peak still lands with headroom.
+  //   old peak = 3K + 2I + I_new + E   (K kernel, I old initramfs,
+  //                                     I_new padded initramfs,
+  //                                     E other ESP contents)
+  //   new peak = 2K + I + I_new + E    (plus the daemon's 32 MiB
+  //                                     pre-check margin)
+  // The padding must also fit the data partition's two slots
+  // (2K + I + I_new). If the initramfs is already big enough that
+  // the old peak overflows on its own, no padding is needed.
+  const MiB = 1024 * 1024;
+  const kernSize = statSync(join(OUT, "vmlinuz")).size;
+  const initSize = statSync(join(OUT, "initramfs.cpio.gz")).size;
+  const espTotal = (await partRange(1)).sectors * 512;
+  const dataTotal = (await partRange(2)).sectors * 512;
+  const ESP_OTHER = 32 * MiB; // shim + GRUB + BOOTX64.EFI + grub.cfg
+  const oldPeakNoPad = 3 * kernSize + 3 * initSize + ESP_OTHER;
+  let padding = 0;
+  if (oldPeakNoPad <= espTotal) {
+    const lower = espTotal - oldPeakNoPad + 16 * MiB; // old peak must exceed the ESP by >= 16 MiB
+    const upper = Math.min(
+      espTotal - (2 * kernSize + 2 * initSize + ESP_OTHER) - 96 * MiB, // new peak + 32 margin + 64 headroom
+      dataTotal - 16 * MiB - (2 * kernSize + 2 * initSize), // data slots fit
+    );
+    if (lower > upper) {
+      throw new Error(
+        `m9 ESP geometry has no padding window: kernel ${(kernSize / MiB).toFixed(1)} MiB, ` +
+          `initramfs ${(initSize / MiB).toFixed(1)} MiB, ESP ${(espTotal / MiB).toFixed(1)} MiB, ` +
+          `data ${(dataTotal / MiB).toFixed(1)} MiB — need padding ${(lower / MiB).toFixed(1)}..${(upper / MiB).toFixed(1)} MiB`,
+      );
+    }
+    padding = Math.floor((lower + upper) / 2 / MiB) * MiB;
+    await execAsync("dd", [
+      "if=/dev/urandom",
+      `of=${join(markerDir, "m9-esp-padding")}`,
+      "bs=1M",
+      `count=${padding / MiB}`,
+      "status=none",
+    ]);
+  }
+  console.log(
+    `m9 esp geometry: kernel ${(kernSize / MiB).toFixed(1)} MiB, initramfs ${(initSize / MiB).toFixed(1)} MiB, ` +
+      `ESP ${(espTotal / MiB).toFixed(1)} MiB, padding ${(padding / MiB).toFixed(0)} MiB`,
+  );
   // The marker initramfs must report the FEED version (m9-test-2),
   // not the build version: the daemon's check_health syncs the slot
   // state's version to the running OS version, so a marker that still
@@ -1131,6 +1186,28 @@ async function buildTestFeed() {
     `(cd ${markerDir} && find . | cpio -o -H newc --quiet | gzip -9 > ${join(feedDir, "initramfs.cpio.gz")})`,
   ]);
   copyFileSync(join(OUT, "vmlinuz"), join(feedDir, "vmlinuz"));
+  // Prove the geometry with the MEASURED padded initramfs (the
+  // repack can shift gzip size by a few KB): the old three-copy peak
+  // must overflow the ESP — so the phase fails against the old
+  // daemon — while the new two-copy peak fits with headroom.
+  const newInitSize = statSync(join(feedDir, "initramfs.cpio.gz")).size;
+  const oldPeak = 3 * kernSize + 2 * initSize + newInitSize + ESP_OTHER;
+  const newPeak = 2 * kernSize + initSize + newInitSize + ESP_OTHER;
+  check(
+    "esp: test geometry — old three-copy peak overflows the ESP",
+    padding > 0 ? oldPeak > espTotal + 16 * MiB : oldPeak > espTotal,
+    `old peak ${(oldPeak / MiB).toFixed(1)} MiB vs ESP ${(espTotal / MiB).toFixed(1)} MiB (padding ${(padding / MiB).toFixed(0)} MiB)`,
+  );
+  check(
+    "esp: test geometry — new two-copy peak fits with headroom",
+    newPeak + 32 * MiB + 64 * MiB <= espTotal,
+    `new peak ${(newPeak / MiB).toFixed(1)} MiB, ESP ${(espTotal / MiB).toFixed(1)} MiB`,
+  );
+  check(
+    "esp: test geometry — data slots fit the new initramfs",
+    2 * kernSize + initSize + newInitSize <= dataTotal - 16 * MiB,
+    `slots ${((2 * kernSize + initSize + newInitSize) / MiB).toFixed(1)} MiB vs data ${(dataTotal / MiB).toFixed(1)} MiB`,
+  );
   // In anchor mode the signing key is the harness throwaway keypair
   // (generated by the anchor-mode setup before this runs); in
   // test-key mode it is the build-time TEST keypair.

@@ -20,24 +20,40 @@
  * M9 — ESP sync (bare metal): on hardware GRUB boots the kernel +
  * initramfs from the EFI System Partition, NOT from the data-disk
  * slots, so a slot update alone never boots. After the slot install
- * the apply child mounts the ESP (partition 1 of the data disk,
- * vfat), preserves the running kernel as /vmlinuz.prev +
- * /initramfs.prev.cpio.gz, copies the new slot's kernel +
- * initramfs into place (temp + fsync + sha256 re-read + rename),
- * and rewrites /EFI/ubuntu/grub.cfg atomically with two entries:
- * the default boots the new active slot from /vmlinuz, "SevynOS
- * (previous)" boots the good slot from /vmlinuz.prev. Any sync
- * failure aborts the apply WITHOUT flipping the state — the running
- * system keeps booting the old kernel. With no ESP at all (the
- * QEMU -kernel path: the data device is a whole disk, no partition
- * table) the sync is skipped and the slot flip still works, because
- * the harness boots -kernel from the active slot.
+ * the apply child mounts the ESP (found by its SEVYNESP label, not
+ * by partition number — M11 dual-boot), and syncs the new slot's
+ * kernel + initramfs into place (temp + fsync + sha256 re-read +
+ * rename), then rewrites /EFI/ubuntu/grub.cfg atomically with a
+ * default entry (the new active slot) and, when the previous kernel
+ * could be preserved, a "previous" entry booting the good slot
+ * from /vmlinuz.prev. Any sync failure aborts the apply WITHOUT
+ * flipping the state — the running system keeps booting the old
+ * kernel. With no ESP at all (the QEMU -kernel path: the data
+ * device is a whole disk, no partition table) the sync is skipped
+ * and the slot flip still works, because the harness boots -kernel
+ * from the active slot.
  *   On startup, when the booted slot's attempt counter reaches 2
  * and the booted slot is not the good slot, the daemon restores
  * the ESP from the good slot, flips active back to good, and
  * reboots. No auto-reboot timer: the fallback fires on the second
  * boot attempt (manual reboot / power-cycle after the first failed
  * boot), so a slow first boot can never false-trigger it.
+ *   ESP sync rework, 2026-11-15 (the M12 Genesis nightly exposed
+ * the flaw — see esp_sync_files): the old order preserved the
+ * running kernel as .prev FIRST and then wrote the new files, so
+ * at the peak the 1152 MiB ESP held old + .prev + temp-new —
+ * three copies of the boot set. Once the initramfs grew past
+ * ~366 MiB (Genesis: 437 MiB) that peak passed the ESP size and
+ * the update died mid-copy with ENOSPC. The new order deletes the
+ * stale .prev first, writes the new files, and re-creates .prev
+ * afterwards from the GOOD SLOT's copy on the data partition
+ * (the slot holds the same running kernel the ESP had) — peak is
+ * two copies, never three — and a free-space pre-check refuses
+ * the update loudly BEFORE copying anything when even that would
+ * not fit. When the good slot's files are gone, .prev degrades:
+ * the update still lands, the GRUB "previous" entry is omitted,
+ * and the degradation is logged loudly; the slot copy
+ * (esp_sync_restore) remains the real fallback.
  *
  * Feed protocol (established in the repo — tools/update-signing/ and
  * services/update/src/feed-signing.ts; this daemon re-implements it
@@ -112,6 +128,10 @@
  *     kernel cmdline carries no sevyn.slot=),
  *   SEVYN_UPDATE_ESP_DIR (host-test hook: use this directory as the
  *     ESP, skipping device discovery + mount),
+ *   SEVYN_UPDATE_ESP_SIZE_BYTES (host-test hook: pretend the ESP is
+ *     exactly this many bytes, measuring used space by walking the
+ *     ESP dir — so the host tests can prove the space logic on a
+ *     small fixture ESP instead of the host filesystem),
  *   SEVYN_UPDATE_PROC_MOUNTS (host-test hook: mounts table to read
  *     for ESP discovery; default /proc/mounts),
  *   SEVYN_UPDATE_BY_PARTUUID_DIR (host-test hook: /dev/disk/by-partuuid
@@ -147,6 +167,7 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -184,6 +205,7 @@ static const char *g_tmp_dir;
 static const char *g_health_file;
 static const char *g_wget;
 static const char *g_esp_dir;    /* SEVYN_UPDATE_ESP_DIR, or NULL */
+static const char *g_esp_size;   /* SEVYN_UPDATE_ESP_SIZE_BYTES, or NULL */
 static const char *g_proc_mounts; /* SEVYN_UPDATE_PROC_MOUNTS, or NULL */
 
 #define ESP_MOUNT_POINT "/esp"
@@ -1055,64 +1077,372 @@ static char *extract_other_entries(const char *cfg_path)
     return kept;
 }
 
+/* --- ESP sync (M9, reworked 2026-11-15) --- */
+
+/* Size of a regular file. Missing files report size 0, exists 0;
+ * any other stat failure is an error. */
+static int file_size_or_missing(const char *path,
+                                unsigned long long *size_out,
+                                int *exists_out)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        if (errno == ENOENT) {
+            *size_out = 0;
+            *exists_out = 0;
+            return 0;
+        }
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        *size_out = 0;
+        *exists_out = 0;
+        return 0;
+    }
+    *size_out = (unsigned long long)st.st_size;
+    *exists_out = 1;
+    return 0;
+}
+
+/* Recursive size of the regular files under dir. Used only for the
+ * SEVYN_UPDATE_ESP_SIZE_BYTES host-test hook, where statvfs would
+ * report the host filesystem instead of the fixture ESP. */
+static int dir_usage(const char *dir, unsigned long long *used_out)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return -1;
+    unsigned long long used = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        char *child = path_join(dir, e->d_name);
+        if (!child) {
+            closedir(d);
+            return -1;
+        }
+        struct stat st;
+        if (lstat(child, &st) != 0) {
+            free(child);
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            unsigned long long sub = 0;
+            if (dir_usage(child, &sub) != 0) {
+                free(child);
+                closedir(d);
+                return -1;
+            }
+            used += sub;
+        } else if (S_ISREG(st.st_mode)) {
+            used += (unsigned long long)st.st_size;
+        }
+        free(child);
+    }
+    closedir(d);
+    *used_out = used;
+    return 0;
+}
+
+/* ESP capacity + free space. Normally from statvfs; the
+ * SEVYN_UPDATE_ESP_SIZE_BYTES host-test hook caps the capacity at
+ * that many bytes (used measured by walking the ESP dir). */
+static int esp_usage(const char *esp_dir, unsigned long long *total_out,
+                     unsigned long long *avail_out, char *err, size_t errcap)
+{
+    if (g_esp_size && *g_esp_size) {
+        char *end = NULL;
+        unsigned long long total = strtoull(g_esp_size, &end, 10);
+        if (end == g_esp_size || *end != '\0' || total == 0) {
+            snprintf(err, errcap, "bad SEVYN_UPDATE_ESP_SIZE_BYTES: %s",
+                     g_esp_size);
+            return -1;
+        }
+        unsigned long long used = 0;
+        if (dir_usage(esp_dir, &used) != 0) {
+            snprintf(err, errcap, "cannot measure ESP dir %s: %s",
+                     esp_dir, strerror(errno));
+            return -1;
+        }
+        *total_out = total;
+        *avail_out = used >= total ? 0 : total - used;
+        return 0;
+    }
+    struct statvfs sv;
+    if (statvfs(esp_dir, &sv) != 0) {
+        snprintf(err, errcap, "cannot statfs ESP %s: %s",
+                 esp_dir, strerror(errno));
+        return -1;
+    }
+    *total_out = (unsigned long long)sv.f_blocks *
+        (unsigned long long)sv.f_frsize;
+    *avail_out = (unsigned long long)sv.f_bavail *
+        (unsigned long long)sv.f_frsize;
+    return 0;
+}
+
+static unsigned long long sat_sub(unsigned long long a,
+                                  unsigned long long b)
+{
+    return a >= b ? a - b : 0;
+}
+
+/* A temp name is "<dst>.tmp.<pid>" — match names whose ".tmp."
+ * suffix is followed only by digits, so a real file that merely
+ * contains ".tmp." is never removed. */
+static int is_tmp_name(const char *name)
+{
+    const char *t = strstr(name, ".tmp.");
+    if (!t)
+        return 0;
+    t += 5;
+    if (*t == '\0')
+        return 0;
+    for (const char *p = t; *p; p++) {
+        if (*p < '0' || *p > '9')
+            return 0;
+    }
+    return 1;
+}
+
+/* Remove stale temp files (<name>.tmp.<pid>) left by an interrupted
+ * sync, at the ESP top level and under EFI/ubuntu (where grub.cfg's
+ * temp lives). Best-effort: a leftover temp only costs space until
+ * the next sync, and the space pre-check accounts for whatever is
+ * still there. Returns the number removed. */
+static int esp_cleanup_stale_tmps(const char *esp_dir)
+{
+    int removed = 0;
+    char efi_ubuntu[PATH_MAX];
+    const char *dirs[2];
+    dirs[0] = esp_dir;
+    if (snprintf(efi_ubuntu, sizeof(efi_ubuntu), "%s/EFI/ubuntu",
+                 esp_dir) >= (int)sizeof(efi_ubuntu))
+        dirs[1] = NULL;
+    else
+        dirs[1] = efi_ubuntu;
+    for (int i = 0; i < 2; i++) {
+        if (!dirs[i])
+            continue;
+        DIR *d = opendir(dirs[i]);
+        if (!d)
+            continue;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (!is_tmp_name(e->d_name))
+                continue;
+            char *child = path_join(dirs[i], e->d_name);
+            if (!child)
+                continue;
+            struct stat st;
+            if (lstat(child, &st) == 0 && S_ISREG(st.st_mode) &&
+                unlink(child) == 0)
+                removed++;
+            free(child);
+        }
+        closedir(d);
+    }
+    return removed;
+}
+
+/* Free-space headroom the sync keeps in reserve on top of the
+ * computed peak: FAT metadata + the grub.cfg rewrite + slack for
+ * the next kernel growing a little. */
+#define ESP_SYNC_FREE_MARGIN_BYTES (32ULL * 1024 * 1024)
+
 /* The ESP sync core: operates on a plain directory (the mounted ESP
  * or the SEVYN_UPDATE_ESP_DIR hook), so the host unit tests
- * exercise it directly. new_* are the slot files to boot; prev_*
- * are the kernel to preserve as /vmlinuz.prev (the running kernel
- * on apply, the good slot on restore). Rewrites grub.cfg with the
- * two entries. On any failure the live /vmlinuz is untouched
- * (copies go through temp names + rename) and -1 is returned.
- * partuuid (M11, NULL when unknown) pins sevyn.data=PARTUUID=...
- * on the SevynOS entries; the other OS entries (Windows 11,
- * Linux, ...) in the existing grub.cfg are preserved verbatim. */
+ * exercise it directly. new_* are the slot files to boot; good_*
+ * are the good slot's files to preserve as /vmlinuz.prev (the
+ * running kernel on apply, the good slot itself on restore).
+ * Rewrites grub.cfg with the default entry, plus the "previous"
+ * entry when .prev exists on disk. Returns 0 on success, -1 on
+ * failure with err filled; on any failure before the grub.cfg
+ * rewrite the old menu still boots — copies go through temp names
+ * + rename, and the slot state is only flipped by the caller
+ * after a successful sync. partuuid (M11, NULL when unknown) pins
+ * sevyn.data=PARTUUID=... on the SevynOS entries; the other OS
+ * entries (Windows 11, Linux, ...) in the existing grub.cfg are
+ * preserved verbatim.
+ *
+ * Order (reworked 2026-11-15 — see the M9 header note): the stale
+ * .prev is deleted BEFORE the new files land, and re-created
+ * afterwards from the good slot's copy on the data partition.
+ * The peak is two copies of the boot set, never three: on a
+ * 1152 MiB ESP with a 437 MiB initramfs the peak is ~842 MiB. */
 static int esp_sync_files(const char *esp_dir,
                           const char *new_kern, const char *new_initrd,
-                          const char *prev_kern, const char *prev_initrd,
+                          const char *good_kern, const char *good_initrd,
                           char active_slot, char good_slot,
-                          const char *partuuid)
+                          const char *partuuid,
+                          char *err, size_t errcap)
 {
-    char dst[PATH_MAX];
-    /* Preserve the previous kernel first: if the new copy fails
-     * after this, the ESP still boots the old kernel (now also the
-     * .prev one). */
-    if (snprintf(dst, sizeof(dst), "%s/vmlinuz.prev", esp_dir) >=
-        (int)sizeof(dst))
+    /* Stale temps from an interrupted sync first: they inflate the
+     * usage measurement and eat the space the pre-check needs. */
+    int cleaned = esp_cleanup_stale_tmps(esp_dir);
+    if (cleaned > 0)
+        log_line("UPDATE ESP sync: removed %d stale temp file(s)", cleaned);
+
+    /* Measure everything before touching anything. */
+    unsigned long long new_kern_size, new_initrd_size;
+    unsigned long long good_kern_size, good_initrd_size;
+    unsigned long long old_kern_size, old_initrd_size;
+    unsigned long long prev_kern_size, prev_initrd_size;
+    int exists = 0;
+    if (file_size_or_missing(new_kern, &new_kern_size, &exists) != 0 ||
+        !exists) {
+        snprintf(err, errcap, "ESP sync: new slot kernel missing: %s",
+                 new_kern);
+        log_line("UPDATE ESP SYNC FAIL %s", err);
         return -1;
-    if (esp_copy_verified(prev_kern, dst) != 0)
+    }
+    if (file_size_or_missing(new_initrd, &new_initrd_size, &exists) != 0 ||
+        !exists) {
+        snprintf(err, errcap, "ESP sync: new slot initramfs missing: %s",
+                 new_initrd);
+        log_line("UPDATE ESP SYNC FAIL %s", err);
         return -1;
-    if (snprintf(dst, sizeof(dst), "%s/initramfs.prev.cpio.gz",
-                 esp_dir) >= (int)sizeof(dst))
+    }
+    /* .prev is re-created from the good slot: when its files are
+     * gone the update still lands, but degraded (see below). */
+    int prev_available = 1;
+    if (file_size_or_missing(good_kern, &good_kern_size, &exists) != 0 ||
+        !exists)
+        prev_available = 0;
+    if (prev_available &&
+        (file_size_or_missing(good_initrd, &good_initrd_size,
+                              &exists) != 0 || !exists))
+        prev_available = 0;
+    if (!prev_available) {
+        log_line("UPDATE ESP sync: good slot files missing — the GRUB "
+                 "'previous' entry will be omitted; the slot restore "
+                 "remains the fallback");
+    }
+    char old_kern[PATH_MAX], old_initrd[PATH_MAX];
+    char prev_kern[PATH_MAX], prev_initrd[PATH_MAX];
+    if (snprintf(old_kern, sizeof(old_kern), "%s/vmlinuz", esp_dir) >=
+            (int)sizeof(old_kern) ||
+        snprintf(old_initrd, sizeof(old_initrd),
+                 "%s/initramfs.cpio.gz", esp_dir) >=
+            (int)sizeof(old_initrd) ||
+        snprintf(prev_kern, sizeof(prev_kern), "%s/vmlinuz.prev",
+                 esp_dir) >= (int)sizeof(prev_kern) ||
+        snprintf(prev_initrd, sizeof(prev_initrd),
+                 "%s/initramfs.prev.cpio.gz", esp_dir) >=
+            (int)sizeof(prev_initrd)) {
+        snprintf(err, errcap, "ESP sync: ESP path too long");
         return -1;
-    if (esp_copy_verified(prev_initrd, dst) != 0)
+    }
+    if (file_size_or_missing(old_kern, &old_kern_size, &exists) != 0 ||
+        file_size_or_missing(old_initrd, &old_initrd_size, &exists) != 0 ||
+        file_size_or_missing(prev_kern, &prev_kern_size, &exists) != 0 ||
+        file_size_or_missing(prev_initrd, &prev_initrd_size,
+                             &exists) != 0) {
+        snprintf(err, errcap, "ESP sync: cannot stat ESP files: %s",
+                 strerror(errno));
         return -1;
-    /* New kernel + initramfs into place. */
-    if (snprintf(dst, sizeof(dst), "%s/vmlinuz", esp_dir) >=
-        (int)sizeof(dst))
+    }
+    unsigned long long total = 0, avail = 0;
+    if (esp_usage(esp_dir, &total, &avail, err, errcap) != 0) {
+        log_line("UPDATE ESP SYNC FAIL %s", err);
         return -1;
-    if (esp_copy_verified(new_kern, dst) != 0)
+    }
+    unsigned long long used_now = total >= avail ? total - avail : 0;
+    unsigned long long prev_total = prev_kern_size + prev_initrd_size;
+    unsigned long long used_after_prev_delete =
+        sat_sub(used_now, prev_total);
+    unsigned long long used_after_new =
+        sat_sub(used_after_prev_delete, old_kern_size + old_initrd_size) +
+        new_kern_size + new_initrd_size;
+    /* Peak simultaneous usage: the new-initramfs temp (initramfs is
+     * written first), the new-kernel temp, and the .prev re-creation
+     * temp — whichever is largest. */
+    unsigned long long peak =
+        used_after_prev_delete + new_initrd_size;
+    unsigned long long peak_kern =
+        sat_sub(used_after_prev_delete, old_initrd_size) +
+        new_initrd_size + new_kern_size;
+    if (peak_kern > peak)
+        peak = peak_kern;
+    if (prev_available) {
+        unsigned long long peak_prev =
+            used_after_new + good_kern_size + good_initrd_size;
+        if (peak_prev > peak)
+            peak = peak_prev;
+    }
+    if (peak + ESP_SYNC_FREE_MARGIN_BYTES > total) {
+        snprintf(err, errcap,
+                 "ESP sync needs %llu MiB at peak (ESP is %llu MiB, "
+                 "%llu MiB free) — refusing before copying so the "
+                 "running system keeps booting",
+                 (peak + ESP_SYNC_FREE_MARGIN_BYTES) / (1024 * 1024),
+                 total / (1024 * 1024), avail / (1024 * 1024));
+        log_line("UPDATE ESP SYNC FAIL %s", err);
         return -1;
-    if (snprintf(dst, sizeof(dst), "%s/initramfs.cpio.gz", esp_dir) >=
-        (int)sizeof(dst))
+    }
+
+    /* Delete the stale .prev first: the space it frees is what the
+     * new temp writes need. */
+    if (prev_total > 0) {
+        log_line("UPDATE ESP sync: removing stale .prev (frees %llu MiB)",
+                 prev_total / (1024 * 1024));
+        (void)unlink(prev_kern);
+        (void)unlink(prev_initrd);
+    }
+    /* New initramfs first, then the new kernel: a failure here
+     * leaves the old kernel in place. */
+    if (esp_copy_verified(new_initrd, old_initrd) != 0) {
+        snprintf(err, errcap, "ESP sync failed copying new initramfs");
+        log_line("UPDATE ESP SYNC FAIL %s", err);
         return -1;
-    if (esp_copy_verified(new_initrd, dst) != 0)
+    }
+    if (esp_copy_verified(new_kern, old_kern) != 0) {
+        snprintf(err, errcap, "ESP sync failed copying new kernel");
+        log_line("UPDATE ESP SYNC FAIL %s", err);
         return -1;
-    if (sync_dir(esp_dir) != 0)
+    }
+    /* Re-create .prev from the good slot's copy: the same running
+     * kernel the ESP had, now sourced from the data partition
+     * instead of the ESP's own (deleted) copy. */
+    int prev_on_disk = 0;
+    if (prev_available) {
+        if (esp_copy_verified(good_kern, prev_kern) != 0 ||
+            esp_copy_verified(good_initrd, prev_initrd) != 0) {
+            (void)unlink(prev_kern);
+            (void)unlink(prev_initrd);
+            log_line("UPDATE ESP sync: WARNING — could not preserve "
+                     ".prev from the good slot; the GRUB 'previous' "
+                     "entry will be omitted; the slot restore "
+                     "remains the fallback");
+            prev_available = 0;
+        } else {
+            prev_on_disk = 1;
+        }
+    }
+    if (sync_dir(esp_dir) != 0) {
+        snprintf(err, errcap, "ESP sync failed syncing ESP dir");
         return -1;
-    /* grub.cfg: default boots the active slot from /vmlinuz, the
-     * previous entry boots the good slot from /vmlinuz.prev. M11:
-     * preserve the other OS entries verbatim, and pin the data
-     * partition by PARTUUID when known. */
+    }
+    /* grub.cfg: default boots the active slot from /vmlinuz; the
+     * previous entry boots the good slot from /vmlinuz.prev, when
+     * .prev exists on disk. M11: preserve the other OS entries
+     * verbatim, and pin the data partition by PARTUUID when known. */
     char cfg_path[PATH_MAX];
     if (snprintf(cfg_path, sizeof(cfg_path), "%s/%s", esp_dir,
-                 ESP_GRUB_CFG_REL) >= (int)sizeof(cfg_path))
+                 ESP_GRUB_CFG_REL) >= (int)sizeof(cfg_path)) {
+        snprintf(err, errcap, "ESP sync: grub.cfg path too long");
         return -1;
+    }
     char *other = extract_other_entries(cfg_path);
     char data_arg[128] = "";
     if (partuuid)
         snprintf(data_arg, sizeof(data_arg),
                  " sevyn.data=PARTUUID=%s", partuuid);
     char cfg_text[2048];
-    int n = snprintf(cfg_text, sizeof(cfg_text),
+    int n;
+    if (prev_on_disk) {
+        n = snprintf(cfg_text, sizeof(cfg_text),
              "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
              "# Written by sevyn-updated (ESP sync): the default entry boots\n"
              "# the active slot from /vmlinuz; the previous entry boots the\n"
@@ -1128,13 +1458,33 @@ static int esp_sync_files(const char *esp_dir,
              "    initrd /initramfs.prev.cpio.gz\n"
              "}\n",
              active_slot, data_arg, good_slot, data_arg);
+    } else {
+        log_line("UPDATE ESP sync: WARNING — no .prev on disk; the "
+                 "GRUB 'previous' entry is omitted for this update; "
+                 "the slot restore remains the fallback");
+        n = snprintf(cfg_text, sizeof(cfg_text),
+             "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
+             "# Written by sevyn-updated (ESP sync): the default entry boots\n"
+             "# the active slot from /vmlinuz. No 'previous' entry: the\n"
+             "# previous kernel could not be preserved on this ESP\n"
+             "# (see the update log); the slot restore is the fallback.\n"
+             "set timeout=3\n"
+             "set default=0\n"
+             "menuentry \"SevynOS\" {\n"
+             "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=%c%s\n"
+             "    initrd /initramfs.cpio.gz\n"
+             "}\n",
+             active_slot, data_arg);
+    }
     if (n < 0 || (size_t)n >= sizeof(cfg_text)) {
         free(other);
+        snprintf(err, errcap, "ESP sync: grub.cfg too long");
         return -1;
     }
     if (other) {
         if (strlen(cfg_text) + strlen(other) + 1 > sizeof(cfg_text)) {
             free(other);
+            snprintf(err, errcap, "ESP sync: grub.cfg too long");
             return -1;
         }
         strcat(cfg_text, other);
@@ -1142,14 +1492,20 @@ static int esp_sync_files(const char *esp_dir,
     }
     char efi_dir[PATH_MAX];
     if (snprintf(efi_dir, sizeof(efi_dir), "%s/EFI/ubuntu", esp_dir) >=
-        (int)sizeof(efi_dir))
+        (int)sizeof(efi_dir)) {
+        snprintf(err, errcap, "ESP sync: EFI dir path too long");
         return -1;
+    }
     /* The EFI/ubuntu dir exists on every image (GRUB lives there);
      * create it if a test ESP is bare. */
-    if (mkdir_p(efi_dir) != 0)
+    if (mkdir_p(efi_dir) != 0) {
+        snprintf(err, errcap, "ESP sync: cannot create EFI dir");
         return -1;
-    if (write_file_atomic(cfg_path, cfg_text) != 0)
+    }
+    if (write_file_atomic(cfg_path, cfg_text) != 0) {
+        snprintf(err, errcap, "ESP sync: cannot write grub.cfg");
         return -1;
+    }
     return 0;
 }
 
@@ -1419,12 +1775,15 @@ static void esp_release(int mounted)
         (void)umount(ESP_MOUNT_POINT);
 }
 
-/* ESP sync for an apply: the new slot's files become /vmlinuz, the
- * running ESP kernel is preserved as /vmlinuz.prev. Returns 0 when
- * synced (or when there is no ESP), -1 on failure. */
+/* ESP sync for an apply: the new slot's files become /vmlinuz, and
+ * the running kernel is preserved as /vmlinuz.prev — re-created
+ * from the good slot's copy after the new files land (see
+ * esp_sync_files). Returns 0 when synced (or when there is no
+ * ESP), -1 on failure with err filled. */
 static int esp_sync_apply(const char *slot_dir, char idle, char good,
                           char *err, size_t errcap)
 {
+    err[0] = '\0';
     char new_kern[PATH_MAX], new_initrd[PATH_MAX];
     if (snprintf(new_kern, sizeof(new_kern), "%s/vmlinuz",
                  slot_dir) >= (int)sizeof(new_kern))
@@ -1437,34 +1796,39 @@ static int esp_sync_apply(const char *slot_dir, char idle, char good,
     int rc = esp_resolve(&esp, &mounted, err, errcap);
     if (rc != 0)
         return rc == 1 ? 0 : -1;
-    char prev_kern[PATH_MAX], prev_initrd[PATH_MAX];
-    if (snprintf(prev_kern, sizeof(prev_kern), "%s/vmlinuz",
-                 esp) >= (int)sizeof(prev_kern)) {
+    /* The good slot's files are the running kernel: .prev is
+     * re-created from them after the new files land. */
+    char good_kern[PATH_MAX], good_initrd[PATH_MAX];
+    if (snprintf(good_kern, sizeof(good_kern), "%s/slots/%c/vmlinuz",
+                 g_data_dir, good) >= (int)sizeof(good_kern)) {
         esp_release(mounted);
         return -1;
     }
-    if (snprintf(prev_initrd, sizeof(prev_initrd),
-                 "%s/initramfs.cpio.gz",
-                 esp) >= (int)sizeof(prev_initrd)) {
+    if (snprintf(good_initrd, sizeof(good_initrd),
+                 "%s/slots/%c/initramfs.cpio.gz",
+                 g_data_dir, good) >= (int)sizeof(good_initrd)) {
         esp_release(mounted);
         return -1;
     }
     char *partuuid = data_partuuid();
-    int r = esp_sync_files(esp, new_kern, new_initrd, prev_kern,
-                           prev_initrd, idle, good, partuuid);
+    int r = esp_sync_files(esp, new_kern, new_initrd, good_kern,
+                           good_initrd, idle, good, partuuid,
+                           err, errcap);
     free(partuuid);
     esp_release(mounted);
-    if (r != 0)
+    if (r != 0 && err[0] == '\0')
         snprintf(err, errcap, "ESP sync failed");
     return r;
 }
 
 /* ESP restore for a twice-failed boot: the good slot's files become
  * both /vmlinuz and /vmlinuz.prev, grub.cfg points both entries at
- * the good slot. Returns 0 on success (or no ESP), -1 on failure. */
+ * the good slot. Returns 0 on success (or no ESP), -1 on failure
+ * with err filled. */
 static int esp_sync_restore(const char *slot_dir, char good,
                             char *err, size_t errcap)
 {
+    err[0] = '\0';
     char kern[PATH_MAX], initrd[PATH_MAX];
     if (snprintf(kern, sizeof(kern), "%s/vmlinuz",
                  slot_dir) >= (int)sizeof(kern))
@@ -1479,10 +1843,10 @@ static int esp_sync_restore(const char *slot_dir, char good,
         return rc == 1 ? 0 : -1;
     char *partuuid = data_partuuid();
     int r = esp_sync_files(esp, kern, initrd, kern, initrd, good, good,
-                           partuuid);
+                           partuuid, err, errcap);
     free(partuuid);
     esp_release(mounted);
-    if (r != 0)
+    if (r != 0 && err[0] == '\0')
         snprintf(err, errcap, "ESP restore failed");
     return r;
 }
@@ -2023,6 +2387,7 @@ int main(int argc, char **argv)
     if (!g_wget || !*g_wget)
         g_wget = DEFAULT_WGET;
     g_esp_dir = getenv("SEVYN_UPDATE_ESP_DIR");
+    g_esp_size = getenv("SEVYN_UPDATE_ESP_SIZE_BYTES");
     g_proc_mounts = getenv("SEVYN_UPDATE_PROC_MOUNTS");
 
     g_console_fd = open("/dev/console", O_WRONLY | O_NONBLOCK);
