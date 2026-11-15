@@ -938,6 +938,12 @@ python3 "$ROOT/image/stage-firmware.py" "$SYSROOT" "$STAGE" \
 mkdir -p "$STAGE/etc/ld.so.conf.d"
 cp -a "$SYSROOT/etc/ld.so.conf" "$STAGE/etc/" 2>/dev/null || true
 cp -a "$SYSROOT/etc/ld.so.conf.d/"*.conf "$STAGE/etc/ld.so.conf.d/" 2>/dev/null || true
+# Dedupe the stage libraries once ALL staging is done: the explicit
+# Mesa/Weston steps above copy libraries to /usr/lib/... that the
+# closure already staged under /lib/... (libicudata.so.74 alone is
+# ~29 MB raw), plus nested copies like libweston-13/libweston-13/.
+# The copy-closure runs dedupe too, but only over what they staged.
+python3 "$ROOT/image/copy-closure.py" --dedupe-only "$STAGE"
 ldconfig -r "$STAGE" 2>/dev/null || echo "warning: ldconfig -r failed (continuing)" >&2
 
 cp "$ROOT/image/weston.ini" "$STAGE/etc/xdg/weston/weston.ini"

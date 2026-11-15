@@ -23,6 +23,11 @@ gzipped in the initramfs — the M12 image was over GitHub's 2 GiB
 release-asset cap without it. Scoped to the stage lib dirs only;
 the canonical /lib64 loader copy stays a real file, and
 /usr/share/sevyn/* (Chromium's $ORIGIN libs) is untouched.
+`--dedupe-only <stage>` runs just that pass over an already-assembled
+stage: the image build's explicit Mesa/Weston staging copies
+libraries to /usr/lib/... after the closure runs, so those duplicates
+only exist once all staging is done — the build calls it right
+before ldconfig.
 """
 import hashlib
 import os
@@ -183,6 +188,20 @@ def dedupe_stage_libs(stage):
 
 
 def main():
+    # --dedupe-only <stage>: dedupe a stage dir that was assembled by
+    # other steps too (the image build's explicit Mesa/Weston staging
+    # copies libraries to /usr/lib/... after the closure runs, so the
+    # duplicates only exist once all staging is done — run this right
+    # before ldconfig in the image build).
+    if len(sys.argv) == 3 and sys.argv[1] == "--dedupe-only":
+        stage = os.path.abspath(sys.argv[2])
+        freed, replaced = dedupe_stage_libs(stage)
+        if replaced:
+            print(f"deduped {replaced} duplicate libraries, "
+                  f"freed {freed / (1024 * 1024):.1f} MiB")
+        else:
+            print("dedupe: no duplicate libraries")
+        return 0
     if len(sys.argv) < 4:
         print(__doc__, file=sys.stderr)
         return 2
