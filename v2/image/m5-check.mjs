@@ -225,6 +225,58 @@ function findWindowHeader(img, r, g, b) {
   return { top, bottom, left, right };
 }
 
+// Partial header band (round 8, shared with m13): a window whose
+// header is covered keeps a visible body fragment, but its rows
+// hold fewer than the 700px findWindowHeader requires — the
+// strict scan returns null even though the window is plainly on
+// screen (m13 run 43715706248: the Terminal fragment holds
+// ~304px/row at x599-902). This scan takes the longest
+// consecutive run of rows holding >100 header-colour px as the
+// band and returns its rect. It is used ONLY to derive a
+// fragment raise point (see refocusFragmentRaisePointPartial),
+// never to gate a focus click: a fragment header must never
+// gate a focus click. Returns null when no band of >=10 rows
+// exists.
+function findWindowHeaderPartial(img, r, g, b) {
+  const { width: W, pixels } = img;
+  let best = null;
+  let cur = null;
+  const close = () => {
+    if (cur && (!best || cur.bottom - cur.top > best.bottom - best.top)) best = cur;
+    cur = null;
+  };
+  for (let y = 48; y < 672; y++) {
+    let n = 0;
+    let rowLeft = W;
+    let rowRight = -1;
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 3;
+      if (
+        Math.abs(pixels[i] - r) <= 10 &&
+        Math.abs(pixels[i + 1] - g) <= 10 &&
+        Math.abs(pixels[i + 2] - b) <= 10
+      ) {
+        n++;
+        if (x < rowLeft) rowLeft = x;
+        if (x > rowRight) rowRight = x;
+      }
+    }
+    if (n > 100) {
+      if (!cur) cur = { top: y, bottom: y, left: rowLeft, right: rowRight };
+      else {
+        cur.bottom = y;
+        if (rowLeft < cur.left) cur.left = rowLeft;
+        if (rowRight > cur.right) cur.right = rowRight;
+      }
+    } else {
+      close();
+    }
+  }
+  close();
+  if (!best || best.bottom - best.top + 1 < 10) return null;
+  return best;
+}
+
 // --- QMP client ---
 class QMP {
   constructor(path) {
@@ -985,6 +1037,69 @@ function refocusFragmentRaisePoint(fresh, known, W, H) {
   return safePoint ? { x: cx, y: cy } : null;
 }
 
+// Raise point from a PARTIAL Terminal fragment (round 8, run
+// 43715706248, head 0f82d7d9): the strict scan returns null when
+// the header is covered, but the Terminal body still shows as a
+// fragment — in the crash run, ~304px of #111827 at x599-902 on
+// rows y492+ (the dragged-aside Browser window + raised Chromium
+// cover the header). The fragment's rect comes from
+// findWindowHeaderPartial; this helper finds the longest run of
+// Terminal-colour pixels inside (fragment ∩ known window) and
+// returns its centre — a VERIFIED Terminal pixel, so the raise
+// click lands on the Terminal, never on the covering window.
+// The plain intersection centre is NOT enough: the partial rect
+// merges the fragment with the covering Browser window's own
+// dark pixels — left=0 in the crash frame — so its centre
+// (502,581) is Browser body (measured [229,231,235], not
+// #111827), and clicking it would raise the Browser instead.
+// Returns null when no run reaches 20px, when the point would
+// leave the known rect / the frame / the dock band, or when
+// either rect is null. Among the longest rows the one closest
+// to the fragment's vertical centre wins, so the click lands
+// mid-fragment, not on its edge.
+function refocusFragmentRaisePointPartial(partial, known, img, W, H) {
+  if (!partial || !known) return null;
+  const ix0 = Math.max(partial.left, known.left);
+  const iy0 = Math.max(partial.top, known.top);
+  const ix1 = Math.min(partial.right, known.right);
+  const iy1 = Math.min(partial.bottom, known.bottom);
+  if (ix0 > ix1 || iy0 > iy1) return null;
+  const midY = (iy0 + iy1) / 2;
+  let best = null;
+  for (let y = iy0; y <= iy1; y++) {
+    let s = -1;
+    for (let x = ix0; x <= ix1 + 1; x++) {
+      const m = x <= ix1 && pixelMatches(img, x, y, 17, 24, 39);
+      if (m && s < 0) s = x;
+      if (!m && s >= 0) {
+        const len = x - s;
+        if (
+          !best ||
+          len > best.len ||
+          (len === best.len && Math.abs(y - midY) < Math.abs(best.y - midY))
+        ) {
+          best = { x0: s, x1: x - 1, y, len };
+        }
+        s = -1;
+      }
+    }
+  }
+  if (!best || best.len < 20) return null;
+  const cx = Math.round((best.x0 + best.x1) / 2);
+  const cy = best.y;
+  const safePoint =
+    cx >= known.left &&
+    cx <= known.right &&
+    cy >= known.top &&
+    cy <= known.bottom &&
+    cy < DOCK_ICON_TOP_Y &&
+    cx >= 0 &&
+    cx < W &&
+    cy >= 0 &&
+    cy < H;
+  return safePoint ? { x: cx, y: cy } : null;
+}
+
 // The Terminal's dock icon, found in the CURRENT frame: the only
 // #111827 block in the dock band. The Terminal icon is dark navy
 // (its window colour); every other dock icon is a bright colour
@@ -1453,6 +1568,39 @@ async function main() {
       );
       return !!exec;
     };
+    // Round 8 (m13 run 43715706248, head 0f82d7d9 — same refocus
+    // code here): wait for a Terminal RELAUNCHED from the dock
+    // to become ready — and only then let the caller start a
+    // verify window. In the crash run the dock click relaunched
+    // Terminal (new pid 1290) and the harness gave up ~3.5 s
+    // later, while the fresh app was still loading its bundle
+    // and initializing EGL/llvmpipe: the fresh frame showed no
+    // header at all (zero #111827 rows over 100px). A verify
+    // window started at the dock click expires while the app is
+    // still booting, so the clock must restart AFTER readiness:
+    // poll fresh frames until the window is frame-proven ready
+    // — a strict header the first-attempt gate accepts, or a
+    // guarded input row — up to 30 s. A relaunched window is a
+    // NEW window, so its header is adopted as termPos outright:
+    // the old position cannot constrain it (the consistency
+    // jump check is skipped by passing null as `known`).
+    // Returns the ready frame, or null on timeout.
+    const waitForRelaunchedTerminal = async (timeoutMs = 30000) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const frame = await shot(b.qmp, join(OUT, "m5-shot-refocus-fresh.ppm"));
+        const header = findWindowHeader(frame, 17, 24, 39);
+        if (header && refocusFirstAttemptSafe(header, null, frame.width, frame.height)) {
+          termPos = header;
+          return frame;
+        }
+        if (refocusInputPointSafe(termPos, frame, frame.width, frame.height)) {
+          return frame;
+        }
+        if (Date.now() >= deadline) return null;
+        await sleep(2000);
+      }
+    };
     // Round 4: the first-attempt clicks run ONLY when the gate
     // passes (fresh header detected this frame, consistent with the
     // known window, clicks inside the detected rect). When the gate
@@ -1528,12 +1676,24 @@ async function main() {
       // raise below, which re-clicks with a fresh window.
     }
     let raised = false;
-    const raisePoint = refocusFragmentRaisePoint(
-      termFresh,
-      termPos,
-      shotNow.width,
-      shotNow.height,
-    );
+    let relaunched = false;
+    // Round 8: when the strict scan finds no header, the
+    // Terminal may still be on screen as a fragment (see
+    // refocusFragmentRaisePointPartial) — the m13 crash run's
+    // refocus frame shows ~304px of Terminal body at x599-902
+    // on rows y492+, with the header covered. The fragment is
+    // derived from shotNow, the same frame the strict scan and
+    // the dock-icon search use — never from a stale frame.
+    const termPartial = findWindowHeaderPartial(shotNow, 17, 24, 39);
+    const raisePoint =
+      refocusFragmentRaisePoint(termFresh, termPos, shotNow.width, shotNow.height) ??
+      refocusFragmentRaisePointPartial(
+        termPartial,
+        termPos,
+        shotNow,
+        shotNow.width,
+        shotNow.height,
+      );
     if (raisePoint) {
       await moveTo(raisePoint.x, raisePoint.y, shotNow.width, shotNow.height);
       await sleep(300);
@@ -1543,14 +1703,43 @@ async function main() {
     } else {
       const dockIcon = findTerminalDockIcon(shotNow, termPos);
       if (dockIcon) {
+        // Round 8: record the log position BEFORE the click, so
+        // the code below can tell a RELAUNCH (a fresh `APPD
+        // launched terminal` line — the app was not running, or
+        // the dock launched a new instance) from a plain raise
+        // of the running window. A relaunch needs the readiness
+        // wait below; a raise does not.
+        const dockClickLines = logLines(b.logPath).length;
         await moveTo(dockIcon.x, dockIcon.y, shotNow.width, shotNow.height);
         await sleep(300);
         await click();
         await sleep(1000);
         raised = true;
+        relaunched = !!(await waitForLog(
+          b.logPath,
+          /APPD launched terminal \(pid \d+\)/,
+          5000,
+          dockClickLines,
+        ));
       }
     }
     if (raised) {
+      // Round 8: when the dock click relaunched Terminal, do
+      // NOT enter the attempt loop yet — the fresh app is still
+      // booting, and the loop's two attempts + 25 s verify
+      // windows would expire before it paints. Wait for
+      // readiness first (up to 30 s); the 25 s verify window in
+      // verifyFocus then starts FRESH, after the window is
+      // frame-proven ready. A readiness timeout fails fast with
+      // its own message, not the generic refocus one.
+      if (relaunched) {
+        const readyFrame = await waitForRelaunchedTerminal();
+        if (!readyFrame) {
+          throw new Error(
+            "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
+          );
+        }
+      }
       // The window needs a moment to come forward; re-shot once
       // if the first fresh frame still shows no header.
       for (let attempt = 0; attempt < 2; attempt++) {

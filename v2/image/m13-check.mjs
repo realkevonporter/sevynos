@@ -360,6 +360,20 @@ function dragStartPoint(frame, rect, r, g, b) {
   return { x: Math.round((best.x0 + best.x1) / 2), y: best.y };
 }
 
+// Do two window rects show the same window in the same place
+// (every edge within `tol`)? Round 8: the drag-back verifier.
+// A null rect never matches — an unverifiable position is not a
+// returned window.
+function rectsWithin(a, b, tol) {
+  if (!a || !b) return false;
+  return (
+    Math.abs(a.top - b.top) <= tol &&
+    Math.abs(a.left - b.left) <= tol &&
+    Math.abs(a.bottom - b.bottom) <= tol &&
+    Math.abs(a.right - b.right) <= tol
+  );
+}
+
 // --- QMP client ---
 class QMP {
   constructor(path) {
@@ -1115,6 +1129,69 @@ function refocusFragmentRaisePoint(fresh, known, W, H) {
   return safePoint ? { x: cx, y: cy } : null;
 }
 
+// Raise point from a PARTIAL Terminal fragment (round 8, run
+// 43715706248, head 0f82d7d9): the strict scan returns null when
+// the header is covered, but the Terminal body still shows as a
+// fragment — in the crash run, ~304px of #111827 at x599-902 on
+// rows y492+ (the dragged-aside Browser window + raised Chromium
+// cover the header). The fragment's rect comes from
+// findWindowHeaderPartial; this helper finds the longest run of
+// Terminal-colour pixels inside (fragment ∩ known window) and
+// returns its centre — a VERIFIED Terminal pixel, so the raise
+// click lands on the Terminal, never on the covering window.
+// The plain intersection centre is NOT enough: the partial rect
+// merges the fragment with the covering Browser window's own
+// dark pixels — left=0 in the crash frame — so its centre
+// (502,581) is Browser body (measured [229,231,235], not
+// #111827), and clicking it would raise the Browser instead.
+// Returns null when no run reaches 20px, when the point would
+// leave the known rect / the frame / the dock band, or when
+// either rect is null. Among the longest rows the one closest
+// to the fragment's vertical centre wins, so the click lands
+// mid-fragment, not on its edge.
+function refocusFragmentRaisePointPartial(partial, known, img, W, H) {
+  if (!partial || !known) return null;
+  const ix0 = Math.max(partial.left, known.left);
+  const iy0 = Math.max(partial.top, known.top);
+  const ix1 = Math.min(partial.right, known.right);
+  const iy1 = Math.min(partial.bottom, known.bottom);
+  if (ix0 > ix1 || iy0 > iy1) return null;
+  const midY = (iy0 + iy1) / 2;
+  let best = null;
+  for (let y = iy0; y <= iy1; y++) {
+    let s = -1;
+    for (let x = ix0; x <= ix1 + 1; x++) {
+      const m = x <= ix1 && pixelMatches(img, x, y, 17, 24, 39);
+      if (m && s < 0) s = x;
+      if (!m && s >= 0) {
+        const len = x - s;
+        if (
+          !best ||
+          len > best.len ||
+          (len === best.len && Math.abs(y - midY) < Math.abs(best.y - midY))
+        ) {
+          best = { x0: s, x1: x - 1, y, len };
+        }
+        s = -1;
+      }
+    }
+  }
+  if (!best || best.len < 20) return null;
+  const cx = Math.round((best.x0 + best.x1) / 2);
+  const cy = best.y;
+  const safePoint =
+    cx >= known.left &&
+    cx <= known.right &&
+    cy >= known.top &&
+    cy <= known.bottom &&
+    cy < DOCK_ICON_TOP_Y &&
+    cx >= 0 &&
+    cx < W &&
+    cy >= 0 &&
+    cy < H;
+  return safePoint ? { x: cx, y: cy } : null;
+}
+
 // The Terminal's dock icon, found in the CURRENT frame: the only
 // #111827 block in the dock band. The Terminal icon is dark navy
 // (its window colour); every other dock icon is a bright colour
@@ -1752,6 +1829,39 @@ async function main() {
       );
       return !!exec;
     };
+    // Round 8 (run 43715706248, head 0f82d7d9): wait for a
+    // Terminal RELAUNCHED from the dock to become ready — and
+    // only then let the caller start a verify window. In the
+    // crash run the dock click relaunched Terminal (new pid
+    // 1290) and the harness gave up ~3.5 s later, while the
+    // fresh app was still loading its bundle and initializing
+    // EGL/llvmpipe: the fresh frame showed no header at all
+    // (zero #111827 rows over 100px). A verify window started
+    // at the dock click expires while the app is still booting,
+    // so the clock must restart AFTER readiness: poll fresh
+    // frames until the window is frame-proven ready — a strict
+    // header the first-attempt gate accepts, or a guarded input
+    // row — up to 30 s. A relaunched window is a NEW window, so
+    // its header is adopted as termPos outright: the old
+    // position cannot constrain it (the consistency jump check
+    // is skipped by passing null as `known`). Returns the ready
+    // frame, or null on timeout.
+    const waitForRelaunchedTerminal = async (timeoutMs = 30000) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const frame = await shot(b.qmp, join(OUT, "m13-shot-refocus-fresh.ppm"));
+        const header = findWindowHeader(frame, 17, 24, 39);
+        if (header && refocusFirstAttemptSafe(header, null, frame.width, frame.height)) {
+          termPos = header;
+          return frame;
+        }
+        if (refocusInputPointSafe(termPos, frame, frame.width, frame.height)) {
+          return frame;
+        }
+        if (Date.now() >= deadline) return null;
+        await sleep(2000);
+      }
+    };
     // Round 4: the first-attempt clicks run ONLY when the gate
     // passes (fresh header detected this frame, consistent with the
     // known window, clicks inside the detected rect). When the gate
@@ -1829,12 +1939,24 @@ async function main() {
       // raise below, which re-clicks with a fresh window.
     }
     let raised = false;
-    const raisePoint = refocusFragmentRaisePoint(
-      termFresh,
-      termPos,
-      shotNow.width,
-      shotNow.height,
-    );
+    let relaunched = false;
+    // Round 8: when the strict scan finds no header, the
+    // Terminal may still be on screen as a fragment (see
+    // refocusFragmentRaisePointPartial) — the crash run's
+    // refocus frame shows ~304px of Terminal body at x599-902
+    // on rows y492+, with the header covered. The fragment is
+    // derived from shotNow, the same frame the strict scan and
+    // the dock-icon search use — never from a stale frame.
+    const termPartial = findWindowHeaderPartial(shotNow, 17, 24, 39);
+    const raisePoint =
+      refocusFragmentRaisePoint(termFresh, termPos, shotNow.width, shotNow.height) ??
+      refocusFragmentRaisePointPartial(
+        termPartial,
+        termPos,
+        shotNow,
+        shotNow.width,
+        shotNow.height,
+      );
     if (raisePoint) {
       await moveTo(raisePoint.x, raisePoint.y, shotNow.width, shotNow.height);
       await sleep(300);
@@ -1844,14 +1966,43 @@ async function main() {
     } else {
       const dockIcon = findTerminalDockIcon(shotNow, termPos);
       if (dockIcon) {
+        // Round 8: record the log position BEFORE the click, so
+        // the code below can tell a RELAUNCH (a fresh `APPD
+        // launched terminal` line — the app was not running, or
+        // the dock launched a new instance) from a plain raise
+        // of the running window. A relaunch needs the readiness
+        // wait below; a raise does not.
+        const dockClickLines = logLines(b.logPath).length;
         await moveTo(dockIcon.x, dockIcon.y, shotNow.width, shotNow.height);
         await sleep(300);
         await click();
         await sleep(1000);
         raised = true;
+        relaunched = !!(await waitForLog(
+          b.logPath,
+          /APPD launched terminal \(pid \d+\)/,
+          5000,
+          dockClickLines,
+        ));
       }
     }
     if (raised) {
+      // Round 8: when the dock click relaunched Terminal, do
+      // NOT enter the attempt loop yet — the fresh app is still
+      // booting, and the loop's two attempts + 25 s verify
+      // windows would expire before it paints. Wait for
+      // readiness first (up to 30 s); the 25 s verify window in
+      // verifyFocus then starts FRESH, after the window is
+      // frame-proven ready. A readiness timeout fails fast with
+      // its own message, not the generic refocus one.
+      if (relaunched) {
+        const readyFrame = await waitForRelaunchedTerminal();
+        if (!readyFrame) {
+          throw new Error(
+            "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
+          );
+        }
+      }
       // The window needs a moment to come forward; re-shot once
       // if the first fresh frame still shows no header.
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -2021,7 +2172,20 @@ async function main() {
   // delta.
   const dragBrowserWindow = async (dx, dy, tag) => {
     const frame = await shot(b.qmp, join(OUT, `m13-shot-browser-drag-${tag}-before.ppm`));
-    const before = findWindowHeader(frame, 14, 165, 233);
+    // Round 8 (run 43715706248, head 0f82d7d9): strict first,
+    // partial fallback — the SAME fallback the after-frame
+    // already had. The drag-back's before-frame is taken AFTER
+    // Chromium was raised frontmost, so Chromium covers the
+    // Browser header (max 120 #0ea5e9 px/row in the crash run's
+    // back-before frame) and the strict scan returns null — the
+    // round-7 code returned null here and the drag-back never
+    // ran at all, leaving the window dragged aside over the
+    // Terminal. The partial rect is enough to drag from:
+    // dragStartPoint verifies its start pixel (in the crash
+    // frame it finds (60,453), a real header pixel).
+    const before =
+      findWindowHeader(frame, 14, 165, 233) ??
+      findWindowHeaderPartial(frame, 14, 165, 233);
     if (!before) return null;
     // Round 7: the drag starts on a VERIFIED header pixel — after
     // Chromium is raised the header is partly covered and the
@@ -2511,21 +2675,66 @@ async function main() {
         // move (dbdda2ae: left 107->0 suggests -107, but the
         // right edge 904->597 proves -307). Use the right edge
         // when the left is clamped at 0, else the left edge.
-        const dxLeft = aside.before.left - aside.after.left;
-        const dxRight = aside.before.right - aside.after.right;
-        const dxBack = aside.after.left > 0 ? dxLeft : dxRight;
-        const back = await dragBrowserWindow(
-          dxBack,
-          aside.before.top - aside.after.top,
-          "back",
+        // Round 8 (run 43715706248, head 0f82d7d9): VERIFY the
+        // drag-back — the round-7 code ran it once and only noted
+        // "(Browser window drag-back unverified)" on a passing
+        // green check, and the window in fact never moved back at
+        // all (see dragBrowserWindow: the strict-only before-scan
+        // returned null on the Chromium-covered header, so the
+        // drag never ran). The Browser window stayed dragged
+        // aside, covered the Terminal, and the next refocus
+        // crashed. So the return is verified against the pre-drag
+        // position, retried up to twice by the measured REMAINING
+        // delta (right edge when the left is screen-clamped at 0,
+        // else the left edge — the same rule as the first back
+        // delta), and recorded as its own check: a window that
+        // has not returned FAILS the drag-back step explicitly
+        // instead of the run proceeding to refocus with the
+        // Terminal covered and no record of why.
+        let backOk = false;
+        let backDetail = "";
+        let backAttempts = 0;
+        let backCur = aside.after;
+        for (let attempt = 0; attempt < 3 && !backOk; attempt++) {
+          const dxLeft = aside.before.left - backCur.left;
+          const dxRight = aside.before.right - backCur.right;
+          const dxBack = backCur.left > 0 ? dxLeft : dxRight;
+          const dyBack = aside.before.top - backCur.top;
+          const back = await dragBrowserWindow(
+            dxBack,
+            dyBack,
+            attempt === 0 ? "back" : `back-retry${attempt}`,
+          );
+          backAttempts++;
+          if (back?.after) {
+            backOk = rectsWithin(back.after, aside.before, REFOCUS_JUMP_PX);
+            backDetail =
+              `attempt ${backAttempts}: ${JSON.stringify(backCur)} -> ` +
+              `${JSON.stringify(back.after)} (target ${JSON.stringify(aside.before)})`;
+            backCur = back.after;
+          } else if (back?.before) {
+            // The drag ran but its after-frame shows no header
+            // (still covered, or the drag had no effect): the
+            // window is where the before frame saw it — retry
+            // from there.
+            backDetail =
+              `attempt ${backAttempts}: no header in the after frame ` +
+              `(before ${JSON.stringify(back.before)})`;
+            backCur = back.before;
+          } else {
+            // No header in the before frame either: no position
+            // to compute a retry delta from — stop.
+            backDetail = `attempt ${backAttempts}: no Browser header in the before frame`;
+            break;
+          }
+        }
+        check(
+          "browser-app: Browser window dragged back to its place after the green raise",
+          backOk,
+          backOk
+            ? `${backDetail} — verified within ${REFOCUS_JUMP_PX}px`
+            : `${backDetail} after ${backAttempts} attempt(s) — the window did not return; the Terminal may still be covered`,
         );
-        const backOk =
-          !!back?.after &&
-          Math.abs(back.after.top - aside.before.top) <= REFOCUS_JUMP_PX &&
-          Math.abs(back.after.left - aside.before.left) <= REFOCUS_JUMP_PX &&
-          Math.abs(back.after.bottom - aside.before.bottom) <= REFOCUS_JUMP_PX &&
-          Math.abs(back.after.right - aside.before.right) <= REFOCUS_JUMP_PX;
-        if (!backOk) greenDetail += " (Browser window drag-back unverified)";
       } else {
         greenDetail =
           "no green on screen (Browser window drag did not move it — no header, or the drag had no effect)";
