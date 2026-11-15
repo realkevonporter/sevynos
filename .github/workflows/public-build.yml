@@ -95,11 +95,11 @@ jobs:
             sevynos-v2-deps-
       - name: Build v2 native deps
         run: sh v2/rn/host/build-deps.sh
-      - name: Build v2 (M12 Genesis GPU compositor) image
+      - name: Build v2 (M13 browser embed) image
         env:
           TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
-          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m12-image.sh
+          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m13-image.sh
           sudo chown -R "$USER" v2/image/build
       - name: Guard v2 shell icons in initramfs
         run: |
@@ -123,7 +123,7 @@ jobs:
           gzip -9 -k sevynos.img
           sha256sum vmlinuz initramfs.cpio.gz sevynos.img sevynos.img.gz > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
-          SevynOS v2 (M12 Genesis GPU compositor) — bootable image
+          SevynOS v2 (M13 browser embed) — bootable image
           ==============================================
           Kernel + initramfs for QEMU (x86_64), plus sevynos.img — a
           GPT USB-boot disk image for real hardware. Boots to the
@@ -177,6 +177,12 @@ jobs:
           GPU instead of the CPU painter, with the CPU path kept as
           a fallback (boot with `sevyn.genesis=0` to force it). The
           60 fps bar is proven on the GF65, not in QEMU.
+          M13: the Browser is a real embed now — Chromium runs as a
+          chromeless app-mode window paired with the Browser app
+          (tabs + address bar are the only chrome), sized to the
+          Browser window's content area. `sevyn browser` tries the
+          GPU first and falls back to software rendering, and
+          `sevyn browser quit` stops Chromium cleanly.
 
           Boot it in QEMU (4 GB RAM: Chromium + Sevyn Code run in the image):
             qemu-system-x86_64 -machine q35 -m 4096 -kernel vmlinuz \
@@ -266,7 +272,7 @@ jobs:
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
 
-            SevynOS v2 (M12 Genesis GPU compositor) image: vmlinuz + initramfs.cpio.gz + sevynos.img
+            SevynOS v2 (M13 browser embed) image: vmlinuz + initramfs.cpio.gz + sevynos.img
             (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
             status tray, dock with 12 apps — and dock clicks open apps
             in their own windows. Terminal, Settings, Files, and the
@@ -287,6 +293,9 @@ jobs:
             M12: Genesis, the GPU compositor — the desktop paints
             through EGL/GLES2 on the GPU (CPU painter kept as a
             fallback).
+            M13: the Browser embed — Chromium runs chromeless beside
+            the Browser app window, GPU first with a software
+            fallback, driven over CDP.
             The v1 ISO below is the old
             tree's image. updates-v2.json is the v2 update feed: an
             installed v2 system checks it and updates in place (A/B
@@ -303,5 +312,5 @@ jobs:
           artifactErrorsFailBuild: true
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
-          # The v2-* files are the M12 Genesis image (kernel + initramfs + GPT disk image).
+          # The v2-* files are the M13 browser-embed image (kernel + initramfs + GPT disk image).
           artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/sevynos.img.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"

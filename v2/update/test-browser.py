@@ -40,7 +40,7 @@ def check(name, cond, detail=""):
 
 # --- fake CDP server ----------------------------------------------------
 
-TABS = [
+_INITIAL_TABS = [
     {
         "description": "",
         "devtoolsFrontendUrl": "/devtools/inspector.html?ws=127.0.0.1:1/devtools/page/AAA",
@@ -69,6 +69,11 @@ TABS = [
         "webSocketDebuggerUrl": "",
     },
 ]
+
+# The live tab list: /json/close really removes a tab and PUT
+# /json/new really adds one, so the tests can assert the tab list
+# afterwards (M13 warm open leaves exactly one page tab).
+TABS = [dict(t) for t in _INITIAL_TABS]
 
 REQUESTS = []  # (method, path) in arrival order
 
@@ -104,6 +109,7 @@ class CDPHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/json/close/"):
             tab = self.path.split("/")[-1]
             if any(t["id"] == tab for t in TABS):
+                TABS[:] = [t for t in TABS if t["id"] != tab]
                 self._send_json(200, {})
             else:
                 self.send_response(404)
@@ -116,7 +122,7 @@ class CDPHandler(BaseHTTPRequestHandler):
         REQUESTS.append(("PUT", self.path))
         if self.path.startswith("/json/new?"):
             url = self.path[len("/json/new?"):]
-            self._send_json(200, {
+            tab = {
                 "description": "",
                 "devtoolsFrontendUrl": "",
                 "id": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
@@ -124,7 +130,10 @@ class CDPHandler(BaseHTTPRequestHandler):
                 "type": "page",
                 "url": url,
                 "webSocketDebuggerUrl": "",
-            })
+            }
+            TABS[:] = [t for t in TABS if t["id"] != tab["id"]]
+            TABS.append(tab)
+            self._send_json(200, tab)
         else:
             self.send_response(405)
             self.end_headers()
@@ -257,6 +266,14 @@ def main():
           "Omnibox" not in r.stdout, r.stdout)
 
     # --- browser open (Chromium already running: PUT /json/new) ---
+    # M13 is single-tab by design: a warm open replaces the current
+    # tab — after PUT /json/new the CLI closes every other page tab
+    # (their windows die with them, leaving the new tab's window
+    # frontmost) and activates the new tab, so the page-tab list
+    # afterwards holds just the new tab. (The `browser close`
+    # check above removed BBBB from the fake, so reset the tab
+    # list first.)
+    TABS[:] = [dict(t) for t in _INITIAL_TABS]
     REQUESTS.clear()
     r = run_cli(binary, ["browser", "open", "https://example.com"], env)
     check("browser open: exit 0", r.returncode == 0, r.stderr)
@@ -266,6 +283,24 @@ def main():
     check("browser open: prints opened + new tab",
           "opened: https://example.com" in r.stdout and
           "tab: DDDD" in r.stdout, r.stdout)
+    # The request order is the contract: PUT new, close each other
+    # page tab (AAA + BBB; the browser_ui entry is not a page tab),
+    # then activate the new tab.
+    new_i = REQUESTS.index(("PUT", "/json/new?https://example.com"))
+    close_a = ("GET", "/json/close/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    close_b = ("GET", "/json/close/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+    act = ("GET", "/json/activate/DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
+    check("browser open: closes every other page tab after PUT",
+          close_a in REQUESTS and close_b in REQUESTS and
+          REQUESTS.index(close_a) > new_i and
+          REQUESTS.index(close_b) > new_i, str(REQUESTS))
+    check("browser open: activates the new tab last",
+          act in REQUESTS and
+          REQUESTS.index(act) > REQUESTS.index(close_a) and
+          REQUESTS.index(act) > REQUESTS.index(close_b), str(REQUESTS))
+    check("browser open: page-tab list afterwards is just the new tab",
+          [t["id"] for t in TABS if t["type"] == "page"] ==
+          ["DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"], str(TABS))
 
     # Bare hostname gets https:// prepended.
     REQUESTS.clear()
@@ -275,6 +310,8 @@ def main():
           str(REQUESTS))
 
     # --- browser activate / close ---
+    # (Reset the tab list: the warm-open check above closed AAA/BBB.)
+    TABS[:] = [dict(t) for t in _INITIAL_TABS]
     r = run_cli(binary, ["browser", "activate",
                          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"], env)
     check("browser activate: exit 0 + prints id",
@@ -326,20 +363,42 @@ def main():
 
     # --- browser open: CDP comes up DURING the wait (slow start) ---
     # A fake Chromium that sleeps 1 s, then serves CDP on the port
-    # from SEVYN_CDP_PORT, with the launched URL (argv[1]) as its
-    # only tab. `browser open` must return "opened:" + that tab's
-    # id — this is the path the check relies on for a fast start,
-    # and it exercises the find-tab-by-URL lookup. The fake exits
-    # on its own after 15 s so no process lingers.
+    # from SEVYN_CDP_PORT, with the launched URL as its only tab.
+    # `browser open` must return "opened:" + that tab's id — this is
+    # the path the check relies on for a fast start, and it exercises
+    # the find-tab-by-URL lookup. The fake exits on its own after
+    # 15 s so no process lingers.
     fake_chromium = tmp / "fake-chromium.py"
     fake_chromium.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, os, sys, threading, time\n"
+        "import json, os, socket, sys, threading, time\n"
         "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
         "port = int(os.environ.get('SEVYN_CDP_PORT', '9222'))\n"
-        "url = sys.argv[-1] if len(sys.argv) > 1 else 'about:blank'\n"
-        "# (The CLI execs Chromium with the URL as its LAST argument,\n"
-        "# after the --flags — argv[1] is --no-sandbox, not the URL.)\n"
+        "# M13: the URL rides in --app=<url> (chromeless launch),\n"
+        "# never positionally — fall back to argv[-1] for the plain\n"
+        "# about:blank launch, whose last arg is --user-data-dir.\n"
+        "url = next((a[6:] for a in sys.argv[1:]\n"
+        "            if a.startswith('--app=')),\n"
+        "           sys.argv[-1] if len(sys.argv) > 1 else 'about:blank')\n"
+        "# FAKE_CDP_MODE=silent: bind the port, accept connections,\n"
+        "# and never respond — the bound-but-silent CDP server\n"
+        "# (m13(a)). The CLI's wait must stay wall-clock bounded\n"
+        "# against it; the fake exits on its own after 15 s.\n"
+        "if os.environ.get('FAKE_CDP_MODE') == 'silent':\n"
+        "    s = socket.socket()\n"
+        "    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "    s.bind(('127.0.0.1', port))\n"
+        "    s.listen(16)\n"
+        "    s.settimeout(0.5)\n"
+        "    conns = []\n"
+        "    end = time.time() + 15\n"
+        "    while time.time() < end:\n"
+        "        try:\n"
+        "            c, _ = s.accept()\n"
+        "            conns.append(c)\n"
+        "        except socket.timeout:\n"
+        "            pass\n"
+        "    sys.exit(0)\n"
         "class H(BaseHTTPRequestHandler):\n"
         "    protocol_version = 'HTTP/1.0'\n"
         "    def log_message(self, *a): pass\n"
@@ -377,6 +436,29 @@ def main():
           r.stdout + r.stderr)
     check("browser open: slow-start wait bounded (~1 s, not the full 10)",
           dt < 10, f"took {dt:.1f}s")
+
+    # --- browser open: CDP port bound but silent (m13(a)) ---
+    # The fake binds the port, accepts connections, and never
+    # responds. The old wait loop's 5 s probe timeout made
+    # wait_for_cdp(3) take ~15 s and the host killed the CLI at
+    # 10 s. The wait is wall-clock bounded now: the whole cold
+    # open (GPU attempt + fallback, SEVYN_CDP_WAIT_S=2) must finish
+    # well inside 10 s and print "launched:".
+    silent_port = free_port()
+    silent_env = {"SEVYN_CDP_PORT": str(silent_port),
+                  "SEVYN_CHROMIUM_BIN": str(fake_chromium),
+                  "SEVYN_CDP_WAIT_S": "2",
+                  "FAKE_CDP_MODE": "silent",
+                  "SEVYN_CHROMIUM_STATE": str(tmp / "chromium.state")}
+    t0 = time.time()
+    r = run_cli(binary, ["browser", "open", "https://example.com"],
+                silent_env)
+    dt = time.time() - t0
+    check("browser open: silent CDP port returns launched (exit 0)",
+          r.returncode == 0 and "launched: https://example.com" in r.stdout,
+          r.stdout + r.stderr)
+    check("browser open: silent-CDP wait bounded (< 8 s)",
+          dt < 8, f"took {dt:.1f}s")
 
     # --- net ---
     r = run_cli(binary, ["net", "status"], {})

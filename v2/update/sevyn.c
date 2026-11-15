@@ -28,6 +28,8 @@
  *   sevyn browser tabs          list open tabs (CDP)
  *   sevyn browser activate <id> bring a tab forward
  *   sevyn browser close <id>    close a tab
+ *   sevyn browser quit          stop Chromium (SIGTERM its pid;
+ *                               idempotent — ok when not running)
  *   sevyn browser status        Chromium running? CDP answering? tabs?
  *   sevyn net status            link, address, gateway, DNS, wifi
  *   sevyn net dns <host>        resolve a name through the guest DNS
@@ -63,6 +65,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_SOCK "/run/sevyn-update.sock"
@@ -82,6 +85,12 @@
  * data disk, mounted at boot, so it is writable whenever Chromium
  * can launch. */
 #define CHROMIUM_LOG "/data/chromium.log"
+/* Chromium's pid + GPU mode (M13), written at launch so `browser
+ * quit` can SIGTERM it and `browser status` can report the mode:
+ * two lines, "pid=<n>" and "gpu=<yes|fallback>". Removed by
+ * `browser quit`; stale after a crash (pid dead counts as
+ * not-running). */
+#define CHROMIUM_STATE "/data/chromium.state"
 #define STATUS_SOCK "/run/sevyn-status.sock"
 
 /* ------------------------------------------------------------------ */
@@ -158,6 +167,7 @@ static void print_usage(FILE *f)
             "  sevyn browser tabs          list open tabs\n"
             "  sevyn browser activate <id> bring a tab forward\n"
             "  sevyn browser close <id>    close a tab\n"
+            "  sevyn browser quit          stop Chromium (idempotent)\n"
             "  sevyn browser status        Chromium + CDP + tab count\n"
             "  sevyn comms [--socket <path>] <verb>\n"
             "                              talk to a commsd other than the\n"
@@ -1236,17 +1246,18 @@ static int cdp_port(void)
     return 9222;
 }
 
-/* One CDP HTTP request. Returns the HTTP status code (0 on transport
- * failure); body_out gets the response body, NUL-terminated (up to
- * cap-1 bytes). Reads Content-Length bytes of body, then returns —
- * it must NOT wait for EOF (see the read loop). */
-static int cdp_request(const char *method, const char *path, char *body_out,
-                       size_t cap)
+/* One CDP HTTP request with an explicit socket timeout. Returns
+ * the HTTP status code (0 on transport failure); body_out gets the
+ * response body, NUL-terminated (up to cap-1 bytes). Reads
+ * Content-Length bytes of body, then returns — it must NOT wait for
+ * EOF (see the read loop). */
+static int cdp_request_timeout(const char *method, const char *path,
+                               char *body_out, size_t cap, int timeout_s)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return 0;
-    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    struct timeval tv = { .tv_sec = timeout_s, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     struct sockaddr_in addr;
@@ -1336,11 +1347,125 @@ static int cdp_request(const char *method, const char *path, char *body_out,
     return status;
 }
 
-/* Is Chromium up and answering CDP? */
-static int browser_running(void)
+/* The normal CDP request: a 5 s socket timeout. The wait path
+ * (wait_for_cdp) uses cdp_request_timeout directly with ~1 s —
+ * a 5 s probe there would blow the wait budget (see below). */
+static int cdp_request(const char *method, const char *path, char *body_out,
+                       size_t cap)
+{
+    return cdp_request_timeout(method, path, body_out, cap, 5);
+}
+
+/* Is Chromium up and answering CDP? The probe timeout is explicit:
+ * the wait path probes with ~1 s (a bound-but-silent port must not
+ * eat the whole wait budget on one recv), everything else uses
+ * the normal 5 s. */
+static int browser_running_timeout(int timeout_s)
 {
     char body[4096];
-    return cdp_request("GET", "/json/version", body, sizeof(body)) == 200;
+    return cdp_request_timeout("GET", "/json/version", body, sizeof(body),
+                               timeout_s) == 200;
+}
+
+static int browser_running(void)
+{
+    return browser_running_timeout(5);
+}
+
+/* Chromium state file (M13): "pid=<n>" + "gpu=<yes|fallback>".
+ * SEVYN_CHROMIUM_STATE overrides the path for the host-side test
+ * (the guest default is /data/chromium.state). A write failure
+ * (no /data yet) is ignored — the launch still proceeds; `quit`
+ * and the gpu line in `status` then report not-running/unknown. */
+static const char *chromium_state_path(void)
+{
+    return env_or("SEVYN_CHROMIUM_STATE", CHROMIUM_STATE);
+}
+
+static void browser_write_state(pid_t pid, const char *gpu)
+{
+    const char *path = chromium_state_path();
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    dprintf(fd, "pid=%d\ngpu=%s\n", (int)pid, gpu);
+    close(fd);
+}
+
+/* Pid recorded in the state file, or -1 when there is none / the
+ * file is unreadable / the pid is not positive. */
+static pid_t browser_state_pid(void)
+{
+    char *text = read_file_cap(chromium_state_path(), 128);
+    if (!text)
+        return -1;
+    const char *p = strstr(text, "pid=");
+    pid_t pid = p ? (pid_t)atoi(p + 4) : -1;
+    free(text);
+    return pid > 0 ? pid : -1;
+}
+
+/* GPU mode recorded in the state file ("yes"/"fallback"), or
+ * "unknown" when the file is absent / has no gpu= line. The
+ * returned pointer is buf when a value was found. */
+static const char *browser_state_gpu(char *buf, size_t cap)
+{
+    char *text = read_file_cap(chromium_state_path(), 128);
+    if (!text)
+        return "unknown";
+    const char *p = strstr(text, "gpu=");
+    if (!p) {
+        free(text);
+        return "unknown";
+    }
+    snprintf(buf, cap, "%s", p + 4);
+    for (char *q = buf; *q; q++) {
+        if (*q == '\n' || *q == ' ' || *q == '\r') {
+            *q = '\0';
+            break;
+        }
+    }
+    free(text);
+    return buf[0] ? buf : "unknown";
+}
+
+/* Append a "BROWSER gpu=<mode>" marker to the chromium log — the
+ * marker the harness reads to tell which launch path was taken
+ * (same marker style as the Browser app's BROWSER lines). */
+static void browser_log_gpu(const char *mode)
+{
+    int fd = open(CHROMIUM_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0)
+        return;
+    dprintf(fd, "BROWSER gpu=%s\n", mode);
+    close(fd);
+}
+
+/* Wait a BOUNDED time for CDP to answer (wait_s seconds, default
+ * 6). Returns 1 when Chromium is answering by the end.
+ *
+ * Wall-clock bounded, NOT iteration bounded. The old loop polled
+ * wait_s*5 times with a 200 ms sleep, but each poll was a
+ * cdp_request() with a 5 s socket timeout — once Chromium has bound
+ * port 9222 but its DevTools HTTP server is not answering yet, a
+ * single poll blocks up to 5 s on recv(), so wait_for_cdp(3) could
+ * take ~15 s and the host's 10 s exec kill fired on a cold
+ * `browser open` (m13(a)). The loop now checks a deadline, polls
+ * every 200 ms with a ~1 s probe timeout, and does one final probe
+ * at/after the deadline — so a 3 s wait costs at most ~3 s plus
+ * two short probes, and the 3 s + 3 s split in `browser open`
+ * stays well under the 10 s host kill. */
+static int wait_for_cdp(int wait_s)
+{
+    if (wait_s <= 0)
+        wait_s = 6;
+    time_t deadline = time(NULL) + wait_s;
+    while (time(NULL) < deadline) {
+        if (browser_running_timeout(1))
+            return 1;
+        usleep(200000);
+    }
+    return browser_running_timeout(1);
 }
 
 /* Launch Chromium detached and return immediately. The caller must
@@ -1355,9 +1480,19 @@ static int browser_running(void)
  * Returns 0 when the launch was attempted (the fork succeeded), 1
  * when even the fork failed. Whether Chromium actually came up is
  * observable via `browser status` (running: yes + cdp: yes) and
- * via /data/chromium.log (Chromium's stdout/stderr). The URL (if
- * any) is the first tab; without one Chromium opens about:blank. */
-static int browser_launch(const char *url)
+ * via /data/chromium.log (Chromium's stdout/stderr).
+ * M13: with a URL Chromium launches chromeless (--app=<url>, no
+ * tabs/omnibox) as the content window paired with the Browser app
+ * window, sized 800x348 (the app window is 800x500 and its chrome
+ * is 152px: title 44 + tabs 36 + address 44 + status 28). Without
+ * a URL (NULL, empty, or about:blank) it opens about:blank at
+ * 800x500, as before. The URL is never passed positionally with
+ * --app. The intermediate child records the grandchild pid + gpu
+ * mode in /data/chromium.state ("yes" here, "fallback" when
+ * disable_gpu is set — the fallback relaunch in `browser open`).
+ * Live resize sync is out of scope for M13 (it would need a CDP
+ * WebSocket in this CLI): the window keeps its launch size. */
+static int browser_launch(const char *url, int disable_gpu)
 {
     const char *bin = env_or("SEVYN_CHROMIUM_BIN", CHROMIUM_BIN);
     pid_t child = fork();
@@ -1372,8 +1507,12 @@ static int browser_launch(const char *url)
         pid_t grand = fork();
         if (grand < 0)
             _exit(127);
-        if (grand > 0)
+        if (grand > 0) {
+            /* Record the Chromium pid + gpu mode for `browser quit`
+             * and `browser status` before exiting. */
+            browser_write_state(grand, disable_gpu ? "fallback" : "yes");
             _exit(0);
+        }
         /* Grandchild: Chromium. Detach, point it at the compositor
          * and the staged CA bundle, send its output to the
          * chromium log, stdin from /dev/null. */
@@ -1412,17 +1551,17 @@ static int browser_launch(const char *url)
         char datadir[512];
         snprintf(datadir, sizeof(datadir), "--user-data-dir=%s",
                  CHROMIUM_PROFILE);
-        /* --window-size=800,500: the same size class as the .sevyn
-         * app windows, so the compositor cascades it alongside them
-         * instead of maximising it over the shell. */
-        /* --disable-gpu: the GPU process cannot start in the
-         * image — Mesa has no DRI driver for virtio-gpu
-         * (/usr/lib/dri/virtio_gpu_dri.so is absent), so ANGLE's EGL
-         * init fails, all EGL display types fail, and the GPU process
-         * exits; the browser then never answers CDP (diagnosed
-         * 2026-11-07 via /data/chromium.log). Software rendering is
-         * the right call anyway: the shell's compositor is the pixman
-         * CPU renderer, so there is no GPU to use. */
+        /* --window-size: 800x348 with a URL (the content rect under
+         * the Browser app's 152px of chrome), 800x500 without one
+         * (plain about:blank launch, as before). */
+        /* GPU (M13): the first attempt runs WITHOUT --disable-gpu —
+         * Weston now uses the GL renderer and Mesa DRI drivers are
+         * staged, so the GPU process may start. The M5 --disable-gpu
+         * was for the old pixman CPU compositor with no DRI driver
+         * in the image; both halves of that justification are stale
+         * post-M12. If CDP never answers, `browser open` kills this
+         * Chromium and relaunches with --disable-gpu (software
+         * rendering fallback) — see cmd_browser. */
         /* DBUS_SESSION_BUS_ADDRESS=/dev/null: the image runs no
          * D-Bus daemon, so Chromium's startup D-Bus calls (session
          * bus) otherwise block on a ~25s connect timeout each and
@@ -1433,25 +1572,34 @@ static int browser_launch(const char *url)
          * fail fast. The system bus already fails fast (its socket
          * does not exist). */
         setenv("DBUS_SESSION_BUS_ADDRESS", "/dev/null", 1);
-        if (url && *url)
-            execl(bin, bin, "--no-sandbox", "--disable-gpu",
-                  "--disable-dev-shm-usage",
-                  "--disable-crash-reporter",
-                  "--disable-component-update",
-                  "--no-first-run",
-                  "--ozone-platform=wayland",
-                  "--window-size=800,500",
-                  port, datadir, url, (char *)NULL);
-        else
-            execl(bin, bin, "--no-sandbox", "--disable-gpu",
-                  "--disable-dev-shm-usage",
-                  "--disable-crash-reporter",
-                  "--disable-component-update",
-                  "--no-first-run",
-                  "--ozone-platform=wayland",
-                  "--window-size=800,500",
-                  port, datadir, (char *)NULL);
-        /* execl failed: stderr is the chromium log, so the reason
+        /* --app=<url>: chromeless content window — no Chromium tabs
+         * or omnibox; the SevynOS Browser app is the only chrome.
+         * The URL is never passed positionally with --app. */
+        int has_url = url && *url && strcmp(url, "about:blank") != 0;
+        char app[2048];
+        const char *args[16];
+        int n = 0;
+        args[n++] = bin;
+        args[n++] = "--no-sandbox";
+        if (disable_gpu)
+            args[n++] = "--disable-gpu";
+        args[n++] = "--disable-dev-shm-usage";
+        args[n++] = "--disable-crash-reporter";
+        args[n++] = "--disable-component-update";
+        args[n++] = "--no-first-run";
+        args[n++] = "--ozone-platform=wayland";
+        if (has_url) {
+            snprintf(app, sizeof(app), "--app=%s", url);
+            args[n++] = app;
+            args[n++] = "--window-size=800,348";
+        } else {
+            args[n++] = "--window-size=800,500";
+        }
+        args[n++] = port;
+        args[n++] = datadir;
+        args[n] = NULL;
+        execv(bin, (char *const *)args);
+        /* execv failed: stderr is the chromium log, so the reason
          * lands there for `sevyn files cat /data/chromium.log`. */
         fprintf(stderr, "error: exec %s failed: %s\n", bin,
                 strerror(errno));
@@ -1551,6 +1699,33 @@ struct tab_by_url {
     char *url;
 };
 
+/* Close every page tab except `keep` — the warm-open replacement
+ * step (see cmd_browser). Best-effort: a failed close is ignored,
+ * the open itself already succeeded. about:blank and DevTools tabs
+ * are not user pages and are left alone; the enumeration itself
+ * already skips non-page targets (the Omnibox popup, service
+ * workers), as the existing tabs/status verbs do. */
+struct close_others {
+    const char *keep;
+};
+
+static void close_other_tab(const char *id, const char *title,
+                            const char *url, void *ctx)
+{
+    struct close_others *c = (struct close_others *)ctx;
+    (void)title;
+    if (strcmp(id, c->keep) == 0)
+        return;
+    if (strcmp(url, "about:blank") == 0 ||
+        strncmp(url, "chrome-devtools://", 18) == 0 ||
+        strncmp(url, "devtools://", 11) == 0)
+        return;
+    char path[4096];
+    char body[4096];
+    snprintf(path, sizeof(path), "/json/close/%s", id);
+    cdp_request("GET", path, body, sizeof(body));
+}
+
 static void find_tab_by_url(const char *id, const char *title,
                             const char *url, void *ctx)
 {
@@ -1564,6 +1739,43 @@ static void find_tab_by_url(const char *id, const char *title,
     t->url = strdup(url);
 }
 
+/* CDP is answering and the launched URL should be the first tab:
+ * print "opened:" + the tab line for it. */
+static void print_opened_tab(const char *url)
+{
+    char body[262144];
+    struct tab_by_url t = { .want = url };
+    if (cdp_request("GET", "/json/list", body, sizeof(body)) == 200)
+        for_each_page_tab(body, find_tab_by_url, &t);
+    printf("opened: %s\n", url);
+    if (t.id)
+        printf("tab: %s\t%s\t%s\n", t.id, t.title ? t.title : "",
+               t.url ? t.url : url);
+    free(t.id);
+    free(t.title);
+    free(t.url);
+}
+
+/* Stop Chromium (M13): SIGTERM the pid in /data/chromium.state and
+ * remove the state file. Idempotent — "quit: not-running" when
+ * there is no state file, no live pid, or the pid is already dead;
+ * exit 0 either way (the Browser app calls this on close
+ * unconditionally). */
+static int cmd_browser_quit(void)
+{
+    const char *path = chromium_state_path();
+    pid_t pid = browser_state_pid();
+    if (pid <= 0 || kill(pid, 0) != 0) {
+        unlink(path);
+        printf("quit: not-running\n");
+        return 0;
+    }
+    kill(pid, SIGTERM);
+    unlink(path);
+    printf("quit: ok\n");
+    return 0;
+}
+
 static int cmd_browser_status(void)
 {
     if (!browser_running()) {
@@ -1572,6 +1784,7 @@ static int cmd_browser_status(void)
     }
     char body[262144];
     char ver[4096];
+    char gpu[32];
     int tabs = 0;
     char *version = NULL;
     if (cdp_request("GET", "/json/list", body, sizeof(body)) == 200) {
@@ -1585,6 +1798,7 @@ static int cmd_browser_status(void)
     printf("cdp: yes\n");
     printf("tabs: %d\n", tabs);
     printf("version: %s\n", version ? version : "unknown");
+    printf("gpu: %s\n", browser_state_gpu(gpu, sizeof(gpu)));
     free(version);
     return 0;
 }
@@ -1615,46 +1829,75 @@ static int cmd_browser(int argc, char **argv)
         for_each_page_tab(body, print_tab, NULL);
         return 0;
     }
+    if (strcmp(verb, "quit") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_browser_quit();
+    }
     if (strcmp(verb, "open") == 0) {
         if (argc != 3 && argc != 4)
             return usage();
-        const char *raw = argc == 4 ? argv[3] : "about:blank";
+        /* No URL: about:blank stays literal (normalize_url would
+         * turn it into "https://about:blank"); the launch then
+         * takes the plain path and the tab lookup matches. */
         char url[2048];
-        normalize_url(raw, url, sizeof(url));
+        if (argc == 4)
+            normalize_url(argv[3], url, sizeof(url));
+        else
+            snprintf(url, sizeof(url), "about:blank");
         if (!browser_running()) {
-            /* Cold start: launch Chromium with the URL as its first
-             * tab, then wait a BOUNDED time for CDP so a fast start
-             * returns the tab synchronously. The wait must stay well
-             * under the host's 10 s exec timeout (default 6 s) — a
-             * slow start under TCG returns "launched" and the caller
-             * polls `browser status` / `browser tabs` for readiness
-             * (the URL opens as Chromium's first tab once it is up).
-             * SEVYN_CDP_WAIT_S overrides the wait. */
-            if (browser_launch(url) != 0)
-                return 1;
+            /* Cold start: launch Chromium, then wait a BOUNDED time
+             * for CDP so a fast start returns the tab synchronously.
+             * The wait must stay well under the host's 10 s exec
+             * timeout (default 6 s) — a slow start under TCG
+             * returns "launched" and the caller polls `browser
+             * status` / `browser tabs` for readiness (the URL opens
+             * as Chromium's first tab once it is up).
+             * SEVYN_CDP_WAIT_S overrides the wait.
+             * M13: the first attempt runs with the GPU enabled. If
+             * CDP still does not answer, kill that Chromium (pid
+             * from the state file) and relaunch with --disable-gpu
+             * (software fallback), then wait again. The requested
+             * wait is SPLIT across the two attempts (first half,
+             * then the rest), so the total stays at SEVYN_CDP_WAIT_S
+             * (default 6 s) plus ~1 s of kill grace — well under the
+             * host's 10 s exec timeout. Two full waits would exceed
+             * it and the CLI could be killed before printing
+             * "launched:" (the fallback Chromium still comes up and
+             * the caller polls for it, but the Browser app would show
+             * an error on a slow fallback start). */
             const char *wait_s = env_or("SEVYN_CDP_WAIT_S", "6");
             int wait = atoi(wait_s);
             if (wait <= 0)
                 wait = 6;
-            for (int i = 0; i < wait * 5; i++) {
-                if (browser_running())
-                    break;
-                usleep(200000);
+            /* Split the budget: first attempt gets the larger half. */
+            int wait1 = (wait + 1) / 2;
+            int wait2 = wait - wait1;
+            const char *launch_url = argc == 4 ? url : NULL;
+            if (browser_launch(launch_url, 0) != 0)
+                return 1;
+            if (wait_for_cdp(wait1)) {
+                browser_log_gpu("yes");
+                print_opened_tab(url);
+                return 0;
             }
-            if (browser_running()) {
-                char body[262144];
-                struct tab_by_url t = { .want = url };
-                if (cdp_request("GET", "/json/list", body,
-                                sizeof(body)) == 200)
-                    for_each_page_tab(body, find_tab_by_url, &t);
-                printf("opened: %s\n", url);
-                if (t.id)
-                    printf("tab: %s\t%s\t%s\n", t.id,
-                           t.title ? t.title : "",
-                           t.url ? t.url : url);
-                free(t.id);
-                free(t.title);
-                free(t.url);
+            pid_t old = browser_state_pid();
+            if (old > 0) {
+                kill(old, SIGTERM);
+                /* Brief grace for the old Chromium to exit and
+                 * release the profile lock / CDP port before the
+                 * fallback relaunch. */
+                for (int i = 0; i < 10; i++) {
+                    if (kill(old, 0) != 0)
+                        break;
+                    usleep(100000);
+                }
+            }
+            if (browser_launch(launch_url, 1) != 0)
+                return 1;
+            browser_log_gpu("fallback");
+            if (wait_for_cdp(wait2)) {
+                print_opened_tab(url);
                 return 0;
             }
             printf("launched: %s\n", url);
@@ -1670,6 +1913,30 @@ static int cmd_browser(int argc, char **argv)
         char *id = json_string_after(body, NULL, "\"id\"");
         char *title = json_string_after(body, NULL, "\"title\"");
         char *turl = json_string_after(body, NULL, "\"url\"");
+        /* M13 is single-tab by design: each `browser open` replaces
+         * the current tab, so a warm open leaves exactly ONE tab —
+         * the new one. With --app, PUT /json/new opens the new tab
+         * in a NEW window that stays behind the first window, and
+         * /json/activate only switches the tab inside its own
+         * window — so a warm open used to paint the first page and
+         * never navigate again (m5(a)(b)(c), m13(b)(c)(d)(e)).
+         * Close every other page tab first (their windows die with
+         * them, leaving the new tab's window frontmost), then
+         * activate the new tab. Best-effort: a failed close or
+         * activate still returns 0 — the open itself succeeded. */
+        if (id) {
+            char list_body[262144];
+            if (cdp_request("GET", "/json/list", list_body,
+                            sizeof(list_body)) == 200) {
+                struct close_others ctx = { .keep = id };
+                for_each_page_tab(list_body, close_other_tab, &ctx);
+            }
+            char act_path[4096];
+            char act_body[4096];
+            snprintf(act_path, sizeof(act_path), "/json/activate/%s",
+                     id);
+            cdp_request("GET", act_path, act_body, sizeof(act_body));
+        }
         printf("opened: %s\n", url);
         if (id && title && turl)
             printf("tab: %s\t%s\t%s\n", id, title, turl);
