@@ -116,7 +116,12 @@ jobs:
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
-          sha256sum vmlinuz initramfs.cpio.gz sevynos.img > v2-SHA256SUMS
+          # sevynos.img.gz is the durable answer to the 2 GiB release-asset
+          # cap: the raw image sits at its partition-layout floor and only
+          # grows from here, while the gzip is ~950 MB. Keep publishing the
+          # raw .img too while it fits under the cap.
+          gzip -9 -k sevynos.img
+          sha256sum vmlinuz initramfs.cpio.gz sevynos.img sevynos.img.gz > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
           SevynOS v2 (M12 Genesis GPU compositor) — bootable image
           ==============================================
@@ -193,11 +198,15 @@ jobs:
             (sdX is the USB stick — NOT the internal disk), then
             boot from USB. It does not touch the internal disk;
             M7 is "boot", not "install".
+            sevynos.img.gz is the same image compressed (about half
+            the download): Etcher writes it directly; with dd,
+            gunzip it first (`gunzip sevynos.img.gz`), then dd the
+            .img as above.
 
           Verify the download with v2-SHA256SUMS.
           This is a development snapshot, not a stable release.
           EOF
-          ls -l vmlinuz initramfs.cpio.gz sevynos.img v2-SHA256SUMS v2-BOOT-NOTES.txt
+          ls -l vmlinuz initramfs.cpio.gz sevynos.img sevynos.img.gz v2-SHA256SUMS v2-BOOT-NOTES.txt
       - name: Generate the v2 update feed
         env:
           SEVYN_NIGHTLY_UPDATE_SIGNING_KEY: ${{ secrets.SEVYN_NIGHTLY_UPDATE_SIGNING_KEY }}
@@ -233,7 +242,7 @@ jobs:
           import os, sys
           CAP = 2147483648
           bad = []
-          for name in ("vmlinuz", "initramfs.cpio.gz", "sevynos.img"):
+          for name in ("vmlinuz", "initramfs.cpio.gz", "sevynos.img", "sevynos.img.gz"):
               p = os.path.join("v2/image/build", name)
               size = os.path.getsize(p)
               print(f"{name}: {size} bytes")
@@ -295,4 +304,4 @@ jobs:
           # rootfs.squashfs + updates.json feed the OS update service's
           # check/download/apply flow (Settings → Software Update).
           # The v2-* files are the M12 Genesis image (kernel + initramfs + GPT disk image).
-          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"
+          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/sevynos.img.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"
