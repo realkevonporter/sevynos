@@ -23,6 +23,7 @@
 #include <wayland-cursor.h>
 
 #include "common.h"
+#include "genesis-presenter.h"
 #include "painter.h"
 
 struct xdg_wm_base;
@@ -90,6 +91,11 @@ class Wayland {
   // Non-blocking dispatch round. Returns false if the display is gone.
   bool dispatch(int timeoutMs);
 
+  // M12: evaluate the Genesis fps sample window on the host
+  // main-loop tick (see GenesisPresenter::maybeLogFps). No-op when
+  // Genesis is not live.
+  void tickGenesis();
+
   void setPointerHandler(PointerHandler h) { pointerHandler_ = h; }
   void setScrollHandler(ScrollHandler h) { scrollHandler_ = h; }
   void setKeyHandler(KeyHandler h) { keyHandler_ = h; }
@@ -141,6 +147,10 @@ class Wayland {
   void onFrameDone();
   void onBufferRelease(int index);
   void doPresent();
+  // Genesis (M12): create the GPU presenter on first use (or return
+  // false forever once it has failed / been disabled via
+  // SEVYN_GENESIS=0). True means the GPU path is live.
+  bool ensureGenesis();
   void requestFrame();
   void flushPending();
   // Set the pointer cursor (default arrow) from the enter serial.
@@ -237,6 +247,13 @@ class Wayland {
   wl_surface* surface_ = nullptr;
   xdg_surface* xdgSurface_ = nullptr;
   xdg_toplevel* xdgToplevel_ = nullptr;
+  // Genesis (M12): the GPU present path. Created lazily on the first
+  // present; null means "not attempted yet" (CPU painter in use) and
+  // genesisDead_ means "attempted and unavailable — never retry".
+  // Declared after surface_ so it is destroyed before the surface
+  // (its wl_egl_window hangs off the surface).
+  std::unique_ptr<GenesisPresenter> genesis_;
+  bool genesisDead_ = false;
   wl_pointer* pointer_ = nullptr;
   wl_keyboard* keyboard_ = nullptr;
   // Pointer cursor: one static arrow for the whole shell/apps. The

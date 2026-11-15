@@ -2082,6 +2082,11 @@ int RnHost::run() {
       logLine("HOST Wayland display lost, exiting");
       return 1;
     }
+    // M12: the Genesis fps sample window's time bound is evaluated
+    // on this tick (see GenesisPresenter::maybeLogFps) — the shell
+    // presents on state changes only, so without this an idle
+    // desktop never logs a sample.
+    wayland_->tickGenesis();
     // Same guard as the headless loop: a throwing microtask must not
     // kill the shell.
     try {

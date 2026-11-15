@@ -268,6 +268,31 @@ const Painter::Glyph* Painter::glyphFor(uint32_t cp, float size,
   return &inserted.first->second;
 }
 
+const Painter::GlyphBitmap* Painter::glyphBitmap(uint32_t cp, float size,
+                                                 bool bold) {
+  const Glyph* g = glyphFor(cp, size, bold);
+  if (!g)
+    return nullptr;
+  glyphBitmapScratch_.advance = g->advance;
+  glyphBitmapScratch_.bitmapLeft = g->bitmapLeft;
+  glyphBitmapScratch_.bitmapTop = g->bitmapTop;
+  glyphBitmapScratch_.width = g->width;
+  glyphBitmapScratch_.height = g->height;
+  glyphBitmapScratch_.bitmap =
+      g->bitmap.empty() ? nullptr : g->bitmap.data();
+  return &glyphBitmapScratch_;
+}
+
+const Painter::ImagePixels* Painter::imagePixels(const std::string& path) {
+  auto img = loadImage(path);
+  if (!img || img->w <= 0 || img->h <= 0)
+    return nullptr;
+  imagePixelsScratch_.w = img->w;
+  imagePixelsScratch_.h = img->h;
+  imagePixelsScratch_.rgba = img->rgba.data();
+  return &imagePixelsScratch_;
+}
+
 float Painter::measureTextWidth(const std::string& text, float size,
                                 bool bold) {
   float w = 0;

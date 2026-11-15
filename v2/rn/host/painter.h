@@ -47,6 +47,25 @@ class Painter {
   float measureTextHeight(const std::string& text, float size, bool bold,
                           float maxWidth);
 
+  // Genesis (M12): read-only access to the raster caches for the GPU
+  // presenter. The returned pointers are valid only until the next
+  // glyphFor/loadImage call for the same key (a cache clear may free
+  // them); use immediately, never hold across presents.
+  struct GlyphBitmap {
+    int advance = 0;
+    int bitmapLeft = 0;
+    int bitmapTop = 0;
+    int width = 0;
+    int height = 0;
+    const uint8_t* bitmap = nullptr; // width*height coverage bytes
+  };
+  const GlyphBitmap* glyphBitmap(uint32_t cp, float size, bool bold);
+  struct ImagePixels {
+    int w = 0, h = 0;
+    const uint8_t* rgba = nullptr; // w*h*4 straight-alpha RGBA bytes
+  };
+  const ImagePixels* imagePixels(const std::string& path);
+
  private:
   void fillRect(float x, float y, float w, float h, uint32_t color,
                 float radius);
@@ -102,6 +121,11 @@ class Painter {
   // call (a cache insert may rehash); use it immediately.
   // Returns nullptr only when no font is available.
   const Glyph* glyphFor(uint32_t cp, float size, bool bold);
+
+  // Genesis (M12) scratch for the glyphBitmap/imagePixels accessors:
+  // filled per call, valid only until the next accessor call.
+  mutable GlyphBitmap glyphBitmapScratch_;
+  mutable ImagePixels imagePixelsScratch_;
 
   struct Image {
     int w = 0, h = 0;

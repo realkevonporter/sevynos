@@ -278,6 +278,7 @@ g++ -O2 -std=c++17 -Wall -Wextra \
   $(pkg-config --cflags wayland-client wayland-cursor freetype2 libpng) \
   -o "$BUILD_TMP/sevyn-rn-host" \
   "$ROOT/rn/host/common.cc" "$ROOT/rn/host/painter.cc" \
+  "$ROOT/rn/host/genesis-presenter.cc" \
   "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
   "$ROOT/rn/host/appclient.cc" \
   "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
