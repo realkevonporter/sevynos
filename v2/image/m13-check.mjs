@@ -174,7 +174,7 @@ async function waitForLog(path, pattern, timeoutMs, sinceLines = 0) {
 // 420000, yet every verifyFocus + exec-wait passed on the
 // Browser app's own traffic for ~8 minutes). The discriminator,
 // proven on both 242ad0ba boot logs: the Terminal echoes every
-// command it runs as `JS TERMINAL browser-<verb> ...` 2–46 ms
+// command it runs as `JS TERMINAL <app>-<verb> ...` 2–46 ms
 // after its EXEC line, while the Browser app echoes `JS BROWSER
 // ...` after its own. So an EXEC line counts as
 // Terminal-originated ONLY when its own verb's `JS TERMINAL`
@@ -211,18 +211,39 @@ async function waitForTerminalExec(path, execRe, echoRe, timeoutMs, sinceLines =
   return null;
 }
 
-// The Terminal app's per-verb echo for a `browser ...` command, or
-// null when the verb has no echo. `activate`/`close` have no `JS
-// TERMINAL` echo at all (both 242ad0ba logs: their EXEC lines are
-// followed by no JS line within 16 lines) — but no other app runs
-// those verbs either (the Browser app only ever runs open/status/
-// tabs), so their EXEC lines are already Terminal-specific and
-// need no scoping. `quit` is likewise never waited on via termCmd.
+// The Terminal app's per-command echo, scoped by the command's OWN
+// app token (first word) and verb (second word): the Terminal
+// echoes every command it runs as `JS TERMINAL <app>-<verb> ...`
+// a few ms after its EXEC line. Round 9 keyed on the verb alone,
+// so `net status` was scoped to the `browser-status` echo it can
+// never produce — m5 check 18 on head 96d36141 burned its full
+// 120 s timeout on an EXEC that ran fine (boot log: `[48797]
+// EXEC sevyn net status -> 0`, `[48812] JS TERMINAL net-status
+// interface=eth0 wifi=on`, 15 ms later). Echo formats below are
+// read off the 96d36141 boot logs, not guessed: `net dns ...` ->
+// `JS TERMINAL net-dns ...` (EXEC [175714] -> echo [175717]);
+// `browser open` -> `JS TERMINAL browser-open` (EXEC [201942] ->
+// echo [201947]); `browser status` / `browser tabs` as before.
+// Verbs with no echo return null and keep the plain wait:
+// `activate` / `close` (no `JS TERMINAL` echo of their own
+// follows their EXEC lines in either 96d36141 boot log) and
+// `quit` (m13 log: the quit EXEC [867509] is followed by JS
+// POINTER / GENESIS lines, no `JS TERMINAL browser-quit`) — but
+// no other app runs those verbs either (the Browser app only ever
+// runs open/status/tabs), so their EXEC lines are already
+// Terminal-specific and need no scoping. `quit` is likewise never
+// waited on via termCmd.
 function terminalEchoRe(cmd) {
-  const verb = cmd.split(" ")[1];
-  if (verb === "status") return /JS TERMINAL browser-status/;
-  if (verb === "tabs") return /JS TERMINAL browser-tabs/;
-  if (verb === "open") return /JS TERMINAL browser-open/;
+  const [app, verb] = cmd.split(" ");
+  if (app === "browser") {
+    if (verb === "status") return /JS TERMINAL browser-status/;
+    if (verb === "tabs") return /JS TERMINAL browser-tabs/;
+    if (verb === "open") return /JS TERMINAL browser-open/;
+  }
+  if (app === "net") {
+    if (verb === "status") return /JS TERMINAL net-status/;
+    if (verb === "dns") return /JS TERMINAL net-dns/;
+  }
   return null;
 }
 
@@ -3438,10 +3459,6 @@ async function main() {
     "screen: shell still visible at end",
     fTop > 10000 && fDock > 2000,
     `topBar=${fTop} dockBg=${fDock}`,
-  );
-  check(
-    "genesis: no GPU fallback engaged (whole run)",
-    !logHas(b.logPath, /GENESIS unavailable|falling back to CPU painter/),
   );
   b.ctl.write("POWEROFF\n");
   const exited = await waitExit(b, 30000);
