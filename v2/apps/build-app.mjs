@@ -6,7 +6,7 @@
 // appColor/appGlyph), so make-bundles.py packages the same app.hbc
 // under twelve different manifests.
 //
-// Usage: node build-app.mjs [--entry app|crash|terminal|settings|files|browser|comms|installer]
+// Usage: node build-app.mjs [--entry app|crash|terminal|settings|files|browser|comms|installer|camera]
 //                            [--hermesc <path>] [--out <dir>]
 //   --entry: app (default) builds src/main.tsx -> app.hbc;
 //            crash builds src/crash-main.tsx -> crash.hbc;
@@ -40,6 +40,7 @@ const ENTRIES = [
   "browser",
   "comms",
   "installer",
+  "camera",
 ];
 if (!ENTRIES.includes(entry)) {
   console.error("--entry must be one of " + ENTRIES.join("|") + ", got " + entry);

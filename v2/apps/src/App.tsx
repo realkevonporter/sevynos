@@ -730,15 +730,6 @@ export function App(): React.ReactElement {
         }
       />
     );
-  } else if (id === "camera") {
-    body = (
-      <EmptyState
-        glyph={Sevyn.appGlyph}
-        color={color}
-        title="No camera yet"
-        body="This device has no camera adapter connected."
-      />
-    );
   } else if (id === "messages") {
     body = (
       <EmptyState
