@@ -1,9 +1,9 @@
 "use strict";
 // End-to-end Node test for the built app bundles (dist/app.js,
 // dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js,
-// dist/comms.js) and the crash bundle (dist/crash.js). Loads the app
+// dist/comms.js, dist/music.js) and the crash bundle (dist/crash.js). Loads the app
 // bundle with the mock Sevyn host as several apps — files (status.read
-// granted, the fallback screen) and notes/music/calculator/calendar/store
+// granted, the fallback screen) and notes/calculator/calendar/store
 // (the M9 real screens) — and drives the close X. The crash bundle
 // must throw during evaluation. The M4 apps load with cli.exec and a
 // canned exec handler, and drive their real flows (terminal typing,
@@ -14,7 +14,15 @@
 // with a canned `sevyn comms` handler: login form, room list, thread
 // + send, and the call screens (the async login/send run in the
 // async section at the end — the mock's execAsync resolves on a
-// microtask, so those checks await a setImmediate flush).
+// microtask, so those checks await a setImmediate flush). The
+// Music bundle loads with cli.exec and a canned `sevyn music`
+// handler: library (scan + files-list fallback + empty), and the
+// live flow (play, 1 s position poll, pause/resume, seek, volume,
+// next/previous wrap, stop, clean errors). The position poll runs
+// on a 1 s interval — the async music checks stop playback before
+// unmounting, so the playing->stopped state change clears the
+// interval (unmount alone does not flush the effect cleanup in this
+// harness); the sync music checks never start it (nothing playing).
 //
 // Run: node test/app-e2e-test.js   (from v2/apps, after npm run build)
 const assert = require("node:assert/strict");
@@ -48,6 +56,10 @@ const browserBundle = fs.readFileSync(
 );
 const commsBundle = fs.readFileSync(
   path.join(__dirname, "..", "dist", "comms.js"),
+  "utf8",
+);
+const musicBundle = fs.readFileSync(
+  path.join(__dirname, "..", "dist", "music.js"),
   "utf8",
 );
 const crashBundle = fs.readFileSync(
@@ -171,8 +183,7 @@ check("files (status.read): name, glyph, live status line", () => {
 });
 
 // M9: the template apps have real screens now. The permission gate
-// is proven by the music empty state (which still shows the status
-// line) and the fallback screen; notes shows its real UI instead.
+// is proven by the fallback screen; notes shows its real UI instead.
 check("notes: real notes screen, no status leak", () => {
   const last = loadAs({
     id: "notes",
@@ -194,16 +205,16 @@ check("notes: real notes screen, no status leak", () => {
   );
 });
 
-check("music (no permission): status line says not permitted", () => {
+check("fallback (no permission): status line says not permitted", () => {
   const last = loadAs({
-    id: "music",
-    name: "Music",
+    id: "widget",
+    name: "Widget",
     color: "#ec4899",
-    glyph: "M",
+    glyph: "W",
     permissions: [],
   });
   const texts = textsOf(last);
-  assert.ok(texts.includes("Music"), "app name shown");
+  assert.ok(texts.includes("Widget"), "app name shown");
   assert.ok(
     texts.some((t) => t.includes("not permitted")),
     "status line says not permitted",
@@ -214,12 +225,12 @@ check("music (no permission): status line says not permitted", () => {
   );
 });
 
-check("music (status.read): live status line", () => {
+check("fallback (status.read): live status line", () => {
   const last = loadAs({
-    id: "music",
-    name: "Music",
+    id: "widget",
+    name: "Widget",
     color: "#ec4899",
-    glyph: "M",
+    glyph: "W",
     permissions: ["status.read"],
   });
   const texts = textsOf(last);
@@ -230,6 +241,270 @@ check("music (status.read): live status line", () => {
   assert.ok(
     texts.some((t) => t.includes("Wi-Fi")),
     "live wifi in status line",
+  );
+});
+
+// --- Music ---------------------------------------------------------------
+// Canned `sevyn music` + `sevyn files` answers. The fake daemon
+// keeps playback state; each STATUS while playing advances position
+// by 1 s, so the 1 s position poll is observable. Only STATUS
+// advances the clock — command replies report the state as the
+// command left it. `daemonDown` flips every music call to a bare
+// failure (no JSON): the old volume-up bug's shape.
+const MUSIC_TRACKS = [
+  {
+    id: "/data/01-sunrise-acoustic.wav",
+    title: "01-sunrise-acoustic",
+    artist: "Unknown Artist",
+    album: "Local Library",
+    durationSec: 21.5,
+    path: "/data/01-sunrise-acoustic.wav",
+    format: "wav",
+  },
+  {
+    id: "/data/02-midnight-jazz.wav",
+    title: "02-midnight-jazz",
+    artist: "Unknown Artist",
+    album: "Local Library",
+    durationSec: 25.5,
+    path: "/data/02-midnight-jazz.wav",
+    format: "wav",
+  },
+  {
+    id: "/data/03-ocean-breeze.wav",
+    title: "03-ocean-breeze",
+    artist: "Unknown Artist",
+    album: "Local Library",
+    durationSec: 24.83,
+    path: "/data/03-ocean-breeze.wav",
+    format: "wav",
+  },
+  {
+    id: "/data/04-city-lights.wav",
+    title: "04-city-lights",
+    artist: "Unknown Artist",
+    album: "Local Library",
+    durationSec: 27.75,
+    path: "/data/04-city-lights.wav",
+    format: "wav",
+  },
+  {
+    id: "/data/05-forest-dawn.wav",
+    title: "05-forest-dawn",
+    artist: "Unknown Artist",
+    album: "Local Library",
+    durationSec: 22.83,
+    path: "/data/05-forest-dawn.wav",
+    format: "wav",
+  },
+  {
+    id: "/data/06-desert-drive.wav",
+    title: "06-desert-drive",
+    artist: "Unknown Artist",
+    album: "Local Library",
+    durationSec: 22.93,
+    path: "/data/06-desert-drive.wav",
+    format: "wav",
+  },
+  {
+    id: "/data/07-starlight-lullaby.wav",
+    title: "07-starlight-lullaby",
+    artist: "Unknown Artist",
+    album: "Local Library",
+    durationSec: 29.5,
+    path: "/data/07-starlight-lullaby.wav",
+    format: "wav",
+  },
+];
+
+function musicHandler(opts) {
+  const options = opts || {};
+  const scanOk = options.scanOk !== false;
+  const files = options.files || MUSIC_TRACKS.map((t) => t.path.slice("/data/".length));
+  const failPlayPath = options.failPlayPath || null;
+  let daemonDown = !!options.daemonDown;
+  const daemon = {
+    playing: false,
+    paused: false,
+    position: 0,
+    volume: 100,
+    current: null,
+  };
+  const durationOf = (trackPath) => {
+    const found = MUSIC_TRACKS.find((t) => t.path === trackPath);
+    return found ? found.durationSec : 0;
+  };
+  const statusReply = (advance) => {
+    if (advance && daemon.playing && daemon.current) {
+      daemon.position = Math.min(daemon.position + 1, durationOf(daemon.current));
+      if (daemon.position >= durationOf(daemon.current)) daemon.playing = false;
+    }
+    return (
+      "0\n" +
+      JSON.stringify({
+        ok: true,
+        available: true,
+        playing: daemon.playing,
+        paused: daemon.paused,
+        positionSec: daemon.position,
+        durationSec: daemon.current ? durationOf(daemon.current) : 0,
+        volume: daemon.volume,
+        track: daemon.current ? { path: daemon.current } : null,
+      })
+    );
+  };
+  const handler = (cmd) => {
+    if (cmd === "sevyn music scan /data") {
+      if (daemonDown || !scanOk) return "1\n";
+      return "0\n" + JSON.stringify({ ok: true, tracks: MUSIC_TRACKS });
+    }
+    if (cmd === "sevyn files list /data") {
+      return "0\n" + files.map((f) => "f " + f + "\n").join("");
+    }
+    if (cmd === "sevyn music status") {
+      if (daemonDown) return "1\n";
+      return statusReply(true);
+    }
+    if (cmd.startsWith("sevyn music play ")) {
+      if (daemonDown) return "1\n";
+      const playPath = cmd.slice("sevyn music play ".length);
+      // A file can turn undecodable between scan and play (changed
+      // on disk): the daemon refuses with a stable code, and the app
+      // must show it, not crash.
+      if (playPath === failPlayPath)
+        return (
+          "1\n" +
+          JSON.stringify({
+            ok: false,
+            error: "not an audio file",
+            code: "unsupported-format",
+          })
+        );
+      daemon.current = playPath;
+      daemon.playing = true;
+      daemon.paused = false;
+      daemon.position = 0;
+      return statusReply(false);
+    }
+    if (cmd === "sevyn music pause") {
+      if (daemonDown) return "1\n";
+      daemon.playing = false;
+      daemon.paused = true;
+      return statusReply(false);
+    }
+    if (cmd === "sevyn music resume") {
+      if (daemonDown) return "1\n";
+      daemon.playing = true;
+      daemon.paused = false;
+      return statusReply(false);
+    }
+    if (cmd === "sevyn music stop") {
+      if (daemonDown) return "1\n";
+      daemon.playing = false;
+      daemon.paused = false;
+      daemon.position = 0;
+      daemon.current = null;
+      return statusReply(false);
+    }
+    if (cmd.startsWith("sevyn music seek ")) {
+      if (daemonDown) return "1\n";
+      const target = Number(cmd.slice("sevyn music seek ".length));
+      if (target > durationOf(daemon.current))
+        return (
+          "1\n" +
+          JSON.stringify({
+            ok: false,
+            error: "seek past the end",
+            code: "out-of-range",
+          })
+        );
+      daemon.position = target;
+      return statusReply(false);
+    }
+    if (cmd.startsWith("sevyn music volume ")) {
+      if (daemonDown) return "1\n";
+      const target = Number(cmd.slice("sevyn music volume ".length));
+      daemon.volume = Math.min(100, Math.max(0, target));
+      return statusReply(false);
+    }
+    return "0\n";
+  };
+  handler.setDown = (down) => {
+    daemonDown = down;
+  };
+  return handler;
+}
+
+function loadMusicAs(handler, permissions) {
+  return loadAs(
+    {
+      id: "music",
+      name: "Music",
+      color: "#ec4899",
+      glyph: "M",
+      permissions: permissions || ["cli.exec"],
+    },
+    musicBundle,
+    handler,
+  );
+}
+
+check("music (no permission): cli.exec gate", () => {
+  loadMusicAs(null, []);
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Music permission is not granted")),
+    "permission gate shown",
+  );
+  assert.ok(
+    !texts.some((t) => t.includes("01-sunrise-acoustic")),
+    "no library without the permission",
+  );
+});
+
+check("music: library lists all 7 test tracks with real durations", () => {
+  loadMusicAs(musicHandler());
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("7 tracks"), "count shown");
+  for (const track of MUSIC_TRACKS) {
+    assert.ok(texts.includes(track.title), track.title + " listed");
+  }
+  assert.ok(
+    texts.some((t) => t.includes("0:21")),
+    "01 duration shown",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("0:29")),
+    "07 duration shown",
+  );
+  assert.ok(texts.includes("Tap a track to play it."), "now-playing idle line shown");
+  assert.ok(texts.includes("Volume 100%"), "volume shown");
+});
+
+check("music: scan failure falls back to the files list", () => {
+  loadMusicAs(musicHandler({ scanOk: false }));
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("7 tracks")),
+    "count shown",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("durations unknown")),
+    "fallback note shown",
+  );
+  assert.ok(texts.includes("01-sunrise-acoustic"), "track listed");
+  assert.ok(!texts.some((t) => t.includes("0:21")), "no fake durations in the fallback");
+});
+
+check("music: empty library + Retry re-scans", () => {
+  loadMusicAs(musicHandler({ scanOk: false, files: [] }));
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("No music yet"), "empty state shown");
+  assert.ok(texts.includes("Retry"), "retry button shown");
+  tapText("Retry", 15);
+  assert.ok(
+    Sevyn._logs.includes("MUSIC rescan"),
+    "retry re-scans, logs=" + JSON.stringify(Sevyn._logs),
   );
 });
 
@@ -818,6 +1093,179 @@ async function checkAsync(name, fn) {
       "send marker logged",
     );
   });
+
+  await checkAsync(
+    "music: play, position poll, pause/resume, seek, volume, next/prev wrap, stop",
+    async () => {
+      const handler = musicHandler();
+      loadMusicAs(handler);
+      tapText("01-sunrise-acoustic", 15);
+      await flush();
+      await flush();
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Playing"), "playing state shown");
+      assert.ok(
+        Sevyn._logs.includes("MUSIC play /data/01-sunrise-acoustic.wav"),
+        "play marker logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      // The 1 s position poll fires STATUS; the fake advances 1 s
+      // per STATUS while playing.
+      await new Promise((r) => setTimeout(r, 1200));
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("0:01 / 0:21")),
+        "position advanced to 0:01, texts=" + JSON.stringify(texts),
+      );
+      tapText("Pause", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Paused"), "paused state shown");
+      await new Promise((r) => setTimeout(r, 1200));
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("0:01 / 0:21")),
+        "position frozen while paused, texts=" + JSON.stringify(texts),
+      );
+      tapText("Resume", 15);
+      await flush();
+      await flush();
+      tapText("+10s", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("0:11 / 0:21")),
+        "seek +10s to 0:11, texts=" + JSON.stringify(texts),
+      );
+      tapText("Volume −", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Volume 90%"), "volume down to 90%");
+      tapText("Next", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        Sevyn._logs.includes("MUSIC play /data/02-midnight-jazz.wav"),
+        "next plays track 02, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      tapText("Previous", 15);
+      await flush();
+      await flush();
+      assert.ok(
+        Sevyn._logs.includes("MUSIC play /data/01-sunrise-acoustic.wav"),
+        "previous returns to track 01",
+      );
+      // Wrap: Next from the last track plays the first.
+      tapText("07-starlight-lullaby", 15);
+      await flush();
+      await flush();
+      tapText("Next", 15);
+      await flush();
+      await flush();
+      const playLogs = Sevyn._logs.filter((l) =>
+        l.startsWith("MUSIC play /data/01-sunrise-acoustic.wav"),
+      );
+      assert.ok(playLogs.length >= 2, "next wraps to track 01");
+      tapText("Stop", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Stopped"), "stopped state shown");
+      // Unmount: clears the 1 s status interval so the process exits.
+      renderer.unmount();
+      Sevyn._reset();
+    },
+  );
+
+  await checkAsync(
+    "music: failed play surfaces a clean error and the app recovers",
+    async () => {
+      loadMusicAs(musicHandler({ failPlayPath: "/data/02-midnight-jazz.wav" }));
+      tapText("02-midnight-jazz", 15);
+      await flush();
+      await flush();
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("not an audio file")),
+        "daemon error shown, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(
+        texts.some((t) => t.includes("unsupported-format")),
+        "stable error code shown",
+      );
+      assert.ok(
+        texts.includes("01-sunrise-acoustic"),
+        "library still listed after the bad call",
+      );
+      tapText("01-sunrise-acoustic", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Playing"), "a good track plays after the error");
+      assert.ok(
+        !texts.some((t) => t.includes("not an audio file")),
+        "error cleared by the next success",
+      );
+      // Stop first: the 1 s status interval is cleared by the
+      // playing->stopped state change (unmount alone does not flush
+      // the effect cleanup in this harness, so an active interval
+      // would keep the process alive).
+      tapText("Stop", 15);
+      await flush();
+      await flush();
+      renderer.unmount();
+      Sevyn._reset();
+    },
+  );
+
+  await checkAsync(
+    "music: volume with the daemon down surfaces an error, never throws",
+    async () => {
+      const handler = musicHandler();
+      loadMusicAs(handler);
+      tapText("01-sunrise-acoustic", 15);
+      await flush();
+      await flush();
+      handler.setDown(true);
+      tapText("Volume +", 15);
+      await flush();
+      await flush();
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("Could not reach the audio service")),
+        "daemon-down error shown, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(
+        texts.includes("Playing"),
+        "app still alive after the failed volume call",
+      );
+      handler.setDown(false);
+      tapText("Volume −", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Volume 90%"), "volume recovers when the daemon does");
+      assert.ok(
+        !texts.some((t) => t.includes("Could not reach the audio service")),
+        "error cleared by the next success",
+      );
+      // Stop first: the 1 s status interval is cleared by the
+      // playing->stopped state change (unmount alone does not flush
+      // the effect cleanup in this harness, so an active interval
+      // would keep the process alive).
+      tapText("Stop", 15);
+      await flush();
+      await flush();
+      renderer.unmount();
+      Sevyn._reset();
+    },
+  );
 
   console.log(`\n${passed} app e2e checks passed`);
 })();
