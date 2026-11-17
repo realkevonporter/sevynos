@@ -1,0 +1,13 @@
+{
+  "description": "SevynOS Music — musicd: local audio playback daemon (headless Chromium <audio> over CDP; null player for host tests)",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "name": "@sevynos/musicd",
+  "private": true,
+  "scripts": {
+    "test": "node test-musicd.mjs && node test-cli.mjs"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}

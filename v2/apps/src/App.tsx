@@ -706,16 +706,6 @@ export function App(): React.ReactElement {
     body = <Notes />;
   } else if (id === "store") {
     body = <Store />;
-  } else if (id === "music") {
-    body = (
-      <EmptyState
-        glyph={Sevyn.appGlyph}
-        color={color}
-        title="No music yet"
-        body="Audio files you add to this device will appear here."
-        footer={permitted ? statusText(status) : "Status: not permitted"}
-      />
-    );
   } else if (id === "photos") {
     const n = countPhotos();
     body = (

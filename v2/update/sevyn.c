@@ -190,6 +190,18 @@ static void print_usage(FILE *f)
             "  sevyn comms calls           list calls (JSON)\n"
             "  sevyn comms rcs status      RCS staging state\n"
             "  sevyn comms rcs probe       SIP/MSRP skeleton vs mock ACS\n"
+            "  sevyn music [--socket <path>] <verb>\n"
+            "                              talk to a musicd other than the\n"
+            "                              system one (same --socket shape\n"
+            "                              as `sevyn comms`)\n"
+            "  sevyn music status          playback state + position\n"
+            "                              (JSON)\n"
+            "  sevyn music play <path...>  play a local audio file\n"
+            "  sevyn music pause           pause playback\n"
+            "  sevyn music resume          resume playback\n"
+            "  sevyn music stop            stop playback\n"
+            "  sevyn music seek <seconds>  seek (clamped to the track)\n"
+            "  sevyn music volume <0-100>  set volume (clamped)\n"
             "  sevyn net status            link, address, gateway, DNS,\n"
             "                              wifi\n"
             "  sevyn net dns <host>        resolve a name (guest DNS)\n"
@@ -1218,6 +1230,113 @@ static int cmd_comms(int argc, char **argv)
         char cmd[64];
         snprintf(cmd, sizeof(cmd), "RCS %s", argv[3]);
         return comms_roundtrip(cmd);
+    }
+    return usage();
+}
+
+/* ------------------------------------------------------------------ */
+/* music — local audio playback via musicd (v2/music/musicd.mjs)       */
+/* ------------------------------------------------------------------ */
+
+/* Talk to musicd. Same shape as comms_roundtrip: one line out, one
+ * bare JSON line back, printed verbatim; the exit code follows the
+ * payload's ok flag so a failed verb exits 1. */
+#define MUSIC_SOCK "/run/sevyn-music.sock"
+
+static int connect_music(void)
+{
+    return connect_sock("SEVYN_MUSIC_SOCK", MUSIC_SOCK);
+}
+
+static int music_send(int fd, const char *line)
+{
+    size_t n = strlen(line);
+    char buf[8192];
+    if (n + 1 >= sizeof(buf))
+        return -1;
+    memcpy(buf, line, n);
+    buf[n++] = '\n';
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, buf + off, n - off);
+        if (w <= 0)
+            return -1;
+        off += (size_t)w;
+    }
+    return 0;
+}
+
+static int music_roundtrip(const char *cmd)
+{
+    int fd = connect_music();
+    if (fd < 0) {
+        fprintf(stderr, "error: cannot reach the music daemon\n");
+        return 1;
+    }
+    if (music_send(fd, cmd) != 0) {
+        fprintf(stderr, "error: cannot talk to the music daemon\n");
+        close(fd);
+        return 1;
+    }
+    static char reply[65536];
+    int n = read_line(fd, reply, sizeof(reply));
+    close(fd);
+    if (n <= 0) {
+        fprintf(stderr, "error: no reply from the music daemon\n");
+        return 1;
+    }
+    int rc = print_reply(reply);
+    if (rc == 0 && strncmp(reply, "{\"ok\":false", 11) == 0)
+        return 1;
+    return rc;
+}
+
+static int cmd_music(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    /* --socket <path> talks to a musicd other than the system one
+     * (same shape as `sevyn comms --socket`). */
+    if (strcmp(argv[2], "--socket") == 0) {
+        if (argc < 5)
+            return usage();
+        setenv("SEVYN_MUSIC_SOCK", argv[3], 1);
+        argv += 2;
+        argc -= 2;
+    }
+    const char *verb = argv[2];
+
+    if (strcmp(verb, "status") == 0 && argc == 3)
+        return music_roundtrip("STATUS");
+    if (strcmp(verb, "pause") == 0 && argc == 3)
+        return music_roundtrip("PAUSE");
+    if (strcmp(verb, "resume") == 0 && argc == 3)
+        return music_roundtrip("RESUME");
+    if (strcmp(verb, "stop") == 0 && argc == 3)
+        return music_roundtrip("STOP");
+    if (strcmp(verb, "play") == 0 && argc >= 4) {
+        /* The path is everything after the verb, joined with spaces
+         * (a file name with a space stays one path — the daemon's
+         * protocol takes the rest of the line as the path). */
+        char cmd[8192];
+        size_t n = (size_t)snprintf(cmd, sizeof(cmd), "PLAY");
+        for (int i = 3; i < argc && n < sizeof(cmd) - 1; i++)
+            n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " %s", argv[i]);
+        if (n >= sizeof(cmd) - 1) {
+            fprintf(stderr, "error: path too long\n");
+            return 1;
+        }
+        return music_roundtrip(cmd);
+    }
+    if (strcmp(verb, "seek") == 0 && argc == 4) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "SEEK %s", argv[3]);
+        return music_roundtrip(cmd);
+    }
+    if (strcmp(verb, "volume") == 0 && argc == 4) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "VOLUME %s", argv[3]);
+        return music_roundtrip(cmd);
     }
     return usage();
 }
@@ -5911,6 +6030,8 @@ static int dispatch(int argc, char **argv)
         return cmd_browser(argc, argv);
     if (strcmp(argv[1], "comms") == 0)
         return cmd_comms(argc, argv);
+    if (strcmp(argv[1], "music") == 0)
+        return cmd_music(argc, argv);
     if (strcmp(argv[1], "net") == 0)
         return cmd_net(argc, argv);
     if (strcmp(argv[1], "tokrah") == 0)

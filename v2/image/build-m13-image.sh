@@ -406,9 +406,10 @@ fi
 
 # --- build the app bundles (M4 + M5) --------------------------------------
 # Terminal, Settings, Files are real apps with their own .hbc (M4);
-# Browser is a real app with its own .hbc (M5); the other eight stock
-# apps share the one template .hbc (identity comes from the host at
-# runtime); the crash .hbc is the harness's crash fixture.
+# Browser is a real app with its own .hbc (M5); Music is a real app
+# with its own .hbc (Music v1); the other seven stock apps share the
+# one template .hbc (identity comes from the host at runtime); the
+# crash .hbc is the harness's crash fixture.
 # make-bundles.py signs terminal with a fresh per-image Ed25519
 # keypair and writes the public key into the trusted-keys dir; the
 # private key stays in the build temp dir and is never staged.
@@ -423,6 +424,7 @@ fi
 (cd "$APPS_DIR" && node build-app.mjs --entry files --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
 (cd "$APPS_DIR" && node build-app.mjs --entry browser --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
 (cd "$APPS_DIR" && node build-app.mjs --entry installer --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+(cd "$APPS_DIR" && node build-app.mjs --entry music --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
 [ -f "$BUILD_TMP/app-dist/app.hbc" ] || { echo "error: app.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/crash.hbc" ] || { echo "error: crash.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/terminal.hbc" ] || { echo "error: terminal.hbc not built" >&2; exit 1; }
@@ -430,6 +432,7 @@ fi
 [ -f "$BUILD_TMP/app-dist/files.hbc" ] || { echo "error: files.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/browser.hbc" ] || { echo "error: browser.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/installer.hbc" ] || { echo "error: installer.hbc not built" >&2; exit 1; }
+[ -f "$BUILD_TMP/app-dist/music.hbc" ] || { echo "error: music.hbc not built" >&2; exit 1; }
 python3 "$APPS_DIR/make-bundles.py" \
   --hbc "$BUILD_TMP/app-dist/app.hbc" \
   --crash-hbc "$BUILD_TMP/app-dist/crash.hbc" \
@@ -438,6 +441,7 @@ python3 "$APPS_DIR/make-bundles.py" \
   --files-hbc "$BUILD_TMP/app-dist/files.hbc" \
   --browser-hbc "$BUILD_TMP/app-dist/browser.hbc" \
   --installer-hbc "$BUILD_TMP/app-dist/installer.hbc" \
+  --music-hbc "$BUILD_TMP/app-dist/music.hbc" \
   --out "$BUILD_TMP/pristine" \
   --trusted-keys-dir "$BUILD_TMP/trusted-keys" \
   --test-bundles-dir "$BUILD_TMP/test-bundles"
@@ -559,6 +563,7 @@ mkdir -p "$STAGE/bin" "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/run" \
          "$STAGE/usr/share/sevyn/test-bundles" \
          "$STAGE/usr/share/sevyn/tokrah" "$STAGE/usr/share/sevyn/tokrah-mock" \
          "$STAGE/usr/share/sevyn/comms" "$STAGE/usr/share/sevyn/comms-mock" \
+         "$STAGE/usr/share/sevyn/music" \
          "$STAGE/usr/share/sevyn/trusted-keys" "$STAGE/var/lib/sevyn/apps" \
          "$STAGE/usr/share/sevyn/install"
 
@@ -720,6 +725,19 @@ if [ -n "$COMMS_NODE_SRC" ]; then
     || { echo "error: commsd node closure failed" >&2; exit 1; }
 else
   ln -s ../code-server/lib/node "$STAGE/usr/share/sevyn/comms/node"
+fi
+# musicd (Music v1): daemon + player page, and its node binary —
+# the same resolution as commsd (code-server's node when >= 22,
+# else the pinned standalone Node 24, with its library closure).
+mkdir -p "$STAGE/usr/share/sevyn/music"
+cp "$ROOT/music/musicd.mjs" "$ROOT/music/player.html" \
+   "$STAGE/usr/share/sevyn/music/"
+if [ -n "$COMMS_NODE_SRC" ]; then
+  python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
+    "$COMMS_NODE_SRC:/usr/share/sevyn/music/node" \
+    || { echo "error: musicd node closure failed" >&2; exit 1; }
+else
+  ln -s ../code-server/lib/node "$STAGE/usr/share/sevyn/music/node"
 fi
 cp "$BUILD_TMP/pristine/"*.sevyn "$STAGE/usr/share/sevyn/pristine/"
 cp "$BUILD_TMP/test-bundles/"*.sevyn "$STAGE/usr/share/sevyn/test-bundles/"
@@ -1224,6 +1242,18 @@ if [ "${MOCKCOMMS:-0}" = "1" ]; then
     --fake-media 1 >/data/logs/commsd-bob.log 2>&1 &
   echo "M10 init: comms mocks started (sevyn.mockcomms=1)"
 fi
+# musicd (Music v1): owns /run/sevyn-music.sock. Starts after
+# commsd so its first STATUS can reach a warm player; the apps
+# drive it through `sevyn music`. The headless Chromium player
+# runs from /usr/share/sevyn/chromium/chrome with the player page
+# at /usr/share/sevyn/music/player.html. Its log goes to
+# /data/logs/musicd.log — /data is the persistent data disk, so the
+# log survives a reboot/poweroff; the console only gets a one-line
+# start marker.
+/usr/share/sevyn/music/node /usr/share/sevyn/music/musicd.mjs \
+  --bridge chromium --chrome /usr/share/sevyn/chromium/chrome \
+  --bridge-page /usr/share/sevyn/music/player.html >/data/logs/musicd.log 2>&1 &
+echo "Music v1 init: musicd started @ $(cut -d" " -f1 /proc/uptime)s"
 # Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
 # (localhost only — the browser that paints it arrives in M5). It
 # needs HOME for its user-data dir (the staged settings file lives

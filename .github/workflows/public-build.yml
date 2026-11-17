@@ -113,6 +113,11 @@ jobs:
           grep -qx "usr/share/sevyn/comms/commsd.mjs" /tmp/initramfs-list.txt || { echo "error: missing commsd usr/share/sevyn/comms/commsd.mjs in initramfs" >&2; exit 1; }
           grep -qx "usr/share/sevyn/comms-mock/mock-matrix.js" /tmp/initramfs-list.txt || { echo "error: missing mock homeserver usr/share/sevyn/comms-mock/mock-matrix.js in initramfs" >&2; exit 1; }
           grep -qx "usr/share/sevyn/comms-mock/mock-acs.js" /tmp/initramfs-list.txt || { echo "error: missing mock ACS usr/share/sevyn/comms-mock/mock-acs.js in initramfs" >&2; exit 1; }
+      - name: Guard v2 musicd + player page in initramfs
+        run: |
+          zcat v2/image/build/initramfs.cpio.gz | cpio -t 2>/dev/null > /tmp/initramfs-list.txt
+          grep -qx "usr/share/sevyn/music/musicd.mjs" /tmp/initramfs-list.txt || { echo "error: missing musicd usr/share/sevyn/music/musicd.mjs in initramfs" >&2; exit 1; }
+          grep -qx "usr/share/sevyn/music/player.html" /tmp/initramfs-list.txt || { echo "error: missing player page usr/share/sevyn/music/player.html in initramfs" >&2; exit 1; }
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build

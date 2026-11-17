@@ -197,6 +197,11 @@ jobs:
           python3 v2/update/test-updated.py
           python3 v2/update/test-browser.py
 
+      - name: Music daemon checks
+        run: |
+          node v2/music/test-musicd.mjs
+          node v2/music/test-cli.mjs
+
       - name: Build the M13 image
         env:
           TOKRAH_SRC: ${{ github.workspace }}/tokrah

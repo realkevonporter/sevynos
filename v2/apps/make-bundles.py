@@ -28,6 +28,7 @@ Usage:
   python3 make-bundles.py --hbc <app.hbc> --crash-hbc <crash.hbc>
       [--terminal-hbc <terminal.hbc>] [--settings-hbc <settings.hbc>]
       [--files-hbc <files.hbc>] [--browser-hbc <browser.hbc>]
+      [--installer-hbc <installer.hbc>] [--music-hbc <music.hbc>]
       --out <bundles-dir> --trusted-keys-dir <dir>
       [--test-bundles-dir <dir>]
 
@@ -53,7 +54,7 @@ SIGN_HELPER = REPO / "v2" / "loader" / "ed25519-sign.c"
 
 # Per-app overrides beyond apps.ts (id -> manifest fields). Terminal
 # is the protected system app (the recovery path); terminal, settings,
-# files, browser, and the three M10 comms apps run the `sevyn` CLI,
+# files, browser, music, and the three M10 comms apps run the `sevyn` CLI,
 # so they hold cli.exec. Files keeps status.read too: the M3 template
 # still shows a live status line in its window (m3-check step 5), and
 # the real M4 Files app simply never subscribes — it has no status line.
@@ -77,6 +78,7 @@ OVERRIDES = {
     "video-calls": {"permissions": ["cli.exec"]},
     "voice-calls": {"permissions": ["cli.exec"]},
     "installer": {"permissions": ["cli.exec"]},
+    "music": {"permissions": ["cli.exec"]},
 }
 
 
@@ -169,6 +171,8 @@ def main():
                     help="comms app.hbc (defaults to the template)")
     ap.add_argument("--installer-hbc", default=None,
                     help="installer app.hbc (defaults to the template)")
+    ap.add_argument("--music-hbc", default=None,
+                    help="music app.hbc (defaults to the template)")
     ap.add_argument("--out", required=True, help="stock bundles dir")
     ap.add_argument("--trusted-keys-dir", required=True)
     ap.add_argument("--test-bundles-dir", default=None)
@@ -177,8 +181,8 @@ def main():
     hbc = Path(args.hbc).read_bytes()
     crash_hbc = Path(args.crash_hbc).read_bytes()
     # M4 real apps ship their own bundles; M10's three comms apps
-    # share one comms.hbc; anything without one falls back to the
-    # template (the other eight stock apps).
+    # share one comms.hbc; Music ships its own bundle too; anything
+    # without one falls back to the template.
     hbc_for = {
         "terminal": (Path(args.terminal_hbc).read_bytes()
                      if args.terminal_hbc else hbc),
@@ -196,6 +200,8 @@ def main():
                         if args.comms_hbc else hbc),
         "installer": (Path(args.installer_hbc).read_bytes()
                      if args.installer_hbc else hbc),
+        "music": (Path(args.music_hbc).read_bytes()
+                  if args.music_hbc else hbc),
     }
     out_dir = Path(args.out)
     trusted_dir = Path(args.trusted_keys_dir)

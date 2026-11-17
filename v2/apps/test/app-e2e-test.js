@@ -1,20 +1,25 @@
 "use strict";
 // End-to-end Node test for the built app bundles (dist/app.js,
 // dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js,
-// dist/comms.js) and the crash bundle (dist/crash.js). Loads the app
-// bundle with the mock Sevyn host as several apps — files (status.read
-// granted, the fallback screen) and notes/music/calculator/calendar/store
-// (the M9 real screens) — and drives the close X. The crash bundle
-// must throw during evaluation. The M4 apps load with cli.exec and a
-// canned exec handler, and drive their real flows (terminal typing,
-// settings channel switch + AI selection, files navigation). The M5
-// Browser loads with cli.exec and a canned CDP-backed exec handler,
-// and drives its real flow (tabs on mount, address-bar navigation).
-// The M10 comms bundle loads as messages / video-calls / voice-calls
-// with a canned `sevyn comms` handler: login form, room list, thread
-// + send, and the call screens (the async login/send run in the
-// async section at the end — the mock's execAsync resolves on a
-// microtask, so those checks await a setImmediate flush).
+// dist/comms.js, dist/music.js) and the crash bundle (dist/crash.js).
+// Loads the app bundle with the mock Sevyn host as several apps —
+// files (status.read granted, the fallback screen) and
+// notes/calculator/calendar/store (the M9 real screens) — and drives
+// the close X. The crash bundle must throw during evaluation. The M4
+// apps load with cli.exec and a canned exec handler, and drive their
+// real flows (terminal typing, settings channel switch + AI selection,
+// files navigation). The M5 Browser loads with cli.exec and a canned
+// CDP-backed exec handler, and drives its real flow (tabs on mount,
+// address-bar navigation). The M10 comms bundle loads as messages /
+// video-calls / voice-calls with a canned `sevyn comms` handler:
+// login form, room list, thread + send, and the call screens (the
+// async login/send run in the async section at the end — the mock's
+// execAsync resolves on a microtask, so those checks await a
+// setImmediate flush). The Music bundle loads with cli.exec and a
+// canned `sevyn files` + `sevyn music` handler: the library lists
+// the device's audio files on mount, and tapping a track plays it
+// (the async play/pause + the guarded failed-play run in the async
+// section at the end).
 //
 // Run: node test/app-e2e-test.js   (from v2/apps, after npm run build)
 const assert = require("node:assert/strict");
@@ -48,6 +53,10 @@ const browserBundle = fs.readFileSync(
 );
 const commsBundle = fs.readFileSync(
   path.join(__dirname, "..", "dist", "comms.js"),
+  "utf8",
+);
+const musicBundle = fs.readFileSync(
+  path.join(__dirname, "..", "dist", "music.js"),
   "utf8",
 );
 const crashBundle = fs.readFileSync(
@@ -171,8 +180,9 @@ check("files (status.read): name, glyph, live status line", () => {
 });
 
 // M9: the template apps have real screens now. The permission gate
-// is proven by the music empty state (which still shows the status
-// line) and the fallback screen; notes shows its real UI instead.
+// is proven by the fallback screen (which still shows the status
+// line); notes shows its real UI instead. Music left the template
+// in v1 (its own bundle — see the music checks below).
 check("notes: real notes screen, no status leak", () => {
   const last = loadAs({
     id: "notes",
@@ -194,42 +204,65 @@ check("notes: real notes screen, no status leak", () => {
   );
 });
 
-check("music (no permission): status line says not permitted", () => {
-  const last = loadAs({
-    id: "music",
-    name: "Music",
-    color: "#ec4899",
-    glyph: "M",
-    permissions: [],
-  });
+// Music v1: the library lists the device's audio files on mount
+// (only audio extensions — a .txt and a .jpg in /data stay out),
+// and the now-playing card starts idle.
+const MUSIC_IDLE =
+  '0\n{"ok":true,"state":"idle","path":"","position":0,"duration":0,"volume":80,"media":"none","error":""}\n';
+function musicLibraryHandler(cmd) {
+  if (cmd === "sevyn files list /data")
+    return "0\nd music\nf sunrise.wav\nf notes.txt\nf photo.jpg\n";
+  if (cmd === "sevyn files list /data/music") return "0\nf jazz.wav\n";
+  if (cmd === "sevyn music status") return MUSIC_IDLE;
+  return "0\n";
+}
+
+check("music: library lists device audio files", () => {
+  const last = loadAs(
+    {
+      id: "music",
+      name: "Music",
+      color: "#ec4899",
+      glyph: "M",
+      permissions: ["cli.exec"],
+    },
+    musicBundle,
+    musicLibraryHandler,
+  );
   const texts = textsOf(last);
   assert.ok(texts.includes("Music"), "app name shown");
+  assert.ok(texts.includes("Library"), "library heading shown");
+  assert.ok(texts.includes("sunrise"), "/data wav listed");
+  assert.ok(texts.includes("jazz"), "/data/music wav listed");
+  assert.ok(texts.includes("2 tracks"), "track count shown");
+  assert.ok(!texts.some((t) => t.includes("notes.txt")), "non-audio file excluded");
+  assert.ok(!texts.some((t) => t.includes("photo.jpg")), "photo excluded");
+  assert.ok(texts.includes("Nothing playing"), "now-playing card idle");
   assert.ok(
-    texts.some((t) => t.includes("not permitted")),
-    "status line says not permitted",
-  );
-  assert.ok(
-    !texts.some((t) => t.includes("87%")),
-    "no live status leaks without the permission",
+    Sevyn._logs.includes("MUSIC listed library (2)"),
+    "library marker logged, logs=" + JSON.stringify(Sevyn._logs),
   );
 });
 
-check("music (status.read): live status line", () => {
-  const last = loadAs({
-    id: "music",
-    name: "Music",
-    color: "#ec4899",
-    glyph: "M",
-    permissions: ["status.read"],
-  });
+check("music: empty library is an honest empty state", () => {
+  const last = loadAs(
+    {
+      id: "music",
+      name: "Music",
+      color: "#ec4899",
+      glyph: "M",
+      permissions: ["cli.exec"],
+    },
+    musicBundle,
+    (cmd) => {
+      if (cmd === "sevyn music status") return MUSIC_IDLE;
+      return "0\n";
+    },
+  );
   const texts = textsOf(last);
   assert.ok(
-    texts.some((t) => t.includes("87%")),
-    "live battery in status line",
-  );
-  assert.ok(
-    texts.some((t) => t.includes("Wi-Fi")),
-    "live wifi in status line",
+    texts.some((t) => t.includes("Audio files in /data")),
+    "empty-library hint shown",
   );
 });
 
@@ -817,6 +850,110 @@ async function checkAsync(name, fn) {
       Sevyn._logs.includes("COMMS sent room=!general:test.local"),
       "send marker logged",
     );
+  });
+
+  await checkAsync("music: tap a track plays it, pause toggles", async () => {
+    let playing = false;
+    const handler = (cmd) => {
+      if (cmd === "sevyn files list /data") return "0\nf sunrise.wav\nf jazz.wav\n";
+      if (cmd === "sevyn files list /data/music") return "0\n";
+      if (cmd === "sevyn music play /data/sunrise.wav") {
+        playing = true;
+        return (
+          "0\n" +
+          '{"ok":true,"state":"playing","path":"/data/sunrise.wav",' +
+          '"position":0,"duration":21.5,"volume":80,"media":"chromium","error":""}\n'
+        );
+      }
+      if (cmd === "sevyn music pause") {
+        playing = false;
+        return (
+          "0\n" +
+          '{"ok":true,"state":"paused","path":"/data/sunrise.wav",' +
+          '"position":1.2,"duration":21.5,"volume":80,"media":"chromium","error":""}\n'
+        );
+      }
+      if (cmd === "sevyn music status") {
+        const state = playing ? "playing" : "paused";
+        const pos = playing ? 1.2 : 1.2;
+        return (
+          "0\n" +
+          `{"ok":true,"state":"${state}","path":"/data/sunrise.wav",` +
+          `"position":${pos},"duration":21.5,"volume":80,"media":"chromium","error":""}\n`
+        );
+      }
+      return "0\n";
+    };
+    loadAs(
+      {
+        id: "music",
+        name: "Music",
+        color: "#ec4899",
+        glyph: "M",
+        permissions: ["cli.exec"],
+      },
+      musicBundle,
+      handler,
+    );
+    tapText("sunrise", 15);
+    await flush();
+    await flush();
+    assert.ok(
+      Sevyn._logs.some((l) => l === "EXEC sevyn music play /data/sunrise.wav"),
+      "play CLI issued, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    assert.ok(Sevyn._logs.includes("MUSIC play /data/sunrise.wav"), "play marker logged");
+    let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("playing")),
+      "now-playing shows playing",
+    );
+    tapText("❚❚", 18);
+    await flush();
+    await flush();
+    assert.ok(
+      Sevyn._logs.some((l) => l === "EXEC sevyn music pause"),
+      "pause CLI issued, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("paused")),
+      "now-playing shows paused",
+    );
+  });
+
+  await checkAsync("music: failed play shows the error, app survives", async () => {
+    const handler = (cmd) => {
+      if (cmd === "sevyn files list /data") return "0\nf broken.wav\n";
+      if (cmd === "sevyn files list /data/music") return "0\n";
+      if (cmd.startsWith("sevyn music play"))
+        return '0\n{"ok":false,"error":"no such file: /data/broken.wav"}\n';
+      if (cmd === "sevyn music status") return MUSIC_IDLE;
+      return "0\n";
+    };
+    loadAs(
+      {
+        id: "music",
+        name: "Music",
+        color: "#ec4899",
+        glyph: "M",
+        permissions: ["cli.exec"],
+      },
+      musicBundle,
+      handler,
+    );
+    tapText("broken", 15);
+    await flush();
+    await flush();
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("no such file")),
+      "daemon error shown on screen, texts=" + JSON.stringify(texts),
+    );
+    assert.ok(texts.includes("broken"), "library still rendered");
+    // The poll interval must not outlive the test: unmount so the
+    // process can exit (the next loadAs would do the same).
+    renderer.unmount();
   });
 
   console.log(`\n${passed} app e2e checks passed`);

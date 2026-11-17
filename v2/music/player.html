@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- SevynOS Music — player page for musicd's headless Chromium.
+
+     The daemon drives this page over CDP (Runtime.evaluate); the page
+     owns the one <audio> element, so Chromium — the only media decoder
+     staged in the image — does the decoding and the audio output.
+     No network, no UI: the Music app is the chrome, this page is the
+     engine. file:// audio sources are allowed by the daemon's
+     --allow-file-access-from-files launch flag. -->
+<meta charset="utf-8" />
+<title>SevynOS music player</title>
+<audio id="a" preload="auto"></audio>
+<script>
+  const a = document.getElementById("a");
+  let lastError = "";
+  a.addEventListener("error", () => {
+    lastError = (a.error && a.error.message) || "audio element error";
+  });
+  window.__sevynPlayer = {
+    // Load a file:// URL; resolves with its duration once metadata
+    // arrives, rejects (load error, bad file) otherwise.
+    load(src) {
+      lastError = "";
+      return new Promise((resolve, reject) => {
+        const onMeta = () => {
+          cleanup();
+          resolve({ duration: a.duration });
+        };
+        const onErr = () => {
+          cleanup();
+          reject(new Error(lastError || "could not load audio"));
+        };
+        const cleanup = () => {
+          a.removeEventListener("loadedmetadata", onMeta);
+          a.removeEventListener("error", onErr);
+        };
+        a.addEventListener("loadedmetadata", onMeta);
+        a.addEventListener("error", onErr);
+        a.src = src;
+        a.load();
+      });
+    },
+    play() {
+      lastError = "";
+      return a.play().then(() => ({ ok: true }));
+    },
+    pause() {
+      a.pause();
+      return { ok: true };
+    },
+    seek(seconds) {
+      a.currentTime = seconds;
+      return { ok: true };
+    },
+    setVolume(v) {
+      a.volume = v;
+      return { ok: true };
+    },
+    status() {
+      return {
+        currentTime: a.currentTime,
+        duration: a.duration,
+        paused: a.paused,
+        ended: a.ended,
+        volume: a.volume,
+        src: a.currentSrc || a.src,
+        error: lastError,
+      };
+    },
+  };
+</script>
