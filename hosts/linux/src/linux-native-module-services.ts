@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, mkdir, readFile, writeFile, readdir } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { basename, extname, join } from "node:path";
 import WebSocket from "ws";
 import type { StructuredValue, WorkerServiceName } from "@sevynos/react-native/internal";
@@ -65,6 +66,7 @@ export class LinuxNativeModuleServices {
   #videoPlayback: VideoPlaybackSession | undefined;
   readonly #binaryLoader: LinuxBinaryNativeModuleLoader;
   readonly #binaryModules = new Map<string, LinuxBinaryNativeModule>();
+  readonly #cameraSocketPath: string;
   readonly #webviews = new Map<string, ChromiumBrowserEngine>();
   readonly #websockets = new Map<string, LinuxWebSocketSession>();
   readonly #accessibility = new LinuxAccessibilityService();
@@ -101,8 +103,10 @@ export class LinuxNativeModuleServices {
     root = "/tmp/sevynos-native",
     nativeModuleRoot = "/opt/sevynos/native-modules",
     mediaLauncher: LinuxMediaLauncher = launchFfplay,
+    cameraSocketPath = process.env["SEVYN_CAMERA_SOCK"] ?? "/run/sevyn-camera.sock",
   ) {
     this.#root = root;
+    this.#cameraSocketPath = cameraSocketPath;
     this.#mediaLauncher = mediaLauncher;
     this.#binaryLoader = new LinuxBinaryNativeModuleLoader(nativeModuleRoot, [
       "camera",
@@ -347,7 +351,97 @@ export class LinuxNativeModuleServices {
     return { id: `notification-${String(Date.now())}` };
   }
 
+  /* Camera via camd (native V4L2 daemon, PR 1): one line out, one
+   * JSON line back over the Unix socket. Returns null when camd
+   * cannot be reached at all (no socket, refused, timeout) — the
+   * caller then falls back to the legacy ffmpeg path below, which
+   * is what dev machines without camd use. A reply with ok:false
+   * is different: camd answered and the command failed (no device,
+   * bad path) — that throws, because the fallback would fail the
+   * same way and a clean daemon error beats a confusing spawn
+   * error. On the image camd always answers (init starts it), so
+   * the legacy path never runs there — ffmpeg is not staged. */
+  async #camd(command: string): Promise<Record<string, unknown> | null> {
+    const sock = this.#cameraSocketPath;
+    const reply = await new Promise<string | null>((resolve) => {
+      let settled = false;
+      const done = (value: string | null): void => {
+        if (!settled) {
+          settled = true;
+          resolve(value);
+        }
+      };
+      let conn;
+      try {
+        conn = createConnection(sock);
+      } catch {
+        done(null);
+        return;
+      }
+      const timer = setTimeout(() => {
+        conn.destroy();
+        done(null);
+      }, 30_000);
+      timer.unref();
+      let buf = Buffer.alloc(0);
+      conn.on("error", () => {
+        clearTimeout(timer);
+        done(null);
+      });
+      conn.on("data", (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        const idx = buf.indexOf(0x0a);
+        if (idx >= 0) {
+          clearTimeout(timer);
+          const line = buf.subarray(0, idx).toString("utf8");
+          conn.destroy();
+          done(line);
+        }
+      });
+      conn.on("connect", () => {
+        conn.write(`${command}\n`);
+      });
+    });
+    if (reply === null) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(reply);
+    } catch {
+      throw new Error("Camera daemon sent an invalid reply.");
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      throw new Error("Camera daemon sent an invalid reply.");
+    const record = parsed as Record<string, unknown>;
+    if (record["ok"] === false) {
+      throw new Error(
+        typeof record["error"] === "string"
+          ? record["error"]
+          : "Camera daemon rejected the command.",
+      );
+    }
+    return record;
+  }
+
   async #statusCamera(): Promise<StructuredValue> {
+    const viaCamd = await this.#camd("STATUS");
+    if (viaCamd !== null) {
+      const available = viaCamd["available"] === true;
+      return {
+        available,
+        hasCamera: available,
+        ...(typeof viaCamd["device"] === "string" ? { device: viaCamd["device"] } : {}),
+        formats: Array.isArray(viaCamd["formats"])
+          ? [...new Set(viaCamd["formats"].filter((f) => typeof f === "string"))]
+          : [],
+        ...(available
+          ? {}
+          : { message: "No usable Video4Linux capture device was detected." }),
+      };
+    }
+    return this.#statusCameraLegacy();
+  }
+
+  async #statusCameraLegacy(): Promise<StructuredValue> {
     const device = await this.#cameraDevice();
     if (device === undefined) {
       return {
@@ -370,12 +464,26 @@ export class LinuxNativeModuleServices {
   }
 
   async #captureCamera(): Promise<StructuredValue> {
-    const device = await this.#cameraDevice();
-    if (device === undefined)
-      throw new Error("No usable Video4Linux capture device was detected.");
     const photosDir = `${this.#root}/photos`;
     await mkdir(photosDir, { recursive: true });
     const path = `${photosDir}/camera-${String(Date.now())}.jpg`;
+    const viaCamd = await this.#camd(`CAPTURE ${path}`);
+    if (viaCamd !== null) {
+      return {
+        path: typeof viaCamd["path"] === "string" ? viaCamd["path"] : path,
+        mediaType: "image/jpeg",
+        width: typeof viaCamd["width"] === "number" ? viaCamd["width"] : 1280,
+        height: typeof viaCamd["height"] === "number" ? viaCamd["height"] : 720,
+        timestamp: Date.now(),
+      };
+    }
+    return this.#captureCameraLegacy(path);
+  }
+
+  async #captureCameraLegacy(path: string): Promise<StructuredValue> {
+    const device = await this.#cameraDevice();
+    if (device === undefined)
+      throw new Error("No usable Video4Linux capture device was detected.");
     await run("ffmpeg", [
       "-nostdin",
       "-y",
@@ -401,6 +509,32 @@ export class LinuxNativeModuleServices {
   }
 
   async #previewCamera(): Promise<StructuredValue> {
+    const viaCamd = await this.#camd("PREVIEW");
+    if (viaCamd !== null) {
+      if (viaCamd["available"] !== true) {
+        return {
+          width: 640,
+          height: 360,
+          available: false,
+          timestamp: Date.now(),
+        };
+      }
+      /* camd writes both representations; the RN adapter reads the
+       * RGBA file (raw pixels via __sevynReadBinaryFile), the shell
+       * app reads the PNG. */
+      const rgba = viaCamd["rgba"];
+      return {
+        width: typeof viaCamd["width"] === "number" ? viaCamd["width"] : 640,
+        height: typeof viaCamd["height"] === "number" ? viaCamd["height"] : 360,
+        available: true,
+        path: typeof rgba === "string" ? rgba : "",
+        timestamp: Date.now(),
+      };
+    }
+    return this.#previewCameraLegacy();
+  }
+
+  async #previewCameraLegacy(): Promise<StructuredValue> {
     const device = await this.#cameraDevice();
     if (device === undefined) {
       return {
@@ -458,6 +592,23 @@ export class LinuxNativeModuleServices {
       return { width: 0, height: 0, available: false };
     }
     const rgbaPath = `${this.#root}/camera-read-image.rgba`;
+    const viaCamd = await this.#camd(`DECODE ${path} ${rgbaPath}`);
+    if (viaCamd !== null) {
+      if (viaCamd["available"] !== true) {
+        return { width: 0, height: 0, available: false };
+      }
+      return {
+        width: typeof viaCamd["width"] === "number" ? viaCamd["width"] : 0,
+        height: typeof viaCamd["height"] === "number" ? viaCamd["height"] : 0,
+        available: true,
+        path: typeof viaCamd["path"] === "string" ? viaCamd["path"] : rgbaPath,
+        timestamp: Date.now(),
+      };
+    }
+    return this.#readImageCameraLegacy(path, rgbaPath);
+  }
+
+  async #readImageCameraLegacy(path: string, rgbaPath: string): Promise<StructuredValue> {
     try {
       // Probe dimensions first
       const probe = await run("ffprobe", [
@@ -510,6 +661,12 @@ export class LinuxNativeModuleServices {
     }
   }
 
+  /* Video recording is NOT in camd (v1 is stills only — see
+   * v2/camera/README.md). This stays on the ffmpeg dev path: it
+   * works on a dev machine with ffmpeg installed, and on the image
+   * the spawn fails cleanly (ffmpeg is not staged) instead of
+   * pretending to record. A follow-up wires an encoder into camd
+   * and this method moves onto the socket with the rest. */
   async #startCameraRecord(): Promise<StructuredValue> {
     if (this.#cameraRecording !== undefined)
       throw new Error("Camera recording is already in progress.");
