@@ -688,12 +688,52 @@ installNativeAdapters({
     },
   },
   media: {
-    play: async (source) => {
+    play: async (source: string) => {
       await request("media.play", source);
+    },
+    pause: async () => {
+      await request("media.pause", null);
+    },
+    resume: async () => {
+      await request("media.resume", null);
     },
     stop: async () => {
       await request("media.stop", null);
     },
+    seek: async (seconds: number) => {
+      await request("media.seek", seconds);
+    },
+    setVolume: async (volume: number) => {
+      await request("media.volume", volume);
+    },
+    status: async () => request("media.status", null),
+    scan: async (directory?: string) =>
+      (await request("media.scan", directory ?? null)) as readonly unknown[],
+  },
+  // Playback through audiod, same implementation as `media` above
+  // (one client behind both names — see native-adapter-contracts).
+  audio: {
+    play: async (source: string) => {
+      await request("media.play", source);
+    },
+    pause: async () => {
+      await request("media.pause", null);
+    },
+    resume: async () => {
+      await request("media.resume", null);
+    },
+    stop: async () => {
+      await request("media.stop", null);
+    },
+    seek: async (seconds: number) => {
+      await request("media.seek", seconds);
+    },
+    setVolume: async (volume: number) => {
+      await request("media.volume", volume);
+    },
+    status: async () => request("media.status", null),
+    scan: async (directory?: string) =>
+      (await request("media.scan", directory ?? null)) as readonly unknown[],
   },
   nativeModules: {
     invoke: (module, method, argumentsValue) =>

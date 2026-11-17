@@ -352,6 +352,14 @@ export const NativeModules = Object.freeze({
     audio: Object.freeze({
       getOutputs: () => requireNativeAdapter("audio").getOutputs?.(),
       setOutput: (id: string) => requireNativeAdapter("audio").setOutput?.(id),
+      play: (source: string) => requireNativeAdapter("audio").play?.(source),
+      pause: () => requireNativeAdapter("audio").pause?.(),
+      resume: () => requireNativeAdapter("audio").resume?.(),
+      stop: () => requireNativeAdapter("audio").stop?.(),
+      seek: (seconds: number) => requireNativeAdapter("audio").seek?.(seconds),
+      setVolume: (volume: number) => requireNativeAdapter("audio").setVolume?.(volume),
+      status: () => requireNativeAdapter("audio").status?.(),
+      scan: (directory?: string) => requireNativeAdapter("audio").scan?.(directory),
     }),
     vibration: Object.freeze({
       vibrate: (pattern?: number | readonly number[]) =>

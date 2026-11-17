@@ -153,6 +153,24 @@ export interface SevynNativeAdapters {
   readonly audio?: {
     getOutputs?(): Promise<readonly unknown[]>;
     setOutput?(deviceId: string): Promise<void>;
+    /**
+     * Playback, backed by audiod (the native audio daemon) — the
+     * same implementation behind `media`. Every call is guarded in
+     * the host client: a bad call rejects with an `AudiodError`
+     * carrying a stable code, never a synchronous throw. (The
+     * `media` adapter is the MediaService surface; `audio` carries
+     * the same playback surface for callers that think in
+     * output-device terms. One client, two names — never two
+     * implementations.)
+     */
+    play?(source: string): Promise<unknown>;
+    pause?(): Promise<unknown>;
+    resume?(): Promise<unknown>;
+    stop?(): Promise<unknown>;
+    seek?(seconds: number): Promise<unknown>;
+    setVolume?(volume: number): Promise<unknown>;
+    status?(): Promise<unknown>;
+    scan?(directory?: string): Promise<readonly unknown[]>;
   };
   readonly vibration?: {
     vibrate(pattern?: number | readonly number[]): Promise<void>;

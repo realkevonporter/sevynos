@@ -1,10 +1,8 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
-import {
-  LinuxNativeModuleServices,
-  type LinuxMediaPlaybackHandle,
-} from "./linux-native-module-services.js";
+import { LinuxNativeModuleServices } from "./linux-native-module-services.js";
+import { LinuxAudiodClient, type AudiodTransport } from "./linux-audiod-client.js";
 
 const servers: ReturnType<typeof createServer>[] = [];
 const websocketServers: WebSocketServer[] = [];
@@ -31,6 +29,117 @@ afterEach(async () => {
     ),
   );
 });
+
+/** Fake audiod transport for the services tests (same daemon semantics). */
+class FakeAudiodTransport implements AudiodTransport {
+  readonly calls: string[] = [];
+  #playing = false;
+  #paused = false;
+  #positionSec = 0;
+  #durationSec = 0;
+  #volume = 100;
+  #track: Record<string, unknown> | null = null;
+  #durations = new Map<string, number>([
+    ["/data/song.mp3", 240],
+    ["/dev/null", 180],
+  ]);
+
+  public async roundtrip(line: string): Promise<Record<string, unknown>> {
+    this.calls.push(line);
+    const [command, ...rest] = line.split(" ");
+    const arg = rest.join(" ");
+    const status = (): Record<string, unknown> => ({
+      ok: true,
+      available: true,
+      playing: this.#playing,
+      paused: this.#paused,
+      positionSec: this.#positionSec,
+      durationSec: this.#durationSec,
+      volume: this.#volume,
+      track: this.#track,
+      error: "",
+    });
+    switch (command) {
+      case "STATUS":
+        return status();
+      case "PLAY": {
+        if (arg === "/tmp/sevynos-audio-file-that-does-not-exist.wav")
+          return { ok: false, error: "audio file not found", code: "not-found" };
+        this.#playing = true;
+        this.#paused = false;
+        this.#positionSec = 0;
+        this.#durationSec = this.#durations.get(arg) ?? 60;
+        this.#track = {
+          path: arg,
+          format: arg.endsWith(".mp3") ? "mp3" : "wav",
+          durationSec: this.#durationSec,
+        };
+        return status();
+      }
+      case "PAUSE":
+        if (!this.#playing)
+          return { ok: false, error: "nothing is playing", code: "idle" };
+        this.#paused = true;
+        return status();
+      case "RESUME":
+        if (!this.#playing)
+          return { ok: false, error: "nothing is playing", code: "idle" };
+        this.#paused = false;
+        return status();
+      case "STOP":
+        this.#playing = false;
+        this.#paused = false;
+        this.#positionSec = 0;
+        this.#track = null;
+        return status();
+      case "SEEK": {
+        if (!this.#playing)
+          return { ok: false, error: "nothing is playing", code: "idle" };
+        const seconds = Number(arg);
+        if (seconds > this.#durationSec)
+          return { ok: false, error: "seek is outside the track", code: "out-of-range" };
+        this.#positionSec = seconds;
+        return status();
+      }
+      case "VOLUME":
+        this.#volume = Math.max(0, Math.min(100, Math.round(Number(arg))));
+        return status();
+      case "SCAN": {
+        if (arg === "/tmp/non-existent-music-test-folder")
+          return { ok: false, error: "cannot list that directory", code: "not-found" };
+        return {
+          ok: true,
+          tracks: [
+            {
+              id: "/data/song.mp3",
+              title: "song",
+              artist: "Unknown Artist",
+              album: "Local Library",
+              durationSec: 240,
+              path: "/data/song.mp3",
+              format: "mp3",
+            },
+          ],
+        };
+      }
+      default:
+        return { ok: false, error: "unknown command", code: "bad-argument" };
+    }
+  }
+}
+
+function servicesWithFakeAudio(): {
+  services: LinuxNativeModuleServices;
+  fake: FakeAudiodTransport;
+} {
+  const fake = new FakeAudiodTransport();
+  const services = new LinuxNativeModuleServices(
+    "/tmp/sevynos-native-test",
+    "/tmp/sevynos-native-modules-test",
+    new LinuxAudiodClient(fake),
+  );
+  return { services, fake };
+}
 
 describe("Linux native module services", () => {
   it("brokers bounded HTTP responses for Hermes fetch", async () => {
@@ -130,42 +239,29 @@ describe("Linux native module services", () => {
   });
 
   it("handles media playback lifecycle, seeking, and status tracking", async () => {
-    const launches: { source: string; volume: number; offsetSeconds: number }[] = [];
-    const handles: LinuxMediaPlaybackHandle[] = [];
-    const services = new LinuxNativeModuleServices(
-      "/tmp/sevynos-native-test",
-      "/tmp/sevynos-native-modules-test",
-      (source, volume, offsetSeconds) => {
-        launches.push({ source, volume, offsetSeconds });
-        const handle: LinuxMediaPlaybackHandle = {
-          pause: () => undefined,
-          resume: () => undefined,
-          stop: () => undefined,
-          onEnded: () => undefined,
-        };
-        handles.push(handle);
-        return Promise.resolve(handle);
-      },
-    );
+    const { services, fake } = servicesWithFakeAudio();
     const played = await services.request("media.play", {
-      path: "/dev/null",
+      path: "/data/song.mp3",
       track: {
         id: "track-1",
         title: "Genesis Horizon",
         artist: "SevynOS Sound Team",
         album: "Genesis Horizon",
         durationSec: 240,
-        path: "/dev/null",
+        path: "/data/song.mp3",
         format: "mp3",
       },
       durationSec: 240,
     });
+    // The duration is the daemon's probe (240 for this file), not a
+    // hardcoded 180 — and the caller-supplied track wins for display.
     expect(played).toMatchObject({
       playing: true,
       paused: false,
       durationSec: 240,
+      track: { title: "Genesis Horizon", artist: "SevynOS Sound Team" },
     });
-    expect(launches).toEqual([{ source: "/dev/null", volume: 100, offsetSeconds: 0 }]);
+    expect(fake.calls[0]).toBe("PLAY /data/song.mp3");
 
     const paused = await services.request("media.pause", null);
     expect(paused).toMatchObject({
@@ -184,12 +280,12 @@ describe("Linux native module services", () => {
       playing: true,
       currentPositionSec: 60,
     });
-    expect(launches.at(-1)?.offsetSeconds).toBe(60);
 
     const status = await services.request("media.status", null);
     expect(status).toMatchObject({
       playing: true,
       durationSec: 240,
+      currentPositionSec: 60,
     });
 
     const stopped = await services.request("media.stop", null);
@@ -198,31 +294,76 @@ describe("Linux native module services", () => {
       paused: false,
     });
 
-    const scanned = await services.request("media.scan", {
-      directory: "/tmp/non-existent-music-test-folder",
-    });
+    // A missing directory is a clean rejection now, not a silent []:
+    // the old scan swallowed the error and returned nothing.
+    await expect(
+      services.request("media.scan", {
+        directory: "/tmp/non-existent-music-test-folder",
+      }),
+    ).rejects.toThrow("cannot list that directory");
+    const scanned = await services.request("media.scan", { directory: "/data" });
     expect(Array.isArray(scanned)).toBe(true);
+    expect(scanned).toMatchObject([
+      { path: "/data/song.mp3", durationSec: 240, format: "mp3" },
+    ]);
 
     services.close();
-    expect(handles.length).toBeGreaterThanOrEqual(2);
   });
 
   it("does not report playback when the requested audio file is missing", async () => {
-    const services = new LinuxNativeModuleServices(
-      "/tmp/sevynos-native-test",
-      "/tmp/sevynos-native-modules-test",
-      () => Promise.reject(new Error("media launcher should not be called")),
-    );
+    const { services } = servicesWithFakeAudio();
     await expect(
       services.request("media.play", "/tmp/sevynos-audio-file-that-does-not-exist.wav"),
-    ).rejects.toThrow("Audio file is unavailable");
+    ).rejects.toThrow("audio file not found");
     await expect(services.request("media.status", null)).resolves.toMatchObject({
       playing: false,
     });
   });
 
+  it("rejects bad media calls instead of crashing the host", async () => {
+    const { services } = servicesWithFakeAudio();
+    // The old bug: a volume-up rejection escaped into Genesis and
+    // killed it. Every one of these must reject cleanly and leave
+    // the services object usable afterwards.
+    await expect(services.request("media.play", "")).rejects.toThrow(
+      "Audio playback requires a file path.",
+    );
+    await expect(services.request("media.play", "relative/path.wav")).rejects.toThrow(
+      "Audio playback requires an absolute path.",
+    );
+    await expect(services.request("media.seek", -1)).rejects.toThrow(
+      "Seek requires a finite number",
+    );
+    await expect(services.request("media.seek", Number.NaN)).rejects.toThrow(
+      "Seek requires a finite number",
+    );
+    await expect(services.request("media.volume", Number.NaN)).rejects.toThrow(
+      "Volume requires a finite number",
+    );
+    await expect(services.request("media.pause", null)).rejects.toThrow(
+      "nothing is playing",
+    );
+    const played = await services.request("media.play", "/data/song.mp3");
+    expect(played).toMatchObject({ playing: true, durationSec: 240 });
+    // Out-of-range seek and clamped volume edges, still alive after.
+    await expect(services.request("media.seek", 9999)).rejects.toThrow(
+      "seek is outside the track",
+    );
+    const loud = await services.request("media.volume", 150);
+    expect(loud).toMatchObject({ volume: 100 });
+    const quiet = await services.request("media.volume", -5);
+    expect(quiet).toMatchObject({ volume: 0 });
+    await expect(services.request("media.status", null)).resolves.toMatchObject({
+      playing: true,
+    });
+    services.close();
+  });
+
   it("handles new hardware services gracefully (battery, display, audio, vibration, nfc, cellular, torch, volume)", async () => {
-    const services = new LinuxNativeModuleServices();
+    // The media calls below go through a fake audiod: there is no
+    // daemon socket in the test env, and a missing daemon must be a
+    // rejection the caller sees — not a fake "playing" state.
+    const { services } = servicesWithFakeAudio();
 
     // Battery status
     const battery = await services.request("battery.status", null);
