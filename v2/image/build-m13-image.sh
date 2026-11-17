@@ -333,6 +333,17 @@ gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
   "$ROOT/update/sevyn.c"
 
+# The camera daemon (camd): native V4L2 capture, no Chromium, no
+# ffmpeg. Links libjpeg-turbo (YUYV/MJPEG encode + decode) and
+# libpng (preview PNGs for the shell renderer, which decodes PNG
+# only). The -dev packages come from the workflow apt installs
+# (libjpeg-turbo8-dev, libpng-dev); a missing header fails the
+# build loudly here, never silently at runtime. The copy-closure
+# below stages camd's library closure (libjpeg.so.8, libpng16)
+# into the image with the binary.
+gcc -O2 -Wall -Wextra -Werror -o "$BUILD_TMP/sevyn-camd" \
+  "$ROOT/camera/camd.c" -ljpeg -lpng -lz
+
 # Update trust anchor (see the header): committed release anchor, or a
 # fresh per-image test keypair.
 mkdir -p "$BUILD_TMP/trusted-update-keys"
@@ -617,6 +628,7 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$BUILD_TMP/sevyn-aid:/usr/local/bin/sevyn-aid" \
   "$BUILD_TMP/sevyn-updated:/usr/local/bin/sevyn-updated" \
   "$BUILD_TMP/sevyn:/usr/local/bin/sevyn" \
+  "$BUILD_TMP/sevyn-camd:/usr/local/bin/sevyn-camd" \
   "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
   "$CODE_SERVER_DIR/lib/node:/usr/share/sevyn/code-server/lib/node" \
   "$CHROMIUM_DIR/chrome:/usr/share/sevyn/chromium/chrome"
@@ -942,6 +954,11 @@ fi
 # iocharset is iso8859-1); without them the ESP mount fails with
 # EINVAL ("FAT-fs: IO charset iso8859-1 not found") and the
 # in-place update cannot sync the ESP.
+# Camera (camd): uvcvideo + videodev + videobuf2-* — the UVC webcam
+# stack for the GF65's camera. Without them there is no /dev/video0
+# at all and camd can only report available:false. QEMU has no
+# camera either way; the modules are harmless there (nothing probes
+# them) and the dep closure resolves via modinfo.
 # Installer v2: usb-storage + uas + sd_mod — the USB storage stack.
 # Without them the live system cannot see a USB disk at all (no
 # /dev/sd*, no /sys/block/sda): the portable install target is
@@ -952,6 +969,7 @@ python3 "$ROOT/image/stage-modules.py" "$SYSROOT" "$kernel_version" "$STAGE" \
   virtio-gpu usbhid hid-generic xhci-pci virtio-blk virtio-net ext4 \
   i915 iwlwifi iwlmvm mac80211 cfg80211 nvme alx \
   snd-hda-intel snd-hda-codec-realtek snd-hda-codec-generic snd-hda-codec-hdmi \
+  uvcvideo videodev videobuf2-core videobuf2-common videobuf2-memops videobuf2-v4l2 \
   i2c-hid-acpi i2c-hid hid-multitouch intel-lpss-pci \
   nls_iso8859-1 nls_utf8 \
   usb-storage uas sd_mod
@@ -1223,6 +1241,24 @@ if [ "${MOCKCOMMS:-0}" = "1" ]; then
     --bridge-page /usr/share/sevyn/comms/bridge.html \
     --fake-media 1 >/data/logs/commsd-bob.log 2>&1 &
   echo "M10 init: comms mocks started (sevyn.mockcomms=1)"
+fi
+# camd (native camera): owns /run/sevyn-camera.sock (V4L2 capture,
+# MJPEG passthrough or YUYV->JPEG). Starts after commsd; the apps
+# drive it through `sevyn camera` and the RN host camera adapter
+# talks to its socket directly. No Chromium, no ffmpeg — the daemon
+# is the whole capture path. The synthetic source starts ONLY when
+# the kernel cmdline carries sevyn.syntheticcamera=1 (the camera
+# check boots with it — QEMU has no camera); real hardware runs
+# the real device, and a device without one reports
+# available:false. Its log goes to /data/logs/camd.log.
+for a in $(cat /proc/cmdline); do case "$a" in sevyn.syntheticcamera=*) SYNTHCAM=${a#sevyn.syntheticcamera=};; esac; done
+mkdir -p /data/camera /data/photos /data/logs
+if [ "${SYNTHCAM:-0}" = "1" ]; then
+  /usr/local/bin/sevyn-camd --synthetic >/data/logs/camd.log 2>&1 &
+  echo "camd init: synthetic camera started (sevyn.syntheticcamera=1)"
+else
+  /usr/local/bin/sevyn-camd >/data/logs/camd.log 2>&1 &
+  echo "camd init: camd started @ $(cut -d" " -f1 /proc/uptime)s"
 fi
 # Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
 # (localhost only — the browser that paints it arrives in M5). It

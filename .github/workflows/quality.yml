@@ -36,3 +36,21 @@ jobs:
           sudo apt-get update && sudo apt-get install --yes
           libwayland-dev libxkbcommon-dev pkg-config
       - run: cargo test --locked
+
+  # camd (native camera daemon): compile it and prove the socket
+  # protocol against the synthetic source — no camera hardware in
+  # CI. The image build (v2-m13.yml) is the gate for staging; this
+  # job is the gate for the daemon itself.
+  camd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install camd build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          gcc libjpeg-turbo8-dev libpng-dev zlib1g-dev
+      - run: node v2/camera/camd-check.mjs

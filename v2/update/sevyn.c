@@ -190,6 +190,18 @@ static void print_usage(FILE *f)
             "  sevyn comms calls           list calls (JSON)\n"
             "  sevyn comms rcs status      RCS staging state\n"
             "  sevyn comms rcs probe       SIP/MSRP skeleton vs mock ACS\n"
+            "  sevyn camera [--socket <path>] <verb>\n"
+            "                              talk to a camd other than the\n"
+            "                              system one (same pattern as\n"
+            "                              `sevyn comms --socket`)\n"
+            "  sevyn camera status         V4L2 device + formats (JSON)\n"
+            "  sevyn camera list           list V4L2 capture devices\n"
+            "  sevyn camera preview [w h]  one preview frame: PNG + RGBA\n"
+            "                              paths (JSON)\n"
+            "  sevyn camera capture [path] shutter: real JPEG to <path>\n"
+            "                              (default /data/camera/…)\n"
+            "  sevyn camera decode <jpeg> <rgba> [maxPixels]\n"
+            "                              JPEG -> RGBA + PNG sidecar\n"
             "  sevyn net status            link, address, gateway, DNS,\n"
             "                              wifi\n"
             "  sevyn net dns <host>        resolve a name (guest DNS)\n"
@@ -1754,6 +1766,127 @@ static void print_opened_tab(const char *url)
     free(t.id);
     free(t.title);
     free(t.url);
+}
+
+/* camera — native V4L2 capture via camd (no Chromium, no ffmpeg)   */
+/* ------------------------------------------------------------------ */
+
+/* Talk to camd (the camera daemon). One line out, one JSON line
+ * back — the same shape as comms_roundtrip: the daemon answers bare
+ * JSON ({ok:true,...} or {ok:false,error:...}); print_reply prints
+ * it verbatim, and the exit code follows the payload's ok flag. */
+#define CAMERA_SOCK "/run/sevyn-camera.sock"
+
+static int connect_camera(void)
+{
+    return connect_sock("SEVYN_CAMERA_SOCK", CAMERA_SOCK);
+}
+
+/* comms_send's 8192 cap, reused shape: a camera command is short
+ * (verb + two paths at most), so 4096 is plenty. */
+static int camera_send(int fd, const char *line)
+{
+    size_t n = strlen(line);
+    char buf[4096];
+    if (n + 1 >= sizeof(buf))
+        return -1;
+    memcpy(buf, line, n);
+    buf[n++] = '\n';
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, buf + off, n - off);
+        if (w <= 0)
+            return -1;
+        off += (size_t)w;
+    }
+    return 0;
+}
+
+static int camera_roundtrip(const char *cmd)
+{
+    int fd = connect_camera();
+    if (fd < 0) {
+        fprintf(stderr, "error: cannot reach the camera daemon\n");
+        return 1;
+    }
+    if (camera_send(fd, cmd) != 0) {
+        fprintf(stderr, "error: cannot talk to the camera daemon\n");
+        close(fd);
+        return 1;
+    }
+    static char reply[65536];
+    int n = read_line(fd, reply, sizeof(reply));
+    close(fd);
+    if (n <= 0) {
+        fprintf(stderr, "error: no reply from the camera daemon\n");
+        return 1;
+    }
+    int rc = print_reply(reply);
+    if (rc == 0 && strncmp(reply, "{\"ok\":false", 11) == 0)
+        return 1;
+    return rc;
+}
+
+static int cmd_camera(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    /* --socket <path> talks to a camd other than the system one
+     * (same pattern as `sevyn comms --socket`: the check runs a
+     * synthetic daemon on a temp socket, and the Terminal has no
+     * shell env assignment, so the socket rides on the command
+     * line). */
+    if (strcmp(argv[2], "--socket") == 0) {
+        if (argc < 5)
+            return usage();
+        setenv("SEVYN_CAMERA_SOCK", argv[3], 1);
+        argv += 2;
+        argc -= 2;
+    }
+    const char *verb = argv[2];
+
+    if (strcmp(verb, "status") == 0) {
+        if (argc != 3)
+            return usage();
+        return camera_roundtrip("STATUS");
+    }
+    if (strcmp(verb, "list") == 0) {
+        if (argc != 3)
+            return usage();
+        return camera_roundtrip("LIST");
+    }
+    if (strcmp(verb, "preview") == 0) {
+        if (argc != 3 && argc != 5)
+            return usage();
+        char cmd[128];
+        if (argc == 5)
+            snprintf(cmd, sizeof(cmd), "PREVIEW %s %s", argv[3], argv[4]);
+        else
+            snprintf(cmd, sizeof(cmd), "PREVIEW");
+        return camera_roundtrip(cmd);
+    }
+    if (strcmp(verb, "capture") == 0) {
+        if (argc != 3 && argc != 4)
+            return usage();
+        char cmd[2048];
+        if (argc == 4)
+            snprintf(cmd, sizeof(cmd), "CAPTURE %s", argv[3]);
+        else
+            snprintf(cmd, sizeof(cmd), "CAPTURE");
+        return camera_roundtrip(cmd);
+    }
+    if (strcmp(verb, "decode") == 0) {
+        if (argc != 5 && argc != 6)
+            return usage();
+        char cmd[4096];
+        if (argc == 6)
+            snprintf(cmd, sizeof(cmd), "DECODE %s %s %s", argv[3], argv[4],
+                     argv[5]);
+        else
+            snprintf(cmd, sizeof(cmd), "DECODE %s %s", argv[3], argv[4]);
+        return camera_roundtrip(cmd);
+    }
+    return usage();
 }
 
 /* Stop Chromium (M13): SIGTERM the pid in /data/chromium.state and
@@ -5911,6 +6044,8 @@ static int dispatch(int argc, char **argv)
         return cmd_browser(argc, argv);
     if (strcmp(argv[1], "comms") == 0)
         return cmd_comms(argc, argv);
+    if (strcmp(argv[1], "camera") == 0)
+        return cmd_camera(argc, argv);
     if (strcmp(argv[1], "net") == 0)
         return cmd_net(argc, argv);
     if (strcmp(argv[1], "tokrah") == 0)

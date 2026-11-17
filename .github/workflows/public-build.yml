@@ -50,6 +50,7 @@ jobs:
             wayland-protocols \
             libfreetype-dev \
             libpng-dev \
+            libjpeg-turbo8-dev \
             libssl-dev \
             weston \
             seatd \
