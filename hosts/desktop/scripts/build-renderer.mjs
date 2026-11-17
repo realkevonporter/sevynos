@@ -42,6 +42,12 @@ export const createPrivateKey = () => { throw new Error("node:crypto is unavaila
 export const sign = () => { throw new Error("node:crypto is unavailable in this bundle"); };
 export const verify = () => { throw new Error("node:crypto is unavailable in this bundle"); };
 export const rename = async () => { throw new Error("node:fs/promises is unavailable in this bundle"); };
+// @sevynos/desktop-shell volume service (disk sizes via statfs). The
+// renderer bundle never reads real disks — readFile above returns empty,
+// so no volumes are ever listed there — and statfs fails closed like
+// rename; diskUsage() catches it and reports 0/0. The Linux host bundles
+// with platform=node and uses the real builtin.
+export const statfs = async () => { throw new Error("node:fs/promises is unavailable in this bundle"); };
 export const createWriteStream = () => { throw new Error("node:fs is unavailable in this bundle"); };
 export const once = async () => { throw new Error("node:events is unavailable in this bundle"); };
 export default {};
