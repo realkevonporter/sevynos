@@ -46,6 +46,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+      # setup-node's package-manager cache lookup needs pnpm on
+      # PATH (it fails the job before any step runs without it —
+      # the `check` job installs it the same way).
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
           node-version: 24
