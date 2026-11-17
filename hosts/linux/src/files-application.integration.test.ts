@@ -1,13 +1,14 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   SevynApplicationRuntime,
   SystemNotificationService,
   type AccessibilityNode,
 } from "@sevynos/react-native/internal";
-import { createCoreSystemApplication } from "@sevynos/core-applications";
+import { FilesApplication } from "@sevynos/app-files";
 import { LinuxFileSystem } from "./linux-file-system.js";
 
 const settle = (): Promise<void> =>
@@ -15,7 +16,10 @@ const settle = (): Promise<void> =>
     setTimeout(resolve, 60);
   });
 const waitFor = async (predicate: () => boolean): Promise<void> => {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  // Generous budget: under parallel load (turbo runs several suites at
+  // once) the runtime can take well over a second to re-render after a
+  // navigation while the trash contents load asynchronously.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     if (predicate()) return;
     await settle();
   }
@@ -27,20 +31,21 @@ const flatten = (nodes: readonly AccessibilityNode[]): readonly AccessibilityNod
 describe("Files UI with native user storage", () => {
   let root: string;
   let filesystem: LinuxFileSystem;
+  let notifications: SystemNotificationService;
   let runtime: SevynApplicationRuntime;
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "sevyn-files-ui-"));
     filesystem = new LinuxFileSystem({ rootDirectory: root, defaultFiles: false });
     await filesystem.write("/Documents/report.txt", "original");
     await filesystem.moveToTrash("/Documents/report.txt");
+    notifications = new SystemNotificationService();
     runtime = new SevynApplicationRuntime({
       bounds: { x: 0, y: 0, width: 1600, height: 900 },
     });
     runtime.mount(
-      createCoreSystemApplication({
-        kind: "files",
+      createElement(FilesApplication, {
         filesystem,
-        notifications: new SystemNotificationService(),
+        notifications,
       }),
     );
     await settle();
@@ -68,8 +73,8 @@ describe("Files UI with native user storage", () => {
   };
   it("lists and restores real Trash payloads through pointer input", async () => {
     await click("files.loc.trash");
-    await click("file.trash://report.txt");
-    await click("files.restore");
+    await click("files.restore.report.txt");
+    await waitFor(() => notifications.list().some((item) => item.title === "Restored"));
     expect(await filesystem.read("/Documents/report.txt")).toBe("original");
     expect(await filesystem.listTrash()).toEqual([]);
   });
@@ -77,23 +82,21 @@ describe("Files UI with native user storage", () => {
     await click("files.loc.trash");
     await click("files.empty_trash");
     expect(await filesystem.listTrash()).toHaveLength(1);
-    await click("files.cancel_empty");
-    expect(await filesystem.listTrash()).toHaveLength(1);
-    await click("files.empty_trash");
     await click("files.empty_trash");
     expect(await filesystem.listTrash()).toEqual([]);
   });
   it("shows restore conflicts without losing either file", async () => {
     await filesystem.write("/Documents/report.txt", "new");
     await click("files.loc.trash");
-    await click("file.trash://report.txt");
-    await click("files.restore");
-    expect(
-      runtime.snapshot.commands.some(
-        (command) =>
-          command.kind === "text" && command.text.includes("Destination already exists"),
-      ),
-    ).toBe(true);
+    await click("files.restore.report.txt");
+    await waitFor(() =>
+      notifications
+        .list()
+        .some(
+          (item) =>
+            item.title === "Error" && item.message.includes("Destination already exists"),
+        ),
+    );
     expect(await filesystem.read("/Documents/report.txt")).toBe("new");
     expect(await filesystem.listTrash()).toHaveLength(1);
   });

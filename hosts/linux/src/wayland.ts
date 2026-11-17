@@ -80,6 +80,7 @@ import { protectCurrentProcessFromOomKiller } from "./oom-score.js";
 import { LinuxSystemService } from "./linux-system-service.js";
 import { LinuxProcessService } from "./linux-process-service.js";
 import { LinuxFileSystem } from "./linux-file-system.js";
+import { LinuxVolumeService } from "./linux-volume-service.js";
 import { FileArchiveService } from "@sevynos/file-archives";
 import { ChromiumBrowserEngine } from "./chromium-browser-engine.js";
 import { LinuxSevynCodeService } from "./linux-sevyn-code-service.js";
@@ -155,6 +156,21 @@ function defaultBrowserDownloadDirectory(): string | undefined {
   return stateDirectory === undefined ? undefined : join(stateDirectory, "Downloads");
 }
 
+/**
+ * One polling volume service for the host process, shared by every
+ * LinuxFileSystem the host creates. The filesystem jail allow-lists
+ * removable volumes through it: without this wiring the filesystem was
+ * constructed with no volume service, so listing a USB mount point
+ * (/media/…) always failed even though the jail code allowed it.
+ * start() is idempotent, so sharing is safe.
+ */
+let sharedVolumeServiceInstance: LinuxVolumeService | undefined;
+function sharedVolumeService(): LinuxVolumeService {
+  sharedVolumeServiceInstance ??= new LinuxVolumeService();
+  sharedVolumeServiceInstance.start();
+  return sharedVolumeServiceInstance;
+}
+
 export async function startWaylandHost(
   transport: NativeBridgeTransport,
   options: WaylandHostOptions = {},
@@ -213,7 +229,8 @@ export async function startWaylandHost(
   const time = options.time ?? new LinuxTimeService();
   const system = options.system ?? new LinuxSystemService();
   const processes = options.processes ?? new LinuxProcessService();
-  const filesystem = options.filesystem ?? new LinuxFileSystem();
+  const filesystem =
+    options.filesystem ?? new LinuxFileSystem({ volumeService: sharedVolumeService() });
 
   // Sync the system clock as soon as Wi-Fi connects; NTP needs the network.
   network.subscribe(() => {
@@ -1911,7 +1928,7 @@ if (
     battery: new LinuxBatteryService(),
     audio: new LinuxAudioService(),
     system: new LinuxSystemService(),
-    filesystem: new LinuxFileSystem(),
+    filesystem: new LinuxFileSystem({ volumeService: sharedVolumeService() }),
     update: updateService,
     stateDirectory,
     createBrowserEngine: () => {

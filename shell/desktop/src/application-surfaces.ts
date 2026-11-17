@@ -242,6 +242,13 @@ export class ApplicationSurfaceRegistry {
   readonly #nativeBounds = new Map<GenesisWindowId, NativeBounds>();
   readonly #filesystem: SevynFileSystem;
   readonly #storage: SevynStorageService;
+  /**
+   * Bound volume-path predicate from the volume service, so the
+   * user-scoped filesystem can let removable-volume paths (/media/…)
+   * pass through unscoped. Bound here because isVolumePath reads the
+   * service's private volume list.
+   */
+  readonly #isVolumePath: (path: string) => boolean;
   readonly #battery: SevynBatteryService;
   readonly #audio: SevynAudioService;
   readonly #system: SevynSystemService;
@@ -287,6 +294,7 @@ export class ApplicationSurfaceRegistry {
     const volumeService = new LinuxVolumeService();
     volumeService.start();
     this.#storage = volumeService;
+    this.#isVolumePath = (path: string): boolean => volumeService.isVolumePath(path);
     this.#filesystem =
       filesystem ??
       new InMemoryFileSystem({
@@ -470,7 +478,7 @@ export class ApplicationSurfaceRegistry {
   public createFiles(windowId: GenesisWindowId): FilesApplicationSurface {
     const surface: FilesApplicationSurface = Object.freeze({
       kind: "files",
-      heading: "Files",
+      heading: "File Explorer",
     });
     this.#set(windowId, surface);
     return surface;
@@ -761,7 +769,11 @@ export class ApplicationSurfaceRegistry {
     }
     let scoped = this.#scopedFilesystems.get(user.username);
     if (scoped === undefined) {
-      scoped = new UserScopedFileSystem(this.#filesystem, `users/${user.username}`);
+      scoped = new UserScopedFileSystem(
+        this.#filesystem,
+        `users/${user.username}`,
+        this.#isVolumePath,
+      );
       this.#scopedFilesystems.set(user.username, scoped);
     }
     return scoped;

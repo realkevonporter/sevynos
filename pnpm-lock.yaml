@@ -544,6 +544,9 @@ importers:
       '@sevynos/app-calculator':
         specifier: workspace:*
         version: link:../../applications/calculator
+      '@sevynos/app-files':
+        specifier: workspace:*
+        version: link:../../applications/files
       '@sevynos/app-notes':
         specifier: workspace:*
         version: link:../../applications/notes

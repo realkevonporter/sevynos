@@ -123,10 +123,10 @@ export const DESKTOP_APPLICATION_CATALOG: readonly DesktopApplicationDefinition[
     }),
     Object.freeze({
       id: "org.sevynos.files",
-      name: "Files",
+      name: "File Explorer",
       kind: "files",
       icon: "icons/files.svg",
-      title: "Files",
+      title: "File Explorer",
       layout: windowLayout(760, 560, 600, 400),
     }),
     Object.freeze({

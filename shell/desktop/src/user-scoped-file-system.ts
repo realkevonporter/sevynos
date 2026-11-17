@@ -23,18 +23,30 @@ function normalizeVirtualPath(path: string): string {
 export class UserScopedFileSystem implements SevynFileSystem {
   readonly #inner: SevynFileSystem;
   readonly #scopeDir: string;
+  readonly #isVolumePath: ((path: string) => boolean) | undefined;
 
   /**
    * @param inner the host filesystem (rooted at the shared user-data dir).
    * @param scopeDir the home subdirectory relative to the inner root,
    *   e.g. "users/kevon". Leading/trailing slashes are tolerated.
+   * @param isVolumePath optional predicate for removable-volume paths
+   *   (e.g. "/media/sdb1"). Those pass through unscoped: they live
+   *   outside every user's home, so scoping them would rewrite a USB
+   *   mount into a nonexistent folder under the user's home and browsing
+   *   the drive would always fail. Trash for volume items lands in the
+   *   shared root trash (the inner filesystem's behavior).
    */
-  public constructor(inner: SevynFileSystem, scopeDir: string) {
+  public constructor(
+    inner: SevynFileSystem,
+    scopeDir: string,
+    isVolumePath?: (path: string) => boolean,
+  ) {
     this.#inner = inner;
     this.#scopeDir = scopeDir.replace(/^\/+/, "").replace(/\/+$/, "");
     if (this.#scopeDir === "" || this.#scopeDir.split("/").includes("..")) {
       throw new Error(`Invalid user filesystem scope: "${scopeDir}".`);
     }
+    this.#isVolumePath = isVolumePath;
   }
 
   public get scopeDir(): string {
@@ -43,6 +55,7 @@ export class UserScopedFileSystem implements SevynFileSystem {
 
   #scoped(path: string): string {
     const normalized = normalizeVirtualPath(path);
+    if (this.#isVolumePath?.(normalized) === true) return normalized;
     if (normalized === "/") return `/${this.#scopeDir}`;
     return `/${this.#scopeDir}${normalized}`;
   }

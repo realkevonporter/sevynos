@@ -177,3 +177,74 @@ describe("Linux filesystem data safety", () => {
     expect(await filesystem.listTrash()).toHaveLength(1);
   });
 });
+
+describe("LinuxFileSystem removable volumes", () => {
+  let tempDir: string;
+  let volumeRoot: string;
+  let fs: LinuxFileSystem;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "sevyn-fs-test-"));
+    // A stand-in for a /media/<device> mount: a real directory outside the
+    // user root that the volume-service stub allow-lists.
+    volumeRoot = await mkdtemp(join(tmpdir(), "sevyn-volume-test-"));
+    fs = new LinuxFileSystem({
+      rootDirectory: tempDir,
+      defaultFiles: false,
+      volumeService: {
+        isVolumePath: (path: string) =>
+          path === volumeRoot || path.startsWith(volumeRoot + "/"),
+      },
+    });
+    await fs.initialize();
+    await mkdir(join(volumeRoot, "Photos"), { recursive: true });
+    await writeFile(join(volumeRoot, "Photos", "beach.txt"), "beach");
+    await writeFile(join(volumeRoot, "readme.txt"), "usb");
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+    await rm(volumeRoot, { recursive: true, force: true });
+  });
+
+  it("lists a volume mount point with absolute virtual paths", async () => {
+    const entries = await fs.list(volumeRoot);
+    expect(entries.map((entry) => entry.name).sort()).toEqual(["Photos", "readme.txt"]);
+    expect(entries.map((entry) => entry.path).sort()).toEqual([
+      `${volumeRoot}/Photos`,
+      `${volumeRoot}/readme.txt`,
+    ]);
+  });
+
+  it("reads, writes, copies and renames inside a volume", async () => {
+    expect(await fs.read(`${volumeRoot}/readme.txt`)).toBe("usb");
+    await fs.write(`${volumeRoot}/notes.txt`, "hello");
+    expect(await fs.read(`${volumeRoot}/notes.txt`)).toBe("hello");
+    await fs.copy(`${volumeRoot}/Photos`, `${volumeRoot}/Photos-copy`);
+    expect(await fs.read(`${volumeRoot}/Photos-copy/beach.txt`)).toBe("beach");
+    await fs.rename(`${volumeRoot}/notes.txt`, `${volumeRoot}/renamed.txt`);
+    expect(await fs.read(`${volumeRoot}/renamed.txt`)).toBe("hello");
+    await expect(fs.stat(`${volumeRoot}/notes.txt`)).resolves.toBeUndefined();
+  });
+
+  it("copies directories between the internal drive and a volume", async () => {
+    await fs.write("/Documents/from-home.txt", "home");
+    await fs.copy("/Documents/from-home.txt", `${volumeRoot}/from-home.txt`);
+    expect(await fs.read(`${volumeRoot}/from-home.txt`)).toBe("home");
+    await fs.copy(`${volumeRoot}/Photos`, "/Documents/Photos-copy");
+    expect(await fs.read("/Documents/Photos-copy/beach.txt")).toBe("beach");
+  });
+
+  it("moves a volume file to trash and restores it", async () => {
+    await fs.moveToTrash(`${volumeRoot}/readme.txt`);
+    await expect(fs.stat(`${volumeRoot}/readme.txt`)).resolves.toBeUndefined();
+    const trashed = await fs.listTrash();
+    expect(trashed.map((entry) => entry.name)).toContain("readme.txt");
+    await fs.restoreFromTrash("readme.txt");
+    expect(await fs.read(`${volumeRoot}/readme.txt`)).toBe("usb");
+  });
+
+  it("rejects paths outside the root and all volumes", async () => {
+    await expect(fs.list("/definitely/not/a/volume")).rejects.toThrow();
+  });
+});

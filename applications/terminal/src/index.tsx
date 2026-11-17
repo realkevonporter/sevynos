@@ -68,7 +68,7 @@ export const DEFAULT_TERMINAL_APPS: readonly TerminalAppRecord[] = [
   },
   {
     id: "org.sevynos.files",
-    name: "Files",
+    name: "File Explorer",
     version: "1.0.0",
     system: false,
     permissions: ["filesystem:user"],

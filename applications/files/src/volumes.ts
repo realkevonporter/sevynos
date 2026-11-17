@@ -6,11 +6,29 @@
 
 export interface VolumeLike {
   readonly mountPoint: string;
+  readonly removable?: boolean | undefined;
+  readonly label?: string | undefined;
 }
 
 /** True when `path` is the volume's mount point or a folder inside it. */
 export function isPathOnVolume(path: string, mountPoint: string): boolean {
   return path === mountPoint || path.startsWith(`${mountPoint}/`);
+}
+
+/**
+ * Sidebar order: the internal (non-removable) drive first, then removable
+ * volumes alphabetically by label. The volume service already lists the
+ * internal drive; this only shapes the order for display.
+ */
+export function sortVolumesForSidebar<T extends VolumeLike>(
+  volumes: readonly T[],
+): readonly T[] {
+  return [...volumes].sort((a, b) => {
+    const aInternal = a.removable === false;
+    const bInternal = b.removable === false;
+    if (aInternal !== bInternal) return aInternal ? -1 : 1;
+    return (a.label ?? a.mountPoint).localeCompare(b.label ?? b.mountPoint);
+  });
 }
 
 /**
@@ -36,11 +54,16 @@ export function detectUnpluggedBrowsePath(
   return undefined;
 }
 
-/** Human-readable "X free of Y" capacity line for a volume. */
+/**
+ * Human-readable "X free of Y" capacity line for a volume.
+ * Volumes that report no size info (0/0) show "Size unknown" instead of
+ * a misleading "0 B free of 0 B".
+ */
 export function formatVolumeCapacity(
   sizeBytes: number,
   availableBytes: number,
   formatBytes: (bytes: number) => string,
 ): string {
+  if (sizeBytes <= 0 && availableBytes <= 0) return "Size unknown";
   return `${formatBytes(availableBytes)} free of ${formatBytes(sizeBytes)}`;
 }
