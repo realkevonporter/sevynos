@@ -524,6 +524,66 @@ export class InMemoryFileSystem implements SevynFileSystem {
     }
     return Promise.resolve();
   }
+  public rename(fromPath: string, toPath: string): Promise<void> {
+    const from = normalize(fromPath);
+    const to = normalize(toPath);
+    if (this.#files.has(from)) {
+      this.#files.set(to, this.#files.get(from) ?? "");
+      this.#files.delete(from);
+      this.#ensureParents(to);
+      return Promise.resolve();
+    }
+    if (this.#directories.has(from)) {
+      this.#directories.delete(from);
+      this.#directories.add(to);
+      this.#ensureParents(to);
+      const prefix = `${from}/`;
+      for (const key of [...this.#files.keys()]) {
+        if (key.startsWith(prefix)) {
+          this.#files.set(
+            `${to}/${key.slice(prefix.length)}`,
+            this.#files.get(key) ?? "",
+          );
+          this.#files.delete(key);
+        }
+      }
+      for (const key of [...this.#directories]) {
+        if (key.startsWith(prefix)) {
+          this.#directories.delete(key);
+          this.#directories.add(`${to}/${key.slice(prefix.length)}`);
+        }
+      }
+      return Promise.resolve();
+    }
+    return Promise.reject(new Error(`Path "${fromPath}" does not exist.`));
+  }
+  public copy(fromPath: string, toPath: string): Promise<void> {
+    const from = normalize(fromPath);
+    const to = normalize(toPath);
+    if (this.#files.has(from)) {
+      this.#files.set(to, this.#files.get(from) ?? "");
+      this.#ensureParents(to);
+      return Promise.resolve();
+    }
+    if (this.#directories.has(from)) {
+      this.#directories.add(to);
+      this.#ensureParents(to);
+      const prefix = `${from}/`;
+      for (const key of [...this.#files.keys()]) {
+        if (key.startsWith(prefix))
+          this.#files.set(
+            `${to}/${key.slice(prefix.length)}`,
+            this.#files.get(key) ?? "",
+          );
+      }
+      for (const key of [...this.#directories]) {
+        if (key.startsWith(prefix))
+          this.#directories.add(`${to}/${key.slice(prefix.length)}`);
+      }
+      return Promise.resolve();
+    }
+    return Promise.reject(new Error(`Path "${fromPath}" does not exist.`));
+  }
   #ensureParents(path: string): void {
     const parts = normalize(path).split("/").filter(Boolean);
     let current = "";

@@ -475,7 +475,14 @@ canvas.addEventListener("pointerdown", (event) => {
         });
         return;
       case "desktop-workspace-item":
-        void runtime.applications.launch("org.sevynos.files");
+        void runtime.openDesktopEntry(desktopControl.path).catch((error: unknown) => {
+          runtime.diagnostics.record({
+            severity: "error",
+            subsystem: "desktop",
+            event: "desktop-item.open-failed",
+            message: String(error),
+          });
+        });
         return;
       case "desktop-settings-control":
         if (desktopControl.action === "installer-launch") {

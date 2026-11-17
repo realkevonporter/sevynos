@@ -190,6 +190,109 @@ describe("Genesis desktop host runtime", () => {
     await runtime.closeForShutdown();
   });
 
+  it("opens, renames, deletes, and pastes desktop entries through the runtime", async () => {
+    const runtime = await createDesktopRuntime({ launchDefaults: false });
+    const composer = new DesktopSceneComposer(runtime);
+
+    const folder = await runtime.createDesktopFolder();
+    expect(folder).toBe("/Desktop/New Folder");
+    const file = await runtime.createDesktopFile();
+    expect(file).toBe("/Desktop/New Text File.txt");
+
+    // Opening a folder launches File Explorer pointed at that folder.
+    await runtime.openDesktopEntry(folder);
+    const files = runtime.applications.getByApplicationId("org.sevynos.files");
+    expect(files).toBeDefined();
+    expect(runtime.surfaces.filesDirectory(files?.windowId ?? "")).toBe(
+      "/Desktop/New Folder",
+    );
+
+    // Opening a file points File Explorer at the parent folder.
+    await runtime.openDesktopEntry(file);
+    expect(runtime.surfaces.filesDirectory(files?.windowId ?? "")).toBe("/Desktop");
+
+    // Rename with collision protection.
+    const renamed = await runtime.renameDesktopEntry(file, "notes.txt");
+    expect(renamed).toBe("/Desktop/notes.txt");
+    await expect(runtime.renameDesktopEntry(renamed, "New Folder")).rejects.toThrow(
+      /already exists/,
+    );
+    await expect(runtime.renameDesktopEntry(renamed, "a/b")).rejects.toThrow();
+
+    // Copy-paste names the copy; cut-paste moves it.
+    const copy = await runtime.pasteDesktopEntry(renamed, "copy", "/Desktop");
+    expect(copy).toBe("/Desktop/notes copy.txt");
+    expect((await runtime.listDesktopItems()).map((entry) => entry.name)).toContain(
+      "notes copy.txt",
+    );
+    const moved = await runtime.pasteDesktopEntry(
+      "/Desktop/notes copy.txt",
+      "cut",
+      "/Desktop/New Folder",
+    );
+    expect(moved).toBe("/Desktop/New Folder/notes copy.txt");
+    expect((await runtime.listDesktopItems()).map((entry) => entry.name)).not.toContain(
+      "notes copy.txt",
+    );
+    expect(
+      (await runtime.filesystem?.list("/Desktop/New Folder"))?.map((entry) => entry.name),
+    ).toContain("notes copy.txt");
+
+    // Delete removes the entry and the grid refreshes.
+    await runtime.deleteDesktopEntry(renamed);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const scene = composer.compose({ width: 1200, height: 800, scaleFactor: 1 });
+    expect(
+      scene.nodes
+        .filter((node) => node.kind === "desktop-workspace-item")
+        .map((node) => node.label),
+    ).toEqual(["New Folder"]);
+    composer.dispose();
+    await runtime.closeForShutdown();
+  });
+
+  it("refreshes desktop entries when the Desktop folder changes outside the desktop", async () => {
+    const runtime = await createDesktopRuntime({ launchDefaults: false });
+    const composer = new DesktopSceneComposer(runtime);
+
+    expect(runtime.filesystem).toBeDefined();
+    await runtime.filesystem?.write("/Desktop/from-files.txt", "hello");
+    // The composer re-lists at most once a second; wait past the throttle,
+    // compose to trigger the refresh, then compose again to read it.
+    await new Promise<void>((resolve) => setTimeout(resolve, 1100));
+    composer.compose({ width: 1200, height: 800, scaleFactor: 1 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const scene = composer.compose({ width: 1200, height: 800, scaleFactor: 1 });
+    expect(
+      scene.nodes
+        .filter((node) => node.kind === "desktop-workspace-item")
+        .map((node) => node.label),
+    ).toContain("from-files.txt");
+    composer.dispose();
+    await runtime.closeForShutdown();
+  });
+
+  it("carries the wallpaper choice into the composed background", async () => {
+    const runtime = await createDesktopRuntime({ launchDefaults: false });
+    const composer = new DesktopSceneComposer(runtime);
+
+    const backgroundOf = (scene: DesktopScene): unknown =>
+      scene.nodes.find((node) => node.kind === "desktop-background");
+    let scene = composer.compose({ width: 1200, height: 800, scaleFactor: 1 });
+    expect(backgroundOf(scene)).toMatchObject({
+      wallpaperStyle: "default",
+      wallpaperColor: "#090b11",
+    });
+    runtime.settings.update({ wallpaperStyle: "cosmic", wallpaperColor: "#312e81" });
+    scene = composer.compose({ width: 1200, height: 800, scaleFactor: 1 });
+    expect(backgroundOf(scene)).toMatchObject({
+      wallpaperStyle: "cosmic",
+      wallpaperColor: "#312e81",
+    });
+    composer.dispose();
+    await runtime.closeForShutdown();
+  });
+
   it("routes pointer focus and z-order through one desktop coordinator", async () => {
     const runtime = await createDesktopRuntime();
 

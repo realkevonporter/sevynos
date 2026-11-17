@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { renderDesktopLauncher, type DesktopLauncherRenderInput } from "./desktop.js";
+import {
+  renderDesktopLauncher,
+  renderDesktopWallpaper,
+  renderDesktopWorkspace,
+  type DesktopLauncherRenderInput,
+  type DesktopWallpaperRenderInput,
+} from "./desktop.js";
 
 const baseInput: DesktopLauncherRenderInput = {
   open: true,
@@ -66,5 +72,67 @@ describe("desktop application launcher", () => {
     const nodes = renderDesktopLauncher({ ...baseInput, open: false });
     expect(nodes).toHaveLength(1);
     expect(nodes[0]?.kind).toBe("desktop-launcher-button");
+  });
+});
+
+describe("desktop wallpaper", () => {
+  const wallpaperInput: DesktopWallpaperRenderInput = {
+    displays: [
+      {
+        id: "display-1",
+        bounds: { x: 0, y: 0, width: 1280, height: 800 },
+        taskbarBounds: { x: 0, y: 744, width: 1280, height: 56 },
+      },
+    ],
+  };
+
+  it("carries the selected style and color on the background node", () => {
+    const nodes = renderDesktopWallpaper({
+      ...wallpaperInput,
+      wallpaperStyle: "cosmic",
+      wallpaperColor: "#312e81",
+    });
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toMatchObject({
+      kind: "desktop-background",
+      wallpaperStyle: "cosmic",
+      wallpaperColor: "#312e81",
+    });
+  });
+
+  it("omits the wallpaper fields when no choice was made", () => {
+    const nodes = renderDesktopWallpaper(wallpaperInput);
+    expect(nodes[0]).not.toHaveProperty("wallpaperStyle");
+    expect(nodes[0]).not.toHaveProperty("wallpaperColor");
+  });
+});
+
+describe("desktop workspace fallback", () => {
+  it("ignores the React Native callbacks and renders the same nodes", () => {
+    const input = {
+      display: { x: 0, y: 0, width: 1280, height: 800 },
+      entries: [
+        { name: "Photos", path: "/Desktop/Photos", kind: "directory" as const },
+        { name: "notes.txt", path: "/Desktop/notes.txt", kind: "file" as const },
+      ],
+      order: 0.5,
+    };
+    const plain = renderDesktopWorkspace(input);
+    const withCallbacks = renderDesktopWorkspace({
+      ...input,
+      onNewFolder: () => undefined,
+      onNewFile: () => undefined,
+      onOpenEntry: () => undefined,
+      onRenameEntry: () => undefined,
+      onDeleteEntry: () => undefined,
+      onPasteEntry: () => undefined,
+      onChangeWallpaper: () => undefined,
+    });
+    expect(withCallbacks).toEqual(plain);
+    expect(
+      withCallbacks
+        .filter((node) => node.kind === "desktop-workspace-item")
+        .map((node) => node.path),
+    ).toEqual(["/Desktop/Photos", "/Desktop/notes.txt"]);
   });
 });

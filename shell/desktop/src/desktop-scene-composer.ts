@@ -100,6 +100,7 @@ export class DesktopSceneComposer {
     readonly kind: "file" | "directory";
   }[] = Object.freeze([]);
   #desktopRefreshInFlight = false;
+  #lastDesktopEntriesRefreshAt = 0;
   readonly #unsubscribers: (() => void)[] = [];
 
   public constructor(
@@ -230,6 +231,7 @@ export class DesktopSceneComposer {
   }
 
   async #refreshDesktopEntries(): Promise<void> {
+    this.#lastDesktopEntriesRefreshAt = Date.now();
     if (this.#desktopRefreshInFlight || this.#runtime.filesystem === undefined) return;
     this.#desktopRefreshInFlight = true;
     try {
@@ -330,18 +332,28 @@ export class DesktopSceneComposer {
 
   /**
    * Dispatch a pointer event to a React Native shell component.
-   * Returns true if the event was handled.
+   * Returns true if the event was handled. `button` is the DOM-style
+   * button number (0 left, 2 right); right-clicks reach the component's
+   * onContextMenu handlers instead of starting a press.
    */
   public dispatchShellPointer(
     applicationId: string,
     type: "down" | "up" | "move" | "cancel",
     x: number,
     y: number,
+    button = 0,
   ): boolean {
-    return this.#shellRenderer.dispatchPointer(applicationId, type, x, y);
+    return this.#shellRenderer.dispatchPointer(applicationId, type, x, y, button);
   }
 
   public compose(viewport: DesktopViewport): DesktopScene {
+    // Re-list the Desktop folder at most once a second so the icon grid
+    // follows changes made outside the desktop (e.g. create/delete from
+    // File Explorer) without listing on every frame. Desktop mutations
+    // notify the runtime, which refreshes immediately via the subscription.
+    if (Date.now() - this.#lastDesktopEntriesRefreshAt >= 1000) {
+      void this.#refreshDesktopEntries();
+    }
     const base = this.#runtime.compositor.compose();
     const windowNodes = base.listWindows().map<DesktopWindowSceneNode>((baseNode) => {
       const window = this.#runtime.windows.getWindow(baseNode.windowId);
@@ -500,6 +512,8 @@ export class DesktopSceneComposer {
 
     const wallpaperInput = {
       displays: shellDisplays,
+      wallpaperStyle: this.#runtime.settings.snapshot.wallpaperStyle ?? "default",
+      wallpaperColor: this.#runtime.settings.snapshot.wallpaperColor ?? "#090b11",
     } satisfies DesktopWallpaperRenderInput;
     const backgroundNodes = this.#renderShellApplication(
       SystemApplicationId.Wallpaper,
@@ -530,10 +544,57 @@ export class DesktopSceneComposer {
       () => topContentOrder,
       shellDisplays,
     );
+    const recordDesktopFailure = (event: string) => (error: unknown) => {
+      this.#runtime.diagnostics.record({
+        severity: "error",
+        subsystem: "desktop",
+        event,
+        message: String(error),
+      });
+    };
     const workspaceInput = {
       display: primary.bounds,
       entries: this.#desktopEntries,
       order: 0.5,
+      onNewFolder: () => {
+        void this.#runtime
+          .createDesktopFolder()
+          .catch(recordDesktopFailure("desktop-item.create-failed"));
+      },
+      onNewFile: () => {
+        void this.#runtime
+          .createDesktopFile()
+          .catch(recordDesktopFailure("desktop-item.create-failed"));
+      },
+      onOpenEntry: (path: string) => {
+        void this.#runtime
+          .openDesktopEntry(path)
+          .catch(recordDesktopFailure("desktop-item.open-failed"));
+      },
+      onRenameEntry: (path: string, newName: string) => {
+        void this.#runtime
+          .renameDesktopEntry(path, newName)
+          .catch(recordDesktopFailure("desktop-item.rename-failed"));
+      },
+      onDeleteEntry: (path: string) => {
+        void this.#runtime
+          .deleteDesktopEntry(path)
+          .catch(recordDesktopFailure("desktop-item.delete-failed"));
+      },
+      onPasteEntry: (
+        sourcePath: string,
+        mode: "copy" | "cut",
+        targetDirectory: string,
+      ) => {
+        void this.#runtime
+          .pasteDesktopEntry(sourcePath, mode, targetDirectory)
+          .catch(recordDesktopFailure("desktop-item.paste-failed"));
+      },
+      onChangeWallpaper: () => {
+        void this.#runtime.applications
+          .launch("org.sevynos.settings")
+          .catch(recordDesktopFailure("desktop-wallpaper.settings-launch-failed"));
+      },
     };
     // Try RN component first; fall back to direct native renderer in tests
     // (no react-native) or if the RN component fails to load.

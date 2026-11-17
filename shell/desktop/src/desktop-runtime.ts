@@ -176,6 +176,30 @@ export interface DesktopRuntime {
 
   readonly createDesktopFile: () => Promise<string>;
 
+  /**
+   * Opens a desktop entry: a folder opens File Explorer at that folder; a
+   * file opens File Explorer at its parent folder and reports the file as
+   * selected. No default-application handler registry exists yet, so files
+   * cannot be opened in an app from the desktop.
+   */
+  readonly openDesktopEntry: (path: string) => Promise<void>;
+
+  /** Renames a desktop entry; returns the new path. */
+  readonly renameDesktopEntry: (path: string, newName: string) => Promise<string>;
+
+  /** Moves a desktop entry to the trash (or deletes it when trash is unavailable). */
+  readonly deleteDesktopEntry: (path: string) => Promise<void>;
+
+  /**
+   * Pastes a copied or cut entry into a desktop folder; returns the new
+   * path. Cut entries are trashed at the source after a successful copy.
+   */
+  readonly pasteDesktopEntry: (
+    sourcePath: string,
+    mode: "copy" | "cut",
+    targetDirectory: string,
+  ) => Promise<string>;
+
   readonly requestRender: () => void;
 }
 
@@ -1326,6 +1350,126 @@ export async function createDesktopRuntime(
     return path;
   }
 
+  function parentDirectory(path: string): string {
+    const segments = path.split("/").filter(Boolean);
+    segments.pop();
+    const joined = segments.join("/");
+    return joined.length === 0 ? "/" : `/${joined}`;
+  }
+
+  function baseName(path: string): string {
+    return path.split("/").filter(Boolean).pop() ?? path;
+  }
+
+  async function openFilesAt(directoryPath: string): Promise<void> {
+    const running = applications.getByApplicationId("org.sevynos.files");
+    const launched = running ?? (await applications.launch("org.sevynos.files"));
+    surfaces.setFilesDirectory(launched.windowId, directoryPath);
+    notify();
+  }
+
+  async function openDesktopEntry(path: string): Promise<void> {
+    const entries = await listDesktopItems();
+    const entry = entries.find((candidate) => candidate.path === path);
+    if (entry === undefined) {
+      diagnostics.record({
+        severity: "info",
+        subsystem: "desktop",
+        event: "desktop-item.open-missing",
+        message: `Desktop entry "${path}" no longer exists; opening the Desktop folder.`,
+      });
+      await openFilesAt("/Desktop");
+      return;
+    }
+    if (entry.kind === "directory") {
+      await openFilesAt(entry.path);
+      return;
+    }
+    // No default-application handler registry exists yet, so a file opens
+    // File Explorer at its parent folder and is reported as selected —
+    // the same behaviour as opening a file inside File Explorer.
+    await openFilesAt(parentDirectory(entry.path));
+    surfaces.showNotification({
+      title: "File Selected",
+      message: `Selected ${entry.name}`,
+    });
+  }
+
+  async function renameDesktopEntry(path: string, newName: string): Promise<string> {
+    const trimmed = newName.trim();
+    if (trimmed.length === 0 || trimmed.includes("/")) {
+      throw new Error('A new name must not be empty or contain "/".');
+    }
+    const filesystem = surfaces.filesystem;
+    if (filesystem.rename === undefined) {
+      throw new Error("The filesystem does not support rename.");
+    }
+    const directory = parentDirectory(path);
+    const target = `${directory}/${trimmed}`.replace(/\/\//g, "/");
+    if (target === path) return path;
+    const siblings = await filesystem.list(directory);
+    if (siblings.some((entry) => entry.path === target)) {
+      throw new Error(`An item named "${trimmed}" already exists.`);
+    }
+    await filesystem.rename(path, target);
+    notify();
+    return target;
+  }
+
+  async function deleteDesktopEntry(path: string): Promise<void> {
+    const filesystem = surfaces.filesystem;
+    if (filesystem.moveToTrash !== undefined) {
+      await filesystem.moveToTrash(path);
+    } else if (filesystem.delete !== undefined) {
+      await filesystem.delete(path);
+    } else {
+      throw new Error("The filesystem does not support delete.");
+    }
+    notify();
+  }
+
+  async function pasteDesktopEntry(
+    sourcePath: string,
+    mode: "copy" | "cut",
+    targetDirectory: string,
+  ): Promise<string> {
+    const filesystem = surfaces.filesystem;
+    if (filesystem.copy === undefined) {
+      throw new Error("The filesystem does not support copy.");
+    }
+    if (targetDirectory === sourcePath || targetDirectory.startsWith(`${sourcePath}/`)) {
+      throw new Error("An item cannot be pasted into itself.");
+    }
+    const name = baseName(sourcePath);
+    const siblings = await filesystem.list(targetDirectory);
+    const names = new Set(siblings.map((entry) => entry.name));
+    let targetName = name;
+    if (names.has(targetName)) {
+      const dot = name.lastIndexOf(".");
+      const stem = dot > 0 ? name.slice(0, dot) : name;
+      const extension = dot > 0 ? name.slice(dot) : "";
+      let copyIndex = 1;
+      do {
+        targetName =
+          copyIndex === 1
+            ? `${stem} copy${extension}`
+            : `${stem} copy ${String(copyIndex)}${extension}`;
+        copyIndex += 1;
+      } while (names.has(targetName));
+    }
+    const target = `${targetDirectory}/${targetName}`.replace(/\/\//g, "/");
+    await filesystem.copy(sourcePath, target);
+    if (mode === "cut") {
+      if (filesystem.moveToTrash !== undefined) {
+        await filesystem.moveToTrash(sourcePath);
+      } else if (filesystem.delete !== undefined) {
+        await filesystem.delete(sourcePath);
+      }
+    }
+    notify();
+    return target;
+  }
+
   const runtime: DesktopRuntime = {
     windows,
     cursor,
@@ -1377,6 +1521,10 @@ export async function createDesktopRuntime(
     listDesktopItems,
     createDesktopFolder: () => createDesktopEntry("directory"),
     createDesktopFile: () => createDesktopEntry("file"),
+    openDesktopEntry,
+    renameDesktopEntry,
+    deleteDesktopEntry,
+    pasteDesktopEntry,
     requestRender: notify,
     runFirstRunSetup: async () => {
       let resolveSetup: (() => void) | undefined;

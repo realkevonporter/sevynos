@@ -1069,12 +1069,23 @@ export async function startWaylandHost(
             };
             const localX = event.position.x - surface.bounds.x;
             const localY = event.position.y - surface.bounds.y;
+            const button = buttonNumber(event.button);
             // Remember this surface so pointer-up can complete the press.
-            pressedShellSurface = {
-              applicationId: surface.applicationId,
-              bounds: { x: surface.bounds.x, y: surface.bounds.y },
-            };
-            composer.dispatchShellPointer(surface.applicationId, "down", localX, localY);
+            // A right-click opens a context menu instead, so there is no
+            // press to complete.
+            if (button !== 2) {
+              pressedShellSurface = {
+                applicationId: surface.applicationId,
+                bounds: { x: surface.bounds.x, y: surface.bounds.y },
+              };
+            }
+            composer.dispatchShellPointer(
+              surface.applicationId,
+              "down",
+              localX,
+              localY,
+              button,
+            );
             return;
           }
           case "desktop-workspace-action":
@@ -1102,7 +1113,14 @@ export async function startWaylandHost(
             if (
               !isPointInsideAnyWindow(latestScene, event.position.x, event.position.y)
             ) {
-              void runtime.applications.launch("org.sevynos.files");
+              void runtime.openDesktopEntry(shellControl.path).catch((error: unknown) => {
+                runtime.diagnostics.record({
+                  severity: "error",
+                  subsystem: "desktop",
+                  event: "desktop-item.open-failed",
+                  message: String(error),
+                });
+              });
               return;
             }
             break;
