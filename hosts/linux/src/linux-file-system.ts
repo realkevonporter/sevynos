@@ -339,7 +339,7 @@ export class LinuxFileSystem implements SevynFileSystem {
         throw error;
       }
       try {
-        await rename(resolved, targetFile);
+        await this.#renameOrCopy(resolved, targetFile);
       } catch (error) {
         await unlink(targetInfo);
         throw error;
@@ -400,7 +400,7 @@ export class LinuxFileSystem implements SevynFileSystem {
     }
     await this.#assertAbsent(originalPath);
     await mkdir(dirname(originalPath), { recursive: true });
-    await rename(targetFile, originalPath);
+    await this.#renameOrCopy(targetFile, originalPath);
     await unlink(targetInfo);
   }
 
@@ -427,6 +427,24 @@ export class LinuxFileSystem implements SevynFileSystem {
       /^[a-zA-Z]+:/.test(virtualPath)
     )
       throw new Error("Invalid filesystem path.");
+    // Removable-volume paths are absolute system paths (e.g. /media/sdb1),
+    // not home-relative ones: resolve them directly instead of nesting them
+    // under the user root. Without this, listing a USB mount point looked
+    // for <root>/media/sdb1 and always failed, even though the jail's
+    // #assertContained already allow-listed the mount.
+    const normalizedVolumePath =
+      "/" + virtualPath.replace(/^\/+/, "").replace(/\/+$/, "");
+    if (this.#isVolumePath(normalizedVolumePath)) {
+      const candidate = resolve(normalizedVolumePath);
+      await this.#assertSafePath(candidate);
+      try {
+        const real = await realpath(candidate);
+        if (!this.#isVolumePath(real)) throw new Error("Path is outside user storage.");
+      } catch (error) {
+        if (!isCode(error, "ENOENT")) throw error;
+      }
+      return candidate;
+    }
     const candidate = resolve(this.#root, virtualPath.replace(/^\/+/, ""));
     this.#assertContained(candidate);
     await this.#assertSafePath(candidate);
@@ -437,6 +455,10 @@ export class LinuxFileSystem implements SevynFileSystem {
       if (!isCode(error, "ENOENT")) throw error;
     }
     return candidate;
+  }
+
+  #isVolumePath(path: string): boolean {
+    return this.#volumeService?.isVolumePath(path) === true;
   }
 
   #assertContained(path: string): void {
@@ -454,6 +476,26 @@ export class LinuxFileSystem implements SevynFileSystem {
 
   async #assertSafePath(path: string): Promise<void> {
     this.#assertContained(path);
+    if (this.#isVolumePath(path)) {
+      // Volume paths live outside the user root, so the root-relative walk
+      // below would climb through ".." segments; walk the absolute path
+      // from "/" instead, rejecting symlinks segment by segment.
+      const segments = resolve(path).split(sep).filter(Boolean);
+      let current: string = sep;
+      for (const part of segments) {
+        current = join(current, part);
+        try {
+          if ((await lstat(current)).isSymbolicLink())
+            throw new Error(
+              "Symbolic links are not supported in user storage operations.",
+            );
+        } catch (error) {
+          if (isCode(error, "ENOENT")) return;
+          throw error;
+        }
+      }
+      return;
+    }
     // Reject symbolic links even when the final target currently lies inside
     // the root; do not follow a dangling link while creating a new file.
     let current = this.#root;
@@ -492,8 +534,29 @@ export class LinuxFileSystem implements SevynFileSystem {
   }
 
   #toVirtualPath(systemPath: string): string {
+    // Entries on a removable volume keep their absolute mount path as the
+    // virtual path ("/media/sdb1/Photos"), so the app can navigate back to
+    // them; relativizing against the user root would produce garbage like
+    // "/../../../media/sdb1/Photos".
+    if (this.#isVolumePath(systemPath)) return systemPath;
     const relativePath = relative(this.#root, systemPath);
     return relativePath ? "/" + relativePath : "/";
+  }
+
+  /**
+   * Rename, falling back to copy + delete when the rename crosses devices
+   * (EXDEV) — e.g. moving a USB file into the trash, which lives on the
+   * internal drive. Used by the trash paths only; plain rename() keeps its
+   * strict behavior and the app handles cross-volume cuts explicitly.
+   */
+  async #renameOrCopy(from: string, to: string): Promise<void> {
+    try {
+      await rename(from, to);
+    } catch (error) {
+      if (!isCode(error, "EXDEV")) throw error;
+      await cp(from, to, { recursive: true, force: false, errorOnExist: true });
+      await rm(from, { recursive: true, force: true });
+    }
   }
 }
 

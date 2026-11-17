@@ -4,7 +4,8 @@ import { filesManifest } from "./index.js";
 describe("FilesApplication", () => {
   it("exports a valid SevynApplicationManifest", () => {
     expect(filesManifest.id).toBe("org.sevynos.files");
-    expect(filesManifest.name).toBe("File Manager");
+    expect(filesManifest.name).toBe("File Explorer");
+    expect(filesManifest.applicationKey).toBe("Files");
     expect(filesManifest.runtime).toBe("react-native");
   });
 });

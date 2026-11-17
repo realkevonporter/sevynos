@@ -124,4 +124,35 @@ describe("UserScopedFileSystem", () => {
     await scoped.list("/");
     expect(inner.seen).toEqual(["list:/users/kevon"]);
   });
+
+  it("passes removable-volume paths through unscoped", async () => {
+    const inner = new RecordingFileSystem();
+    inner.entries = [entry("/media/usb"), entry("/media/usb/photos")];
+    const isVolumePath = (path: string): boolean =>
+      path === "/media/usb" || path.startsWith("/media/usb/");
+    const scoped = new UserScopedFileSystem(inner, "users/kevon", isVolumePath);
+
+    await scoped.list("/media/usb");
+    await scoped.read("/media/usb/readme.txt");
+    await scoped.write("/media/usb/notes.txt", "hello");
+    await scoped.createDirectory("/media/usb/New Folder");
+    await scoped.copy("/media/usb/readme.txt", "/media/usb/readme-copy.txt");
+    await scoped.moveToTrash("/media/usb/old.txt");
+    // Home paths are still scoped.
+    await scoped.list("/Documents");
+
+    expect(inner.seen).toEqual([
+      "list:/media/usb",
+      "read:/media/usb/readme.txt",
+      "write:/media/usb/notes.txt",
+      "createDirectory:/media/usb/New Folder",
+      "copy:/media/usb/readme.txt->/media/usb/readme-copy.txt",
+      "moveToTrash:/media/usb/old.txt",
+      "list:/users/kevon/Documents",
+    ]);
+
+    // Volume entries keep their absolute mount paths (no un-scoping).
+    const entries = await scoped.list("/media/usb");
+    expect(entries.map((item) => item.path)).toEqual(["/media/usb", "/media/usb/photos"]);
+  });
 });

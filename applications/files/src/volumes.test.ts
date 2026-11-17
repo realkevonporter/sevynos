@@ -3,6 +3,7 @@ import {
   detectUnpluggedBrowsePath,
   formatVolumeCapacity,
   isPathOnVolume,
+  sortVolumesForSidebar,
 } from "./volumes.js";
 
 describe("isPathOnVolume", () => {
@@ -56,5 +57,26 @@ describe("formatVolumeCapacity", () => {
     expect(formatVolumeCapacity(1000, 250, (bytes) => `${String(bytes)}B`)).toBe(
       "250B free of 1000B",
     );
+  });
+
+  it("reports unknown size instead of 0 B", () => {
+    expect(formatVolumeCapacity(0, 0, (bytes) => `${String(bytes)}B`)).toBe(
+      "Size unknown",
+    );
+  });
+});
+
+describe("sortVolumesForSidebar", () => {
+  it("puts the internal drive first, then USB alphabetically", () => {
+    const sorted = sortVolumesForSidebar([
+      { mountPoint: "/media/zeta", removable: true, label: "Zeta" },
+      { mountPoint: "/", removable: false, label: "Internal Drive" },
+      { mountPoint: "/media/alpha", removable: true, label: "Alpha" },
+    ]);
+    expect(sorted.map((volume) => volume.mountPoint)).toEqual([
+      "/",
+      "/media/alpha",
+      "/media/zeta",
+    ]);
   });
 });

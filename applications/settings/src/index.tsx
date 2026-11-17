@@ -152,7 +152,7 @@ export const DEFAULT_INSTALLED_APPS: readonly InstalledAppInfo[] = [
   },
   {
     id: "org.sevynos.files",
-    name: "Files",
+    name: "File Explorer",
     version: "1.0.0",
     permissions: ["filesystem:user"],
     system: false,

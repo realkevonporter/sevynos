@@ -54,7 +54,7 @@ const APPS: readonly {
   },
   {
     id: "org.sevynos.files",
-    title: "Files",
+    title: "File Explorer",
     icon: "app-files",
     desc: "Documents & storage",
     color: "#F472B6",

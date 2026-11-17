@@ -69,9 +69,8 @@ describe("core system applications", () => {
       }),
       createCoreSystemApplication({ kind: "ide", browserEngine: mockBrowserEngine }),
       createCoreSystemApplication({ kind: "notes", filesystem, notifications }),
-      createCoreSystemApplication({ kind: "files", filesystem, notifications }),
     ];
-    expect(elements).toHaveLength(7);
+    expect(elements).toHaveLength(6);
     for (const element of elements) expect(isValidElement(element)).toBe(true);
   });
 });

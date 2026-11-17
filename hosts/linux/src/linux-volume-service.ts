@@ -9,7 +9,7 @@
  * and exposes them as volumes to the rest of the system.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, statfs } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
 export interface SevynVolume {
@@ -27,16 +27,28 @@ export type VolumeChangeListener = (volumes: readonly SevynVolume[]) => void;
 
 const MEDIA_ROOT = "/media";
 const PROC_MOUNTS = "/proc/mounts";
+const INTERNAL_MOUNT = "/";
 
-/**
- * Parse /proc/mounts and return entries mounted under /media.
- */
-async function readMediaMounts(): Promise<
-  { device: string; mountPoint: string; filesystem: string }[]
-> {
+/** /proc/mounts escapes spaces/tabs/newlines/backslashes in paths. */
+function unescapeMountPath(value: string): string {
+  return value
+    .replace(/\\040/g, " ")
+    .replace(/\\011/g, "\t")
+    .replace(/\\012/g, "\n")
+    .replace(/\\\\/g, "\\");
+}
+
+interface ProcMount {
+  readonly device: string;
+  readonly mountPoint: string;
+  readonly filesystem: string;
+}
+
+/** Parse /proc/mounts into device/mount-point/filesystem rows. */
+async function readProcMounts(): Promise<ProcMount[]> {
   try {
     const content = await readFile(PROC_MOUNTS, "utf-8");
-    const mounts: { device: string; mountPoint: string; filesystem: string }[] = [];
+    const mounts: ProcMount[] = [];
     for (const line of content.split("\n")) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 3) continue;
@@ -45,14 +57,30 @@ async function readMediaMounts(): Promise<
       const filesystem = parts[2];
       if (device === undefined || mountPoint === undefined || filesystem === undefined)
         continue;
-      if (!mountPoint.startsWith(MEDIA_ROOT + "/")) continue;
-      // Skip the /media root itself; only actual device mounts.
-      if (mountPoint === MEDIA_ROOT) continue;
-      mounts.push({ device, mountPoint, filesystem });
+      mounts.push({
+        device,
+        mountPoint: unescapeMountPath(mountPoint),
+        filesystem,
+      });
     }
     return mounts;
   } catch {
     return [];
+  }
+}
+
+/** Real disk size via statfs; 0/0 when the mount point cannot be stat'ed. */
+async function diskUsage(
+  mountPoint: string,
+): Promise<{ sizeBytes: number; availableBytes: number }> {
+  try {
+    const stats = await statfs(mountPoint);
+    return {
+      sizeBytes: stats.blocks * stats.bsize,
+      availableBytes: stats.bavail * stats.bsize,
+    };
+  } catch {
+    return { sizeBytes: 0, availableBytes: 0 };
   }
 }
 
@@ -112,6 +140,7 @@ export class LinuxVolumeService {
   public async eject(volumeId: string): Promise<void> {
     const volume = this.#volumes.find((v) => v.id === volumeId);
     if (!volume) throw new Error(`Volume ${volumeId} not found.`);
+    if (!volume.removable) throw new Error(`The internal drive cannot be ejected.`);
     // Try the SevynOS unmount script first, fall back to umount.
     const scripts = [
       "/usr/local/bin/sevyn-usb-unmount",
@@ -140,28 +169,53 @@ export class LinuxVolumeService {
   }
 
   /**
-   * Check if a path is inside an active volume mount point.
-   * Used by the filesystem jail to allowlist removable storage.
+   * Check if a path is inside an active removable-volume mount point.
+   * Used by the filesystem jail to allowlist removable storage. The
+   * internal drive (mount point "/") is deliberately excluded: its paths
+   * are inside user storage already, and matching "/" would be meaningless.
    */
   public isVolumePath(path: string): boolean {
     return this.#volumes.some(
-      (v) => path === v.mountPoint || path.startsWith(v.mountPoint + "/"),
+      (v) =>
+        v.mountPoint !== INTERNAL_MOUNT &&
+        (path === v.mountPoint || path.startsWith(v.mountPoint + "/")),
     );
   }
 
   async #refresh(): Promise<void> {
-    const mounts = await readMediaMounts();
-    const volumes: SevynVolume[] = mounts.map((m) => ({
-      id: `usb-${m.mountPoint.slice(MEDIA_ROOT.length + 1)}`,
-      label: labelForMount(m.mountPoint),
-      mountPoint: m.mountPoint,
-      filesystem: m.filesystem,
-      device: m.device,
-      // Size info requires statvfs; report 0 for now (UI shows "USB Drive").
-      sizeBytes: 0,
-      availableBytes: 0,
-      removable: true,
-    }));
+    const mounts = await readProcMounts();
+    const mediaMounts = mounts.filter(
+      (mount) =>
+        mount.mountPoint.startsWith(MEDIA_ROOT + "/") && mount.mountPoint !== MEDIA_ROOT,
+    );
+    const rootMount = mounts.find((mount) => mount.mountPoint === INTERNAL_MOUNT);
+    const volumes: SevynVolume[] = [];
+    // The internal/system drive is always listed first (non-removable, so
+    // the Files sidebar shows it above USB drives and never offers eject).
+    const internalUsage = await diskUsage(INTERNAL_MOUNT);
+    volumes.push({
+      id: "internal",
+      label: "Internal Drive",
+      mountPoint: INTERNAL_MOUNT,
+      filesystem: rootMount?.filesystem ?? "unknown",
+      device: rootMount?.device ?? "internal",
+      sizeBytes: internalUsage.sizeBytes,
+      availableBytes: internalUsage.availableBytes,
+      removable: false,
+    });
+    for (const m of mediaMounts) {
+      const usage = await diskUsage(m.mountPoint);
+      volumes.push({
+        id: `usb-${m.mountPoint.slice(MEDIA_ROOT.length + 1)}`,
+        label: labelForMount(m.mountPoint),
+        mountPoint: m.mountPoint,
+        filesystem: m.filesystem,
+        device: m.device,
+        sizeBytes: usage.sizeBytes,
+        availableBytes: usage.availableBytes,
+        removable: true,
+      });
+    }
 
     // Only notify if the set changed.
     const prevIds = this.#volumes

@@ -25,18 +25,29 @@ import {
   type TrashItem,
 } from "./trash.js";
 import {
+  isCrossDeviceError,
+  isCrossVolumeMove,
+  isCutPasteNoop,
+  resolvePasteTarget,
+  type ClipboardEntry,
+} from "./clipboard.js";
+import { driveTile, fileTileForEntry } from "./file-icons.js";
+import {
   detectUnpluggedBrowsePath,
   formatVolumeCapacity,
   isPathOnVolume,
+  sortVolumesForSidebar,
 } from "./volumes.js";
 import type { ArchiveProgress, SevynArchiveService } from "@sevynos/file-archives";
 
 export const filesManifest: SevynApplicationManifest = {
   manifestVersion: 1,
   id: "org.sevynos.files",
-  name: "File Manager",
+  name: "File Explorer",
   version: "1.0.0",
   runtime: "react-native",
+  // applicationKey stays "Files": it is the RN AppRegistry component key,
+  // not a display name, and the launcher/dock resolve the app by its id.
   applicationKey: "Files",
   developer: "SevynOS",
   icon: "icons/files.svg",
@@ -75,6 +86,20 @@ function stripArchiveExtension(name: string): string {
   return name.replace(/\.(tar\.gz|tgz|zip|tar)$/i, "");
 }
 
+/**
+ * Right-click context menu state. Follows the browser's proven pattern
+ * (onContextMenu → {x, y} + backdrop + menu items) rather than the
+ * framework's context-menu helper, which is built on imperative
+ * View()/Pressable() constructors and needs a theme object — no app uses
+ * it, and the browser pattern is the only shipped usage.
+ */
+interface ContextMenuState {
+  readonly x: number;
+  readonly y: number;
+  /** The item the menu was opened on; undefined for empty-area menus. */
+  readonly entry?: FileSystemEntry | undefined;
+}
+
 interface QuickFolder {
   readonly name: string;
   readonly path: string;
@@ -91,18 +116,6 @@ const QUICK_LOCATIONS: readonly QuickFolder[] = [
   { name: "Videos", path: "/Videos", icon: "film" },
   { name: "Trash", path: "/.Trash", icon: "trash" },
 ];
-
-function getFileIcon(name: string, kind: "file" | "directory"): SevynIconName {
-  if (kind === "directory") return "folder";
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (["png", "jpg", "jpeg", "svg", "bmp", "webp"].includes(ext)) return "image";
-  if (["mp3", "wav", "flac", "ogg"].includes(ext)) return "music-note";
-  if (["mp4", "mkv", "webm", "mov"].includes(ext)) return "film";
-  if (["ts", "tsx", "js", "json", "py", "rs", "cpp", "c", "sh"].includes(ext))
-    return "gear";
-  if (["txt", "md", "log"].includes(ext)) return "file-text";
-  return "file-text";
-}
 
 export function FilesApplication({
   filesystem,
@@ -139,11 +152,17 @@ export function FilesApplication({
   );
   const [extractError, setExtractError] = useState<string | undefined>(undefined);
   const [isExtracting, setIsExtracting] = useState<boolean>(false);
+  const [clipboard, setClipboard] = useState<ClipboardEntry | undefined>(undefined);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | undefined>(undefined);
 
   // Mount points ever seen from the volume service, used to detect a device
   // that vanished while we were browsing it (unplug without eject).
   const seenMountPointsRef = useRef<ReadonlySet<string>>(new Set());
   const volumesPrimedRef = useRef<boolean>(false);
+  // When a right-click lands on an item, the item handler runs before the
+  // content area's handler sees the same event; the timestamp lets the
+  // area handler ignore the bubbled event so the item menu wins.
+  const lastItemMenuAtRef = useRef<number>(0);
 
   const isInTrash = currentPath === "/.Trash";
 
@@ -193,7 +212,7 @@ export function FilesApplication({
           error instanceof Error ? error.message : `Cannot open directory ${dirPath}`;
         setDirectoryError(message);
         notifications?.show({
-          title: "File Manager",
+          title: "File Explorer",
           message,
         });
         return false;
@@ -373,19 +392,148 @@ export function FilesApplication({
     setIsCreatingFolder(false);
   };
 
-  const handleDelete = async () => {
-    if (!selectedPath || !filesystem?.moveToTrash || isInTrash) return;
+  const handleDeletePath = async (path: string) => {
+    if (!filesystem?.moveToTrash || isInTrash) return;
     try {
-      await filesystem.moveToTrash(selectedPath);
+      await filesystem.moveToTrash(path);
       notifications?.show({
         title: "Moved to Trash",
-        message: `Moved ${selectedPath.split("/").pop() ?? selectedPath} to Trash`,
+        message: `Moved ${path.split("/").pop() ?? path} to Trash`,
       });
       void loadDirectory(currentPath);
     } catch {
       notifications?.show({
         title: "Error",
         message: "Failed to move to Trash",
+      });
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedPath) return;
+    await handleDeletePath(selectedPath);
+  };
+
+  const handleCut = (entry: FileSystemEntry) => {
+    setClipboard({
+      kind: "cut",
+      sourcePath: entry.path,
+      sourceName: entry.name,
+      sourceKind: entry.kind,
+    });
+    setContextMenu(undefined);
+    notifications?.show({
+      title: "File Explorer",
+      message: `Cut ${entry.name} — paste to move it`,
+    });
+  };
+
+  const handleCopy = (entry: FileSystemEntry) => {
+    setClipboard({
+      kind: "copy",
+      sourcePath: entry.path,
+      sourceName: entry.name,
+      sourceKind: entry.kind,
+    });
+    setContextMenu(undefined);
+    notifications?.show({
+      title: "File Explorer",
+      message: `Copied ${entry.name} — paste to copy it`,
+    });
+  };
+
+  /**
+   * Paste the clipboard into `destinationDir` through the file service only
+   * (never a shell). Cut moves via rename on the same volume; across
+   * volumes rename fails with EXDEV, so fall back to copy + delete and say
+   * so. Copy is filesystem.copy, which the host implements recursively for
+   * directories.
+   */
+  const handlePaste = async (destinationDir: string) => {
+    if (!clipboard || !filesystem) return;
+    setContextMenu(undefined);
+    if (isCutPasteNoop(clipboard, destinationDir)) {
+      notifications?.show({
+        title: "File Explorer",
+        message: `${clipboard.sourceName} is already in this folder`,
+      });
+      return;
+    }
+    let existingNames: ReadonlySet<string>;
+    try {
+      const siblings =
+        destinationDir === currentPath ? entries : await filesystem.list(destinationDir);
+      existingNames = new Set(siblings.map((entry) => entry.name));
+    } catch {
+      notifications?.show({
+        title: "Error",
+        message: "Could not open the destination folder",
+      });
+      return;
+    }
+    const target = resolvePasteTarget(clipboard, destinationDir, existingNames);
+    if (target === undefined) {
+      notifications?.show({
+        title: "Cannot paste here",
+        message: "A folder cannot be pasted into itself or one of its subfolders.",
+      });
+      return;
+    }
+    const entry = clipboard;
+    const moveAcrossVolumes = async (): Promise<void> => {
+      if (!filesystem.copy || !filesystem.delete) {
+        throw new Error("This filesystem cannot move items across drives.");
+      }
+      await filesystem.copy(entry.sourcePath, target.targetPath);
+      await filesystem.delete(entry.sourcePath);
+    };
+    try {
+      if (entry.kind === "cut") {
+        if (isCrossVolumeMove(entry.sourcePath, destinationDir, volumes)) {
+          await moveAcrossVolumes();
+          notifications?.show({
+            title: "Moved",
+            message: `Moved ${entry.sourceName} to ${destinationDir} (copied across drives)`,
+          });
+        } else {
+          if (!filesystem.rename) throw new Error("Rename is not supported.");
+          await filesystem.rename(entry.sourcePath, target.targetPath);
+          notifications?.show({
+            title: "Moved",
+            message: `Moved ${entry.sourceName} to ${destinationDir}`,
+          });
+        }
+      } else {
+        if (!filesystem.copy) throw new Error("Copy is not supported.");
+        await filesystem.copy(entry.sourcePath, target.targetPath);
+        notifications?.show({
+          title: "Pasted",
+          message: `Copied ${entry.sourceName} to ${destinationDir}`,
+        });
+      }
+      setClipboard(entry.kind === "cut" ? undefined : clipboard);
+      void loadDirectory(currentPath);
+    } catch (error: unknown) {
+      // Rename across volumes fails with EXDEV when the volume check above
+      // could not see the boundary (e.g. a volume the service has not
+      // reported yet): fall back to copy + delete instead of failing.
+      if (entry.kind === "cut" && isCrossDeviceError(error)) {
+        try {
+          await moveAcrossVolumes();
+          notifications?.show({
+            title: "Moved",
+            message: `Moved ${entry.sourceName} to ${destinationDir} (copied across drives)`,
+          });
+          setClipboard(undefined);
+          void loadDirectory(currentPath);
+          return;
+        } catch {
+          // Fall through to the generic error below.
+        }
+      }
+      notifications?.show({
+        title: "Error",
+        message: error instanceof Error ? error.message : "Failed to paste",
       });
     }
   };
@@ -527,17 +675,21 @@ export function FilesApplication({
     }
   };
 
-  const startRename = () => {
-    if (!selectedPath) return;
-    const name = selectedPath.split("/").pop() ?? "";
+  const startRename = (path: string) => {
+    const name = path.split("/").pop() ?? "";
+    setSelectedPath(path);
     setRenameName(name);
     setIsRenaming(true);
+    setContextMenu(undefined);
   };
 
   return (
     <View
       accessibilityRole="application"
-      accessibilityLabel="File Manager"
+      accessibilityLabel="File Explorer"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setContextMenu(undefined);
+      }}
       style={styles.container}
     >
       {/* Sidebar Places */}
@@ -549,6 +701,7 @@ export function FilesApplication({
             return (
               <Pressable
                 key={loc.path}
+                id={`files.loc.${loc.name.toLowerCase()}`}
                 accessibilityRole="button"
                 accessibilityLabel={`Open ${loc.name}`}
                 onPress={() => void navigateTo(loc.path)}
@@ -562,14 +715,15 @@ export function FilesApplication({
             );
           })}
         </ScrollView>
-        {/* Removable Devices (USB drives) */}
-        {volumes.length > 0 && (
+        {/* Devices: internal drive first, then removable (USB) drives */}
+        {sortVolumesForSidebar(volumes).length > 0 && (
           <>
             <Text style={styles.sidebarSectionTitle}>Devices</Text>
             <ScrollView style={styles.quickLocations}>
-              {volumes.map((volume) => {
+              {sortVolumesForSidebar(volumes).map((volume) => {
                 const isActive = isPathOnVolume(currentPath, volume.mountPoint);
                 const isEjecting = ejectingVolumeId === volume.id;
+                const tile = driveTile();
                 return (
                   <View key={volume.id} style={styles.deviceRow}>
                     <Pressable
@@ -578,7 +732,18 @@ export function FilesApplication({
                       onPress={() => void navigateTo(volume.mountPoint)}
                       style={isActive ? styles.deviceItemActive : styles.deviceItem}
                     >
-                      <SevynIcon name="hard-drive" size={15} color="#C7CDD8" />
+                      <View
+                        style={{
+                          width: 24,
+                          height: 24,
+                          borderRadius: 6,
+                          backgroundColor: tile.tileColor,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <SevynIcon name={tile.icon} size={13} color="#FFFFFF" />
+                      </View>
                       <View style={styles.deviceLabelColumn}>
                         <Text
                           style={
@@ -597,15 +762,19 @@ export function FilesApplication({
                         </Text>
                       </View>
                     </Pressable>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Eject ${volume.label}`}
-                      disabled={isEjecting}
-                      onPress={() => void handleEject(volume.id)}
-                      style={isEjecting ? styles.ejectButtonDisabled : styles.ejectButton}
-                    >
-                      <Text style={styles.ejectIcon}>{isEjecting ? "…" : "⏏"}</Text>
-                    </Pressable>
+                    {volume.removable && (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Eject ${volume.label}`}
+                        disabled={isEjecting}
+                        onPress={() => void handleEject(volume.id)}
+                        style={
+                          isEjecting ? styles.ejectButtonDisabled : styles.ejectButton
+                        }
+                      >
+                        <Text style={styles.ejectIcon}>{isEjecting ? "…" : "⏏"}</Text>
+                      </Pressable>
+                    )}
                   </View>
                 );
               })}
@@ -738,7 +907,9 @@ export function FilesApplication({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Rename selected item"
-                onPress={startRename}
+                onPress={() => {
+                  startRename(selectedPath);
+                }}
                 style={styles.actionButton}
               >
                 <SevynIcon name="edit" size={12} color="#F3F4F6" />
@@ -757,6 +928,7 @@ export function FilesApplication({
           {/* Trash operations */}
           {isInTrash && (
             <Pressable
+              id="files.empty_trash"
               accessibilityRole="button"
               accessibilityLabel={
                 confirmEmptyTrash ? "Confirm emptying the Trash" : "Empty Trash"
@@ -865,14 +1037,22 @@ export function FilesApplication({
                 </View>
                 {visibleTrashItems.map((item) => {
                   const confirmingDelete = confirmDeleteName === item.name;
+                  const tile = fileTileForEntry(item.name, item.kind);
                   return (
                     <View key={item.name} style={styles.trashRow}>
                       <View style={styles.trashNameCell}>
-                        <SevynIcon
-                          name={getFileIcon(item.name, item.kind)}
-                          size={16}
-                          color="#C7CDD8"
-                        />
+                        <View
+                          style={{
+                            width: 28,
+                            height: 28,
+                            borderRadius: 7,
+                            backgroundColor: tile.tileColor,
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <SevynIcon name={tile.icon} size={15} color="#FFFFFF" />
+                        </View>
                         <Text style={styles.trashName} numberOfLines={1}>
                           {item.name}
                         </Text>
@@ -888,6 +1068,7 @@ export function FilesApplication({
                       </Text>
                       <View style={styles.trashActionsCell}>
                         <Pressable
+                          id={`files.restore.${item.name}`}
                           accessibilityRole="button"
                           accessibilityLabel={`Restore ${item.name}`}
                           onPress={() => void handleRestore(item.name)}
@@ -933,7 +1114,16 @@ export function FilesApplication({
             )}
           </ScrollView>
         ) : (
-          <ScrollView style={styles.contentScroll}>
+          <ScrollView
+            style={styles.contentScroll}
+            onContextMenu={(event) => {
+              // The item handler fires first when an item was right-clicked;
+              // ignore the bubbled event in that case so the item menu wins.
+              if (Date.now() - lastItemMenuAtRef.current < 100) return;
+              setSelectedPath(undefined);
+              setContextMenu({ x: event.x, y: event.y });
+            }}
+          >
             {visibleEntries.length === 0 ? (
               <View style={styles.emptyState}>
                 <SevynIcon name="folder" size={44} color="#5B6472" />
@@ -947,6 +1137,7 @@ export function FilesApplication({
               <View style={styles.gridContainer}>
                 {visibleEntries.map((entry) => {
                   const isSelected = selectedPath === entry.path;
+                  const tile = fileTileForEntry(entry.name, entry.kind);
                   return (
                     <Pressable
                       key={entry.path}
@@ -955,13 +1146,25 @@ export function FilesApplication({
                       onPress={() => {
                         handleOpenItem(entry);
                       }}
+                      onContextMenu={(event) => {
+                        lastItemMenuAtRef.current = Date.now();
+                        setSelectedPath(entry.path);
+                        setContextMenu({ x: event.x, y: event.y, entry });
+                      }}
                       style={isSelected ? styles.gridCardSelected : styles.gridCard}
                     >
-                      <SevynIcon
-                        name={getFileIcon(entry.name, entry.kind)}
-                        size={28}
-                        color="#C7CDD8"
-                      />
+                      <View
+                        style={{
+                          width: 44,
+                          height: 44,
+                          borderRadius: 10,
+                          backgroundColor: tile.tileColor,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <SevynIcon name={tile.icon} size={24} color="#FFFFFF" />
+                      </View>
                       <Text style={styles.gridName}>{entry.name}</Text>
                     </Pressable>
                   );
@@ -971,6 +1174,7 @@ export function FilesApplication({
               <View style={styles.listContainer}>
                 {visibleEntries.map((entry) => {
                   const isSelected = selectedPath === entry.path;
+                  const tile = fileTileForEntry(entry.name, entry.kind);
                   return (
                     <Pressable
                       key={entry.path}
@@ -979,13 +1183,25 @@ export function FilesApplication({
                       onPress={() => {
                         handleOpenItem(entry);
                       }}
+                      onContextMenu={(event) => {
+                        lastItemMenuAtRef.current = Date.now();
+                        setSelectedPath(entry.path);
+                        setContextMenu({ x: event.x, y: event.y, entry });
+                      }}
                       style={isSelected ? styles.listItemSelected : styles.listItem}
                     >
-                      <SevynIcon
-                        name={getFileIcon(entry.name, entry.kind)}
-                        size={16}
-                        color="#C7CDD8"
-                      />
+                      <View
+                        style={{
+                          width: 28,
+                          height: 28,
+                          borderRadius: 7,
+                          backgroundColor: tile.tileColor,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <SevynIcon name={tile.icon} size={15} color="#FFFFFF" />
+                      </View>
                       <Text style={styles.listName}>{entry.name}</Text>
                       <Text style={styles.listKind}>
                         {entry.kind === "directory" ? "Folder" : "File"}
@@ -1009,9 +1225,151 @@ export function FilesApplication({
                     ? ` · ${String(selectedEntry.size)} bytes`
                     : " · Folder"
                 }`}
+            {clipboard === undefined
+              ? ""
+              : ` · ${clipboard.kind === "cut" ? "Cut" : "Copied"}: ${clipboard.sourceName}`}
           </Text>
         </View>
       </View>
+
+      {/* Right-click context menu (browser pattern: backdrop + menu) */}
+      {contextMenu !== undefined && !isInTrash && (
+        <>
+          <Pressable
+            onPress={() => {
+              setContextMenu(undefined);
+            }}
+            style={styles.contextMenuBackdrop}
+          />
+          <View
+            style={{
+              position: "absolute",
+              backgroundColor: "#1E293B",
+              borderRadius: 8,
+              paddingVertical: 4,
+              minWidth: 180,
+              left: contextMenu.x,
+              top: contextMenu.y,
+              zIndex: 1000,
+            }}
+          >
+            {contextMenu.entry !== undefined ? (
+              <>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open ${contextMenu.entry.name}`}
+                  onPress={() => {
+                    const entry = contextMenu.entry;
+                    setContextMenu(undefined);
+                    if (entry !== undefined) handleOpenItem(entry);
+                  }}
+                  style={styles.contextMenuItem}
+                >
+                  <Text style={styles.contextMenuItemText}>Open</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Cut ${contextMenu.entry.name}`}
+                  onPress={() => {
+                    if (contextMenu.entry !== undefined) handleCut(contextMenu.entry);
+                  }}
+                  style={styles.contextMenuItem}
+                >
+                  <Text style={styles.contextMenuItemText}>Cut</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Copy ${contextMenu.entry.name}`}
+                  onPress={() => {
+                    if (contextMenu.entry !== undefined) handleCopy(contextMenu.entry);
+                  }}
+                  style={styles.contextMenuItem}
+                >
+                  <Text style={styles.contextMenuItemText}>Copy</Text>
+                </Pressable>
+                {contextMenu.entry.kind === "directory" && (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Paste into ${contextMenu.entry.name}`}
+                    disabled={clipboard === undefined}
+                    onPress={() => {
+                      if (contextMenu.entry !== undefined)
+                        void handlePaste(contextMenu.entry.path);
+                    }}
+                    style={styles.contextMenuItem}
+                  >
+                    <Text
+                      style={
+                        clipboard === undefined
+                          ? styles.contextMenuItemTextDisabled
+                          : styles.contextMenuItemText
+                      }
+                    >
+                      Paste
+                    </Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Rename ${contextMenu.entry.name}`}
+                  onPress={() => {
+                    if (contextMenu.entry !== undefined)
+                      startRename(contextMenu.entry.path);
+                  }}
+                  style={styles.contextMenuItem}
+                >
+                  <Text style={styles.contextMenuItemText}>Rename</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Move ${contextMenu.entry.name} to Trash`}
+                  onPress={() => {
+                    const entry = contextMenu.entry;
+                    setContextMenu(undefined);
+                    if (entry !== undefined) void handleDeletePath(entry.path);
+                  }}
+                  style={styles.contextMenuItem}
+                >
+                  <Text style={styles.contextMenuItemTextDanger}>Delete</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Paste here"
+                  disabled={clipboard === undefined}
+                  onPress={() => {
+                    void handlePaste(currentPath);
+                  }}
+                  style={styles.contextMenuItem}
+                >
+                  <Text
+                    style={
+                      clipboard === undefined
+                        ? styles.contextMenuItemTextDisabled
+                        : styles.contextMenuItemText
+                    }
+                  >
+                    Paste
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Create a new folder"
+                  onPress={() => {
+                    setContextMenu(undefined);
+                    setIsCreatingFolder(true);
+                  }}
+                  style={styles.contextMenuItem}
+                >
+                  <Text style={styles.contextMenuItemText}>New folder</Text>
+                </Pressable>
+              </>
+            )}
+          </View>
+        </>
+      )}
 
       {/* Archive extraction dialog */}
       {extractDialog !== undefined && (
@@ -1566,6 +1924,29 @@ const styles = StyleSheet.create({
   statusText: {
     fontSize: 11,
     color: "#6B7280",
+  },
+  contextMenuBackdrop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  contextMenuItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  contextMenuItemText: {
+    color: "#F3F4F6",
+    fontSize: 13,
+  },
+  contextMenuItemTextDisabled: {
+    color: "#6B7280",
+    fontSize: 13,
+  },
+  contextMenuItemTextDanger: {
+    color: "#F87171",
+    fontSize: 13,
   },
   overlay: {
     position: "absolute",
