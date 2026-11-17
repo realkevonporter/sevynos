@@ -564,6 +564,26 @@ export async function startWaylandHost(
         return Array.isArray(value) ? (value as readonly unknown[]) : [];
       },
     },
+    // Playback through audiod, same implementation as `media` above
+    // (one client behind both names — see native-adapter-contracts).
+    // Output-device selection stays on the host's audio service.
+    audio: {
+      play: async (source: string) => {
+        await nativeModules.request("media.play", source);
+      },
+      pause: () => nativeModules.request("media.pause", null),
+      resume: () => nativeModules.request("media.resume", null),
+      stop: async () => {
+        await nativeModules.request("media.stop", null);
+      },
+      seek: (seconds: number) => nativeModules.request("media.seek", seconds),
+      setVolume: (volume: number) => nativeModules.request("media.volume", volume),
+      status: () => nativeModules.request("media.status", null),
+      scan: async (directory?: string) => {
+        const value = await nativeModules.request("media.scan", directory ?? null);
+        return Array.isArray(value) ? (value as readonly unknown[]) : [];
+      },
+    },
     notifications: {
       schedule: async (payload) => {
         const value = await nativeModules.request(

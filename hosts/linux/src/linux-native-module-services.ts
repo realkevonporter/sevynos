@@ -1,8 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, mkdir, readFile, writeFile, readdir } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
+import { join } from "node:path";
 import WebSocket from "ws";
 import type { StructuredValue, WorkerServiceName } from "@sevynos/react-native/internal";
+import {
+  AudiodError,
+  LinuxAudiodClient,
+  type AudiodStatus,
+  type AudiodTrack,
+} from "./linux-audiod-client.js";
 import {
   LinuxBinaryNativeModuleLoader,
   type LinuxBinaryNativeModule,
@@ -12,19 +18,6 @@ import { LinuxAccessibilityService } from "./linux-accessibility-service.js";
 import { LinuxBatteryService } from "./linux-battery-service.js";
 import { LinuxBluetoothService } from "./linux-bluetooth-service.js";
 import { LinuxDisplayService } from "./linux-display-service.js";
-
-export interface LinuxMediaPlaybackHandle {
-  pause(): void;
-  resume(): void;
-  stop(): void;
-  onEnded(listener: (error?: Error) => void): void;
-}
-
-export type LinuxMediaLauncher = (
-  source: string,
-  volume: number,
-  offsetSeconds: number,
-) => Promise<LinuxMediaPlaybackHandle>;
 
 interface VideoPlaybackSession {
   readonly child: ChildProcess;
@@ -46,17 +39,15 @@ const VIDEO_PLAYBACK_MAX_WIDTH = 640;
 
 export class LinuxNativeModuleServices {
   readonly #root: string;
-  readonly #mediaLauncher: LinuxMediaLauncher;
-  #media: LinuxMediaPlaybackHandle | undefined;
-  #mediaSource: string | undefined;
-  #mediaGeneration = 0;
-  #mediaTrack: StructuredValue | undefined;
-  #mediaPlaying = false;
-  #mediaPaused = false;
-  #mediaStartTimeMs = 0;
-  #mediaPausedOffsetSec = 0;
-  #mediaDurationSec = 180;
-  #mediaVolume = 100;
+  /**
+   * The audiod client: the single playback implementation behind
+   * every `media.*` service. The old ffplay launcher (a subprocess
+   * per play, wall-clock position, hardcoded durations — and an
+   * `ffplay` binary the image never stages) is gone; audiod owns
+   * decode, position, and volume now. Injectable so tests drive a
+   * fake audiod without a real daemon.
+   */
+  readonly #audio: LinuxAudiodClient;
   #microphone: ChildProcess | undefined;
   #microphonePath: string | undefined;
   #cameraRecording: ChildProcess | undefined;
@@ -100,10 +91,10 @@ export class LinuxNativeModuleServices {
   public constructor(
     root = "/tmp/sevynos-native",
     nativeModuleRoot = "/opt/sevynos/native-modules",
-    mediaLauncher: LinuxMediaLauncher = launchFfplay,
+    audioClient: LinuxAudiodClient = new LinuxAudiodClient(),
   ) {
     this.#root = root;
-    this.#mediaLauncher = mediaLauncher;
+    this.#audio = audioClient;
     this.#binaryLoader = new LinuxBinaryNativeModuleLoader(nativeModuleRoot, [
       "camera",
       "microphone",
@@ -321,9 +312,6 @@ export class LinuxNativeModuleServices {
   }
 
   public close(): void {
-    this.#media?.stop();
-    this.#media = undefined;
-    this.#mediaGeneration += 1;
     this.#microphone?.kill("SIGINT");
     this.#microphone = undefined;
     this.#microphonePath = undefined;
@@ -1777,19 +1765,9 @@ export class LinuxNativeModuleServices {
     return { keys: [...this.#keystore.keys()] };
   }
 
-  #currentMediaPositionSec(): number {
-    if (!this.#mediaPlaying) return 0;
-    if (this.#mediaPaused) return this.#mediaPausedOffsetSec;
-    const elapsedSec = (Date.now() - this.#mediaStartTimeMs) / 1000;
-    const pos = this.#mediaPausedOffsetSec + elapsedSec;
-    return Math.min(pos, this.#mediaDurationSec);
-  }
-
   async #play(value: StructuredValue): Promise<StructuredValue> {
     let source = "";
-    let track: StructuredValue | undefined = undefined;
-    let durationSec = 180;
-
+    let track: AudiodTrack | undefined;
     if (typeof value === "string") {
       source = value;
     } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
@@ -1797,111 +1775,39 @@ export class LinuxNativeModuleServices {
       if (typeof rec["path"] === "string") {
         source = rec["path"];
       }
-      if (rec["track"] !== undefined && rec["track"] !== null) {
-        track = rec["track"];
-        if (
-          typeof track === "object" &&
-          !Array.isArray(track) &&
-          typeof (track as Record<string, StructuredValue>)["durationSec"] === "number"
-        ) {
-          durationSec = (track as Record<string, StructuredValue>)[
-            "durationSec"
-          ] as number;
-        }
-      }
-      if (typeof rec["durationSec"] === "number") {
-        durationSec = rec["durationSec"];
+      if (
+        typeof rec["track"] === "object" &&
+        rec["track"] !== null &&
+        !Array.isArray(rec["track"])
+      ) {
+        track = audiodTrackFromRecord(rec["track"] as Record<string, StructuredValue>);
       }
     }
-
-    if (source.length === 0) {
-      throw new Error("Media playback requires a file path.");
-    }
-    await access(source).catch(() => {
-      throw new Error(`Audio file is unavailable: ${source}`);
-    });
-
-    await this.#startMediaProcess(source, 0);
-
-    const rawExt = extname(source).replace(/^\./, "").toLowerCase();
-    const ext = rawExt.length > 0 ? rawExt : "mp3";
-    this.#mediaTrack = track ?? {
-      id: source,
-      title: basename(source),
-      artist: "Unknown Artist",
-      album: "Local Audio",
-      durationSec,
-      path: source,
-      format: ext,
-    };
-    this.#mediaPlaying = true;
-    this.#mediaPaused = false;
-    this.#mediaStartTimeMs = Date.now();
-    this.#mediaPausedOffsetSec = 0;
-    this.#mediaDurationSec = durationSec;
-
-    return {
-      playing: true,
-      paused: false,
-      currentPositionSec: 0,
-      durationSec: this.#mediaDurationSec,
-      track: this.#mediaTrack,
-      volume: this.#mediaVolume,
-    };
+    // The client validates the path and converts every failure —
+    // missing file, non-audio file, no daemon — into a rejected
+    // promise with a stable code. Nothing here can throw into the
+    // caller uncaught: request() rejects, the adapter rejects, the
+    // app catches. That is the whole guard.
+    const status = await this.#audio.play(
+      track === undefined ? source : { path: source, track },
+    );
+    return audiodStatusToStructured(status);
   }
 
-  #pause(): Promise<StructuredValue> {
-    if (this.#mediaPlaying && !this.#mediaPaused) {
-      this.#mediaPausedOffsetSec = this.#currentMediaPositionSec();
-      this.#mediaPaused = true;
-      this.#media?.pause();
-    }
-    return Promise.resolve({
-      playing: this.#mediaPlaying,
-      paused: this.#mediaPaused,
-      currentPositionSec: this.#currentMediaPositionSec(),
-      durationSec: this.#mediaDurationSec,
-      track: this.#mediaTrack ?? null,
-      volume: this.#mediaVolume,
-    });
+  async #pause(): Promise<StructuredValue> {
+    return audiodStatusToStructured(await this.#audio.pause());
   }
 
-  #resume(): Promise<StructuredValue> {
-    if (this.#mediaPlaying && this.#mediaPaused) {
-      this.#mediaPaused = false;
-      this.#mediaStartTimeMs = Date.now();
-      this.#media?.resume();
-    }
-    return Promise.resolve({
-      playing: this.#mediaPlaying,
-      paused: this.#mediaPaused,
-      currentPositionSec: this.#currentMediaPositionSec(),
-      durationSec: this.#mediaDurationSec,
-      track: this.#mediaTrack ?? null,
-      volume: this.#mediaVolume,
-    });
+  async #resume(): Promise<StructuredValue> {
+    return audiodStatusToStructured(await this.#audio.resume());
   }
 
-  #stop(): Promise<StructuredValue> {
-    this.#media?.stop();
-    this.#media = undefined;
-    this.#mediaSource = undefined;
-    this.#mediaGeneration += 1;
-    this.#mediaPlaying = false;
-    this.#mediaPaused = false;
-    this.#mediaPausedOffsetSec = 0;
-    return Promise.resolve({
-      playing: false,
-      paused: false,
-      currentPositionSec: 0,
-      durationSec: this.#mediaDurationSec,
-      track: this.#mediaTrack ?? null,
-      volume: this.#mediaVolume,
-    });
+  async #stop(): Promise<StructuredValue> {
+    return audiodStatusToStructured(await this.#audio.stop());
   }
 
   async #seek(value: StructuredValue): Promise<StructuredValue> {
-    let targetSec = 0;
+    let targetSec: number | undefined;
     if (typeof value === "number") {
       targetSec = value;
     } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
@@ -1910,76 +1816,35 @@ export class LinuxNativeModuleServices {
         targetSec = rec["seconds"];
       }
     }
-    targetSec = Math.max(0, Math.min(targetSec, this.#mediaDurationSec));
-    this.#mediaPausedOffsetSec = targetSec;
-    this.#mediaStartTimeMs = Date.now();
-
-    if (this.#mediaPlaying && this.#mediaSource !== undefined) {
-      await this.#startMediaProcess(this.#mediaSource, targetSec);
-      if (this.#mediaPaused) this.#media?.pause();
-    }
-
-    return {
-      playing: this.#mediaPlaying,
-      paused: this.#mediaPaused,
-      currentPositionSec: targetSec,
-      durationSec: this.#mediaDurationSec,
-      track: this.#mediaTrack ?? null,
-      volume: this.#mediaVolume,
-    };
+    if (targetSec === undefined)
+      throw new AudiodError("bad-argument", "Seek requires a number of seconds.");
+    // No clamping here: the daemon enforces the range and rejects
+    // out-of-range seeks with a clean code instead of silently
+    // playing from the wrong place.
+    return audiodStatusToStructured(await this.#audio.seek(targetSec));
   }
 
   async #setMediaVolume(value: StructuredValue): Promise<StructuredValue> {
+    let volume: number | undefined;
     if (typeof value === "number") {
-      this.#mediaVolume = Math.max(0, Math.min(100, Math.round(value)));
+      volume = value;
     } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
       const rec = value as Record<string, StructuredValue>;
       if (typeof rec["volume"] === "number") {
-        this.#mediaVolume = Math.max(0, Math.min(100, Math.round(rec["volume"])));
+        volume = rec["volume"];
       }
     }
-    if (this.#mediaPlaying && this.#mediaSource !== undefined) {
-      const position = this.#currentMediaPositionSec();
-      await this.#startMediaProcess(this.#mediaSource, position);
-      this.#mediaPausedOffsetSec = position;
-      this.#mediaStartTimeMs = Date.now();
-      if (this.#mediaPaused) this.#media?.pause();
-    }
-    return this.#statusMedia();
-  }
-
-  async #startMediaProcess(source: string, offsetSeconds: number): Promise<void> {
-    this.#media?.stop();
-    const generation = ++this.#mediaGeneration;
-    const handle = await this.#mediaLauncher(source, this.#mediaVolume, offsetSeconds);
-    if (generation !== this.#mediaGeneration) {
-      handle.stop();
-      return;
-    }
-    this.#media = handle;
-    this.#mediaSource = source;
-    handle.onEnded(() => {
-      if (this.#mediaGeneration !== generation) return;
-      this.#media = undefined;
-      this.#mediaPlaying = false;
-      this.#mediaPaused = false;
-      this.#mediaPausedOffsetSec = this.#mediaDurationSec;
-    });
+    if (volume === undefined)
+      throw new AudiodError("bad-argument", "Volume requires a number 0..100.");
+    return audiodStatusToStructured(await this.#audio.setVolume(volume));
   }
 
   #statusMedia(): Promise<StructuredValue> {
-    return Promise.resolve({
-      playing: this.#mediaPlaying,
-      paused: this.#mediaPaused,
-      currentPositionSec: this.#currentMediaPositionSec(),
-      durationSec: this.#mediaDurationSec,
-      track: this.#mediaTrack ?? null,
-      volume: this.#mediaVolume,
-    });
+    return this.#audio.status().then(audiodStatusToStructured);
   }
 
   async #scanMedia(value: StructuredValue): Promise<StructuredValue> {
-    let dir = `${this.#root}/music`;
+    let dir: string | undefined;
     if (typeof value === "string" && value.length > 0) {
       dir = value;
     } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
@@ -1988,52 +1853,18 @@ export class LinuxNativeModuleServices {
         dir = rec["directory"];
       }
     }
-
-    const audioExtensions = new Set([".mp3", ".ogg", ".flac", ".wav", ".m4a"]);
-    const tracks: StructuredValue[] = [];
-
-    try {
-      await access(dir);
-      const entries = await readdir(dir, { withFileTypes: true });
-      let idx = 0;
-      for (const entry of entries) {
-        if (entry.isFile()) {
-          const ext = extname(entry.name).toLowerCase();
-          if (audioExtensions.has(ext)) {
-            idx++;
-            const fullPath = join(dir, entry.name);
-            const nameWithoutExt = basename(entry.name, ext);
-            let artist = "Sevyn Artist";
-            let title = nameWithoutExt;
-            if (nameWithoutExt.includes(" - ")) {
-              const parts = nameWithoutExt.split(" - ");
-              const parsedArtist = parts[0]?.trim();
-              if (parsedArtist !== undefined && parsedArtist.length > 0) {
-                artist = parsedArtist;
-              }
-              const parsedTitle = parts.slice(1).join(" - ").trim();
-              if (parsedTitle.length > 0) {
-                title = parsedTitle;
-              }
-            }
-            tracks.push({
-              id: `track-${String(idx)}`,
-              title,
-              artist,
-              album: "Local Library",
-              durationSec: 210,
-              path: fullPath,
-              format: ext.replace(/^\./, ""),
-              year: 2026,
-            });
-          }
-        }
-      }
-    } catch {
-      // Directory doesn't exist or not accessible
-    }
-
-    return tracks;
+    // No directory = the daemon's default (/data). Durations come
+    // from the daemon's probes — never hardcoded here.
+    const tracks = await this.#audio.scan(dir);
+    return tracks.map((track) => ({
+      id: track.id,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      durationSec: track.durationSec,
+      path: track.path,
+      format: track.format,
+    }));
   }
 
   async #networkRequest(value: StructuredValue): Promise<StructuredValue> {
@@ -2472,89 +2303,49 @@ function isStructuredResult(value: unknown): value is StructuredValue {
   return typeof value === "object" && Object.values(value).every(isStructuredResult);
 }
 
-function launchFfplay(
-  source: string,
-  volume: number,
-  offsetSeconds: number,
-): Promise<LinuxMediaPlaybackHandle> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "ffplay",
-      [
-        "-nodisp",
-        "-autoexit",
-        "-loglevel",
-        "error",
-        "-volume",
-        String(volume),
-        "-ss",
-        offsetSeconds.toFixed(3),
-        source,
-      ],
-      {
-        stdio: ["ignore", "ignore", "pipe"],
-        env: {
-          ...process.env,
-          SDL_AUDIODRIVER: process.env["SDL_AUDIODRIVER"] ?? "alsa",
-        },
-      },
-    );
-    const endedListeners = new Set<(error?: Error) => void>();
-    let stderr = "";
-    let settled = false;
-    let stopped = false;
-    let ended: Error | null | undefined;
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    const handle: LinuxMediaPlaybackHandle = {
-      pause: () => {
-        if (child.exitCode === null) child.kill("SIGSTOP");
-      },
-      resume: () => {
-        if (child.exitCode === null) child.kill("SIGCONT");
-      },
-      stop: () => {
-        stopped = true;
-        if (child.exitCode === null) child.kill("SIGTERM");
-      },
-      onEnded: (listener) => {
-        endedListeners.add(listener);
-        if (ended !== undefined)
-          queueMicrotask(() => {
-            listener(ended ?? undefined);
-          });
-      },
-    };
-    const finish = (error?: Error): void => {
-      ended = error ?? null;
-      for (const listener of endedListeners) listener(error);
-    };
-    child.once("error", (error) => {
-      if (!settled) reject(error);
-      else finish(error);
-    });
-    child.once("close", (code) => {
-      const error =
-        stopped || code === 0
-          ? undefined
-          : new Error(stderr.trim() || `ffplay exited with code ${String(code)}.`);
-      if (!settled) {
-        reject(error ?? new Error("Audio playback ended before it started."));
-        return;
-      }
-      finish(error);
-    });
-    child.once("spawn", () => {
-      setTimeout(() => {
-        if (settled) return;
-        if (child.exitCode !== null) return;
-        settled = true;
-        resolve(handle);
-      }, 120);
-    });
-  });
+function audiodTrackFromRecord(record: Record<string, StructuredValue>): AudiodTrack {
+  const text = (key: string): string | undefined => {
+    const value = record[key];
+    return typeof value === "string" ? value : undefined;
+  };
+  const number = (key: string): number => {
+    const value = record[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  const path = text("path") ?? "";
+  const format = text("format") ?? "mp3";
+  const base = path.replace(/^.*\//, "").replace(/\.[^.]+$/, "");
+  return {
+    id: text("id") ?? path,
+    title: text("title") ?? base,
+    artist: text("artist") ?? "Unknown Artist",
+    album: text("album") ?? "Local Library",
+    durationSec: number("durationSec"),
+    path,
+    format,
+  };
+}
+
+function audiodStatusToStructured(status: AudiodStatus): StructuredValue {
+  return {
+    playing: status.playing,
+    paused: status.paused,
+    currentPositionSec: status.currentPositionSec,
+    durationSec: status.durationSec,
+    track:
+      status.track === null
+        ? null
+        : {
+            id: status.track.id,
+            title: status.track.title,
+            artist: status.track.artist,
+            album: status.track.album,
+            durationSec: status.track.durationSec,
+            path: status.track.path,
+            format: status.track.format,
+          },
+    volume: status.volume,
+  };
 }
 
 function asRecord(value: StructuredValue): Record<string, StructuredValue> | undefined {

@@ -396,7 +396,7 @@ installNativeAdapters({
     },
   },
   media: {
-    play: async (source) => {
+    play: async (source: string) => {
       await request("media.play", source);
     },
     pause: async () => {
@@ -408,14 +408,14 @@ installNativeAdapters({
     stop: async () => {
       await request("media.stop", null);
     },
-    seek: async (seconds) => {
+    seek: async (seconds: number) => {
       await request("media.seek", seconds);
     },
-    setVolume: async (volume) => {
+    setVolume: async (volume: number) => {
       await request("media.volume", volume);
     },
     status: async () => request("media.status", null),
-    scan: async (directory) =>
+    scan: async (directory?: string) =>
       (await request("media.scan", directory ?? null)) as readonly unknown[],
   },
   battery: {
@@ -466,6 +466,29 @@ installNativeAdapters({
     setOutput: async (deviceId) => {
       await request("audio.output.set", deviceId);
     },
+    // Playback through audiod, same implementation as `media` above
+    // (one client behind both names — see native-adapter-contracts).
+    play: async (source) => {
+      await request("media.play", source);
+    },
+    pause: async () => {
+      await request("media.pause", null);
+    },
+    resume: async () => {
+      await request("media.resume", null);
+    },
+    stop: async () => {
+      await request("media.stop", null);
+    },
+    seek: async (seconds) => {
+      await request("media.seek", seconds);
+    },
+    setVolume: async (volume) => {
+      await request("media.volume", volume);
+    },
+    status: async () => request("media.status", null),
+    scan: async (directory) =>
+      (await request("media.scan", directory ?? null)) as readonly unknown[],
   },
   vibration: {
     vibrate: async (pattern) => {
