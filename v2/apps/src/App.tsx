@@ -9,7 +9,8 @@
 // glyph tile: a working calculator, a real month calendar, notes
 // backed by /data/notes via `sevyn files`, the store listing the
 // actually installed apps, and honest designed states (no fake
-// content) for music, photos, camera, and messages.
+// content) for photos, camera, and messages. Music is a real app
+// with its own bundle (src/Music.tsx) — it no longer renders here.
 //
 // The close X calls Sevyn.closeApp(): the host exits 0 and appd
 // reports STOPPED. (The compositor's window close button does the
@@ -706,16 +707,6 @@ export function App(): React.ReactElement {
     body = <Notes />;
   } else if (id === "store") {
     body = <Store />;
-  } else if (id === "music") {
-    body = (
-      <EmptyState
-        glyph={Sevyn.appGlyph}
-        color={color}
-        title="No music yet"
-        body="Audio files you add to this device will appear here."
-        footer={permitted ? statusText(status) : "Status: not permitted"}
-      />
-    );
   } else if (id === "photos") {
     const n = countPhotos();
     body = (
