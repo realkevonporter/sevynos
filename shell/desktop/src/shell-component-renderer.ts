@@ -89,13 +89,16 @@ export class ShellComponentRenderer {
 
   /**
    * Dispatch a pointer event to a shell component.
-   * Coordinates are in surface-local space.
+   * Coordinates are in surface-local space. `button` is the DOM-style
+   * button number (0 left, 2 right); the application runtime routes a
+   * right-click to the target's onContextMenu handler.
    */
   public dispatchPointer(
     applicationId: string,
     type: "down" | "up" | "move" | "cancel",
     x: number,
     y: number,
+    button = 0,
   ): boolean {
     const runtime = this.#runtimes.get(applicationId);
     if (runtime === undefined) return false;
@@ -104,9 +107,8 @@ export class ShellComponentRenderer {
         x,
         y,
         pointerId: 1,
-        button: "primary",
-        buttons: type === "up" ? [] : ["primary"],
-      } as never);
+        button,
+      });
       return true;
     } catch {
       return false;

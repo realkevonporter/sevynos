@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_INSTALLED_APPS,
   SYSTEM_SHORTCUTS,
+  WALLPAPER_COLORS,
+  WALLPAPER_STYLES,
   canUninstallApp,
   isAppProtected,
   settingsManifest,
@@ -109,6 +111,20 @@ describe("SettingsApplication", () => {
     expect(categories).not.toContain("display");
     expect(categories).not.toContain("biometrics");
     expect(categories).not.toContain("storage");
+  });
+
+  it("offers four wallpaper styles and a solid-color palette", () => {
+    expect(WALLPAPER_STYLES.map((style) => style.value)).toEqual([
+      "default",
+      "solid",
+      "cosmic",
+      "minimal",
+    ]);
+    expect(WALLPAPER_COLORS).toHaveLength(8);
+    expect(WALLPAPER_COLORS[0]?.value).toBe("#090b11");
+    for (const color of WALLPAPER_COLORS) {
+      expect(color.value).toMatch(/^#[0-9a-f]{6}$/i);
+    }
   });
 });
 

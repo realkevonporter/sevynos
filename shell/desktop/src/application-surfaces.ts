@@ -256,6 +256,14 @@ export class ApplicationSurfaceRegistry {
   #time: SevynTimeService = new UnavailableTimeService();
   #onSetupWizardComplete: (() => void) | undefined;
   readonly #notifications = new SystemNotificationService();
+  /**
+   * Directory a Files window should open at, set by the desktop when the
+   * user opens a folder from the desktop. Keyed by window so a fresh
+   * window and an already-running window both navigate; read by the Files
+   * tree as its initialPath and by the native-surface signature, so
+   * changing it rebuilds the tree and the app's effect navigates.
+   */
+  readonly #filesDirectory = new Map<GenesisWindowId, string>();
   readonly #isolatedSnapshots = new Map<GenesisWindowId, NativeRuntimeSnapshot>();
   readonly #isolatedDispatchers = new Map<
     GenesisWindowId,
@@ -354,6 +362,31 @@ export class ApplicationSurfaceRegistry {
   ): void {
     this.#onUpdateSetting = onUpdateSetting;
     this.#onChange();
+  }
+
+  /**
+   * Points a Files window at a directory (used when the user opens a
+   * folder from the desktop). The directory is read as the Files tree's
+   * initialPath and included in the native-surface signature, so the next
+   * compose rebuilds the tree and navigates — including when the window
+   * is already running. The runtime calls notify after setting it.
+   */
+  public setFilesDirectory(windowId: GenesisWindowId, directoryPath: string): void {
+    this.#filesDirectory.set(windowId, directoryPath);
+  }
+
+  /** Directory a Files window was last pointed at, if any. */
+  public filesDirectory(windowId: GenesisWindowId): string | undefined {
+    return this.#filesDirectory.get(windowId);
+  }
+
+  /** Shows a system notification (same service the Files app uses). */
+  public showNotification(notification: {
+    readonly title: string;
+    readonly message: string;
+    readonly applicationId?: string;
+  }): void {
+    this.#notifications.show(notification);
   }
 
   /**
@@ -649,6 +682,8 @@ export class ApplicationSurfaceRegistry {
       monitor: monitorSignature,
       applications:
         surface.kind === "app-manager" ? this.#applicationManagement?.list() : undefined,
+      filesDirectory:
+        surface.kind === "files" ? this.#filesDirectory.get(windowId) : undefined,
     });
     if (signature !== this.#nativeSignatures.get(windowId)) {
       const tree = this.#applicationTree(windowId, surface.kind, settings, monitor);
@@ -813,6 +848,7 @@ export class ApplicationSurfaceRegistry {
     this.#nativeRuntimes.delete(windowId);
     this.#nativeSignatures.delete(windowId);
     this.#nativeBounds.delete(windowId);
+    this.#filesDirectory.delete(windowId);
     const browserEngine = this.#browserEngines.get(windowId);
     this.#browserEngines.delete(windowId);
     if (browserEngine !== undefined) void browserEngine.close();
@@ -1052,6 +1088,7 @@ export class ApplicationSurfaceRegistry {
           filesystem: this.filesystem,
           storage: this.#storage,
           notifications: this.#notifications,
+          initialPath: this.#filesDirectory.get(windowId) ?? "/",
           // The Extract UI only appears when a backend is injected; the
           // linux host supplies it via configureArchiveService.
           ...(this.#archiveService === undefined

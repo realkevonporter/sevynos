@@ -355,6 +355,23 @@ export class SevynApplicationRuntime {
       responder?.props.onResponderMove?.(targetEvent);
     }
     if (type === "down") {
+      if (event.button === 2) {
+        // Right-click: route to the nearest onContextMenu handler up the
+        // tree (mirrors the onWheel walk below). No dispatcher invoked
+        // this prop before — the browser and desktop context menus were
+        // dead — so a right-click with a handler opens the menu instead
+        // of starting a press. With no handler, fall through to the
+        // normal press path so existing behaviour is unchanged.
+        let candidate: NativeHostNode | undefined = target;
+        while (candidate !== undefined) {
+          if (candidate.props.onContextMenu !== undefined) {
+            candidate.props.onContextMenu(targetEvent);
+            this.#commitSnapshot();
+            return;
+          }
+          candidate = candidate.parent;
+        }
+      }
       const interactive = this.#findInteractiveAncestor(target);
       this.#pressedId = (interactive ?? target)?.id;
       target?.props.onPointerDown?.(targetEvent);

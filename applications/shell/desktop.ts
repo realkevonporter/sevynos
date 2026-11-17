@@ -41,8 +41,14 @@ export interface DesktopShellCatalogEntry {
   readonly icon?: string | undefined;
 }
 
+export type DesktopWallpaperStyle = "default" | "solid" | "cosmic" | "minimal";
+
 export interface DesktopWallpaperRenderInput {
   readonly displays: readonly DesktopShellDisplay[];
+  /** Selected wallpaper variant; defaults to "default" when omitted. */
+  readonly wallpaperStyle?: DesktopWallpaperStyle | undefined;
+  /** Flat color used by the "solid" variant; defaults to "#090b11". */
+  readonly wallpaperColor?: string | undefined;
 }
 
 export interface DesktopStatusBarRenderInput {
@@ -89,6 +95,20 @@ export interface DesktopWorkspaceRenderInput {
     readonly kind: "file" | "directory";
   }[];
   readonly order: number;
+  /**
+   * Desktop actions. The React Native DesktopWorkspace receives these as
+   * props; the legacy native renderer ignores them (hosts handle its
+   * scene nodes directly).
+   */
+  readonly onNewFolder?: (() => void) | undefined;
+  readonly onNewFile?: (() => void) | undefined;
+  readonly onOpenEntry?: ((path: string) => void) | undefined;
+  readonly onRenameEntry?: ((path: string, newName: string) => void) | undefined;
+  readonly onDeleteEntry?: ((path: string) => void) | undefined;
+  readonly onPasteEntry?:
+    | ((sourcePath: string, mode: "copy" | "cut", targetDirectory: string) => void)
+    | undefined;
+  readonly onChangeWallpaper?: (() => void) | undefined;
 }
 
 export interface DesktopWindowSwitcherRenderInput {
@@ -113,6 +133,14 @@ export interface DesktopBackgroundSceneNode {
   readonly order: 0;
   readonly bounds: DesktopShellBounds;
   readonly displayId: string;
+  /**
+   * Wallpaper variant carried through the scene so the choice is visible
+   * to tests and hosts. The React Native wallpaper component renders the
+   * variant; the legacy native renderers still paint the default
+   * background and do not interpret these fields yet.
+   */
+  readonly wallpaperStyle?: DesktopWallpaperStyle | undefined;
+  readonly wallpaperColor?: string | undefined;
 }
 
 export interface DesktopStatusBarSceneNode {
@@ -362,6 +390,12 @@ export function renderDesktopWallpaper(
         order: 0 as const,
         bounds: display.bounds,
         displayId: display.id,
+        ...(input.wallpaperStyle !== undefined
+          ? { wallpaperStyle: input.wallpaperStyle }
+          : {}),
+        ...(input.wallpaperColor !== undefined
+          ? { wallpaperColor: input.wallpaperColor }
+          : {}),
       }),
     ),
   );

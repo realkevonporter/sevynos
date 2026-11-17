@@ -226,6 +226,8 @@ export function canUninstallApp(app: InstalledAppInfo): boolean {
 export interface SettingsModel {
   theme?: ("dark" | "light" | "system") | undefined;
   accentColor?: string | undefined;
+  wallpaperStyle?: ("default" | "solid" | "cosmic" | "minimal") | undefined;
+  wallpaperColor?: string | undefined;
   taskbarPosition?: ("bottom" | "top" | "left" | "right") | undefined;
   dockAutohide?: boolean | undefined;
   scaleFactor?: number | undefined;
@@ -254,6 +256,25 @@ const ACCENT_COLORS = [
   { name: "Hyper Sapphire", value: "#3B82F6" },
   { name: "Neon Amethyst", value: "#8B5CF6" },
   { name: "Crimson Blaze", value: "#EF4444" },
+];
+
+export const WALLPAPER_STYLES = [
+  { label: "Default", value: "default" },
+  { label: "Solid", value: "solid" },
+  { label: "Cosmic", value: "cosmic" },
+  { label: "Minimal", value: "minimal" },
+] as const;
+
+/** Flat colors offered for the solid wallpaper style. */
+export const WALLPAPER_COLORS = [
+  { name: "Sevyn Night", value: "#090b11" },
+  { name: "Slate", value: "#1E293B" },
+  { name: "Indigo", value: "#312E81" },
+  { name: "Violet", value: "#4C1D95" },
+  { name: "Crimson", value: "#7F1D1D" },
+  { name: "Forest", value: "#14532D" },
+  { name: "Amber", value: "#78350F" },
+  { name: "Teal", value: "#0F766E" },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -603,6 +624,12 @@ export function SettingsApplication({
   const [themeMode, setThemeMode] = useState<string>(settings.theme ?? "dark");
   const [selectedAccent, setSelectedAccent] = useState<string>(
     settings.accentColor ?? "#D7AC57",
+  );
+  const [wallpaperStyle, setWallpaperStyle] = useState<string>(
+    settings.wallpaperStyle ?? "default",
+  );
+  const [wallpaperColor, setWallpaperColor] = useState<string>(
+    settings.wallpaperColor ?? "#090b11",
   );
   const [volumeLevel, setVolumeLevel] = useState<number>(75);
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -1205,6 +1232,14 @@ export function SettingsApplication({
     setThemeMode(mode);
     onUpdateSetting?.("theme", mode);
   };
+  const handleWallpaperStyleChange = (style: string) => {
+    setWallpaperStyle(style);
+    onUpdateSetting?.("wallpaperStyle", style);
+  };
+  const handleWallpaperColorChange = (color: string) => {
+    setWallpaperColor(color);
+    onUpdateSetting?.("wallpaperColor", color);
+  };
 
   const handleVolumeChange = (newVol: number) => {
     const clamped = Math.max(0, Math.min(100, newVol));
@@ -1550,6 +1585,68 @@ export function SettingsApplication({
                     </Pressable>
                   ))}
                 </View>
+              </View>
+
+              {/* Wallpaper Card */}
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Wallpaper</Text>
+                <Text style={styles.cardDesc}>
+                  Choose the desktop wallpaper. The change applies immediately and is kept
+                  across reboots.
+                </Text>
+                <View style={styles.segmentedControl}>
+                  {WALLPAPER_STYLES.map((style) => (
+                    <Pressable
+                      key={style.value}
+                      onPress={() => {
+                        handleWallpaperStyleChange(style.value);
+                      }}
+                      style={
+                        wallpaperStyle === style.value
+                          ? styles.segmentButtonActive
+                          : styles.segmentButton
+                      }
+                    >
+                      <Text
+                        style={
+                          wallpaperStyle === style.value
+                            ? styles.segmentTextActive
+                            : styles.segmentText
+                        }
+                      >
+                        {style.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                {wallpaperStyle === "solid" && (
+                  <View style={styles.accentGrid}>
+                    {WALLPAPER_COLORS.map((color) => (
+                      <Pressable
+                        key={color.value}
+                        onPress={() => {
+                          handleWallpaperColorChange(color.value);
+                        }}
+                        style={{
+                          ...styles.accentSwatch,
+                          backgroundColor: color.value,
+                          ...(wallpaperColor === color.value
+                            ? styles.accentSwatchActive
+                            : {}),
+                        }}
+                      >
+                        {wallpaperColor === color.value && (
+                          <SevynIcon name="check" size={16} color="#000000" />
+                        )}
+                      </Pressable>
+                    ))}
+                  </View>
+                )}
+                {wallpaperStyle !== "solid" && (
+                  <Text style={styles.cardDesc}>
+                    Custom image wallpapers are not supported yet.
+                  </Text>
+                )}
               </View>
 
               {/* Dock Behavior */}

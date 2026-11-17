@@ -24,6 +24,21 @@ describe("Genesis settings and diagnostics", () => {
       }),
     ).toMatchObject({ version: 1, theme: "light", workspaceCount: 8, cursorSize: 0.5 });
   });
+  it("keeps valid wallpaper settings and repairs invalid ones", () => {
+    expect(
+      validateDesktopSettings({
+        wallpaperStyle: "cosmic",
+        wallpaperColor: "#312E81",
+      }),
+    ).toMatchObject({ wallpaperStyle: "cosmic", wallpaperColor: "#312E81" });
+    expect(
+      validateDesktopSettings({ wallpaperStyle: "photo", wallpaperColor: "red" }),
+    ).toMatchObject({ wallpaperStyle: "default", wallpaperColor: "#090b11" });
+    expect(DEFAULT_DESKTOP_SETTINGS).toMatchObject({
+      wallpaperStyle: "default",
+      wallpaperColor: "#090b11",
+    });
+  });
   it("publishes settings for persistence and applies theme and accent live", () => {
     const service = new DesktopSettingsService();
     const listener = vi.fn();
