@@ -31,6 +31,29 @@
  *   sevyn browser quit          stop Chromium (SIGTERM its pid;
  *                               idempotent — ok when not running)
  *   sevyn browser status        Chromium running? CDP answering? tabs?
+ *   sevyn camera preview [--fake-media|--real-media]
+ *                               open the camera preview (a second
+ *                               Chromium, its own CDP port 9223, the
+ *                               camera.html page as a chromeless
+ *                               --app window paired with the Camera
+ *                               app). Prints "preview: ready" when
+ *                               CDP answers, "preview: launched"
+ *                               while it is still starting (poll
+ *                               `camera status` for readiness).
+ *                               --fake-media uses Chromium's
+ *                               synthetic camera (the check); default
+ *                               is the real webcam, overridable with
+ *                               SEVYN_CAMERA_FAKE_MEDIA=1.
+ *   sevyn camera capture        shutter: grab the current preview
+ *                               frame over CDP and save a real JPEG
+ *                               to /data (IMG_*.jpg) + a PNG viewer
+ *                               preview to /data/.camera. Prints
+ *                               "saved:" + the JPEG path.
+ *   sevyn camera quit           stop the preview Chromium
+ *                               (idempotent — ok when not running)
+ *   sevyn camera status         preview Chromium running? CDP
+ *                               answering? preview page ready?
+ *                               photos saved?
  *   sevyn net status            link, address, gateway, DNS, wifi
  *   sevyn net dns <host>        resolve a name through the guest DNS
  *   sevyn net announce          announce the link state to statusd
@@ -92,6 +115,22 @@
  * not-running). */
 #define CHROMIUM_STATE "/data/chromium.state"
 #define STATUS_SOCK "/run/sevyn-status.sock"
+/* Camera preview (v1): a SECOND Chromium beside the browser's —
+ * its own CDP port (9223), profile, state file, and log, so the
+ * preview and the browser never fight over a port or a profile
+ * lock. The preview page + capture helper live under
+ * /usr/share/sevyn/camera (staged by the image build); the capture
+ * helper runs on the comms Node (no second Node in the image).
+ * Env overrides exist so the host-side test can point at stubs:
+ * SEVYN_CAMERA_CDP_PORT, SEVYN_CAMERA_PAGE, SEVYN_CAMERA_STATE,
+ * SEVYN_CAMERA_NODE, SEVYN_CAMERA_CAPTURE, SEVYN_CAMERA_FAKE_MEDIA. */
+#define CAMERA_CDP_PORT_DEFAULT 9223
+#define CAMERA_PAGE "/usr/share/sevyn/camera/camera.html"
+#define CAMERA_PROFILE "/tmp/camera-profile"
+#define CAMERA_LOG "/data/camera.log"
+#define CAMERA_STATE "/data/camera.state"
+#define CAMERA_NODE "/usr/share/sevyn/comms/node"
+#define CAMERA_CAPTURE "/usr/share/sevyn/camera/camera-capture.mjs"
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
@@ -169,6 +208,13 @@ static void print_usage(FILE *f)
             "  sevyn browser close <id>    close a tab\n"
             "  sevyn browser quit          stop Chromium (idempotent)\n"
             "  sevyn browser status        Chromium + CDP + tab count\n"
+            "  sevyn camera preview [--fake-media|--real-media]\n"
+            "                              open the camera preview\n"
+            "                              (prints \"preview: ready\" or\n"
+            "                              \"preview: launched\")\n"
+            "  sevyn camera capture        shutter: save a JPEG to /data\n"
+            "  sevyn camera quit           stop the preview Chromium\n"
+            "  sevyn camera status         preview + CDP + photo count\n"
             "  sevyn comms [--socket <path>] <verb>\n"
             "                              talk to a commsd other than the\n"
             "                              system one (the M10 check runs a\n"
@@ -1251,8 +1297,9 @@ static int cdp_port(void)
  * response body, NUL-terminated (up to cap-1 bytes). Reads
  * Content-Length bytes of body, then returns — it must NOT wait for
  * EOF (see the read loop). */
-static int cdp_request_timeout(const char *method, const char *path,
-                               char *body_out, size_t cap, int timeout_s)
+static int cdp_request_timeout_port(int port, const char *method,
+                                    const char *path, char *body_out,
+                                    size_t cap, int timeout_s)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
@@ -1263,7 +1310,7 @@ static int cdp_request_timeout(const char *method, const char *path,
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)cdp_port());
+    addr.sin_port = htons((uint16_t)port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
@@ -1349,7 +1396,22 @@ static int cdp_request_timeout(const char *method, const char *path,
 
 /* The normal CDP request: a 5 s socket timeout. The wait path
  * (wait_for_cdp) uses cdp_request_timeout directly with ~1 s —
- * a 5 s probe there would blow the wait budget (see below). */
+ * a 5 s probe there would blow the wait budget (see below). The
+ * _port variants let the camera verbs talk to the preview
+ * Chromium (9223) while the browser verbs keep 9222. */
+static int cdp_request_timeout(const char *method, const char *path,
+                               char *body_out, size_t cap, int timeout_s)
+{
+    return cdp_request_timeout_port(cdp_port(), method, path, body_out,
+                                    cap, timeout_s);
+}
+
+static int cdp_request_port(int port, const char *method, const char *path,
+                            char *body_out, size_t cap)
+{
+    return cdp_request_timeout_port(port, method, path, body_out, cap, 5);
+}
+
 static int cdp_request(const char *method, const char *path, char *body_out,
                        size_t cap)
 {
@@ -1360,11 +1422,16 @@ static int cdp_request(const char *method, const char *path, char *body_out,
  * the wait path probes with ~1 s (a bound-but-silent port must not
  * eat the whole wait budget on one recv), everything else uses
  * the normal 5 s. */
-static int browser_running_timeout(int timeout_s)
+static int cdp_responding_timeout(int port, int timeout_s)
 {
     char body[4096];
-    return cdp_request_timeout("GET", "/json/version", body, sizeof(body),
-                               timeout_s) == 200;
+    return cdp_request_timeout_port(port, "GET", "/json/version", body,
+                                    sizeof(body), timeout_s) == 200;
+}
+
+static int browser_running_timeout(int timeout_s)
+{
+    return cdp_responding_timeout(cdp_port(), timeout_s);
 }
 
 static int browser_running(void)
@@ -1455,17 +1522,22 @@ static void browser_log_gpu(const char *mode)
  * at/after the deadline — so a 3 s wait costs at most ~3 s plus
  * two short probes, and the 3 s + 3 s split in `browser open`
  * stays well under the 10 s host kill. */
-static int wait_for_cdp(int wait_s)
+static int wait_for_cdp_port(int port, int wait_s)
 {
     if (wait_s <= 0)
         wait_s = 6;
     time_t deadline = time(NULL) + wait_s;
     while (time(NULL) < deadline) {
-        if (browser_running_timeout(1))
+        if (cdp_responding_timeout(port, 1))
             return 1;
         usleep(200000);
     }
-    return browser_running_timeout(1);
+    return cdp_responding_timeout(port, 1);
+}
+
+static int wait_for_cdp(int wait_s)
+{
+    return wait_for_cdp_port(cdp_port(), wait_s);
 }
 
 /* Launch Chromium detached and return immediately. The caller must
@@ -1961,6 +2033,431 @@ static int cmd_browser(int argc, char **argv)
         printf("%s: %s\n", strcmp(verb, "activate") == 0 ? "activated" : "closed",
                argv[3]);
         return 0;
+    }
+    return usage();
+}
+
+/* ------------------------------------------------------------------ */
+/* camera (v1) — stills through the Chromium getUserMedia bridge     */
+/* ------------------------------------------------------------------ */
+
+/* The preview Chromium is the camera: its CDP port (default 9223,
+ * SEVYN_CAMERA_CDP_PORT to override — the host-side test runs a
+ * fake CDP server on a scratch port), its page (camera.html, the
+ * --app window paired with the Camera app), its profile/state/log.
+ * A second Chromium beside the browser's, so the two never fight
+ * over a port or a profile lock. */
+static int camera_cdp_port(void)
+{
+    const char *v = getenv("SEVYN_CAMERA_CDP_PORT");
+    if (v && *v) {
+        int p = atoi(v);
+        if (p > 0 && p < 65536)
+            return p;
+    }
+    return CAMERA_CDP_PORT_DEFAULT;
+}
+
+static const char *camera_page_path(void)
+{
+    return env_or("SEVYN_CAMERA_PAGE", CAMERA_PAGE);
+}
+
+static const char *camera_state_path(void)
+{
+    return env_or("SEVYN_CAMERA_STATE", CAMERA_STATE);
+}
+
+static int camera_running_timeout(int timeout_s)
+{
+    return cdp_responding_timeout(camera_cdp_port(), timeout_s);
+}
+
+static int camera_running(void)
+{
+    return camera_running_timeout(5);
+}
+
+static void camera_write_state(pid_t pid, const char *gpu)
+{
+    const char *path = camera_state_path();
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    dprintf(fd, "pid=%d\ngpu=%s\n", (int)pid, gpu);
+    close(fd);
+}
+
+static pid_t camera_state_pid(void)
+{
+    char *text = read_file_cap(camera_state_path(), 128);
+    if (!text)
+        return -1;
+    const char *p = strstr(text, "pid=");
+    pid_t pid = p ? (pid_t)atoi(p + 4) : -1;
+    free(text);
+    return pid > 0 ? pid : -1;
+}
+
+static const char *camera_state_gpu(char *buf, size_t cap)
+{
+    char *text = read_file_cap(camera_state_path(), 128);
+    if (!text)
+        return "unknown";
+    const char *p = strstr(text, "gpu=");
+    if (!p) {
+        free(text);
+        return "unknown";
+    }
+    snprintf(buf, cap, "%s", p + 4);
+    for (char *q = buf; *q; q++) {
+        if (*q == '\n' || *q == ' ' || *q == '\r') {
+            *q = '\0';
+            break;
+        }
+    }
+    free(text);
+    return buf[0] ? buf : "unknown";
+}
+
+/* Photos saved on this device: JPEGs in /data (top level only —
+ * the .camera/ preview sidecars live in a subdirectory and are not
+ * counted, same as Photos' countPhotos()). SEVYN_CAMERA_PHOTOS_DIR
+ * overrides the directory for the host-side test. */
+static int count_photos(void)
+{
+    DIR *d = opendir(env_or("SEVYN_CAMERA_PHOTOS_DIR", "/data"));
+    if (!d)
+        return 0;
+    int n = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_type != DT_REG && de->d_type != DT_UNKNOWN)
+            continue;
+        const char *name = de->d_name;
+        size_t len = strlen(name);
+        if (len > 4) {
+            const char *ext = name + len - 4;
+            if (strcasecmp(ext, ".jpg") == 0)
+                n++;
+        }
+        if (len > 5) {
+            const char *ext = name + len - 5;
+            if (strcasecmp(ext, ".jpeg") == 0)
+                n++;
+        }
+    }
+    closedir(d);
+    return n;
+}
+
+/* The preview page's state, read off its /json/list title (the page
+ * sets document.title — see camera-page.js — because this CLI has
+ * no CDP WebSocket: "Camera ready 1280x720", "Camera error: ...",
+ * "Camera starting…"). Writes "ready"|"starting"|"error"|"no" into
+ * state_out and the error detail (after "Camera error: ") into
+ * detail_out when error. "no" = no camera page target at all (the
+ * preview Chromium is up but its page has not loaded, or it died). */
+struct camera_page {
+    char *title;
+};
+
+static void find_camera_page(const char *id, const char *title,
+                             const char *url, void *ctx)
+{
+    struct camera_page *c = (struct camera_page *)ctx;
+    (void)id;
+    if (c->title)
+        return;
+    if (!strstr(url, "camera.html"))
+        return;
+    c->title = strdup(title);
+}
+
+static void camera_preview_state(char *state_out, size_t state_cap,
+                                 char *detail_out, size_t detail_cap)
+{
+    snprintf(state_out, state_cap, "no");
+    if (detail_out && detail_cap)
+        detail_out[0] = '\0';
+    char body[262144];
+    if (cdp_request_port(camera_cdp_port(), "GET", "/json/list", body,
+                         sizeof(body)) != 200)
+        return;
+    struct camera_page c = { 0 };
+    for_each_page_tab(body, find_camera_page, &c);
+    if (!c.title)
+        return;
+    if (strncmp(c.title, "Camera ready", 12) == 0)
+        snprintf(state_out, state_cap, "ready");
+    else if (strncmp(c.title, "Camera error: ", 14) == 0) {
+        snprintf(state_out, state_cap, "error");
+        if (detail_out && detail_cap)
+            snprintf(detail_out, detail_cap, "%s", c.title + 14);
+    } else if (strncmp(c.title, "Camera starting", 15) == 0)
+        snprintf(state_out, state_cap, "starting");
+    free(c.title);
+}
+
+/* Launch the preview Chromium detached and return immediately —
+ * same double-fork shape as browser_launch (the host exec kills
+ * this CLI after 10 s; a cold Chromium is slower than that under
+ * TCG). Chromeless --app=<camera page>, 800x348 under the Camera
+ * app's 152px of chrome (title 44 + shutter 44 + mode 36 + status
+ * 28 — the Browser app's geometry, so the content window lands in
+ * the same place). Fake media (the check's synthetic camera) only
+ * on --fake-media / SEVYN_CAMERA_FAKE_MEDIA=1; the default is the
+ * real webcam. */
+static int camera_launch(int disable_gpu, int fake_media)
+{
+    const char *bin = env_or("SEVYN_CHROMIUM_BIN", CHROMIUM_BIN);
+    pid_t child = fork();
+    if (child < 0) {
+        fprintf(stderr, "error: fork failed: %s\n", strerror(errno));
+        return 1;
+    }
+    if (child == 0) {
+        pid_t grand = fork();
+        if (grand < 0)
+            _exit(127);
+        if (grand > 0) {
+            camera_write_state(grand, disable_gpu ? "fallback" : "yes");
+            _exit(0);
+        }
+        setsid();
+        if (!getenv("WAYLAND_DISPLAY"))
+            setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+        if (!getenv("XDG_RUNTIME_DIR"))
+            setenv("XDG_RUNTIME_DIR", "/run", 1);
+        if (!getenv("SSL_CERT_FILE"))
+            setenv("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt",
+                   1);
+        int logfd = open(CAMERA_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+        } else {
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+            }
+        }
+        int nullfd = open("/dev/null", O_RDWR);
+        if (nullfd >= 0)
+            dup2(nullfd, STDIN_FILENO);
+        char port[32];
+        snprintf(port, sizeof(port), "--remote-debugging-port=%d",
+                 camera_cdp_port());
+        char datadir[512];
+        snprintf(datadir, sizeof(datadir), "--user-data-dir=%s",
+                 CAMERA_PROFILE);
+        char app[2048];
+        snprintf(app, sizeof(app), "--app=file://%s", camera_page_path());
+        setenv("DBUS_SESSION_BUS_ADDRESS", "/dev/null", 1);
+        const char *args[20];
+        int n = 0;
+        args[n++] = bin;
+        args[n++] = "--no-sandbox";
+        if (disable_gpu)
+            args[n++] = "--disable-gpu";
+        args[n++] = "--disable-dev-shm-usage";
+        args[n++] = "--disable-crash-reporter";
+        args[n++] = "--disable-component-update";
+        args[n++] = "--no-first-run";
+        args[n++] = "--ozone-platform=wayland";
+        if (fake_media) {
+            args[n++] = "--use-fake-ui-for-media-stream";
+            args[n++] = "--use-fake-device-for-media-stream";
+        }
+        args[n++] = app;
+        args[n++] = "--window-size=800,348";
+        args[n++] = port;
+        args[n++] = datadir;
+        args[n] = NULL;
+        execv(bin, (char *const *)args);
+        fprintf(stderr, "error: exec %s failed: %s\n", bin,
+                strerror(errno));
+        _exit(127);
+    }
+    int st;
+    while (waitpid(child, &st, 0) < 0 && errno == EINTR) {
+    }
+    return 0;
+}
+
+static int cmd_camera_quit(void)
+{
+    const char *path = camera_state_path();
+    pid_t pid = camera_state_pid();
+    if (pid <= 0 || kill(pid, 0) != 0) {
+        unlink(path);
+        printf("quit: not-running\n");
+        return 0;
+    }
+    kill(pid, SIGTERM);
+    unlink(path);
+    printf("quit: ok\n");
+    return 0;
+}
+
+static int cmd_camera_status(void)
+{
+    if (!camera_running()) {
+        printf("running: no\n");
+        return 1;
+    }
+    char state[16];
+    char detail[512];
+    char gpu[32];
+    camera_preview_state(state, sizeof(state), detail, sizeof(detail));
+    printf("running: yes\n");
+    printf("cdp: yes\n");
+    printf("preview: %s\n", state);
+    if (strcmp(state, "error") == 0)
+        printf("preview-error: %s\n", detail);
+    printf("photos: %d\n", count_photos());
+    printf("gpu: %s\n", camera_state_gpu(gpu, sizeof(gpu)));
+    return 0;
+}
+
+/* Shutter: exec the Node capture helper against the running preview
+ * Chromium. The helper (camera-capture.mjs) does the CDP WebSocket
+ * work this C CLI cannot (see the browser section: plain CDP HTTP
+ * only) and prints `saved:` + the JPEG path. Node resolves as
+ * SEVYN_CAMERA_NODE, else the image's comms Node, else PATH `node`;
+ * the helper as SEVYN_CAMERA_CAPTURE, else the staged file. The
+ * child's stdout/stderr are inherited so the `saved:` lines reach
+ * the caller (the Camera app, the check) verbatim; the exit code is
+ * the helper's. The helper fails fast on its own (CDP connect 5 s,
+ * evaluate 15 s) so a dead preview does not hang the CLI past the
+ * host's 10 s exec kill. */
+static int cmd_camera_capture(void)
+{
+    if (!camera_running()) {
+        fprintf(stderr,
+                "error: camera preview is not running (run `sevyn "
+                "camera preview` first)\n");
+        return 1;
+    }
+    const char *helper = env_or("SEVYN_CAMERA_CAPTURE", CAMERA_CAPTURE);
+    if (access(helper, R_OK) != 0) {
+        fprintf(stderr, "error: camera capture helper missing: %s\n",
+                helper);
+        return 1;
+    }
+    const char *node = getenv("SEVYN_CAMERA_NODE");
+    if (!node || !*node) {
+        if (access(CAMERA_NODE, X_OK) == 0)
+            node = CAMERA_NODE;
+        else
+            node = "node";
+    }
+    char port[16];
+    snprintf(port, sizeof(port), "%d", camera_cdp_port());
+    pid_t child = fork();
+    if (child < 0) {
+        fprintf(stderr, "error: fork failed: %s\n", strerror(errno));
+        return 1;
+    }
+    if (child == 0) {
+        const char *args[] = { node, helper, "--port", port, "--out-dir",
+                               "/data", "--preview-dir", "/data/.camera",
+                               "--page-match", "camera.html",
+                               "--timeout-ms", "20000", NULL };
+        execvp(node, (char *const *)args);
+        fprintf(stderr, "error: exec %s failed: %s\n", node,
+                strerror(errno));
+        _exit(127);
+    }
+    int st;
+    while (waitpid(child, &st, 0) < 0 && errno == EINTR) {
+    }
+    if (WIFEXITED(st))
+        return WEXITSTATUS(st);
+    return 1;
+}
+
+static int cmd_camera_preview(int argc, char **argv)
+{
+    int fake_media = 0;
+    const char *env_fake = getenv("SEVYN_CAMERA_FAKE_MEDIA");
+    if (env_fake && strcmp(env_fake, "1") == 0)
+        fake_media = 1;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--fake-media") == 0)
+            fake_media = 1;
+        else if (strcmp(argv[i], "--real-media") == 0)
+            fake_media = 0;
+        else
+            return usage();
+    }
+    if (camera_running()) {
+        printf("preview: already-running\n");
+        return 0;
+    }
+    /* Cold start, same bounded-wait shape as `browser open` (see
+     * there): GPU first, --disable-gpu fallback on the second half
+     * of the SEVYN_CDP_WAIT_S budget (default 6 s), so the total
+     * stays well under the host's 10 s exec timeout. A slow start
+     * under TCG returns "preview: launched" and the caller polls
+     * `camera status` for readiness. */
+    const char *wait_s = env_or("SEVYN_CDP_WAIT_S", "6");
+    int wait = atoi(wait_s);
+    if (wait <= 0)
+        wait = 6;
+    int wait1 = (wait + 1) / 2;
+    int wait2 = wait - wait1;
+    if (camera_launch(0, fake_media) != 0)
+        return 1;
+    if (wait_for_cdp_port(camera_cdp_port(), wait1)) {
+        printf("preview: ready\n");
+        return 0;
+    }
+    pid_t old = camera_state_pid();
+    if (old > 0) {
+        kill(old, SIGTERM);
+        for (int i = 0; i < 10; i++) {
+            if (kill(old, 0) != 0)
+                break;
+            usleep(100000);
+        }
+    }
+    if (camera_launch(1, fake_media) != 0)
+        return 1;
+    if (wait_for_cdp_port(camera_cdp_port(), wait2)) {
+        printf("preview: ready\n");
+        return 0;
+    }
+    printf("preview: launched\n");
+    return 0;
+}
+
+static int cmd_camera(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    const char *verb = argv[2];
+
+    if (strcmp(verb, "status") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_camera_status();
+    }
+    if (strcmp(verb, "quit") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_camera_quit();
+    }
+    if (strcmp(verb, "preview") == 0) {
+        if (argc < 3 || argc > 4)
+            return usage();
+        return cmd_camera_preview(argc, argv);
+    }
+    if (strcmp(verb, "capture") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_camera_capture();
     }
     return usage();
 }
@@ -5909,6 +6406,8 @@ static int dispatch(int argc, char **argv)
         return cmd_code(argc, argv);
     if (strcmp(argv[1], "browser") == 0)
         return cmd_browser(argc, argv);
+    if (strcmp(argv[1], "camera") == 0)
+        return cmd_camera(argc, argv);
     if (strcmp(argv[1], "comms") == 0)
         return cmd_comms(argc, argv);
     if (strcmp(argv[1], "net") == 0)

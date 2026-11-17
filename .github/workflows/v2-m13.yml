@@ -196,6 +196,9 @@ jobs:
           python3 v2/ai/test-aid.py
           python3 v2/update/test-updated.py
           python3 v2/update/test-browser.py
+          python3 v2/update/test-camera.py
+          node v2/camera/test-camera-page.mjs
+          node v2/camera/test-camera-capture.mjs
 
       - name: Build the M13 image
         env:

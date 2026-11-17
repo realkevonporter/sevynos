@@ -13,7 +13,7 @@ it), then for each app writes <id>.sevyn (zip: manifest.json + app.hbc
   - terminal, settings, files, browser: permission cli.exec (they run
     the `sevyn` CLI through the host's Sevyn.exec bridge) and each
     ships its OWN bundle (M4: terminal.hbc, settings.hbc, files.hbc;
-    M5: browser.hbc).
+    M5: browser.hbc). Camera v1 adds camera.hbc (cli.exec + camera).
   - every other stock app: unsigned, no permissions, the template hbc.
 
 Also writes the harness fixtures to the test-bundles dir:
@@ -77,6 +77,11 @@ OVERRIDES = {
     "video-calls": {"permissions": ["cli.exec"]},
     "voice-calls": {"permissions": ["cli.exec"]},
     "installer": {"permissions": ["cli.exec"]},
+    # Camera v1: its own bundle (camera-main.tsx). cli.exec drives the
+    # `sevyn camera` verbs; camera is the manifest-declared
+    # permission the app prompts for on first use (added to the
+    # loader's known set alongside).
+    "camera": {"permissions": ["cli.exec", "camera"]},
 }
 
 
@@ -169,6 +174,8 @@ def main():
                     help="comms app.hbc (defaults to the template)")
     ap.add_argument("--installer-hbc", default=None,
                     help="installer app.hbc (defaults to the template)")
+    ap.add_argument("--camera-hbc", default=None,
+                    help="camera app.hbc (defaults to the template)")
     ap.add_argument("--out", required=True, help="stock bundles dir")
     ap.add_argument("--trusted-keys-dir", required=True)
     ap.add_argument("--test-bundles-dir", default=None)
@@ -177,8 +184,9 @@ def main():
     hbc = Path(args.hbc).read_bytes()
     crash_hbc = Path(args.crash_hbc).read_bytes()
     # M4 real apps ship their own bundles; M10's three comms apps
-    # share one comms.hbc; anything without one falls back to the
-    # template (the other eight stock apps).
+    # share one comms.hbc; Camera v1 ships camera.hbc; anything
+    # without one falls back to the template (the other six stock
+    # apps).
     hbc_for = {
         "terminal": (Path(args.terminal_hbc).read_bytes()
                      if args.terminal_hbc else hbc),
@@ -196,6 +204,8 @@ def main():
                         if args.comms_hbc else hbc),
         "installer": (Path(args.installer_hbc).read_bytes()
                      if args.installer_hbc else hbc),
+        "camera": (Path(args.camera_hbc).read_bytes()
+                   if args.camera_hbc else hbc),
     }
     out_dir = Path(args.out)
     trusted_dir = Path(args.trusted_keys_dir)

@@ -61,7 +61,24 @@
 //      Chromium now). A `browser status` that produces no EXEC
 //      line at all is a harness failure (Terminal focus lost),
 //      reported distinctly from "still running".
+//   8b. Camera v1 (stills): the preview is a second Chromium (its
+//      own CDP port 9223) showing camera.html with Chromium's
+//      synthetic camera (--fake-media); the shutter is `sevyn
+//      camera capture` (Node helper over CDP) writing a real JPEG
+//      to /data. Driven from the Terminal (no new window-drag
+//      logic): preview -> status ready -> two screendumps differ
+//      (the fake video animates — the preview paints live frames)
+//      -> capture twice -> status reports 2 photos -> quit ->
+//      status not running. Then the Camera app itself: LAUNCH,
+//      consent Allow (found as the teal button below the chrome),
+//      `CAMERA preview ready`, close via its X (which quits the
+//      preview Chromium — the lifecycle the browser step proves
+//      for its own Chromium). The JPEGs are verified off the data
+//      disk after poweroff (step 9b): valid JPEG magic + EOI, two
+//      captures differ in bytes (live frames, not a frozen image),
+//      PNG previews beside them in /.camera/.
 //   9. Shell intact at end + clean poweroff.
+//   9b. Camera JPEGs off the data disk (see 8b).
 //
 // Single-tab contract (M13 is single-tab by design): a warm
 // `browser open` leaves exactly ONE tab — the new one. After PUT
@@ -240,6 +257,15 @@ function terminalEchoRe(cmd) {
     if (verb === "tabs") return /JS TERMINAL browser-tabs/;
     if (verb === "open") return /JS TERMINAL browser-open/;
   }
+  // Camera v1 echoes (same shape as the browser's; added with the
+  // camera PR — the formats are the Terminal app's, see its
+  // header comment, not read off an old boot log).
+  if (app === "camera") {
+    if (verb === "status") return /JS TERMINAL camera-status/;
+    if (verb === "preview") return /JS TERMINAL camera-preview/;
+    if (verb === "capture") return /JS TERMINAL camera-capture/;
+    if (verb === "quit") return /JS TERMINAL camera-quit/;
+  }
   if (app === "net") {
     if (verb === "status") return /JS TERMINAL net-status/;
     if (verb === "dns") return /JS TERMINAL net-dns/;
@@ -294,6 +320,76 @@ function countColor(img, r, g, b, tol = 10, box = null) {
     }
   }
   return n;
+}
+
+// Pixels that differ between two frames (same size) inside a box —
+// the live-video proof: a frozen or black preview differs in 0
+// pixels, while Chromium's synthetic camera animates (moving
+// square + clock), so two frames seconds apart differ in
+// thousands. A channel must change by more than `tol` to count, so
+// encoder dither does not inflate the number.
+function countDiff(imgA, imgB, tol = 16, box = null) {
+  const { width: W, height: H, pixels: a } = imgA;
+  const { pixels: b } = imgB;
+  const x0 = box?.x0 ?? 0;
+  const y0 = box?.y0 ?? 0;
+  const x1 = box?.x1 ?? W;
+  const y1 = box?.y1 ?? H;
+  let n = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * W + x) * 3;
+      if (
+        Math.abs(a[i] - b[i]) > tol ||
+        Math.abs(a[i + 1] - b[i + 1]) > tol ||
+        Math.abs(a[i + 2] - b[i + 2]) > tol
+      ) {
+        n++;
+      }
+    }
+  }
+  return n;
+}
+
+// First solid band of one colour below y0 (the Camera consent
+// Allow button: the only #14b8a6 below the 152px chrome — the
+// shutter bar and mode strip are pale, the shutter is white, the
+// "Photos (N)" text is dark teal, all outside tol 10). Returns its
+// bbox or null. Found where it actually painted, so font metrics
+// never enter the click coordinates.
+function findColorBand(img, r, g, b, y0, tol = 10, minRun = 40) {
+  const { width: W, height: H, pixels } = img;
+  let top = -1;
+  let bottom = -1;
+  let left = W;
+  let right = -1;
+  for (let y = y0; y < H; y++) {
+    let n = 0;
+    let rowLeft = W;
+    let rowRight = -1;
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 3;
+      if (
+        Math.abs(pixels[i] - r) <= tol &&
+        Math.abs(pixels[i + 1] - g) <= tol &&
+        Math.abs(pixels[i + 2] - b) <= tol
+      ) {
+        n++;
+        if (x < rowLeft) rowLeft = x;
+        if (x > rowRight) rowRight = x;
+      }
+    }
+    if (n >= minRun) {
+      if (top < 0) top = y;
+      bottom = y;
+      if (rowLeft < left) left = rowLeft;
+      if (rowRight > right) right = rowRight;
+    } else if (top >= 0) {
+      break;
+    }
+  }
+  if (top < 0 || bottom - top + 1 < 10) return null;
+  return { top, bottom, left, right };
 }
 
 // Find an app window's header bar (a solid 44px band of the given
@@ -3440,6 +3536,259 @@ async function main() {
     );
   }
 
+  // 8b. Camera v1 (stills) — the preview is a second Chromium (its
+  // own CDP port 9223) showing camera.html with the synthetic
+  // camera; the shutter is `sevyn camera capture` writing a real
+  // JPEG to /data. Terminal-driven (no new window-drag logic):
+  // preview -> status ready -> live frames -> capture twice ->
+  // status photos=2 -> quit -> not running. Then the Camera app
+  // itself: LAUNCH, consent Allow, CAMERA preview ready, close
+  // via its X (which quits the preview Chromium). The JPEGs are
+  // verified off the data disk after poweroff (9b).
+  const cameraSaved = []; // JPEG paths from TERMINAL camera-capture lines
+  const pollCameraReady = async (attempts = 6) => {
+    for (let i = 0; i < attempts; i++) {
+      // Chromium takes keyboard focus when its window opens, so the
+      // Terminal must be raised + refocused before typing into it.
+      await refocusTerminal();
+      const { hit } = await termCmd(
+        "camera status",
+        /TERMINAL camera-status running=yes preview=ready/,
+        /EXEC sevyn camera status -> [01]/,
+        20000,
+      );
+      if (hit) return hit;
+      await sleep(5000);
+    }
+    return null;
+  };
+  const pollCameraStopped = async (timeoutMs = 60000) => {
+    const deadline = Date.now() + timeoutMs;
+    let sawExec = false;
+    while (Date.now() < deadline) {
+      await refocusTerminal();
+      const { exec, hit } = await termCmd(
+        "camera status",
+        /TERMINAL camera-status running=no/,
+        /EXEC sevyn camera status -> [01]/,
+        10000,
+      );
+      if (exec) sawExec = true;
+      if (hit) return { hit, sawExec };
+      await sleep(3000);
+    }
+    return { hit: null, sawExec };
+  };
+  {
+    const { exec: previewExec, hit: previewHit } = await termCmd(
+      "camera preview --fake-media",
+      /TERMINAL camera-preview (ready|launched)/,
+      /EXEC sevyn camera preview --fake-media -> 0/,
+      30000,
+    );
+    check(
+      "camera: `camera preview --fake-media` runs (preview ready|launched)",
+      !!previewExec && !!previewHit,
+      previewHit || "no TERMINAL camera-preview marker",
+    );
+    const ready = await pollCameraReady();
+    check(
+      "camera: preview page reports ready (camera status preview=ready)",
+      !!ready,
+      ready || "(camera status never reported preview=ready)",
+    );
+    // Live frames: two screendumps 3 s apart must differ — the
+    // synthetic camera animates (moving square + clock), so a
+    // frozen or black preview differs in ~0 pixels. The box starts
+    // below the top bar; the Terminal's caret and the shell clock
+    // move at most a few dozen pixels in 3 s, far under the 500
+    // threshold.
+    const shotA = await shot(b.qmp, join(OUT, "m13-shot-camera-a.ppm"));
+    await sleep(3000);
+    const shotB = await shot(b.qmp, join(OUT, "m13-shot-camera-b.ppm"));
+    const diff = countDiff(shotA, shotB, 16, {
+      x0: 0,
+      y0: 100,
+      x1: shotA.width,
+      y1: shotA.height,
+    });
+    check(
+      "camera: preview paints live frames (two frames 3s apart differ)",
+      diff > 500,
+      `diff=${diff}px`,
+    );
+    // Shutter twice, 2 s apart so the IMG_ timestamps differ.
+    for (let i = 0; i < 2; i++) {
+      const { exec, hit } = await termCmd(
+        "camera capture",
+        /TERMINAL camera-capture saved=\/data\/IMG_[0-9_]+(-[0-9]+)?\.jpg/,
+        /EXEC sevyn camera capture -> 0/,
+        30000,
+      );
+      check(
+        `camera: shutter ${i + 1} saves a JPEG (TERMINAL camera-capture saved=)`,
+        !!exec && !!hit,
+        hit || "no camera-capture marker",
+      );
+      if (hit) {
+        const m = hit.match(/saved=(\S+)/);
+        if (m) cameraSaved.push(m[1]);
+      }
+      await sleep(2000);
+    }
+    check(
+      "camera: two distinct JPEG paths captured",
+      cameraSaved.length === 2 && cameraSaved[0] !== cameraSaved[1],
+      JSON.stringify(cameraSaved),
+    );
+    const { hit: photosHit } = await termCmd(
+      "camera status",
+      /TERMINAL camera-status running=yes preview=ready photos=2/,
+      /EXEC sevyn camera status -> [01]/,
+      20000,
+    );
+    check(
+      "camera: status reports 2 photos after two shutters",
+      !!photosHit,
+      photosHit || "(camera status never reported photos=2)",
+    );
+    const { exec: quitExec, hit: quitHit } = await termCmd(
+      "camera quit",
+      /TERMINAL camera-quit ok/,
+      /EXEC sevyn camera quit -> 0/,
+      20000,
+    );
+    check(
+      "camera: `camera quit` runs (TERMINAL camera-quit ok)",
+      !!quitExec && !!quitHit,
+      quitHit || "no camera-quit marker",
+    );
+    const stopped = await pollCameraStopped(60000);
+    check(
+      "camera: quit stops the preview Chromium (camera status running=no within 60s)",
+      !!stopped.hit,
+      stopped.hit ||
+        (stopped.sawExec
+          ? "(camera status still reported running=yes after 60s)"
+          : "HARNESS FAILURE: `camera status` produced no EXEC line at all — the command never ran (Terminal focus lost?)"),
+    );
+  }
+
+  // The Camera app itself: LAUNCH, consent Allow, preview ready,
+  // close via its X. The app quits any stale preview before
+  // starting its own (a preview launched before its window mapped
+  // sits under it), so this is a cold start under TCG — the app
+  // polls up to 90 s and the harness waits 120 s for its marker.
+  {
+    const launched = await appdCmd(b, "LAUNCH camera", /APPD LAUNCH OK camera/);
+    check("camera-app: LAUNCH accepted", !!launched, launched || "");
+    const appReady = await waitForLog(
+      b.logPath,
+      /HOST app running \(SEVYNOS_M3_APP_READY\) camera/,
+      30000,
+    );
+    check("camera-app: host ready in its own runtime", !!appReady);
+    await sleep(800);
+    const shotCam = await shot(b.qmp, join(OUT, "m13-shot-camera.ppm"));
+    // The Camera window header is its registered colour #14b8a6.
+    const camHeader = findWindowHeader(shotCam, 20, 184, 166);
+    check("camera-app: window on screen (header found)", !!camHeader);
+    if (camHeader) {
+      // Consent Allow: the only teal below the 152px chrome. Found
+      // where it actually painted, so font metrics never enter the
+      // click coordinates.
+      const allow = findColorBand(shotCam, 20, 184, 166, camHeader.top + 152);
+      check("camera-app: consent Allow button found", !!allow, allow || "");
+      if (allow) {
+        await moveTo(
+          Math.round((allow.left + allow.right) / 2),
+          Math.round((allow.top + allow.bottom) / 2),
+          shotCam.width,
+          shotCam.height,
+        );
+        await sleep(300);
+        await click();
+        const camReady = await waitForLog(b.logPath, /JS CAMERA preview ready/, 120000);
+        check(
+          "camera-app: Allow starts the preview (CAMERA preview ready)",
+          !!camReady,
+          camReady || "(no CAMERA preview ready within 120s)",
+        );
+      }
+      // Close via the in-app X (same geometry as the Browser close:
+      // last 28px button in the 44px header, 12px right padding),
+      // falling back to appd CLOSE when the click misses. Either
+      // path must leave the preview Chromium stopped (the running=no
+      // poll below); the quit EXEC line is expected only on the
+      // in-app path.
+      const closeBefore = logLines(b.logPath).length;
+      let closedHow = null;
+      const settledClose = await screenSettled(b);
+      const camHeader2 = settledClose
+        ? findWindowHeader(settledClose, 20, 184, 166)
+        : null;
+      if (camHeader2) {
+        await moveTo(
+          camHeader2.right - 26,
+          camHeader2.top + 22,
+          settledClose.width,
+          settledClose.height,
+        );
+        await sleep(300);
+        await click();
+        let camGone = false;
+        for (let i = 0; i < 10 && !camGone; i++) {
+          await sleep(1000);
+          const after = await shot(b.qmp, join(OUT, "m13-shot-camera-close.ppm"));
+          camGone =
+            !findWindowHeader(after, 20, 184, 166) &&
+            !findWindowHeaderPartial(after, 20, 184, 166);
+        }
+        if (camGone) closedHow = "close-button click";
+      }
+      if (!closedHow) {
+        const closed = await appdCmd(b, "CLOSE camera", /APPD CLOSE OK camera/);
+        if (closed) closedHow = "appd CLOSE fallback";
+      }
+      check(
+        "camera-app: closes (X click or appd CLOSE fallback)",
+        !!closedHow,
+        closedHow || "could not close the Camera app",
+      );
+      if (closedHow === "close-button click") {
+        const quitLine = await waitForLog(
+          b.logPath,
+          /EXEC sevyn camera quit -> 0/,
+          30000,
+          closeBefore,
+        );
+        check(
+          "camera-app: the in-app close ran `sevyn camera quit` (EXEC 0)",
+          !!quitLine,
+          quitLine ||
+            "(no EXEC sevyn camera quit -> 0 line after the close — the app's teardown did not quit Chromium)",
+        );
+      } else {
+        check(
+          "camera-app: in-app quit line N/A (appd CLOSE fallback — no `sevyn camera quit` runs on this path)",
+          true,
+          closedHow || "Camera app never closed",
+        );
+      }
+      if (closedHow) {
+        const stopped = await pollCameraStopped(60000);
+        check(
+          "camera-app: preview Chromium died with the app (camera status running=no within 60s)",
+          !!stopped.hit,
+          stopped.hit ||
+            (stopped.sawExec
+              ? "(camera status still reported running=yes after 60s)"
+              : "HARNESS FAILURE: `camera status` produced no EXEC line at all"),
+        );
+      }
+    }
+  }
+
   // 9. Shell intact at end + clean poweroff.
   const shotFinal = join(OUT, "m13-shot-final.ppm");
   const imgFinal = await shot(b.qmp, shotFinal);
@@ -3467,6 +3816,65 @@ async function main() {
   try {
     server.close();
   } catch {}
+
+  // 9b. Camera JPEGs off the data disk (captured in 8b). The guest
+  // is down, so debugfs reads the settled disk: each saved JPEG
+  // must be a real JPEG (SOI magic + EOI marker, >1 KB), the two
+  // captures must differ in bytes (live frames, not one frozen
+  // image — the synthetic camera animates), and each must have its
+  // PNG viewer preview in /.camera/.
+  {
+    const dumpFile = async (diskPath, outName) => {
+      const out = join(OUT, outName);
+      try {
+        await execAsync("debugfs", ["-R", `dump ${diskPath} ${out}`, DISK]);
+      } catch {
+        return null;
+      }
+      if (!existsSync(out)) return null;
+      return readFileSync(out);
+    };
+    const jpegs = [];
+    for (const saved of cameraSaved) {
+      const base = saved.slice("/data/".length); // IMG_....jpg
+      const jpeg = await dumpFile("/" + base, `m13-camera-${base}`);
+      const isJpeg =
+        !!jpeg &&
+        jpeg.length > 1024 &&
+        jpeg[0] === 0xff &&
+        jpeg[1] === 0xd8 &&
+        jpeg[jpeg.length - 2] === 0xff &&
+        jpeg[jpeg.length - 1] === 0xd9;
+      check(
+        `camera-files: ${base} is a valid JPEG (SOI + EOI, ${jpeg?.length ?? 0} bytes)`,
+        isJpeg,
+        jpeg ? `len=${jpeg.length}` : "(not on the data disk)",
+      );
+      if (jpeg) jpegs.push(jpeg);
+      const pngBase = base.replace(/\.jpg$/i, ".png");
+      const png = await dumpFile("/.camera/" + pngBase, `m13-camera-${pngBase}`);
+      const isPng =
+        !!png &&
+        png.length > 100 &&
+        png[0] === 0x89 &&
+        png[1] === 0x50 &&
+        png[2] === 0x4e &&
+        png[3] === 0x47;
+      check(
+        `camera-files: /.camera/${pngBase} is the PNG viewer preview`,
+        isPng,
+        png ? `len=${png.length}` : "(not on the data disk)",
+      );
+    }
+    check(
+      "camera-files: the two captures differ (live frames, not a frozen image)",
+      jpegs.length === 2 && !jpegs[0].equals(jpegs[1]),
+      jpegs.length === 2
+        ? `len0=${jpegs[0].length} len1=${jpegs[1].length}`
+        : `only ${jpegs.length} JPEG(s) recovered`,
+    );
+  }
+
   finish(
     checks.every((c) => c.ok),
     {

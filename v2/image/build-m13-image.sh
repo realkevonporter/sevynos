@@ -404,11 +404,12 @@ fi
 (cd "$SHELL_DIR" && node build-shell.mjs --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/shell-dist")
 [ -f "$BUILD_TMP/shell-dist/shell.hbc" ] || { echo "error: shell.hbc not built" >&2; exit 1; }
 
-# --- build the app bundles (M4 + M5) --------------------------------------
+# --- build the app bundles (M4 + M5 + Camera v1) ------------------------
 # Terminal, Settings, Files are real apps with their own .hbc (M4);
-# Browser is a real app with its own .hbc (M5); the other eight stock
-# apps share the one template .hbc (identity comes from the host at
-# runtime); the crash .hbc is the harness's crash fixture.
+# Browser is a real app with its own .hbc (M5); Camera v1 is a real
+# app with its own .hbc (camera.hbc); the other six stock apps share
+# the one template .hbc (identity comes from the host at runtime);
+# the crash .hbc is the harness's crash fixture.
 # make-bundles.py signs terminal with a fresh per-image Ed25519
 # keypair and writes the public key into the trusted-keys dir; the
 # private key stays in the build temp dir and is never staged.
@@ -423,6 +424,7 @@ fi
 (cd "$APPS_DIR" && node build-app.mjs --entry files --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
 (cd "$APPS_DIR" && node build-app.mjs --entry browser --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
 (cd "$APPS_DIR" && node build-app.mjs --entry installer --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
+(cd "$APPS_DIR" && node build-app.mjs --entry camera --hermesc "$PREFIX/bin/hermesc" --out "$BUILD_TMP/app-dist")
 [ -f "$BUILD_TMP/app-dist/app.hbc" ] || { echo "error: app.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/crash.hbc" ] || { echo "error: crash.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/terminal.hbc" ] || { echo "error: terminal.hbc not built" >&2; exit 1; }
@@ -430,6 +432,7 @@ fi
 [ -f "$BUILD_TMP/app-dist/files.hbc" ] || { echo "error: files.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/browser.hbc" ] || { echo "error: browser.hbc not built" >&2; exit 1; }
 [ -f "$BUILD_TMP/app-dist/installer.hbc" ] || { echo "error: installer.hbc not built" >&2; exit 1; }
+[ -f "$BUILD_TMP/app-dist/camera.hbc" ] || { echo "error: camera.hbc not built" >&2; exit 1; }
 python3 "$APPS_DIR/make-bundles.py" \
   --hbc "$BUILD_TMP/app-dist/app.hbc" \
   --crash-hbc "$BUILD_TMP/app-dist/crash.hbc" \
@@ -438,6 +441,7 @@ python3 "$APPS_DIR/make-bundles.py" \
   --files-hbc "$BUILD_TMP/app-dist/files.hbc" \
   --browser-hbc "$BUILD_TMP/app-dist/browser.hbc" \
   --installer-hbc "$BUILD_TMP/app-dist/installer.hbc" \
+  --camera-hbc "$BUILD_TMP/app-dist/camera.hbc" \
   --out "$BUILD_TMP/pristine" \
   --trusted-keys-dir "$BUILD_TMP/trusted-keys" \
   --test-bundles-dir "$BUILD_TMP/test-bundles"
@@ -559,6 +563,7 @@ mkdir -p "$STAGE/bin" "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/run" \
          "$STAGE/usr/share/sevyn/test-bundles" \
          "$STAGE/usr/share/sevyn/tokrah" "$STAGE/usr/share/sevyn/tokrah-mock" \
          "$STAGE/usr/share/sevyn/comms" "$STAGE/usr/share/sevyn/comms-mock" \
+         "$STAGE/usr/share/sevyn/camera" \
          "$STAGE/usr/share/sevyn/trusted-keys" "$STAGE/var/lib/sevyn/apps" \
          "$STAGE/usr/share/sevyn/install"
 
@@ -712,6 +717,13 @@ cp "$BUILD_TMP/comms/commsd.mjs" "$BUILD_TMP/comms/bridge.mjs" \
    "$BUILD_TMP/comms/bridge.html" "$BUILD_TMP/comms/rcs.mjs" \
    "$STAGE/usr/share/sevyn/comms/"
 cp -r "$BUILD_TMP/comms/node_modules" "$STAGE/usr/share/sevyn/comms/node_modules"
+
+# --- camera v1 ------------------------------------------------------------
+# The preview page + capture helper. The preview Chromium is launched
+# on demand by `sevyn camera preview` (no daemon); the capture helper
+# runs on the comms Node (no second Node in the image).
+cp "$ROOT/camera/camera.html" "$ROOT/camera/camera-page.js" \
+   "$ROOT/camera/camera-capture.mjs" "$STAGE/usr/share/sevyn/camera/"
 cp "$BUILD_TMP/comms-mock/mock-matrix.js" "$BUILD_TMP/comms-mock/mock-acs.js" \
    "$STAGE/usr/share/sevyn/comms-mock/"
 if [ -n "$COMMS_NODE_SRC" ]; then

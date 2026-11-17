@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- SevynOS v2 Camera v1 — preview page.
+     Opened by `sevyn camera preview` as a chromeless --app window
+     (800x348) paired with the Camera app window, exactly like the
+     M13 browser content window. The <video> element is the live
+     preview (real webcam on hardware, Chromium's synthetic camera
+     under --use-fake-device-for-media-stream in the check). No
+     network calls of its own. Logic lives in camera-page.js; the
+     page exposes window.__sevynCamera (see that file). -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Camera starting…</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #000;
+        height: 100%;
+        overflow: hidden;
+      }
+      #preview {
+        width: 100vw;
+        height: 100vh;
+        object-fit: cover;
+        background: #000;
+      }
+      #status {
+        position: fixed;
+        left: 0;
+        top: 40%;
+        width: 100%;
+        text-align: center;
+        color: #9ca3af;
+        font:
+          16px system-ui,
+          sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="preview" autoplay playsinline muted></video>
+    <div id="status">Camera starting…</div>
+    <script src="camera-page.js"></script>
+  </body>
+</html>

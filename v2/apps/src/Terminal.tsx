@@ -23,6 +23,12 @@
 //                                        (after `browser tabs`)
 //   TERMINAL browser-status running=<y/n> tabs=<n>
 //                                        (after `browser status`)
+//   TERMINAL camera-preview <ready|launched|already-running>
+//                                        (after `camera preview`)
+//   TERMINAL camera-status running=<y/n> preview=<state> photos=<n>
+//                                        (after `camera status`)
+//   TERMINAL camera-capture saved=<path> (after `camera capture`)
+//   TERMINAL camera-quit <ok|not-running> (after `camera quit`)
 //   TERMINAL net-status interface=<i> wifi=<w>
 //                                        (after `net status`)
 //   TERMINAL net-dns host=<h> ip=<ip>    (after `net dns <host>`)
@@ -62,6 +68,9 @@ const HELP_LINES: string[] = [
   "  sevyn browser open [url]    open a page in Chromium",
   "  sevyn browser tabs          list open tabs",
   "  sevyn browser status        Chromium + CDP + tab count",
+  "  sevyn camera preview        open the camera preview",
+  "  sevyn camera capture        take a photo (JPEG to /data)",
+  "  sevyn camera status         preview + CDP + photo count",
   "  sevyn net status            link, address, gateway, DNS",
   "  sevyn net dns <host>        resolve a name",
   "",
@@ -133,6 +142,22 @@ function logMarkers(cmd: string, out: string): void {
         " tabs=" +
         (parseField(out, "tabs") ?? "?"),
     );
+  } else if (cmd === "camera preview" || cmd.startsWith("camera preview ")) {
+    Sevyn.log("TERMINAL camera-preview " + (parseField(out, "preview") ?? "unknown"));
+  } else if (cmd === "camera status" || cmd.startsWith("camera status ")) {
+    Sevyn.log(
+      "TERMINAL camera-status running=" +
+        (parseField(out, "running") ?? "unknown") +
+        " preview=" +
+        (parseField(out, "preview") ?? "unknown") +
+        " photos=" +
+        (parseField(out, "photos") ?? "?"),
+    );
+  } else if (cmd === "camera capture" || cmd.startsWith("camera capture ")) {
+    const saved = out.split("\n").find((l) => l.startsWith("saved: "));
+    Sevyn.log("TERMINAL camera-capture saved=" + (saved ? saved.slice(7) : "unknown"));
+  } else if (cmd === "camera quit" || cmd.startsWith("camera quit ")) {
+    Sevyn.log("TERMINAL camera-quit " + (parseField(out, "quit") ?? "unknown"));
   } else if (cmd === "net status" || cmd.startsWith("net status ")) {
     Sevyn.log(
       "TERMINAL net-status interface=" +

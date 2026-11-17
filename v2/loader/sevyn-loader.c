@@ -283,9 +283,12 @@ static int write_file_atomic(const char *path, const char *data, size_t len)
 
 /* Known permissions (M3: status.read; M4: cli.exec — run the `sevyn`
  * CLI via the host's Sevyn.exec bridge. The host enforces the same
- * set; an app without cli.exec gets an ERR from Sevyn.exec. */
+ * set; an app without cli.exec gets an ERR from Sevyn.exec. Camera
+ * v1: camera — the Camera app's manifest-declared permission, shown
+ * to the user as a first-use prompt in the app; the host's
+ * hasPermission reads it off the manifest like any other.) */
 static const char *kKnownPermissions[] = { "status.read", "cli.exec",
-                                           NULL };
+                                           "camera", NULL };
 
 static int permission_known(const char *p)
 {

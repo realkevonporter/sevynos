@@ -1,7 +1,7 @@
 "use strict";
 // End-to-end Node test for the built app bundles (dist/app.js,
 // dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js,
-// dist/comms.js) and the crash bundle (dist/crash.js). Loads the app
+// dist/comms.js, dist/camera.js) and the crash bundle (dist/crash.js). Loads the app
 // bundle with the mock Sevyn host as several apps — files (status.read
 // granted, the fallback screen) and notes/music/calculator/calendar/store
 // (the M9 real screens) — and drives the close X. The crash bundle
@@ -10,7 +10,10 @@
 // settings channel switch + AI selection, files navigation). The M5
 // Browser loads with cli.exec and a canned CDP-backed exec handler,
 // and drives its real flow (tabs on mount, address-bar navigation).
-// The M10 comms bundle loads as messages / video-calls / voice-calls
+// The Camera v1 bundle loads with cli.exec + camera and a canned
+// `sevyn camera` handler, and drives its real flow (first-use
+// consent, preview ready, shutter capture, gallery + viewer). The
+// M10 comms bundle loads as messages / video-calls / voice-calls
 // with a canned `sevyn comms` handler: login form, room list, thread
 // + send, and the call screens (the async login/send run in the
 // async section at the end — the mock's execAsync resolves on a
@@ -48,6 +51,10 @@ const browserBundle = fs.readFileSync(
 );
 const commsBundle = fs.readFileSync(
   path.join(__dirname, "..", "dist", "comms.js"),
+  "utf8",
+);
+const cameraBundle = fs.readFileSync(
+  path.join(__dirname, "..", "dist", "camera.js"),
   "utf8",
 );
 const crashBundle = fs.readFileSync(
@@ -380,6 +387,11 @@ check("terminal: help on mount, typing runs sevyn commands", () => {
       return "0\nselected=echo-ai backends=echo-ai,plan-ai\n";
     if (cmd === "sevyn ai ask launch files")
       return "0\nbackend=echo-ai allowed=1 denied=0 failed=0\n";
+    if (cmd === "sevyn camera preview --fake-media") return "0\npreview: ready\n";
+    if (cmd === "sevyn camera status")
+      return "0\nrunning: yes\ncdp: yes\npreview: ready\nphotos: 2\ngpu: yes\n";
+    if (cmd === "sevyn camera capture")
+      return "0\nsaved: /data/IMG_20261116_120000.jpg\npreview: /data/.camera/IMG_20261116_120000.png\n";
     return "0\n";
   };
   loadAs(
@@ -438,6 +450,24 @@ check("terminal: help on mount, typing runs sevyn commands", () => {
   assert.ok(
     Sevyn._logs.includes("TERMINAL ai-ask allowed=1 denied=0"),
     "ai-ask marker logged",
+  );
+  type("camera preview --fake-media");
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("TERMINAL camera-preview ready"),
+    "camera-preview marker logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  type("camera status");
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("TERMINAL camera-status running=yes preview=ready photos=2"),
+    "camera-status marker logged",
+  );
+  type("camera capture");
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("TERMINAL camera-capture saved=/data/IMG_20261116_120000.jpg"),
+    "camera-capture marker logged",
   );
 });
 
@@ -650,6 +680,86 @@ check("browser: tabs on mount, address-bar navigation opens a page", () => {
   assert.ok(Sevyn._logs.includes("BROWSER tabs 2"), "refresh after open logged");
 });
 
+// --- Camera v1 ---------------------------------------------------------
+// Canned `sevyn camera` + `sevyn files` answers. `captured` flips
+// the /data listing from the two seeded photos to three (the
+// shutter's new JPEG); `consented` flips the consent file from
+// missing to granted; `statusMode` drives the preview-page state
+// the CLI reports ("ready" | "error-once" — the first status after
+// a real-media preview errors, later ones are ready).
+function cameraHandler({ consented, statusMode } = {}) {
+  let captured = false;
+  let statusCalls = 0;
+  return (cmd) => {
+    if (cmd === "sevyn files cat /data/.camera/consent")
+      return consented ? "0\ngranted\n" : "1\nerror: cannot cat /data/.camera/consent\n";
+    if (cmd === "sevyn files list /data") {
+      const names = ["01-mountain-golden-hour.jpg", "02-portrait.jpg"];
+      if (captured) names.push("IMG_20261116_120000.jpg");
+      return "0\n" + names.map((n) => "f " + n).join("\n") + "\n";
+    }
+    if (cmd === "sevyn files list /data/.camera") {
+      const names = ["01-mountain-golden-hour.png", "02-portrait.png"];
+      if (captured) names.push("IMG_20261116_120000.png");
+      return "0\n" + names.map((n) => "f " + n).join("\n") + "\n";
+    }
+    if (cmd === "sevyn camera preview") return "0\npreview: ready\n";
+    if (cmd === "sevyn camera preview --fake-media") return "0\npreview: ready\n";
+    if (cmd === "sevyn camera status") {
+      statusCalls++;
+      if (statusMode === "error-once" && statusCalls === 1)
+        return "0\nrunning: yes\ncdp: yes\npreview: error\npreview-error: Permission denied\nphotos: 2\ngpu: yes\n";
+      return "0\nrunning: yes\ncdp: yes\npreview: ready\nphotos: 2\ngpu: yes\n";
+    }
+    if (cmd === "sevyn camera capture") {
+      captured = true;
+      return "0\nsaved: /data/IMG_20261116_120000.jpg\npreview: /data/.camera/IMG_20261116_120000.png\n";
+    }
+    if (cmd === "sevyn camera quit") return "0\nquit: ok\n";
+    if (cmd === "sevyn files mkdir /data/.camera") return "0\n";
+    if (cmd === "sevyn files write /data/.camera/consent granted") return "0\n";
+    return "0\n";
+  };
+}
+
+function loadCameraAs(permissions, opts) {
+  return loadAs(
+    {
+      id: "camera",
+      name: "Camera",
+      color: "#14b8a6",
+      glyph: "O",
+      permissions,
+    },
+    cameraBundle,
+    cameraHandler(opts),
+  );
+}
+
+check("camera: first use shows the consent screen, gallery counts seeded photos", () => {
+  loadCameraAs(["cli.exec", "camera"], { consented: false });
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Camera"), "app title shown");
+  assert.ok(
+    texts.includes("Allow Camera to use your camera?"),
+    "consent prompt shown, texts=" + JSON.stringify(texts),
+  );
+  assert.ok(texts.includes("Photos (2)"), "seeded photo count shown");
+  assert.ok(texts.includes("Preview not started."), "preview idle before consent");
+});
+
+check(
+  "camera: missing camera permission shows an honest error, not a dead shutter",
+  () => {
+    loadCameraAs(["cli.exec"], { consented: true });
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.includes("Camera permission not granted — reinstall the Camera app."),
+      "permission error shown, texts=" + JSON.stringify(texts),
+    );
+  },
+);
+
 // --- M10 comms -----------------------------------------------------------
 // Canned `sevyn comms` answers. `loggedIn` flips the mount between
 // the login form and the room/call screens.
@@ -818,6 +928,114 @@ async function checkAsync(name, fn) {
       "send marker logged",
     );
   });
+
+  // --- Camera v1 async flows -------------------------------------------
+  // The mount initializer fires the preview start when consent is
+  // already granted; drain() flushes the execAsync microtask chain
+  // (preview -> status -> ready) plus the renderer's re-render.
+  const drain = async (n = 12) => {
+    for (let i = 0; i < n; i++) await flush();
+  };
+
+  await checkAsync(
+    "camera: consent Allow starts the preview, shutter captures a JPEG",
+    async () => {
+      loadCameraAs(["cli.exec", "camera"], { consented: false });
+      tapText("Allow camera", 15);
+      await drain();
+      assert.ok(
+        Sevyn._logs.includes("CAMERA preview ready"),
+        "preview-ready marker logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("Preview ready")),
+        "preview-ready state shown",
+      );
+      tapText("◎", 14);
+      await drain();
+      assert.ok(
+        Sevyn._logs.includes("CAMERA captured /data/IMG_20261116_120000.jpg"),
+        "capture marker logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.includes("Photos (3)"),
+        "photo count grows after the shutter, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(
+        texts.some((t) => t.includes("Saved /data/IMG_20261116_120000.jpg")),
+        "saved path shown in the status line",
+      );
+    },
+  );
+
+  await checkAsync(
+    "camera: gallery lists photos, viewer shows the PNG preview",
+    async () => {
+      loadCameraAs(["cli.exec", "camera"], { consented: true });
+      await drain();
+      assert.ok(
+        Sevyn._logs.includes("CAMERA preview ready"),
+        "preview auto-started on a consented launch",
+      );
+      tapText("Photos (2)", 14);
+      await drain();
+      assert.ok(
+        Sevyn._logs.includes("CAMERA gallery 2 photos"),
+        "gallery marker logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.includes("01-mountain-golden-hour.jpg"),
+        "seeded fixture listed in the gallery",
+      );
+      assert.ok(texts.includes("02-portrait.jpg"), "second fixture listed");
+      tapText("01-mountain-golden-hour.jpg", 14);
+      const present = Sevyn._presents[Sevyn._presents.length - 1];
+      const image = present.ops.find(
+        (o) =>
+          o.type === "image" && o.asset === "/data/.camera/01-mountain-golden-hour.png",
+      );
+      assert.ok(
+        image,
+        "viewer shows the PNG preview sidecar, ops=" + JSON.stringify(present.ops),
+      );
+      texts = textsOf(present);
+      assert.ok(texts.includes("01-mountain-golden-hour.jpg"), "viewer titles the photo");
+      tapText("← Back to gallery", 14);
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("02-portrait.jpg"), "back to gallery works");
+    },
+  );
+
+  await checkAsync(
+    "camera: real-camera failure offers the test camera, which recovers",
+    async () => {
+      loadCameraAs(["cli.exec", "camera"], { consented: true, statusMode: "error-once" });
+      await drain();
+      assert.ok(
+        Sevyn._logs.some((l) => l === "CAMERA preview error Permission denied"),
+        "preview-error marker logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("No camera: Permission denied")),
+        "error state shown honestly",
+      );
+      tapText("Use test camera", 13);
+      await drain();
+      assert.ok(
+        Sevyn._logs.includes("CAMERA preview ready"),
+        "test-camera recovery logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("Preview ready")),
+        "preview ready after falling back to the test camera",
+      );
+    },
+  );
 
   console.log(`\n${passed} app e2e checks passed`);
 })();
