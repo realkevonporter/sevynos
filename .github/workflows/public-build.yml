@@ -51,6 +51,7 @@ jobs:
             libfreetype-dev \
             libpng-dev \
             libssl-dev \
+            libasound2-dev \
             weston \
             seatd \
             udev \

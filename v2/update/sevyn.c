@@ -190,6 +190,18 @@ static void print_usage(FILE *f)
             "  sevyn comms calls           list calls (JSON)\n"
             "  sevyn comms rcs status      RCS staging state\n"
             "  sevyn comms rcs probe       SIP/MSRP skeleton vs mock ACS\n"
+            "  sevyn music [--socket <path>] <verb>\n"
+            "                              talk to an audiod other than the\n"
+            "                              system one (the harness runs its\n"
+            "                              own daemon on a temp socket)\n"
+            "  sevyn music status          playback state (JSON)\n"
+            "  sevyn music play <path>     play a local audio file\n"
+            "  sevyn music pause           pause the current track\n"
+            "  sevyn music resume          resume the current track\n"
+            "  sevyn music stop            stop playback\n"
+            "  sevyn music seek <seconds>  seek inside the current track\n"
+            "  sevyn music volume <0..100> set playback volume (clamped)\n"
+            "  sevyn music scan [dir]      list playable files (JSON)\n"
             "  sevyn net status            link, address, gateway, DNS,\n"
             "                              wifi\n"
             "  sevyn net dns <host>        resolve a name (guest DNS)\n"
@@ -1218,6 +1230,98 @@ static int cmd_comms(int argc, char **argv)
         char cmd[64];
         snprintf(cmd, sizeof(cmd), "RCS %s", argv[3]);
         return comms_roundtrip(cmd);
+    }
+    return usage();
+}
+
+/* ------------------------------------------------------------------ */
+/* music — native audio service via audiod (v2/audio)                 */
+/* ------------------------------------------------------------------ */
+
+/* Talk to audiod (the native audio daemon). One line out, one bare
+ * JSON line back ({ok:true,...} or {ok:false,error,code}); print_reply
+ * prints it verbatim (the RN apps JSON.parse the payload), and the
+ * exit code follows the payload's ok flag. The reply buffer is 64 KiB
+ * like comms_roundtrip's — a SCAN of a large library is a long line. */
+#define AUDIO_SOCK "/run/sevyn-audio.sock"
+
+static int connect_audio(void)
+{
+    return connect_sock("SEVYN_AUDIO_SOCK", AUDIO_SOCK);
+}
+
+static int audio_roundtrip(const char *cmd)
+{
+    int fd = connect_audio();
+    if (fd < 0) {
+        fprintf(stderr, "error: cannot reach the audio daemon\n");
+        return 1;
+    }
+    if (comms_send(fd, cmd) != 0) {
+        fprintf(stderr, "error: cannot talk to the audio daemon\n");
+        close(fd);
+        return 1;
+    }
+    static char reply[65536];
+    int n = read_line(fd, reply, sizeof(reply));
+    close(fd);
+    if (n <= 0) {
+        fprintf(stderr, "error: no reply from the audio daemon\n");
+        return 1;
+    }
+    int rc = print_reply(reply);
+    if (rc == 0 && strncmp(reply, "{\"ok\":false", 11) == 0)
+        return 1;
+    return rc;
+}
+
+static int cmd_music(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    /* --socket <path> talks to an audiod other than the system one
+     * (the harness runs its own daemon on a temp socket; the
+     * Terminal has no shell env assignment, so the socket rides on
+     * the command line — same convention as `sevyn comms`). */
+    if (strcmp(argv[2], "--socket") == 0) {
+        if (argc < 5)
+            return usage();
+        setenv("SEVYN_AUDIO_SOCK", argv[3], 1);
+        argv += 2;
+        argc -= 2;
+    }
+    const char *verb = argv[2];
+
+    if (strcmp(verb, "status") == 0 && argc == 3)
+        return audio_roundtrip("STATUS");
+    if (strcmp(verb, "pause") == 0 && argc == 3)
+        return audio_roundtrip("PAUSE");
+    if (strcmp(verb, "resume") == 0 && argc == 3)
+        return audio_roundtrip("RESUME");
+    if (strcmp(verb, "stop") == 0 && argc == 3)
+        return audio_roundtrip("STOP");
+    if (strcmp(verb, "play") == 0 && argc == 4) {
+        char cmd[4096];
+        snprintf(cmd, sizeof(cmd), "PLAY %s", argv[3]);
+        return audio_roundtrip(cmd);
+    }
+    if (strcmp(verb, "seek") == 0 && argc == 4) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "SEEK %s", argv[3]);
+        return audio_roundtrip(cmd);
+    }
+    if (strcmp(verb, "volume") == 0 && argc == 4) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "VOLUME %s", argv[3]);
+        return audio_roundtrip(cmd);
+    }
+    if (strcmp(verb, "scan") == 0 && (argc == 3 || argc == 4)) {
+        char cmd[4096];
+        if (argc == 4)
+            snprintf(cmd, sizeof(cmd), "SCAN %s", argv[3]);
+        else
+            snprintf(cmd, sizeof(cmd), "SCAN");
+        return audio_roundtrip(cmd);
     }
     return usage();
 }
@@ -5911,6 +6015,8 @@ static int dispatch(int argc, char **argv)
         return cmd_browser(argc, argv);
     if (strcmp(argv[1], "comms") == 0)
         return cmd_comms(argc, argv);
+    if (strcmp(argv[1], "music") == 0)
+        return cmd_music(argc, argv);
     if (strcmp(argv[1], "net") == 0)
         return cmd_net(argc, argv);
     if (strcmp(argv[1], "tokrah") == 0)
