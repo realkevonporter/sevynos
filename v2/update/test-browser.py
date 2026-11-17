@@ -8,7 +8,11 @@ Chromium's DevTools endpoint: /json/version, /json/list, PUT
 /json/new, /json/activate/<id>, /json/close/<id>) and a FAKE statusd
 (a Unix socket server that records SET lines and answers GET with
 canned STATUS values). No QEMU, no Chromium — the CI harness
-(m5-check) covers the guest end to end.
+(m5-check) covers the guest end to end. A warm `browser open`
+relaunches Chromium with --app=<url> (no PUT /json/new): /json/new
+opens the new tab in a NEW top-level window, and Chrome makes that
+window a normal browser window (tab strip + omnibox), not an --app
+window — so the relaunch is what keeps every navigation chromeless.
 
 Run: python3 v2/update/test-browser.py
 Exit 0 = all checks pass.
@@ -213,6 +217,42 @@ class FakeStatusd(threading.Thread):
             pass
 
 
+def _pid_gone(pid):
+    """True when pid no longer exists, or is a zombie (dead but not
+    yet reaped by its parent — kill(pid, 0) still answers for a
+    zombie, so /proc is the arbiter)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            state = f.read().rsplit(") ", 1)[-1].split()[0]
+        return state == "Z"
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def _wait_for_argv(log_path, timeout=5.0):
+    """Lines the recording fake wrote, waiting for them: the CLI
+    never waits for the launched Chromium (it only reaps the
+    intermediate child), and a fast CDP answer lets the CLI exit
+    before a short-lived fake has finished starting up."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if log_path.exists():
+            lines = log_path.read_text().splitlines()
+            if lines:
+                return lines
+        time.sleep(0.05)
+    return log_path.read_text().splitlines() if log_path.exists() else []
+
+
 def run_cli(binary, args, env_extra):
     env = dict(os.environ)
     env.update(env_extra)
@@ -265,52 +305,112 @@ def main():
     check("browser tabs: browser_ui target excluded",
           "Omnibox" not in r.stdout, r.stdout)
 
-    # --- browser open (Chromium already running: PUT /json/new) ---
-    # M13 is single-tab by design: a warm open replaces the current
-    # tab — after PUT /json/new the CLI closes every other page tab
-    # (their windows die with them, leaving the new tab's window
-    # frontmost) and activates the new tab, so the page-tab list
-    # afterwards holds just the new tab. (The `browser close`
-    # check above removed BBBB from the fake, so reset the tab
-    # list first.)
+    # --- browser open (Chromium already running: relaunch) ---
+    # M13 is single-tab by design, and a warm open relaunches
+    # Chromium with --app=<url> instead of PUT /json/new: /json/new
+    # opens the new tab in a NEW top-level window, and Chrome makes
+    # that window a NORMAL browser window (tab strip + omnibox) —
+    # not an --app window — so after one navigation the user had a
+    # full second Chrome (GF65, 6b3689a). The relaunch keeps every
+    # navigation chromeless. The contract: the old Chromium (pid in
+    # the state file) is SIGTERMed, the new launch carries
+    # --app=<url>, and no PUT /json/new is issued. The fake CDP
+    # server keeps answering throughout (it is not the Chromium
+    # process), so the CLI's wait succeeds at once.
+    # A double-forked dummy stands in for the running Chromium: its
+    # child is reparented to init, so init reaps it on SIGTERM and
+    # the CLI's exit wait sees it go promptly.
+    dummy = tmp / "dummy-chromium.py"
+    dummy.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid > 0:\n"
+        "    sys.exit(0)\n"
+        "os.setsid()\n"
+        "with open(os.environ['DUMMY_PID_FILE'], 'w') as f:\n"
+        "    f.write(str(os.getpid()))\n"
+        "# Close the inherited pipes so the parent's wait returns.\n"
+        "devnull = os.open('/dev/null', os.O_RDWR)\n"
+        "for fd in (0, 1, 2):\n"
+        "    os.dup2(devnull, fd)\n"
+        "time.sleep(60)\n")
+    os.chmod(dummy, 0o755)
+    rec = tmp / "fake-chromium-record.py"
+    rec.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "log = os.environ.get('FAKE_ARGV_LOG', '')\n"
+        "if log:\n"
+        "    with open(log, 'a') as f:\n"
+        "        f.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+    os.chmod(rec, 0o755)
+    argv_log = tmp / "argv.log"
+    state_path = tmp / "chromium.state"
+    warm_env = dict(env)
+    warm_env["SEVYN_CHROMIUM_BIN"] = str(rec)
+    warm_env["SEVYN_CHROMIUM_STATE"] = str(state_path)
+    warm_env["FAKE_ARGV_LOG"] = str(argv_log)
+    warm_env["SEVYN_CDP_WAIT_S"] = "6"
     TABS[:] = [dict(t) for t in _INITIAL_TABS]
     REQUESTS.clear()
-    r = run_cli(binary, ["browser", "open", "https://example.com"], env)
+    if argv_log.exists():
+        argv_log.unlink()
+    proc = subprocess.run(
+        [sys.executable, str(dummy)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        env={**os.environ,
+             "DUMMY_PID_FILE": str(tmp / "dummy.pid")})
+    deadline = time.time() + 5
+    dummy_pid = None
+    while time.time() < deadline:
+        try:
+            dummy_pid = int((tmp / "dummy.pid").read_text().strip())
+            break
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    check("browser open: dummy Chromium started",
+          dummy_pid is not None, "")
+    if dummy_pid is None:
+        print("FAILURES:", FAILURES)
+        return 1
+    state_path.write_text(f"pid={dummy_pid}\ngpu=yes\n")
+    try:
+        r = run_cli(binary, ["browser", "open", "https://example.com"],
+                    warm_env)
+    finally:
+        # Never leave the dummy behind if the stop failed.
+        try:
+            os.kill(dummy_pid, 9)
+        except OSError:
+            pass
     check("browser open: exit 0", r.returncode == 0, r.stderr)
-    check("browser open: PUT /json/new with the URL",
-          ("PUT", "/json/new?https://example.com") in REQUESTS,
+    check("browser open: prints opened",
+          "opened: https://example.com" in r.stdout, r.stdout)
+    check("browser open: no PUT /json/new on a warm open",
+          ("PUT", "/json/new?https://example.com") not in REQUESTS,
           str(REQUESTS))
-    check("browser open: prints opened + new tab",
-          "opened: https://example.com" in r.stdout and
-          "tab: DDDD" in r.stdout, r.stdout)
-    # The request order is the contract: PUT new, close each other
-    # page tab (AAA + BBB; the browser_ui entry is not a page tab),
-    # then activate the new tab.
-    new_i = REQUESTS.index(("PUT", "/json/new?https://example.com"))
-    close_a = ("GET", "/json/close/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-    close_b = ("GET", "/json/close/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
-    act = ("GET", "/json/activate/DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
-    check("browser open: closes every other page tab after PUT",
-          close_a in REQUESTS and close_b in REQUESTS and
-          REQUESTS.index(close_a) > new_i and
-          REQUESTS.index(close_b) > new_i, str(REQUESTS))
-    check("browser open: activates the new tab last",
-          act in REQUESTS and
-          REQUESTS.index(act) > REQUESTS.index(close_a) and
-          REQUESTS.index(act) > REQUESTS.index(close_b), str(REQUESTS))
-    check("browser open: page-tab list afterwards is just the new tab",
-          [t["id"] for t in TABS if t["type"] == "page"] ==
-          ["DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"], str(TABS))
+    check("browser open: old Chromium pid is dead after the stop",
+          _pid_gone(dummy_pid), f"pid {dummy_pid} still alive")
+    argv_lines = _wait_for_argv(argv_log)
+    check("browser open: relaunch carries --app=<url>",
+          len(argv_lines) == 1 and
+          "--app=https://example.com" in json.loads(argv_lines[0]),
+          str(argv_lines))
 
-    # Bare hostname gets https:// prepended.
+    # Bare hostname gets https:// prepended — and also relaunches.
     REQUESTS.clear()
-    r = run_cli(binary, ["browser", "open", "example.com"], env)
-    check("browser open: bare hostname normalized to https",
-          ("PUT", "/json/new?https://example.com") in REQUESTS,
-          str(REQUESTS))
+    argv_log.unlink(missing_ok=True)
+    r = run_cli(binary, ["browser", "open", "example.com"], warm_env)
+    argv_lines = _wait_for_argv(argv_log)
+    check("browser open: bare hostname normalized to https on relaunch",
+          len(argv_lines) == 1 and
+          "--app=https://example.com" in json.loads(argv_lines[0]),
+          str(argv_lines))
 
     # --- browser activate / close ---
-    # (Reset the tab list: the warm-open check above closed AAA/BBB.)
+    # (Reset the tab list: the `browser close` check above removed
+    # BBBB from the fake.)
     TABS[:] = [dict(t) for t in _INITIAL_TABS]
     r = run_cli(binary, ["browser", "activate",
                          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"], env)

@@ -1699,33 +1699,6 @@ struct tab_by_url {
     char *url;
 };
 
-/* Close every page tab except `keep` — the warm-open replacement
- * step (see cmd_browser). Best-effort: a failed close is ignored,
- * the open itself already succeeded. about:blank and DevTools tabs
- * are not user pages and are left alone; the enumeration itself
- * already skips non-page targets (the Omnibox popup, service
- * workers), as the existing tabs/status verbs do. */
-struct close_others {
-    const char *keep;
-};
-
-static void close_other_tab(const char *id, const char *title,
-                            const char *url, void *ctx)
-{
-    struct close_others *c = (struct close_others *)ctx;
-    (void)title;
-    if (strcmp(id, c->keep) == 0)
-        return;
-    if (strcmp(url, "about:blank") == 0 ||
-        strncmp(url, "chrome-devtools://", 18) == 0 ||
-        strncmp(url, "devtools://", 11) == 0)
-        return;
-    char path[4096];
-    char body[4096];
-    snprintf(path, sizeof(path), "/json/close/%s", id);
-    cdp_request("GET", path, body, sizeof(body));
-}
-
 static void find_tab_by_url(const char *id, const char *title,
                             const char *url, void *ctx)
 {
@@ -1803,6 +1776,91 @@ static int cmd_browser_status(void)
     return 0;
 }
 
+/* Stop the running Chromium for a warm-open relaunch: SIGTERM the
+ * pid in the state file, wait up to ~2 s for it to exit and release
+ * the profile lock / CDP port, then escalate to SIGKILL and wait up
+ * to ~2 s more. Best-effort: a stale or already-dead pid is a
+ * no-op, and the state file is removed either way so the relaunch
+ * records a fresh pid. */
+static void browser_stop_for_relaunch(void)
+{
+    pid_t pid = browser_state_pid();
+    if (pid > 0 && kill(pid, 0) == 0) {
+        kill(pid, SIGTERM);
+        int i;
+        for (i = 0; i < 20; i++) {
+            if (kill(pid, 0) != 0)
+                break;
+            usleep(100000);
+        }
+        if (kill(pid, 0) == 0) {
+            kill(pid, SIGKILL);
+            for (i = 0; i < 20; i++) {
+                if (kill(pid, 0) != 0)
+                    break;
+                usleep(100000);
+            }
+        }
+    }
+    unlink(chromium_state_path());
+}
+
+/* (Re-)launch Chromium for `browser open` and wait a BOUNDED time
+ * for CDP so a fast start returns the tab synchronously. The wait
+ * must stay well under the host's 10 s exec timeout (default 6 s)
+ * — a slow start under TCG returns "launched" and the caller polls
+ * `browser status` / `browser tabs` for readiness (the URL opens as
+ * Chromium's first tab once it is up). SEVYN_CDP_WAIT_S overrides
+ * the wait. The first attempt runs with the GPU enabled. If CDP
+ * still does not answer, kill that Chromium (pid from the state
+ * file) and relaunch with --disable-gpu (software fallback), then
+ * wait again. The requested wait is SPLIT across the two attempts
+ * (first half, then the rest), so the total stays at
+ * SEVYN_CDP_WAIT_S (default 6 s) plus ~1 s of kill grace — well
+ * under the host's 10 s exec timeout. Two full waits would exceed
+ * it and the CLI could be killed before printing "launched:" (the
+ * fallback Chromium still comes up and the caller polls for it, but
+ * the Browser app would show an error on a slow fallback start).
+ * Returns 0 on opened/launched, 1 when even the launch fork
+ * failed. */
+static int browser_open_launch(const char *url, const char *launch_url)
+{
+    const char *wait_s = env_or("SEVYN_CDP_WAIT_S", "6");
+    int wait = atoi(wait_s);
+    if (wait <= 0)
+        wait = 6;
+    /* Split the budget: first attempt gets the larger half. */
+    int wait1 = (wait + 1) / 2;
+    int wait2 = wait - wait1;
+    if (browser_launch(launch_url, 0) != 0)
+        return 1;
+    if (wait_for_cdp(wait1)) {
+        browser_log_gpu("yes");
+        print_opened_tab(url);
+        return 0;
+    }
+    pid_t old = browser_state_pid();
+    if (old > 0) {
+        kill(old, SIGTERM);
+        /* Brief grace for the old Chromium to exit and release the
+         * profile lock / CDP port before the fallback relaunch. */
+        for (int i = 0; i < 10; i++) {
+            if (kill(old, 0) != 0)
+                break;
+            usleep(100000);
+        }
+    }
+    if (browser_launch(launch_url, 1) != 0)
+        return 1;
+    browser_log_gpu("fallback");
+    if (wait_for_cdp(wait2)) {
+        print_opened_tab(url);
+        return 0;
+    }
+    printf("launched: %s\n", url);
+    return 0;
+}
+
 static int cmd_browser(int argc, char **argv)
 {
     if (argc < 3)
@@ -1845,105 +1903,26 @@ static int cmd_browser(int argc, char **argv)
             normalize_url(argv[3], url, sizeof(url));
         else
             snprintf(url, sizeof(url), "about:blank");
-        if (!browser_running()) {
-            /* Cold start: launch Chromium, then wait a BOUNDED time
-             * for CDP so a fast start returns the tab synchronously.
-             * The wait must stay well under the host's 10 s exec
-             * timeout (default 6 s) — a slow start under TCG
-             * returns "launched" and the caller polls `browser
-             * status` / `browser tabs` for readiness (the URL opens
-             * as Chromium's first tab once it is up).
-             * SEVYN_CDP_WAIT_S overrides the wait.
-             * M13: the first attempt runs with the GPU enabled. If
-             * CDP still does not answer, kill that Chromium (pid
-             * from the state file) and relaunch with --disable-gpu
-             * (software fallback), then wait again. The requested
-             * wait is SPLIT across the two attempts (first half,
-             * then the rest), so the total stays at SEVYN_CDP_WAIT_S
-             * (default 6 s) plus ~1 s of kill grace — well under the
-             * host's 10 s exec timeout. Two full waits would exceed
-             * it and the CLI could be killed before printing
-             * "launched:" (the fallback Chromium still comes up and
-             * the caller polls for it, but the Browser app would show
-             * an error on a slow fallback start). */
-            const char *wait_s = env_or("SEVYN_CDP_WAIT_S", "6");
-            int wait = atoi(wait_s);
-            if (wait <= 0)
-                wait = 6;
-            /* Split the budget: first attempt gets the larger half. */
-            int wait1 = (wait + 1) / 2;
-            int wait2 = wait - wait1;
-            const char *launch_url = argc == 4 ? url : NULL;
-            if (browser_launch(launch_url, 0) != 0)
-                return 1;
-            if (wait_for_cdp(wait1)) {
-                browser_log_gpu("yes");
-                print_opened_tab(url);
-                return 0;
-            }
-            pid_t old = browser_state_pid();
-            if (old > 0) {
-                kill(old, SIGTERM);
-                /* Brief grace for the old Chromium to exit and
-                 * release the profile lock / CDP port before the
-                 * fallback relaunch. */
-                for (int i = 0; i < 10; i++) {
-                    if (kill(old, 0) != 0)
-                        break;
-                    usleep(100000);
-                }
-            }
-            if (browser_launch(launch_url, 1) != 0)
-                return 1;
-            browser_log_gpu("fallback");
-            if (wait_for_cdp(wait2)) {
-                print_opened_tab(url);
-                return 0;
-            }
-            printf("launched: %s\n", url);
-            return 0;
+        const char *launch_url = argc == 4 ? url : NULL;
+        if (browser_running()) {
+            /* Warm open: relaunch chromeless. PUT /json/new opens
+             * the new tab in a NEW top-level window, and Chrome
+             * makes that window a NORMAL browser window (tab strip
+             * + omnibox) — not an --app window. The old --app
+             * window was then closed, so after one navigation the
+             * user had a full second Chrome instead of the paired
+             * chromeless content window (GF65, 6b3689a). Relaunching
+             * with --app=<url> keeps every navigation chromeless,
+             * and re-cascades the content window next to the
+             * Browser window's current position, so the pair
+             * re-aligns on every Go. A WebSocket Page.navigate
+             * would avoid the restart — and is the follow-up for
+             * instant navigation — but the CLI speaks CDP over
+             * HTTP only. M13 stays single-tab by design: the
+             * relaunch leaves exactly ONE tab, the new one. */
+            browser_stop_for_relaunch();
         }
-        char path[4096];
-        snprintf(path, sizeof(path), "/json/new?%s", url);
-        char body[65536];
-        if (cdp_request("PUT", path, body, sizeof(body)) != 200) {
-            fprintf(stderr, "error: CDP /json/new failed for %s\n", url);
-            return 1;
-        }
-        char *id = json_string_after(body, NULL, "\"id\"");
-        char *title = json_string_after(body, NULL, "\"title\"");
-        char *turl = json_string_after(body, NULL, "\"url\"");
-        /* M13 is single-tab by design: each `browser open` replaces
-         * the current tab, so a warm open leaves exactly ONE tab —
-         * the new one. With --app, PUT /json/new opens the new tab
-         * in a NEW window that stays behind the first window, and
-         * /json/activate only switches the tab inside its own
-         * window — so a warm open used to paint the first page and
-         * never navigate again (m5(a)(b)(c), m13(b)(c)(d)(e)).
-         * Close every other page tab first (their windows die with
-         * them, leaving the new tab's window frontmost), then
-         * activate the new tab. Best-effort: a failed close or
-         * activate still returns 0 — the open itself succeeded. */
-        if (id) {
-            char list_body[262144];
-            if (cdp_request("GET", "/json/list", list_body,
-                            sizeof(list_body)) == 200) {
-                struct close_others ctx = { .keep = id };
-                for_each_page_tab(list_body, close_other_tab, &ctx);
-            }
-            char act_path[4096];
-            char act_body[4096];
-            snprintf(act_path, sizeof(act_path), "/json/activate/%s",
-                     id);
-            cdp_request("GET", act_path, act_body, sizeof(act_body));
-        }
-        printf("opened: %s\n", url);
-        if (id && title && turl)
-            printf("tab: %s\t%s\t%s\n", id, title, turl);
-        free(id);
-        free(title);
-        free(turl);
-        return 0;
+        return browser_open_launch(url, launch_url);
     }
     if (strcmp(verb, "activate") == 0 || strcmp(verb, "close") == 0) {
         if (argc != 4)
