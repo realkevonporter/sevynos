@@ -28,8 +28,10 @@
  *   sevyn browser tabs          list open tabs (CDP)
  *   sevyn browser activate <id> bring a tab forward
  *   sevyn browser close <id>    close a tab
- *   sevyn browser quit          stop Chromium (SIGTERM its pid;
- *                               idempotent — ok when not running)
+ *   sevyn browser quit          stop Chromium (state pid + any
+ *                               Chromium found by a /proc cmdline
+ *                               scan; idempotent — ok when not
+ *                               running)
  *   sevyn browser status        Chromium running? CDP answering? tabs?
  *   sevyn net status            link, address, gateway, DNS, wifi
  *   sevyn net dns <host>        resolve a name through the guest DNS
@@ -1405,6 +1407,36 @@ static pid_t browser_state_pid(void)
     return pid > 0 ? pid : -1;
 }
 
+/* True when pid is not a live process: no /proc entry, or a zombie
+ * (dead but not yet reaped by init — kill(pid, 0) still answers
+ * for a zombie, so /proc is the arbiter). A zombie has already
+ * released the profile lock and the CDP port, so it counts as gone
+ * for the stop/launch decisions: waiting on kill(pid, 0) alone
+ * burns the whole wait budget on a process that is already dead
+ * (the warm-open stop did exactly that on every relaunch). */
+static int browser_pid_gone(pid_t pid)
+{
+    char path[64];
+    char *text;
+    char *close;
+    int gone;
+    if (pid <= 0)
+        return 1;
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    text = read_file_cap(path, 1024);
+    if (!text)
+        return 1;
+    /* stat is "pid (comm) state ...": the state is the first field
+     * after the closing paren. The comm may contain spaces or
+     * parens, so find the LAST ')'. */
+    close = strrchr(text, ')');
+    gone = 1;
+    if (close && close[1] == ' ' && close[2] != '\0')
+        gone = (close[2] == 'Z');
+    free(text);
+    return gone;
+}
+
 /* GPU mode recorded in the state file ("yes"/"fallback"), or
  * "unknown" when the file is absent / has no gpu= line. The
  * returned pointer is buf when a value was found. */
@@ -1734,20 +1766,6 @@ static void print_opened_tab(const char *url)
  * there is no state file, no live pid, or the pid is already dead;
  * exit 0 either way (the Browser app calls this on close
  * unconditionally). */
-static int cmd_browser_quit(void)
-{
-    const char *path = chromium_state_path();
-    pid_t pid = browser_state_pid();
-    if (pid <= 0 || kill(pid, 0) != 0) {
-        unlink(path);
-        printf("quit: not-running\n");
-        return 0;
-    }
-    kill(pid, SIGTERM);
-    unlink(path);
-    printf("quit: ok\n");
-    return 0;
-}
 
 static int cmd_browser_status(void)
 {
@@ -1776,33 +1794,287 @@ static int cmd_browser_status(void)
     return 0;
 }
 
+/* Kill one pid and wait until it is gone (zombie-aware): SIGTERM,
+ * wait up to term_s, then SIGKILL and wait up to kill_s. Returns 1
+ * when the pid is gone by the end, 0 when it is still alive
+ * (essentially only when it is stuck in uninterruptible sleep —
+ * SIGKILL cannot be ignored, and a zombie counts as gone). Polls
+ * every 100 ms and returns early as soon as the pid is gone, so a
+ * fast death costs almost nothing. */
+static int browser_kill_pid(pid_t pid, int term_s, int kill_s)
+{
+    int i;
+    if (pid <= 0 || browser_pid_gone(pid))
+        return 1;
+    kill(pid, SIGTERM);
+    for (i = 0; i < term_s * 10; i++) {
+        if (browser_pid_gone(pid))
+            return 1;
+        usleep(100000);
+    }
+    if (browser_pid_gone(pid))
+        return 1;
+    kill(pid, SIGKILL);
+    for (i = 0; i < kill_s * 10; i++) {
+        if (browser_pid_gone(pid))
+            return 1;
+        usleep(100000);
+    }
+    return browser_pid_gone(pid);
+}
+
+/* Find Chromium processes by their command line: any process whose
+ * argv carries --remote-debugging-port=<cdp port>. The CLI itself
+ * never carries that flag, so it never matches itself; the
+ * Chromium binary does (see browser_launch). Fills pids[] with up
+ * to cap pids and returns how many were found. A zombie's cmdline
+ * is empty, so a dead-but-unreaped Chromium is not found — which
+ * is correct, it holds no lock and no port. */
+static int browser_find_chromium_pids(pid_t *pids, int cap)
+{
+    DIR *d;
+    struct dirent *de;
+    char flag[64];
+    int n = 0;
+    if (cap <= 0)
+        return 0;
+    snprintf(flag, sizeof(flag), "--remote-debugging-port=%d",
+             cdp_port());
+    d = opendir("/proc");
+    if (!d)
+        return 0;
+    while ((de = readdir(d)) != NULL) {
+        char path[128];
+        char buf[4096];
+        int fd;
+        ssize_t r;
+        ssize_t i;
+        pid_t pid;
+        char *end;
+        if (n >= cap)
+            break;
+        pid = (pid_t)strtol(de->d_name, &end, 10);
+        if (end == de->d_name || *end != '\0' || pid <= 0)
+            continue;
+        if (pid == getpid())
+            continue;
+        snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
+        fd = open(path, O_RDONLY);
+        if (fd < 0)
+            continue;
+        r = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (r <= 0)
+            continue;
+        /* cmdline is NUL-separated argv: flatten it so the flag
+         * (which is never argv[0]) is searchable. */
+        for (i = 0; i < r; i++) {
+            if (buf[i] == '\0')
+                buf[i] = ' ';
+        }
+        buf[r] = '\0';
+        if (strstr(buf, flag) != NULL)
+            pids[n++] = pid;
+    }
+    closedir(d);
+    return n;
+}
+
+/* True when any Chromium process is alive right now: the state
+ * pid, or any pid found by a cmdline scan. The scan matters when
+ * the state pid is stale (see browser_stop_for_relaunch): a live
+ * Chromium can be running under a pid the state file does not
+ * name. */
+static int browser_chromium_process_alive(void)
+{
+    pid_t pids[64];
+    if (!browser_pid_gone(browser_state_pid()))
+        return 1;
+    return browser_find_chromium_pids(pids, 64) > 0;
+}
+
+struct tab_url_found {
+    const char *want;
+    int found;
+};
+
+static void find_tab_by_url_flag(const char *id, const char *title,
+                                 const char *url, void *ctx)
+{
+    struct tab_url_found *f = (struct tab_url_found *)ctx;
+    (void)id;
+    (void)title;
+    if (strcmp(url, f->want) == 0)
+        f->found = 1;
+}
+
+/* True when CDP is answering AND it lists a page tab whose URL is
+ * exactly `want`. Used for the idempotent open: a re-go / retry for
+ * a URL that is already the running tab must return that tab, not
+ * launch a duplicate Chromium. False when CDP is down or the URL
+ * is not open. */
+static int browser_opened_tab_is(const char *url)
+{
+    char body[262144];
+    struct tab_url_found f = { .want = url, .found = 0 };
+    if (cdp_request("GET", "/json/list", body, sizeof(body)) != 200)
+        return 0;
+    for_each_page_tab(body, find_tab_by_url_flag, &f);
+    return f.found;
+}
+
+struct close_extras {
+    const char *keep_url;
+    int closed;
+};
+
+static void close_extra_tab(const char *id, const char *title,
+                            const char *url, void *ctx)
+{
+    struct close_extras *c = (struct close_extras *)ctx;
+    char path[4096];
+    char body[4096];
+    (void)title;
+    if (strcmp(url, c->keep_url) == 0)
+        return;
+    if (strcmp(url, "about:blank") == 0 ||
+        strncmp(url, "chrome-devtools://", 18) == 0 ||
+        strncmp(url, "devtools://", 11) == 0)
+        return;
+    snprintf(path, sizeof(path), "/json/close/%s", id);
+    if (cdp_request("GET", path, body, sizeof(body)) == 200)
+        c->closed++;
+}
+
+/* Single-tab safety net, run after a launch that reached CDP: M13
+ * is single-tab by design, so a launch must leave exactly one
+ * page tab — the requested URL. If a handoff somehow still
+ * happened (an old instance survived the stop and the new launch
+ * handed its URL to it), the list holds the old tabs too; close
+ * every page tab except the requested URL to restore the
+ * contract. Best-effort: a failed close is ignored, the open
+ * itself already succeeded. */
+static void browser_enforce_single_tab(const char *url)
+{
+    char body[262144];
+    struct close_extras c = { .keep_url = url, .closed = 0 };
+    if (cdp_request("GET", "/json/list", body, sizeof(body)) != 200)
+        return;
+    for_each_page_tab(body, close_extra_tab, &c);
+    if (c.closed > 0) {
+        int fd = open(CHROMIUM_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            dprintf(fd, "BROWSER closed %d extra tab(s) after open %s\n",
+                    c.closed, url);
+            close(fd);
+        }
+    }
+}
+
 /* Stop the running Chromium for a warm-open relaunch: SIGTERM the
  * pid in the state file, wait up to ~2 s for it to exit and release
  * the profile lock / CDP port, then escalate to SIGKILL and wait up
  * to ~2 s more. Best-effort: a stale or already-dead pid is a
  * no-op, and the state file is removed either way so the relaunch
  * records a fresh pid. */
-static void browser_stop_for_relaunch(void)
+static int cmd_browser_quit(void)
 {
-    pid_t pid = browser_state_pid();
-    if (pid > 0 && kill(pid, 0) == 0) {
-        kill(pid, SIGTERM);
-        int i;
-        for (i = 0; i < 20; i++) {
-            if (kill(pid, 0) != 0)
-                break;
-            usleep(100000);
-        }
-        if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-            for (i = 0; i < 20; i++) {
-                if (kill(pid, 0) != 0)
-                    break;
-                usleep(100000);
+    /* Stop every Chromium: the state pid, and any Chromium found
+     * by a /proc cmdline scan. The state pid goes stale when a
+     * launch hands off — the state file then names a dead pid
+     * while the real Chromium keeps running — and killing only the
+     * state pid is a no-op in that state (m13 lifecycle: `browser
+     * quit` killed nobody and Chromium outlived the app). Each pid
+     * gets the reliable kill (SIGTERM, then SIGKILL;
+     * zombie-aware); the state file is removed and "quit: ok" is
+     * printed whether or not a Chromium was found, so closing the
+     * app never hangs on a stale state file. Fire-and-forget: the
+     * app closes regardless. */
+    const char *path = chromium_state_path();
+    pid_t pids[64];
+    pid_t state_pid;
+    int n = 0;
+    int i;
+    int j;
+    state_pid = browser_state_pid();
+    if (state_pid > 0)
+        pids[n++] = state_pid;
+    n += browser_find_chromium_pids(pids + n, 64 - n);
+    /* Dedupe: the state pid is usually also found by the scan. */
+    for (i = 0; i < n; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (pids[j] == pids[i]) {
+                pids[j] = pids[--n];
+                j--;
             }
         }
     }
-    unlink(chromium_state_path());
+    if (n == 0) {
+        unlink(path);
+        printf("quit: not-running\n");
+        return 0;
+    }
+    for (i = 0; i < n; i++)
+        browser_kill_pid(pids[i], 1, 1);
+    unlink(path);
+    printf("quit: ok\n");
+    return 0;
+}
+
+/* Stop every running Chromium for a warm-open relaunch and verify
+ * it is actually gone before the relaunch. The pid in the state
+ * file is killed, AND any Chromium found by a /proc cmdline scan:
+ * the state pid goes stale when a launch hands off — the handed-off
+ * launcher exits at once, so the state file then names a dead pid
+ * while the real Chromium keeps running under the old pid. Killing
+ * only the state pid is a no-op in that state, and the relaunch
+ * hands off again, accumulating a tab per open (m13: tabs 1→2→3→4
+ * across warm opens, three Chromium windows on screen, `browser
+ * quit` unable to kill anything because the state pid was dead).
+ * Each pid gets the reliable kill (SIGTERM, up to ~2 s, then
+ * SIGKILL, up to ~2 s more; zombie-aware). Returns 1 when every
+ * pid was killed AND a re-scan finds no Chromium process left; 0
+ * when something is still alive — the caller must NOT launch then
+ * (a launch would hand off to the survivor and corrupt the
+ * single-tab contract); it returns an error instead. The state
+ * file is removed on success so the relaunch records a fresh pid. */
+static int browser_stop_for_relaunch(void)
+{
+    pid_t pids[64];
+    pid_t state_pid;
+    int n = 0;
+    int i;
+    int j;
+    int ok = 1;
+    state_pid = browser_state_pid();
+    if (state_pid > 0)
+        pids[n++] = state_pid;
+    n += browser_find_chromium_pids(pids + n, 64 - n);
+    /* Dedupe: the state pid is usually also found by the scan. */
+    for (i = 0; i < n; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (pids[j] == pids[i]) {
+                pids[j] = pids[--n];
+                j--;
+            }
+        }
+    }
+    for (i = 0; i < n; i++) {
+        if (!browser_kill_pid(pids[i], 2, 2))
+            ok = 0;
+    }
+    /* Verify, don't assume: a Chromium the scan missed (or one
+     * that survived the kill) must block the relaunch. The scan is
+     * the arbiter — every real Chromium carries the CDP port flag
+     * in its cmdline, so a live instance is always found. (CDP
+     * quiet is NOT checked here: the test harness serves CDP from
+     * a separate fake server that never dies, and in the guest a
+     * live Chromium is exactly what the scan finds.) */
+    if (browser_find_chromium_pids(pids, 64) > 0)
+        ok = 0;
+    if (ok)
+        unlink(chromium_state_path());
+    return ok;
 }
 
 /* (Re-)launch Chromium for `browser open` and wait a BOUNDED time
@@ -1814,13 +2086,22 @@ static void browser_stop_for_relaunch(void)
  * the wait. The first attempt runs with the GPU enabled. If CDP
  * still does not answer, kill that Chromium (pid from the state
  * file) and relaunch with --disable-gpu (software fallback), then
- * wait again. The requested wait is SPLIT across the two attempts
+ * wait again. The kill is the reliable one (SIGTERM, then SIGKILL;
+ * zombie-aware): the old SIGTERM-only 1 s grace let a starting
+ * Chromium under TCG survive, so the fallback launched while the
+ * first was still alive and handed off to it. If the kill fails
+ * the fallback is NOT launched — the first attempt is still there
+ * and may come up, and a duplicate launch would hand off. The
+ * requested wait is SPLIT across the two attempts
  * (first half, then the rest), so the total stays at
- * SEVYN_CDP_WAIT_S (default 6 s) plus ~1 s of kill grace — well
+ * SEVYN_CDP_WAIT_S (default 6 s) plus up to ~3 s of kill grace — still
  * under the host's 10 s exec timeout. Two full waits would exceed
  * it and the CLI could be killed before printing "launched:" (the
  * fallback Chromium still comes up and the caller polls for it, but
  * the Browser app would show an error on a slow fallback start).
+ * On either success the single-tab contract is enforced (a handoff
+ * that somehow still happened is repaired by closing the extra
+ * tabs) before the tab is printed.
  * Returns 0 on opened/launched, 1 when even the launch fork
  * failed. */
 static int browser_open_launch(const char *url, const char *launch_url)
@@ -1836,24 +2117,23 @@ static int browser_open_launch(const char *url, const char *launch_url)
         return 1;
     if (wait_for_cdp(wait1)) {
         browser_log_gpu("yes");
+        browser_enforce_single_tab(url);
         print_opened_tab(url);
         return 0;
     }
     pid_t old = browser_state_pid();
-    if (old > 0) {
-        kill(old, SIGTERM);
-        /* Brief grace for the old Chromium to exit and release the
-         * profile lock / CDP port before the fallback relaunch. */
-        for (int i = 0; i < 10; i++) {
-            if (kill(old, 0) != 0)
-                break;
-            usleep(100000);
-        }
+    if (old > 0 && !browser_kill_pid(old, 1, 2)) {
+        /* The GPU attempt would not die: do not launch a duplicate
+         * on top of it (it would hand off). It is still starting
+         * and may come up; the caller polls for readiness. */
+        printf("launched: %s\n", url);
+        return 0;
     }
     if (browser_launch(launch_url, 1) != 0)
         return 1;
     browser_log_gpu("fallback");
     if (wait_for_cdp(wait2)) {
+        browser_enforce_single_tab(url);
         print_opened_tab(url);
         return 0;
     }
@@ -1912,15 +2192,68 @@ static int cmd_browser(int argc, char **argv)
              * window was then closed, so after one navigation the
              * user had a full second Chrome instead of the paired
              * chromeless content window (GF65, 6b3689a). Relaunching
-             * with --app=<url> keeps every navigation chromeless,
-             * and re-cascades the content window next to the
-             * Browser window's current position, so the pair
-             * re-aligns on every Go. A WebSocket Page.navigate
+             * with --app=<url> keeps every navigation chromeless.
+             * (The window lands where labwc cascades it — no
+             * --window-position is passed, so the pair does NOT
+             * re-align on every Go; the content window's position
+             * is the compositor's, not the CLI's. That is the
+             * known limitation: windows don't follow live while
+             * dragging.) A WebSocket Page.navigate
              * would avoid the restart — and is the follow-up for
              * instant navigation — but the CLI speaks CDP over
              * HTTP only. M13 stays single-tab by design: the
              * relaunch leaves exactly ONE tab, the new one. */
-            browser_stop_for_relaunch();
+            /* Idempotent open: the running tab already shows this
+             * URL — return it. A re-go / retry must not relaunch:
+             * the tab is already there, and a relaunch while the
+             * instance is up just churns the window (and, if the
+             * instance is still starting, a duplicate launch hands
+             * off and accumulates a tab). Enforce the single-tab
+             * contract first, in case a previous open left extras. */
+            if (browser_opened_tab_is(url)) {
+                browser_enforce_single_tab(url);
+                print_opened_tab(url);
+                return 0;
+            }
+            /* The stop is fallible now: if the old Chromium cannot
+             * be verified dead, launching would hand off to the
+             * survivor and corrupt the single-tab contract — fail
+             * loudly instead so the caller can retry. */
+            if (!browser_stop_for_relaunch()) {
+                fprintf(stderr,
+                        "error: could not stop Chromium for relaunch\n");
+                return 1;
+            }
+            return browser_open_launch(url, launch_url);
+        }
+        /* CDP is down: is a Chromium still starting? A launch is
+         * already in flight when a Chromium process is alive but
+         * CDP is not answering yet (cold start under TCG takes
+         * ~13 s). Launching a duplicate here hands off to the
+         * in-flight instance and accumulates a tab per open (m13:
+         * tabs 1→2→3→4 across warm opens, each `browser open`
+         * adding one). Do not launch: wait briefly for CDP; if it
+         * answers, the in-flight instance is up — return its tab
+         * when it is this URL, else fall through to the warm path.
+         * If CDP stays down, the instance is still starting:
+         * return "launched:" and let the caller poll — the tab
+         * appears when the instance finishes starting. */
+        if (browser_chromium_process_alive()) {
+            if (wait_for_cdp(2)) {
+                if (browser_opened_tab_is(url)) {
+                    browser_enforce_single_tab(url);
+                    print_opened_tab(url);
+                    return 0;
+                }
+                if (!browser_stop_for_relaunch()) {
+                    fprintf(stderr,
+                            "error: could not stop Chromium for relaunch\n");
+                    return 1;
+                }
+                return browser_open_launch(url, launch_url);
+            }
+            printf("launched: %s\n", url);
+            return 0;
         }
         return browser_open_launch(url, launch_url);
     }
