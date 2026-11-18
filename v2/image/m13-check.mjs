@@ -2374,6 +2374,42 @@ async function main() {
     let backDetail = "";
     let backAttempts = 0;
     let backCur = aside.after;
+    // The aside drag leaves the Browser window behind the Terminal
+    // and the freshly raised Chromium, so only a sliver of its
+    // header is visible (<100 #0ea5e9 px/row, below
+    // findWindowHeaderPartial) and dragBrowserWindow's before-frame
+    // finds no header — the drag-back stops after attempt 1
+    // (runs 44231126511, 44246789402). Raise the window first: a
+    // single verified header pixel inside the aside rect is enough
+    // to click (same click-to-raise as refocusTerminal) — once
+    // raised, the full header is visible and the drag loop below
+    // finds it. Skipped when the header is already findable, so a
+    // working drag-back is untouched.
+    {
+      const probe = await shot(
+        b.qmp,
+        join(OUT, `m13-shot-browser-drag-${tagBase}-raise-before.ppm`),
+      );
+      const visible =
+        findWindowHeader(probe, 14, 165, 233) ??
+        findWindowHeaderPartial(probe, 14, 165, 233);
+      if (!visible) {
+        const headerBox = findColorBBox(probe, 14, 165, 233, 10, {
+          x0: aside.after.left,
+          y0: aside.after.top,
+          x1: aside.after.right,
+          y1: aside.after.bottom,
+        });
+        if (headerBox && headerBox.n > 0) {
+          const cx = Math.floor((headerBox.x0 + headerBox.x1) / 2);
+          const cy = Math.floor((headerBox.y0 + headerBox.y1) / 2);
+          await moveTo(cx, cy, probe.width, probe.height);
+          await sleep(300);
+          await click();
+          await sleep(500);
+        }
+      }
+    }
     for (let attempt = 0; attempt < 3 && !backOk; attempt++) {
       const dxLeft = aside.before.left - backCur.left;
       const dxRight = aside.before.right - backCur.right;
