@@ -2189,7 +2189,28 @@ async function main() {
     // inflate it onto bare desktop. No solid run means the raise
     // fails — never click a point that is not Chromium.
     const frags = visibleFragments(box, [termPos], before.width, before.height);
-    const run = findSolidRunPoint(before, r, g, bl, frags);
+    let run = findSolidRunPoint(before, r, g, bl, frags);
+    if (!run) {
+      // Fall back to the full bbox (no Terminal subtraction): a
+      // freshly launched Chromium window is raised above the
+      // Terminal (new windows go on top), so the page colour can
+      // be visible inside termPos even though the fragments
+      // subtract it — the warm-open relaunch creates such a window
+      // on every navigation (run 44231126511: red=169082px with a
+      // 768px run, discarded by the subtraction). A solid run of
+      // the page colour is Chromium content by construction
+      // (neither the Terminal nor the Browser chrome draws a
+      // >=100px run of it), so the fallback cannot click the
+      // Terminal — it only recovers a visible page the
+      // subtraction hid.
+      run = findSolidRunPoint(
+        before,
+        r,
+        g,
+        bl,
+        visibleFragments(box, [], before.width, before.height),
+      );
+    }
     if (!run) return null;
     await moveTo(run.x, run.y, before.width, before.height);
     await sleep(300);
@@ -3061,11 +3082,23 @@ async function main() {
     }
   }
   let navResult = null;
+  let raisedLink = null;
+  // Raise FIRST, before any CDP poll refocuses the Terminal: the
+  // link click navigates the tab in the frontmost Chromium window
+  // and the green paints there. pollTabsTitleCount (below)
+  // refocuses the Terminal, which covers Chromium — a raise after
+  // it can only see a sliver (run 44231126511: green=678px in a
+  // 3px sliver, after the poll). Raising first matches step 4 and
+  // m5 (raise before refocus). The raise polls for the green
+  // bbox, so it waits for the paint; a missed click just makes
+  // the raise wait, and the CDP poll below still decides the
+  // re-click.
   if (linkClick && linkFrame) {
     await moveTo(linkClick.x, linkClick.y, linkFrame.width, linkFrame.height);
     await sleep(300);
     await click();
     await sleep(2000);
+    raisedLink = await raiseChromium(0, 200, 83, "green-link");
     navResult = await pollTabsTitleCount("Second Page", 1, 6);
     if (!navResult || navResult.n < 1) {
       // One re-click at a slightly different offset, still on the
@@ -3076,6 +3109,7 @@ async function main() {
       await sleep(300);
       await click();
       await sleep(2000);
+      raisedLink = await raiseChromium(0, 200, 83, "green-link");
       navResult = await pollTabsTitleCount("Second Page", 1, 4);
     }
   }
@@ -3086,14 +3120,11 @@ async function main() {
       ? `titles=${navResult.titles.join("|")}`
       : "no click point (link page never rendered) or no tabs marker",
   );
-  {
-    const raised = await raiseChromium(0, 200, 83, "green-link");
-    check(
-      "link-nav: the green page renders after the click",
-      !!raised && raised.count > 40000,
-      raised ? `green=${raised.count}px` : "no green on screen",
-    );
-  }
+  check(
+    "link-nav: the green page renders after the click",
+    !!raisedLink && raisedLink.count > 40000,
+    raisedLink ? `green=${raisedLink.count}px` : "no green on screen",
+  );
 
   // 6. Chromeless heuristic (NEW): the red viewport's bbox must be
   // short and wide — height in [150, 360] AND aspect width/height
