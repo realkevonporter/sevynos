@@ -2854,11 +2854,15 @@ static int cmd_net_wifi_connect(int argc, char **argv)
         char *save = NULL;
         char *line = strtok_r(out, "\n", &save);
         while (line) {
+            /* list_networks prints the SSID bare (no quotes):
+             * "<id>\t<ssid>\t<bssid>\t<flags>". */
             char *tab = strchr(line, '\t');
-            if (tab && tab[1] == '"') {
-                char *end = strchr(tab + 2, '"');
-                if (end && (size_t)(end - (tab + 2)) == strlen(ssid) &&
-                    strncmp(tab + 2, ssid, strlen(ssid)) == 0) {
+            if (tab) {
+                char *end = strchr(tab + 1, '\t');
+                size_t slen = end ? (size_t)(end - (tab + 1))
+                                  : strlen(tab + 1);
+                if (slen == strlen(ssid) &&
+                    strncmp(tab + 1, ssid, slen) == 0) {
                     size_t idlen = (size_t)(tab - line);
                     if (idlen < sizeof(id)) {
                         memcpy(id, line, idlen);
@@ -2893,23 +2897,30 @@ static int cmd_net_wifi_connect(int argc, char **argv)
     }
     char esc[128], val[256];
     wifi_escape(ssid, esc, sizeof(esc));
-    snprintf(val, sizeof(val), "ssid \"%s\"", esc);
+    /* wpa_cli's set_network needs three arguments (id, variable,
+     * value). Passing "ssid \"...\"" as one element makes wpa_cli
+     * reject the command before it ever reaches the supplicant. */
+    snprintf(val, sizeof(val), "\"%s\"", esc);
     if (wpa_cli(iface, &out,
-                (const char *[]){"set_network", id, val, NULL}) != 0) {
+                (const char *[]){"set_network", id, "ssid", val, NULL}) != 0) {
         free(out);
         fprintf(stderr, "error: set ssid failed\n");
         return 1;
     }
     free(out);
     out = NULL;
+    /* Same three-argument shape as the ssid call above. */
+    const char *key;
     if (psk) {
         wifi_escape(psk, esc, sizeof(esc));
-        snprintf(val, sizeof(val), "psk \"%s\"", esc);
+        snprintf(val, sizeof(val), "\"%s\"", esc);
+        key = "psk";
     } else {
-        snprintf(val, sizeof(val), "key_mgmt NONE");
+        snprintf(val, sizeof(val), "NONE");
+        key = "key_mgmt";
     }
     if (wpa_cli(iface, &out,
-                (const char *[]){"set_network", id, val, NULL}) != 0) {
+                (const char *[]){"set_network", id, key, val, NULL}) != 0) {
         free(out);
         fprintf(stderr, "error: set key failed\n");
         return 1;
