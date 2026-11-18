@@ -1227,11 +1227,16 @@ async function main() {
   // Terminal window — retrying until the invite lands (sync takes
   // a few seconds; an early answer exits 1, which is the retry
   // signal, not a failure).
+  // mediaBefore scopes the media wait below to lines written after
+  // the call: the daemons mirror "connected" as soon as frames
+  // flow, which can be during the answer loop (before the check's
+  // answer verdict), so scoping after the loop misses lines the
+  // run already produced. Stale lines cannot satisfy it: one call
+  // per boot, and no call is live before this one.
+  const mediaBefore = logLines(b.logPath).length;
   const callOk = await termCmd(b, "comms call @bob:test.local --video");
   check("comms: alice calls bob by user id (video)", !!callOk);
-  // The invite lands a few seconds after alice's call (sync); the
-  // answer itself is fast now that the bridge pre-warms at boot
-  // (a cold launch would exceed the host's 10 s exec timeout).
+  // The invite lands a few seconds after alice's call (sync).
   // termCmdAny fails fast — a too-early answer exits 1 in ~2 s,
   // and the wait only burns its timeout when the command genuinely
   // hangs. 6 attempts, not 3: under TCG the background answer prep
@@ -1240,11 +1245,30 @@ async function main() {
   // running in the daemon across attempts (deduplicated per
   // callId), so more attempts cover a slow prep instead of giving
   // up while it is still working.
+  // But the attempts are only the trigger, not the verdict: the
+  // host kills any sevyn exec after 10 s, and the prep takes
+  // ~90 s on a wedged guest — the first attempt dies at 124
+  // while the daemon-side answer is still working, and later
+  // attempts exit 1 ("no incoming call") because the call already
+  // connected (M10: bob's media-state showed connected with
+  // frames flowing while every ANSWER exited non-zero). The daemon
+  // mirrors `call-answered` to the serial console when the answer
+  // is sent, so the console — the channel that survives the
+  // Terminal wedge — is the answer proof when no CLI observed it.
+  const answerBefore = logLines(b.logPath).length;
   let answered = false;
   for (let attempt = 0; attempt < 6 && !answered; attempt++) {
     await sleep(10000);
     const code = await termCmdAny(b, "comms --socket /tmp/commsd-bob.sock answer", 60000);
     answered = code === 0;
+  }
+  if (!answered) {
+    answered = !!(await waitForLog(
+      b.logPath,
+      /"kind":"call-answered"/,
+      300000,
+      answerBefore,
+    ));
   }
   check("comms: bob answers the video call", answered);
   // ICE + frames: both bridges run Chromium with fake media, and the
@@ -1259,24 +1283,26 @@ async function main() {
   // probe after the serial proof, and KVM check8 already proved
   // the app itself shows "Media connected".
   await sleep(20000);
-  // `before` scopes the wait to lines written after the answer, so
-  // a stale media-state from an earlier run cannot satisfy it.
   // 360 s, not 180 s: round 3 connected at ~120 s, but round 6 got
   // no connected state within 200 s on a slower TCG runner — the
   // bridges were still working, just slower than the budget.
-  const before = logLines(b.logPath).length;
+  // Scoped at mediaBefore (captured before the call): the connected
+  // lines can land during the answer loop, and scoping after the
+  // loop missed lines the run already produced (M10: bob's two
+  // "connected" lines sat before the old cutoff while the wait
+  // reported "no media-state line at all").
   const serialMedia = await Promise.all([
     waitForLog(
       b.logPath,
       /"kind":"media-state","user":"@alice:test.local","media":"connected"/,
       360000,
-      before,
+      mediaBefore,
     ),
     waitForLog(
       b.logPath,
       /"kind":"media-state","user":"@bob:test.local","media":"connected"/,
       360000,
-      before,
+      mediaBefore,
     ),
   ]);
   const mediaFlows = serialMedia.every(Boolean);
@@ -1288,7 +1314,7 @@ async function main() {
   let lastMedia = "";
   if (!mediaFlows) {
     const states = logLines(b.logPath)
-      .slice(before)
+      .slice(mediaBefore)
       .filter((l) => l.includes("media-state"))
       .slice(-4)
       .map((l) => l.slice(-160));
