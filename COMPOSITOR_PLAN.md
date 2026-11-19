@@ -8,6 +8,141 @@ an experiment alongside Weston; it is the SevynOS compositor, and the
 browser embed is its first proof: Chromium's surface placed by Genesis
 inside the Browser app's content rect, as one window, at 60 fps.
 
+## The split (locked, Kevon 2026-11-19 ~06:41 EST)
+
+**Genesis gets its own public repo: `realkevonporter/genesis`,
+GPL-3.0-or-later (same license as SevynOS), with its own README, LICENSE,
+and CI. Its README must state plainly: Genesis is SevynOS's official
+compositor, built for SevynOS only, open-source.**
+
+Kevon is creating the repo himself (2026-11-19 ~06:42 EST) and will hand
+it over. **No repo-creation attempt via API** — the seed waits for his
+handover (repo URL + write access for the PAT). If the handover shows the
+repo is private or the PAT cannot write to it, that is reported plainly
+instead of worked around.
+
+**The split comes FIRST, then Stage 2 in the new repo.** The boundary is
+defined here, before any code moves. Nothing is seeded until the handover
+is confirmed.
+
+### What moves to `genesis` (decided from the code)
+
+- **The C compositor itself** — the future `v2/compositor/` tree
+  (ADR-0006 Phase 2 layout: `include/`, `src/` with `main`, `server`,
+  `backend`, `output`, `seat`, `input`, `xdg-shell`, `surface-registry`,
+  `runtime-bridge`, `logging`, `protocols/`, `tests/`, `meson.build`)
+  lives in the genesis repo from the start. There is no C server code in
+  sevynos today to move; Stage 2 is written there, not in sevynos.
+- **`v2/compositor/test-client.c`** — the M1 test client (one
+  xdg_toplevel window, two same-client subsurfaces, pointer/keyboard
+  logging) becomes the genesis repo's first test client. It has no
+  license header today — it is covered only by sevynos's root LICENSE —
+  so the seed PR adds the `SPDX-License-Identifier: GPL-3.0-or-later`
+  header on move.
+- **`graphics/core/` (whole package) → genesis `model/`.** This is the
+  pure-TypeScript, host-independent scene/display/surface/window/renderer
+  model (`GenesisCompositor`, `GenesisScene` + scene nodes,
+  `GenesisDisplay` + display manager/registry/render plans, surface and
+  window registries, frame executor/render loop) with its vitest suite.
+  It moves whole, not sliced: `compositor/` imports `../window/` and
+  `display/` imports `../errors/`, so slicing it would break the package.
+  Why it moves: it is the spec-as-code for exactly the concepts the C
+  server must implement, it is GPL-3.0-or-later already
+  (`graphics/core/package.json`), it is self-contained, and **nothing in
+  the v2 rebuild imports it** — moving it costs sevynos nothing and gives
+  the new repo day-one CI content (model tests) plus a tested policy
+  model next to the implementation. In the genesis repo it stays
+  TypeScript under `model/`; the C server is the implementation, the model
+  is the executable spec and the tests — it is not shipped code in the
+  image. (Exact npm package name in the new repo is a detail for the
+  seed PR; no npm publishing is decided here.)
+
+### What stays in `sevynos`
+
+- **`v2/rn/host/` — all of it**, including `genesis-presenter.cc` and
+  `wayland.cc`. These are Wayland _clients_: the presenter is the M12
+  client-side EGL present path (the host drawing its own frames), not
+  compositor server code. The name "genesis" there means "the
+  Genesis-era present path" — it does not make it compositor code.
+- **The Shell, the Runtime/appd, `sevyn.c`** (the CLI, including the
+  browser verbs and the future `browser embed` verb), statusd, the image
+  builders, the m-checks (m1/m12/m13), `weston.ini`, the nightly.
+- **`graphics/genesis/` (`@sevynos/genesis`, mobile scene library) —
+  stays, and is NOT the compositor.** Its README already says so: it is
+  the self-contained scene-graph library for `shell/mobile`, "unrelated
+  to the Genesis Node.js host process", "Do not import it from host
+  code". The shared name is a historical collision the split must not
+  deepen: the new public repo is the wlroots compositor, the mobile
+  package keeps its name and scope. Renaming either one is a separate
+  decision for Kevon, not part of the split.
+- **Plan/history docs** (`BROWSER_PLAN.md`, `GPU_COMPOSITOR_PLAN.md`,
+  this plan) stay in sevynos; the genesis repo gets its own README that
+  states the SevynOS-only purpose.
+
+### How sevynos consumes genesis (picked): pinned-commit fetch at image-build time
+
+**Pick: the image builder fetches a pinned genesis commit — not a
+submodule, not a vendored copy.** The pin lives in one file
+(`v2/image/genesis-pin.txt`: commit sha + tarball sha256), and
+`build-genesis-image.sh` fetches
+`https://codeload.github.com/realkevonporter/genesis/tar.gz/<sha>`,
+verifies the sha256, extracts it, and builds the compositor + test
+client from the fetched tree. A builder env override
+(`SEVYN_GENESIS_SRC=/path/to/local/genesis`, same shape as
+`SEVYN_V2_SYSROOT`) lets a developer build against a local checkout
+without bumping the pin.
+
+Why this, and not the alternatives:
+
+- **Precedent in this tree:** the builders already pin and fetch external
+  artifacts at build time (the Chromium snapshot 1738523, staged by the
+  M5/M13 builders). A pinned genesis tarball is the same shape, and the
+  pin is bumped by a PR exactly like the Chromium pin.
+- **Submodule — rejected:** there is no submodule precedent in the repo,
+  and the push path (`gh-push.py`, git-database API) has no
+  submodule/gitlink support — a gitlink entry could not be created or
+  verified through this workflow, and CI would need `submodules: true`
+  on every checkout. Revisit only if push tooling ever supports
+  submodules.
+- **Vendored copy checked into sevynos — rejected:** it duplicates the
+  source of truth, drifts silently, and defeats the point of the split.
+- **The m1 check's path matters:** today `build-m1-image.sh` compiles
+  `v2/compositor/test-client.c` from the tree. After the split, the M1
+  builder compiles the test client from the fetched genesis tree at the
+  pinned commit; `m1-check.mjs` itself is unchanged (it only cares the
+  binary exists and behaves). Until the split lands, M1 keeps building
+  from the tree — the split PR flips the builder and the pin in one
+  commit, so the nightly never has a gap.
+- **CI ownership:** the genesis repo's CI owns the model tests (vitest),
+  the C compositor build, the test-client build, and eventually the
+  nested genesis-check. Sevynos CI owns the image + m-checks against the
+  pinned commit.
+
+### Order of work (split first, Stage 2 second)
+
+1. **Handover** — Kevon confirms the repo URL + PAT write access
+   (verified by `GET /repos/realkevonporter/genesis` and a write probe;
+   private or unwritable is reported, not worked around).
+2. **Seed PR (in `genesis`)** — README + LICENSE + CI + moved
+   `graphics/core/` → `model/` + moved `v2/compositor/test-client.c` →
+   `compositor/test-client.c` (with the SPDX header) + its build. No C
+   server code yet — the seed is the boundary, the model, and the test
+   client.
+3. **Consumption PR (in `sevynos`)** — builder fetches the pinned genesis
+   tarball; M1 builder compiles the test client from the fetched tree;
+   pin file added; `v2/compositor/test-client.c` and `graphics/core/`
+   removed from sevynos in the same PR. One commit, no gap; the nightly
+   keeps working throughout because the pin points at the seeded genesis
+   commit.
+4. **Stage 2** (minimal nested compositor) lands in the genesis repo,
+   consumed by sevynos at a new pin.
+
+### Where this plan lives
+
+This plan PR (#135) is open in sevynos. After the handover, Kevon
+decides whether the plan moves to the genesis repo — the PR stays in
+sevynos until he says so; it is not moved unilaterally.
+
 ## The decision (locked, Kevon 2026-11-19 ~06:38 EST)
 
 **Genesis is SevynOS-only and the official compositor — the one and only
@@ -143,10 +278,11 @@ embedding mechanism, and no client request through it can place a surface.
 - **Language: C** (ADR-0006). The Shell stays TypeScript/React Native;
   the boundary is a typed native interface / IPC, never raw wlroots
   pointers in Shell code.
-- **Layout** (ADR-0006 Phase 2): `v2/compositor/` with `include/`,
-  `src/` (`main`, `server`, `backend`, `output`, `seat`, `input`,
-  `xdg-shell`, `surface-registry`, `runtime-bridge`, `logging`),
-  `protocols/`, `tests/`, `meson.build`, `README.md`.
+- **Layout** (ADR-0006 Phase 2, in the genesis repo — see "The split"):
+  `compositor/` with `include/`, `src/` (`main`, `server`, `backend`,
+  `output`, `seat`, `input`, `xdg-shell`, `surface-registry`,
+  `runtime-bridge`, `logging`), `protocols/`, `tests/`, `meson.build`,
+  `README.md`.
 - **Protocols in v1:** core Wayland compositor, wl_shm, wl_output, wl_seat
   (pointer + keyboard), xdg-shell, `zwlr_foreign_toplevel_manager_v1`
   (Shell only — see below), `zwp_linux_dmabuf_v1` (the zero-copy path).
@@ -456,10 +592,13 @@ before the standalone compositor becomes the shipping default:
 
 - **New builder, copied from `build-m13-image.sh`** — the M13 builder is
   untouched, so the M13 check keeps proving its own image. The new
-  `build-genesis-image.sh` adds: `libwlroots-dev` 0.17.1 (pinned) and its
-  build deps, the `v2/compositor/` meson build, staging of
-  `sevyn-compositor` + `sevyn-compositor.sock` path, and the init change
-  (supervise Genesis; socket-wait timeout → recovery console;
+  `build-genesis-image.sh` fetches the genesis repo at the pinned commit
+  (see "The split" — `v2/image/genesis-pin.txt`, tarball sha256-verified,
+  `SEVYN_GENESIS_SRC` local override) and builds the compositor + test
+  client from the fetched tree; it adds `libwlroots-dev` 0.17.1 (pinned)
+  and its build deps, stages `sevyn-compositor` + the
+  `sevyn-compositor.sock` path, and carries the init change (supervise
+  Genesis; socket-wait timeout → recovery console;
   `sevyn.recovery=1` → recovery console directly). Weston is staged
   only into the _nested-check_ image variant (Stage 2, where it is the
   outer compositor); the standalone image stages no Weston.
