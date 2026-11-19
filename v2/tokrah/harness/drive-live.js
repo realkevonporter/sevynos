@@ -1,7 +1,7 @@
 // SevynOS M6 — live-session driver. Boots the real Tokrah bundle in
 // the mock Sevyn host, drives the UI the way a user would (click the
-// email field, type credentials, tap Sign In, tap the red Go Live
-// button, fill the title, confirm 18+, Start Live, End), and asserts
+// email field, type credentials, tap Sign In, tap Start a Live Stream
+// on the Live tab, fill the title, confirm 18+, Start Live, End), and asserts
 // the wire against the mock API: POST /v1/auth/login, POST /v1/live,
 // socket live:join, POST /v1/live/:id/end. Exits 0 on a full pass.
 // Usage: node drive-live.js [bundle.js]
@@ -105,16 +105,6 @@ function clickText(sub, which = 0) {
   const t = hits[which];
   return clickAt(t.x + t.w / 2, t.y + t.h / 2);
 }
-function findRect(color) {
-  const p = lastPresent();
-  if (!p) return [];
-  return p.ops.filter(
-    (o) =>
-      o.type === "rect" &&
-      typeof o.color === "string" &&
-      o.color.toLowerCase() === color.toLowerCase(),
-  );
-}
 function key(code, shift = false) {
   mock.handlers.key({ key: code, pressed: true, shift });
 }
@@ -168,17 +158,21 @@ async function main() {
     ),
   );
   check("POST /v1/auth/login", true);
+  // The app lands on the Live tab after login (page 0 of the
+  // swipeable pager; the feed mounts behind it). The feed's old red
+  // Go Live button (#E52B42) no longer exists — the go-live entry now
+  // lives on the Live screen ("Start a Live Stream" empty-state
+  // button, plus a "Go Live" pill). Enter the flow from there.
   await waitFor(
-    "home feed (Go Live button)",
-    () => findRect("#E52B42").length > 0,
+    "live tab after login",
+    () => findText("Start a Live Stream").length > 0,
     20000,
   );
-  check("home feed renders after login", true);
+  check("live tab renders after login", true);
 
   // 3 — go live
-  const red = findRect("#E52B42")[0];
-  if (!clickAt(red.x + red.w / 2, red.y + red.h / 2))
-    throw new Error("Go Live button not hittable");
+  if (!clickText("Start a Live Stream"))
+    throw new Error("Start a Live Stream button not found");
   await waitFor(
     "go-live screen",
     () => findText("Go Live").length > 0 && findText("Start Live").length > 0,

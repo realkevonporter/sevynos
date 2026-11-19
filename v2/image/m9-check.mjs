@@ -110,9 +110,9 @@ const IMAGE = join(OUT, "sevynos.img");
 const TIMEOUT_S = Number(process.env.SEVYN_V2_M9_TIMEOUT || 10800);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
 // QEMU accelerator: "tcg" in the sandbox (no /dev/kvm), "kvm" on a
-// box with real KVM. The go-live mount flush is 727-956ms under TCG
-// and a retry tap landing mid-flush wedges it; under KVM the flush
-// is fast and the wedge should vanish.
+// box with real KVM. The go-live mount flush is 727-956ms under TCG,
+// so the go-live taps are spaced 17s apart: a second tap is a fresh
+// navigate, never a mid-flush re-entry.
 const ACCEL = process.env.SEVYN_V2_ACCEL || "tcg";
 const TOKRAH_SRC = process.env.TOKRAH_SRC || "";
 const ANCHOR_FILE = join(ROOT, "update", "trusted-update-keys.json");
@@ -826,17 +826,55 @@ function pressableFor(ops, x, y) {
   if (best) return { x: best.x + best.w / 2, y: best.y + best.h / 2 };
   return { x, y };
 }
-// Centre of a pressable rect of a given colour (the go-live button
-// is the red #E52B42 pressable on the feed). The red lives on the
-// button's outer View, not its Pressable, so also search the coloured
-// rects — clicking the rect's centre hit-tests to the Pressable on
-// top of it.
-function pressableByColor(ops, color) {
-  const p = (ops?.press || []).find((p) => p.color === color);
-  if (p) return { x: p.x + p.w / 2, y: p.y + p.h / 2 };
-  const r = (ops?.rects || []).find((r) => r.color === color);
-  if (!r) return null;
-  return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+// Tap point for a button whose label sits under a smaller overlapping
+// pressable from another pager page. The (tabs) pager mounts the Live
+// and Feed pages at the same layout origin in the host's presented
+// ops, Feed drawn after (on top of) Live — so pressableFor's
+// smallest-containing centre for "Start a Live Stream" lands on the
+// Feed page's "Create Post" button (head3: tap (400,691) -> nodeId
+// 260, which opened the post editor; the editor then threw in
+// FullscreenMediaEditor and blanked the app). The label belongs to
+// the containing pressable overlapping the label rect most; tap the
+// widest strip of that button that no other pressable covers at the
+// label's height. Returns null when no such strip verifies, so the
+// caller can fall back to the other go-live entry instead of tapping
+// the wrong button.
+function exposedTapPoint(ops, text) {
+  const t = (ops?.texts || []).find((t) => t.t === text);
+  if (!t) return null;
+  const tc = { x: t.x + t.w / 2, y: t.y + t.h / 2 };
+  const press = ops?.press || [];
+  const contains = (p, x, y) => x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h;
+  const overlap = (p) => {
+    const x0 = Math.max(p.x, t.x);
+    const x1 = Math.min(p.x + p.w, t.x + t.w);
+    const y0 = Math.max(p.y, t.y);
+    const y1 = Math.min(p.y + p.h, t.y + t.h);
+    return Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  };
+  const containing = press.filter((p) => contains(p, tc.x, tc.y));
+  if (!containing.length) return { x: tc.x, y: tc.y };
+  const target = containing.reduce((a, b) => (overlap(b) > overlap(a) ? b : a));
+  // Covered x-intervals of the target's row at the label's height.
+  const covered = press
+    .filter((p) => p !== target && tc.y >= p.y && tc.y <= p.y + p.h)
+    .map((p) => [Math.max(p.x, target.x), Math.min(p.x + p.w, target.x + target.w)])
+    .filter(([a, b]) => b > a)
+    .sort((a, b) => a[0] - b[0]);
+  let best = null;
+  let cursor = target.x;
+  for (const [a, b] of [...covered, [target.x + target.w, target.x + target.w]]) {
+    if (a > cursor && (!best || a - cursor > best.w)) {
+      best = { x: (cursor + a) / 2, w: a - cursor };
+    }
+    cursor = Math.max(cursor, b);
+  }
+  if (!best) return null;
+  const pt = { x: best.x, y: tc.y };
+  // Verify the point hits the target and nothing else.
+  const hits = press.filter((p) => contains(p, pt.x, pt.y));
+  if (hits.length !== 1 || hits[0] !== target) return null;
+  return pt;
 }
 
 // --- M9 helpers: pointer drags, colour boxes, ESP + feed ---
@@ -2644,19 +2682,41 @@ async function main() {
     120000,
   );
   check("headless B: mock API saw POST /v1/auth/login", !!loginPost);
-  // The feed paints after the login: wait for the red go-live
-  // pressable in the ops log before reading coordinates. Scope the
-  // wait to after the B run started: the login screen's own ops can
-  // already contain #e52b42, which would end the wait immediately.
-  await waitForLog(b.logPath, /#e52b42/i, 120000, beforeB);
+  // The app lands on the Live tab after login (page 0 of the
+  // swipeable pager; the feed mounts behind it). The feed's old red
+  // go-live button (#e52b42) no longer exists — the go-live entries
+  // now live on the Live screen: the "Start a Live Stream"
+  // empty-state button and the "Go Live" pill in the header. Wait
+  // for the button text, then read both entries' coordinates the
+  // same way phase A reads the login controls: text centre ->
+  // smallest containing pressable.
+  await waitForLog(b.logPath, /Start a Live Stream/, 120000, beforeB);
   const opsB = latestOps(b);
-  const goLive = opsB ? pressableByColor(opsB, "#e52b42") : null;
+  const goLiveC = opsB ? textCenter(opsB, "Start a Live Stream") : null;
+  // The header "Go Live" pill (ActiveLivesScreen) is the FIRST
+  // go-live entry Phase C taps: it navigates to the same
+  // /(app)/live/go-live route as the empty-state button, and its
+  // point is unambiguous — no other pressable contains it. The
+  // empty-state button is the SECOND entry, tapped at an exposed
+  // strip (exposedTapPoint): pressableFor's smallest-containing
+  // centre lands on the Feed page's "Create Post" button instead
+  // (same layout origin, drawn on top), which opened the post
+  // editor and blanked the app on head3. The button tap is
+  // best-effort: when no covered-free strip verifies, Phase C runs
+  // on the pill alone.
+  const pillC = opsB ? textCenter(opsB, "Go Live") : null;
+  const goLivePill = pillC ? pressableFor(opsB, pillC.x, pillC.y) : null;
+  const goLive = opsB ? exposedTapPoint(opsB, "Start a Live Stream") : null;
   check(
-    "headless B: home feed paints (red go-live button)",
-    !!goLive,
-    opsB ? `${opsB.texts.length} texts` : "no ops line",
+    "headless B: live tab paints (Start a Live Stream + Go Live pill)",
+    !!(goLiveC && goLivePill),
+    opsB
+      ? `${opsB.texts.length} texts; button tap ${
+          goLive ? "aimed" : "skipped (no exposed strip)"
+        }`
+      : "no ops line",
   );
-  if (!opsB || !goLive) {
+  if (!opsB || !goLiveC || !goLivePill) {
     finish(false, { phase: "B" });
     return;
   }
@@ -2677,23 +2737,26 @@ async function main() {
   const inC1 = [
     ...loginSeqC1,
     // Go-live at 28000, not 20000: the login navigation is still
-    // settling at 20000 (home feed appears ~21000ms under TCG) and a
-    // navigate fired mid-settle wedges flushSyncWork (check 42).
-    // SINGLE tap, no retries: the retry taps at +2s/+4s re-enter
-    // router.navigate + flushSyncWork while tap 1's mount flush is
-    // still running (727-956ms under TCG) and the update gets
-    // dropped — no error, feed stays on screen. The probe retry loop
-    // (fresh host process) is the fallback, not in-run re-taps.
-    `28000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
+    // settling at 20000 (home feed appears ~21000ms under TCG).
+    // TWO taps, 17s apart, on DIFFERENT entries — the header pill
+    // first, then the empty-state button at its exposed strip.
+    // The pill's point is unambiguous; the button's centre is
+    // not (it hits the Feed page's "Create Post" — head3). By
+    // +17s tap 1's mount flush (727-956ms under TCG) has long
+    // completed, so tap 2 is a fresh navigate, not a mid-flush
+    // re-entry. If tap 1 navigated, tap 2 lands on the go-live
+    // screen's camera preview (no tap handler there; Start sits
+    // below the fold, y > 1200) — harmless. If tap 1 missed,
+    // tap 2 still opens go-live from the button.
+    `28000 tap ${Math.round(goLivePill.x)} ${Math.round(goLivePill.y)}`,
+    ...(goLive ? [`45000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`] : []),
   ].join(";");
   const wroteC1 = await writeInputFile(b, "/tmp/m9-in-c1.txt", inC1);
   note("headless C: probe input written", !!wroteC1);
-  // Retry the probe once on a fresh host process: the go-live
-  // navigate can wedge flushSyncWork under TCG (onPress fires, no
-  // navigation, beats stop — checks 37/39/42/52) and a fresh
-  // process almost always gets through. The retry uses distinct
-  // filenames so termCmd's 80-char prefix can't match the first
-  // run's stale EXEC line.
+  // Retry the probe once on a fresh host process: a fresh process
+  // almost always gets through when the first run's navigation
+  // misses. The retry uses distinct filenames so termCmd's 80-char
+  // prefix can't match the first run's stale EXEC line.
   let opsC1 = null;
   let titleT = null;
   let ageT = null;
@@ -2706,8 +2769,8 @@ async function main() {
     const runC1 = await termCmd(
       b,
       attempt === 0
-        ? "tokrah run --width 800 --height 1200 --seconds 60 --input /tmp/m9-in-c1.txt --out /tmp/m9-ops-c1.json"
-        : "tokrah run --width 800 --height 1200 --seconds 60 --input /tmp/m9-in-c1-retry.txt --out /tmp/m9-ops-c1-retry.json",
+        ? "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-c1.txt --out /tmp/m9-ops-c1.json"
+        : "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-c1-retry.txt --out /tmp/m9-ops-c1-retry.json",
       240000,
     );
     check(
@@ -2722,8 +2785,7 @@ async function main() {
     );
     check("headless C: login replayed in probe run", !!loginPostC);
     // Log the wait's own outcome: a timeout here is "screen didn't
-    // appear in 120s", not "screen absent" — conflating the two hid
-    // the wedge (the run ended before the flush finished).
+    // appear in 120s", not "screen absent".
     const goLiveSeen = await waitForLog(
       b.logPath,
       /What’s happening\?/,
@@ -2731,6 +2793,19 @@ async function main() {
       beforeC1,
     );
     note("headless C: go-live screen text seen in log", !!goLiveSeen);
+    // The host logs every tap's hit-test result ("HOST pointer down
+    // (x,y) -> nodeId N") — the only evidence a tap landed where it
+    // aimed. Note the probe run's taps so a still-failing phase C
+    // shows whether the go-live tap hit its button, hit something
+    // else, or hit nothing (nodeId -1).
+    const downs = logLines(b.logPath)
+      .slice(beforeC1)
+      .filter((l) => l.includes("HOST pointer down"));
+    note(
+      `headless C: pointer downs (attempt ${attempt})`,
+      true,
+      downs.length ? downs.join(" | ") : "none",
+    );
     opsC1 = latestOps(b);
     titleT = opsC1 ? textCenter(opsC1, "What’s happening?") : null;
     ageT = opsC1 ? textCenter(opsC1, "I confirm I’m at least 18 years old.") : null;
@@ -2762,21 +2837,26 @@ async function main() {
   const maxScroll = Math.max(0, contentBottom - 1200);
   const scrollDy = Math.min(Math.max(0, startT.y - 1100), maxScroll);
   const startLiveSeq = [
-    `28000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`,
-    // Single go-live tap (same reasoning as the probe): retry taps
-    // re-enter navigate mid-flush and wedge it.
-    `34000 tap ${Math.round(titleBtn.x)} ${Math.round(titleBtn.y)}`,
-    `34500 type M7 test live`,
+    // Same two-tap pattern as the probe, pill first: if the pill
+    // tap missed, the button tap at its exposed strip still opens
+    // go-live; if the pill tap landed, the button tap hits the
+    // go-live preview area (no tap handler; Start is below the
+    // fold). The form taps shift +17s to match — their relative
+    // gaps (2s after the age tap before Start) are unchanged.
+    `28000 tap ${Math.round(goLivePill.x)} ${Math.round(goLivePill.y)}`,
+    ...(goLive ? [`45000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`] : []),
+    `51000 tap ${Math.round(titleBtn.x)} ${Math.round(titleBtn.y)}`,
+    `51500 type M7 test live`,
     // Scroll AT the title: the point must be inside the Go Live form's
     // own ScrollView. (400,600) is inside the feed's ScrollView, which
     // stays mounted under the go-live overlay — scrolling there moves
     // the feed, not the form, and the form's Start stays below the fold.
-    `36500 scroll ${Math.round(titleBtn.x)} ${Math.round(titleBtn.y)} 0 ${Math.round(scrollDy)}`,
+    `53500 scroll ${Math.round(titleBtn.x)} ${Math.round(titleBtn.y)} 0 ${Math.round(scrollDy)}`,
     // 2s gaps after the age tap: the age checkbox's state update must
     // flush before Start, or canStart is still false and begin()
     // bails (check 45: Start fired 500ms after age, no POST /v1/live).
-    `37500 tap ${Math.round(ageBtn.x)} ${Math.round(ageBtn.y - scrollDy)}`,
-    `39500 tap ${Math.round(startBtn.x)} ${Math.round(startBtn.y - scrollDy)}`,
+    `54500 tap ${Math.round(ageBtn.x)} ${Math.round(ageBtn.y - scrollDy)}`,
+    `56500 tap ${Math.round(startBtn.x)} ${Math.round(startBtn.y - scrollDy)}`,
   ];
   const inC = [...loginSeqC1, ...startLiveSeq].join(";");
   const wroteC = await writeInputFile(b, "/tmp/m9-in-c.txt", inC);
@@ -2784,7 +2864,7 @@ async function main() {
   const beforeC = logLines(b.logPath).length;
   const runC = await termCmd(
     b,
-    "tokrah run --width 800 --height 1200 --seconds 50 --input /tmp/m9-in-c.txt --out /tmp/m9-ops-c.json",
+    "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-c.txt --out /tmp/m9-ops-c.json",
     240000,
   );
   check("headless C: sevyn tokrah run completes (start-live input)", !!runC);
