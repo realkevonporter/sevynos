@@ -1267,27 +1267,36 @@ async function main() {
   // The End confirm modal's "End live" button: its coordinates are
   // unknown until the modal paints. Phase D first taps End and reads
   // the modal's ops log; a second run then taps "End live".
+  // The End tap MUST be scheduled after the Start tap (56500): the
+  // host sorts headless input events by timestamp (sevyn-rn-host.cc
+  // loadHeadlessInput), so the old 55000 End fired BEFORE Start,
+  // landed on the go-live screen where it missed (head4 M9: End at
+  // (768,629) hit nodeId -1 at 55s), no modal ever opened, and the
+  // confirm tap then hit the like overlay instead. End at 62000
+  // (host screen paints ~1.4s after Start) and confirm at 68000
+  // (modal paints within ~60ms of a hit End tap).
   const endBtn = pressableFor(opsC, endT.x, endT.y);
   const inD = [
     ...loginSeqC1,
     ...startLiveSeq,
-    `55000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
+    `62000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
   ].join(";");
   const wroteD = await writeInputFile(b, "/tmp/m7-in-d.txt", inD);
   note("headless D: end-live input written", !!wroteD);
   const runD = await termCmd(
     b,
-    "tokrah run --width 800 --height 1200 --seconds 65 --input /tmp/m7-in-d.txt --out /tmp/m7-ops-d.json",
+    "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m7-in-d.txt --out /tmp/m7-ops-d.json",
     240000,
   );
   check("headless D: sevyn tokrah run completes (end tap)", !!runD);
   // The confirm modal paints after the End tap: wait for its
   // "End live" text in the ops log before reading coordinates.
-  // Retry the whole D run once if the modal never paints: a headless
-  // run can wedge mid-flow under TCG (the host loop stalls inside a
-  // state-update flush — checks 37/39/42/43), and a fresh host
-  // process almost always gets through. The retry replays the same
-  // input file, so it re-does login + start + End from scratch.
+  // Retry the whole D run once if the modal never paints: a fresh
+  // host process can clear a slow mount under TCG. The retry replays
+  // the same input file, so it re-does login + start + End from
+  // scratch. (The head4 M9 retry only "worked" because the mock's
+  // live session persisted from the first run and the app resumed
+  // the host screen — a state leak, not the intended flow.)
   let endLiveT = null;
   let opsD = null;
   for (let attempt = 0; attempt < 2 && !endLiveT; attempt++) {
@@ -1299,7 +1308,7 @@ async function main() {
       await writeInputFile(b, "/tmp/m7-in-d-retry.txt", inD);
       const runD2try = await termCmd(
         b,
-        "tokrah run --width 800 --height 1200 --seconds 65 --input /tmp/m7-in-d-retry.txt --out /tmp/m7-ops-d-retry.json",
+        "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m7-in-d-retry.txt --out /tmp/m7-ops-d-retry.json",
         240000,
       );
       check("headless D: sevyn tokrah run completes (end tap, retry)", !!runD2try);
@@ -1335,15 +1344,15 @@ async function main() {
   const inD2 = [
     ...loginSeqC1,
     ...startLiveSeq,
-    `55000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
-    `60000 tap ${Math.round(endLiveBtn.x)} ${Math.round(endLiveBtn.y)}`,
+    `62000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
+    `68000 tap ${Math.round(endLiveBtn.x)} ${Math.round(endLiveBtn.y)}`,
   ].join(";");
   const wroteD2 = await writeInputFile(b, "/tmp/m7-in-d2.txt", inD2);
   note("headless D: confirm input written", !!wroteD2);
   const beforeD2 = logLines(b.logPath).length;
   const runD2 = await termCmd(
     b,
-    "tokrah run --width 800 --height 1200 --seconds 70 --input /tmp/m7-in-d2.txt --out /tmp/m7-ops-d2.json",
+    "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m7-in-d2.txt --out /tmp/m7-ops-d2.json",
     240000,
   );
   check("headless D: sevyn tokrah run completes (confirm tap)", !!runD2);
