@@ -1164,6 +1164,13 @@ ls -la /dev/input/ 2>/dev/null || echo "M4 init: no /dev/input (no input devices
 sleep 1
 WIFI=$(/usr/local/bin/sevyn net announce 2>/dev/null || echo "wifi: off")
 echo "M5 init: $WIFI"
+# System clock (GF65: CMOS RTC reads 2010-01-03): NTP-sync now that
+# the network is up (DHCP ran above) and statusd is running — the
+# clock must be right before Genesis starts, or Chromium fails
+# every HTTPS page with ERR_CERT_DATE_INVALID. Backgrounded +
+# best-effort: a failed sync never fails the boot (Genesis retries
+# on network-up + hourly, and `sevyn time sync` covers it by hand).
+( /usr/local/bin/sevyn time sync >/tmp/sevyn-time-sync.log 2>&1 && echo "SEVYN_TIME_SYNCED $(head -n 1 /tmp/sevyn-time-sync.log)" || echo "SEVYN_TIME_SYNC_FAILED" ) &
 # App daemon next: seeds the registry from pristine on first boot and
 # owns /run/sevyn-apps.sock. The shell connects to it for its dock
 # list and launches; the harness drives it over /dev/ttyS2.

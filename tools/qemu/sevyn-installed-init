@@ -177,6 +177,29 @@ swapon -a 2>/dev/null || true
 # Mount any additional fstab entries
 mount -a 2>/dev/null || true
 
+# ─── Status daemon ───────────────────────────────────────────────────
+# Runs as root and owns the privileged half of the system clock
+# (statusd SET_TIME: clock_settime + RTC + last-known-time).
+# Genesis runs as an unprivileged session user since cc1639c, so
+# without this daemon no NTP sync can ever set the clock — the GF65
+# came up in 2010. Started before networking so the DHCP sync below
+# can reach it, and so its last-known-time restore (dead-battery
+# mask) runs before anything reads the clock.
+if [ -x /usr/local/bin/sevyn-statusd ]; then
+  /usr/local/bin/sevyn-statusd &
+  echo "SEVYN_STATUS_DAEMON_STARTED"
+else
+  echo "SEVYN_STATUS_DAEMON_MISSING"
+fi
+
+# NTP-sync the system clock through the status daemon, in the
+# background: never stalls the boot, never fails it. The RTC may
+# read 2010 (dead battery); this is what makes the clock right
+# before Genesis starts, so Chromium never sees a 2010 clock.
+sync_clock() {
+  ( /usr/local/bin/sevyn time sync >/tmp/sevyn-time-sync.log 2>&1 && echo "SEVYN_TIME_SYNCED $(head -n 1 /tmp/sevyn-time-sync.log)" || echo "SEVYN_TIME_SYNC_FAILED" ) &
+}
+
 log_marker "SEVYN_INPUT_DEVICES_INITIALIZED"
 
 # ─── Networking ──────────────────────────────────────────────────────
@@ -217,6 +240,7 @@ for wifi_path in /sys/class/net/*; do
           if wpa_cli -p /run/wpa_supplicant -i "$wifi_name" status 2>/dev/null | grep -q '^wpa_state=COMPLETED$'; then
             if udhcpc -q -n -t 3 -T 3 -s /usr/share/udhcpc/default.script -i "$wifi_name" >/tmp/sevyn-wifi-dhcp.log 2>&1; then
               echo "SEVYN_NETWORK_READY interface=$wifi_name"
+              sync_clock
             fi
             break
           fi
@@ -237,6 +261,7 @@ for interface_path in /sys/class/net/*; do
   ip link set "$interface_name" up 2>/dev/null || continue
   if udhcpc -q -n -t 2 -T 3 -s /usr/share/udhcpc/default.script -i "$interface_name" >/tmp/sevyn-dhcp.log 2>&1; then
     echo "SEVYN_NETWORK_READY interface=$interface_name"
+    sync_clock
     break
   fi
 done

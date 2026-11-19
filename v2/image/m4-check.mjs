@@ -861,12 +861,16 @@ async function main() {
   }
   // M9: the Wi-Fi section comes first in Settings, so its Scan button
   // is focusable before the channel buttons — the focus order is now
-  // [X, Scan, Nightly, Stable, echo-ai, plan-ai], and Tab x3 lands on
-  // Nightly, not Stable. Click the Stable button directly: before
+  // [X, Scan, Nightly, Stable, Sync Now, Timezone, Apply, echo-ai,
+  // plan-ai] (#134's Date & Time section sits after the channel
+  // buttons, adding Sync Now, the timezone input, and Apply there),
+  // and Tab x5 lands on Nightly, not Stable. Click the Stable button
+  // directly: before
   // Stable applies, the channel is nightly, so Stable is the inactive
   // #e5e7eb button and Nightly is the active #111827 one — the
   // leftmost inactive button IS Stable. Scan for it by colour (the
-  // row's exact y shifts between images), falling back to Tab x4.
+  // row's exact y shifts between images), falling back to Tab x6 from
+  // no-focus.
   const beforeStable = logLines(b.logPath).length;
   let clickedStable = false;
   if (settingsHeader) {
@@ -938,11 +942,10 @@ async function main() {
   if (!clickedNightly) {
     // Fallback: Tab from Stable to Nightly. The focus order depends
     // on the image: M4 has no echo-ai/plan-ai, so it is [—, ▢, X,
-    // Scan, Nightly, Stable] and Tab x5 from Stable reaches Nightly;
-    // M4.5 adds echo-ai/plan-ai, making it x7. Try x5 first (M4); the
-    // waitForLog below will fail if it landed elsewhere, and the
-    // check reports it.
-    await key("tab");
+    // Scan, Nightly, Stable, Sync Now, Timezone, Apply] and Tab x4
+    // from Stable reaches Nightly; M4.5 adds echo-ai/plan-ai, making
+    // it x10. Try x4 first (M4); the waitForLog below will fail if it
+    // landed elsewhere, and the check reports it.
     await key("tab");
     await key("tab");
     await key("tab");

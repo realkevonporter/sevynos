@@ -475,6 +475,26 @@ async function main() {
     check(`status: ${key}=${val} pushed to subscriber`, !!hit);
   }
 
+  // 7b. The privileged clock verb: statusd (root) sets the system
+  // clock on request — the half the unprivileged session cannot do
+  // since cc1639c. The guest clock is set to the host's now, so the
+  // value is a real time, not a fixture; the log line proves the
+  // verb arrived, validated, and clock_settime succeeded (the RTC
+  // result varies by guest: ok where /dev/rtc0 exists).
+  {
+    const before = logLines().length;
+    const nowMs = Date.now();
+    ctl.write(`SET_TIME ${nowMs} 0 m1-check\n`);
+    const hit = await waitForLog(
+      new RegExp(
+        `STATUSD time set to ${nowMs} \\(offset 0 ms, source m1-check, rtc (ok|unavailable|failed)\\)`,
+      ),
+      10000,
+      before,
+    );
+    check("time: SET_TIME sets the guest clock via statusd", !!hit);
+  }
+
   // 8. Final frame still shows both surfaces, then clean poweroff.
   const shotFinal = join(OUT, "m1-shot-final.ppm");
   await qmp.screendump(shotFinal);
