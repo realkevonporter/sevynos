@@ -40,3 +40,25 @@ jobs:
           sudo apt-get update && sudo apt-get install --yes
           libwayland-dev libxkbcommon-dev pkg-config
       - run: cargo test --locked
+
+  # audiod: the native audio service (v2/audio). Compiles the daemon
+  # against the runner's libasound headers and proves it against the
+  # ALSA null PCM device — decodes all four formats, real-time
+  # position, guarded bad calls — with no audio hardware. Real
+  # audible output is GF65-only (see v2/audio/README.md).
+  audiod:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install ALSA build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          gcc libasound2-dev
+      - name: Compile audiod
+        run: >-
+          gcc -O2 -Wall -Wextra -o /tmp/sevyn-audiod
+          v2/audio/audiod.c v2/audio/audio-decode.c
+          v2/audio/third_party/stb_vorbis.c -lasound -lm -lpthread
+      - name: Run audiod harness (null device, 7 test WAVs + fixtures)
+        run: SEVYN_AUDIOD_BIN=/tmp/sevyn-audiod node v2/audio/test-audiod.mjs

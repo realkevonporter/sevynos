@@ -333,6 +333,22 @@ gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
   "$ROOT/update/sevyn.c"
 
+# --- audiod (native audio service) --------------------------------------
+# The audio daemon (v2/audio): C + libasound, decodes local audio
+# files in-process (vendored minimp3/dr_flac/stb_vorbis + own WAV
+# parser) and plays PCM straight to the HDA device — no sound
+# server, no Chromium, no media-player subprocess. It owns
+# /run/sevyn-audio.sock; `sevyn music` (sevyn.c above) and the host
+# media adapter speak its line protocol. Needs libasound2-dev on the
+# build host (the CI apt lists carry it); the header check fails
+# loudly with an actionable message instead of a bare gcc error.
+# Staged below via copy-closure (binary + libasound.so.2 closure,
+# ~1 MB) and started by init after commsd.
+[ -f "$SYSROOT/usr/include/alsa/asoundlib.h" ] || { echo "error: missing $SYSROOT/usr/include/alsa/asoundlib.h (install libasound2-dev)" >&2; exit 1; }
+gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-audiod" \
+  "$ROOT/audio/audiod.c" "$ROOT/audio/audio-decode.c" \
+  "$ROOT/audio/third_party/stb_vorbis.c" -lasound -lm -lpthread
+
 # Update trust anchor (see the header): committed release anchor, or a
 # fresh per-image test keypair.
 mkdir -p "$BUILD_TMP/trusted-update-keys"
@@ -617,6 +633,7 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$BUILD_TMP/sevyn-aid:/usr/local/bin/sevyn-aid" \
   "$BUILD_TMP/sevyn-updated:/usr/local/bin/sevyn-updated" \
   "$BUILD_TMP/sevyn:/usr/local/bin/sevyn" \
+  "$BUILD_TMP/sevyn-audiod:/usr/local/bin/sevyn-audiod" \
   "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
   "$CODE_SERVER_DIR/lib/node:/usr/share/sevyn/code-server/lib/node" \
   "$CHROMIUM_DIR/chrome:/usr/share/sevyn/chromium/chrome"
@@ -1231,6 +1248,17 @@ if [ "${MOCKCOMMS:-0}" = "1" ]; then
     --fake-media 1 >/data/logs/commsd-bob.log 2>&1 &
   echo "M10 init: comms mocks started (sevyn.mockcomms=1)"
 fi
+# audiod (native audio service): owns /run/sevyn-audio.sock (decodes
+# local audio files in-process, plays PCM to the HDA device through
+# ALSA). Starts after commsd so its first STATUS can answer while
+# the shell comes up; the apps drive it through `sevyn music` and
+# the host media adapter. Its log goes to /data/logs/audiod.log —
+# /data is the persistent data disk, so the log survives a reboot
+# (a /tmp log would be destroyed with the guest); the console only
+# gets a one-line start marker. (/data/logs already exists — the
+# commsd block above creates it.)
+/usr/local/bin/sevyn-audiod >/data/logs/audiod.log 2>&1 &
+echo "audiod started @ $(cut -d" " -f1 /proc/uptime)s"
 # Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
 # (localhost only — the browser that paints it arrives in M5). It
 # needs HOME for its user-data dir (the staged settings file lives
