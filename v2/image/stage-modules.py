@@ -47,14 +47,18 @@ def main():
 
     # Modules built into the kernel (=y) have no .ko file; they are
     # already present at boot and need no staging. modules.builtin
-    # lists them by path (kernel/.../<name>.ko).
+    # lists them by path (kernel/.../<name>.ko). Normalize to the
+    # underscored spelling: module files keep hyphens
+    # (videobuf2-core.ko) but lookups use underscores, so a raw
+    # hyphenated set would never match (videobuf2-core is built into
+    # Ubuntu's generic kernel and was falsely reported missing).
     builtin = set()
     try:
         with open(os.path.join(modroot, "modules.builtin")) as f:
             for line in f:
                 base = os.path.basename(line.strip())
                 if base.endswith(".ko"):
-                    builtin.add(base[:-3])
+                    builtin.add(base[:-3].replace("-", "_"))
     except OSError:
         pass
 
@@ -67,8 +71,9 @@ def main():
         seen.add(name)
         # Kernel module files use underscores (virtio_blk.ko.zst) but
         # the conventional spelling uses hyphens (virtio-blk); modprobe
-        # accepts both. Try the name as given, then the underscored form.
-        path = idx.get(name) or idx.get(name.replace("-", "_"))
+        # accepts both. Try the name as given, then each spelling —
+        # modinfo prints depends either way depending on the module.
+        path = idx.get(name) or idx.get(name.replace("-", "_")) or idx.get(name.replace("_", "-"))
         if path is None:
             # Built-in: nothing to stage (and nothing to insmod — the
             # manifest only lists staged modules). A built-in module

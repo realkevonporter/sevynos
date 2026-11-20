@@ -40,3 +40,31 @@ jobs:
           sudo apt-get update && sudo apt-get install --yes
           libwayland-dev libxkbcommon-dev pkg-config
       - run: cargo test --locked
+
+  # camd (native camera daemon): compile it and prove the socket
+  # protocol against the synthetic source — no camera hardware in
+  # CI. The image build (v2-m13.yml) is the gate for staging; this
+  # job is the gate for the daemon itself.
+  camd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      # setup-node's package-manager cache lookup needs pnpm on
+      # PATH (it fails the job before any step runs without it —
+      # the `check` job installs it the same way). No pnpm install
+      # runs in this job (one plain node script), so the
+      # auto-detected pnpm cache has nothing to save and the
+      # post-job save errors with a Path Validation Error — disable
+      # it (setup-node v5 auto-enables caching from the
+      # packageManager field otherwise).
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install camd build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          gcc libjpeg-turbo8-dev libpng-dev zlib1g-dev
+      - run: node v2/camera/camd-check.mjs

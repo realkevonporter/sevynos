@@ -54,6 +54,7 @@ jobs:
             wayland-protocols \
             libfreetype-dev \
             libpng-dev \
+            libjpeg-turbo8-dev \
             libssl-dev \
             weston \
             seatd \
@@ -71,6 +72,16 @@ jobs:
             mtools \
             wpasupplicant \
             iw
+          # UVC camera modules (videobuf2-core et al.) ship in
+          # linux-modules-extra, not the base linux-modules package —
+          # without them the M13 image build fails at stage-modules.py
+          # with "module videobuf2-core not found". There is no
+          # linux-modules-extra-generic metapackage in noble (apt
+          # cannot locate it), so install the -extra package for the
+          # newest generic kernel in /boot — the same kernel
+          # build-m13-image.sh picks.
+          KVER="$(basename "$(ls /boot/vmlinuz-*-generic | sort -V | tail -n 1)" | sed 's/^vmlinuz-//')"
+          sudo apt-get install -y -qq "linux-modules-extra-${KVER}"
       - name: Clone Tokrah (private — read-only PAT)
         run: |
           if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
