@@ -22,6 +22,10 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # graphics/core/ is generated, not tracked: materialize it from the
+      # pinned Genesis commit before pnpm install — the workspace lockfile
+      # expects @sevynos/graphics at graphics/core/.
+      - run: sh v2/image/fetch-genesis.sh model
       - run: pnpm install --frozen-lockfile
       - name: Build bootable image
         run: pnpm qemu:build
