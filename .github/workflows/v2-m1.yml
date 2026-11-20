@@ -21,7 +21,7 @@ on:
 
 jobs:
   m1-check:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, sevynos-kvm]
     # 60, not 30: M0's v2-image push runs were twice cancelled at the
     # 30-minute job timeout while still downloading linux-firmware
     # (a hard dep of linux-image-generic) from a slow Azure mirror —
@@ -35,8 +35,11 @@ jobs:
 
       - name: Install build + boot dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          # Several self-hosted runners share this box, so concurrent
+          # apt runs fight over the dpkg lock — retry a few times.
+          apt_ok=0
+          for attempt in 1 2 3 4 5 6; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq \
             qemu-system-x86 \
             linux-image-generic \
             busybox-static \
@@ -52,7 +55,13 @@ jobs:
             libgl1-mesa-dri \
             adwaita-icon-theme \
             fonts-dejavu-core \
-            xkb-data
+            xkb-data; then
+              apt_ok=1
+              break
+            fi
+            sleep 20
+          done
+          [ "$apt_ok" = 1 ]
 
       - name: Build the M1 image
         run: sudo sh v2/image/build-m1-image.sh
