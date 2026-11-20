@@ -59,8 +59,11 @@ jobs:
 
       - name: Install build + boot dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          # Several self-hosted runners share this box, so concurrent
+          # apt runs fight over the dpkg lock — retry a few times.
+          apt_ok=0
+          for attempt in 1 2 3 4 5 6; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq \
             qemu-system-x86 \
             linux-image-generic \
             busybox-static \
@@ -117,7 +120,13 @@ jobs:
             libxi6 \
             libxrender1 \
             libxtst6 \
-            libxss1
+            libxss1; then
+              apt_ok=1
+              break
+            fi
+            sleep 20
+          done
+          [ "$apt_ok" = 1 ]
 
       - name: Clone Tokrah (private — read-only PAT)
         run: |

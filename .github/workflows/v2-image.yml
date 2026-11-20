@@ -23,14 +23,29 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install build dependencies
-        run: >
-          sudo apt-get update && sudo apt-get install --yes
-          qemu-system-x86 busybox-static cpio linux-image-generic
+        run: |
+          # Several self-hosted runners share this box, so concurrent
+          # apt runs fight over the dpkg lock — retry a few times.
+          apt_ok=0
+          for attempt in 1 2 3 4 5 6; do
+            if sudo apt-get update && sudo apt-get install --yes qemu-system-x86 busybox-static cpio linux-image-generic; then
+              apt_ok=1
+              break
+            fi
+            sleep 20
+          done
+          [ "$apt_ok" = 1 ]
       - name: Build empty image
         # sudo: /boot kernels ship mode 600 (root-only).
         run: sudo sh v2/image/build-empty-image.sh
       - name: Boot empty image in QEMU
         run: sudo sh v2/image/boot-check.sh
+      - name: Hand the build dir back to the runner
+        # The build/boot steps run under sudo, so v2/image/build/ is
+        # root-owned; hand it back or the next job's checkout cannot
+        # clean the workspace (EACCES — the M1 failure mode).
+        if: always()
+        run: sudo chown -R "$USER" v2/image/build
       - name: Upload image artifacts
         if: always()
         uses: actions/upload-artifact@v4
