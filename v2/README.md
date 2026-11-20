@@ -78,8 +78,8 @@ reaffirmed 2026-11-06.
 ```text
 v2/
   README.md            # this file — vision, locks, milestones
-  compositor/
-    test-client.c      # M1: Wayland test client (one window, two click targets)
+  # (no compositor/ dir: the M1 test client moved to the Genesis repo —
+  #  see image/genesis-pin.txt; the M1 builder fetches it)
   services/
     statusd.c          # M1: status daemon (battery/wifi/volume event feed)
     status-client.c    # M1: status subscriber (the feed's proof client)
