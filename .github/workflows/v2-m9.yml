@@ -50,7 +50,7 @@ on:
 
 jobs:
   m9-check:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, sevynos-kvm]
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4

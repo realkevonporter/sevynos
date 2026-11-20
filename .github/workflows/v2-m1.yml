@@ -21,7 +21,7 @@ on:
 
 jobs:
   m1-check:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, sevynos-kvm]
     # 60, not 30: M0's v2-image push runs were twice cancelled at the
     # 30-minute job timeout while still downloading linux-firmware
     # (a hard dep of linux-image-generic) from a slow Azure mirror —
