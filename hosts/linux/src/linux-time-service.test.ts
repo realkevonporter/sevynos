@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Socket } from "node:dgram";
@@ -51,11 +52,17 @@ function createHarness(
     responseDelayMs?: number;
     failHosts?: readonly string[];
     nowValue?: number;
+    /* When set, the service uses its default (statusd) clock write
+     * against this socket instead of the injected setSystemTime,
+     * and fallbackCalls records the date-fallback invocations. */
+    statusSocketPath?: string;
+    fallbackCalls?: number[];
   } = {},
 ): {
   service: LinuxTimeService;
   sockets: FakeSocket[];
   setTimeCalls: number[];
+  fallbackCalls: number[];
 } {
   const sockets: FakeSocket[] = [];
   const setTimeCalls: number[] = [];
@@ -94,14 +101,61 @@ function createHarness(
       sockets.push(socket);
       return socket as unknown as Socket;
     },
-    setSystemTime: (epochMs: number) => {
-      setTimeCalls.push(epochMs);
-      return Promise.resolve();
-    },
+    ...(options.statusSocketPath
+      ? {
+          statusSocketPath: options.statusSocketPath,
+          setSystemTimeFallback: (epochMs: number) => {
+            options.fallbackCalls?.push(epochMs);
+            return Promise.resolve();
+          },
+        }
+      : {
+          setSystemTime: (epochMs: number) => {
+            setTimeCalls.push(epochMs);
+            return Promise.resolve();
+          },
+        }),
     now: () => nowValue,
     ntpHosts: ["ntp-a.example", "ntp-b.example"],
   });
-  return { service, sockets, setTimeCalls };
+  return {
+    service,
+    sockets,
+    setTimeCalls,
+    fallbackCalls: options.fallbackCalls ?? [],
+  };
+}
+
+/* A fake statusd: records every line, answers with the given reply. */
+async function startFakeStatusd(
+  socketPath: string,
+  reply: (line: string) => string,
+): Promise<{ lines: string[]; close: () => Promise<void> }> {
+  const lines: string[] = [];
+  const server = createServer((socket) => {
+    let buf = "";
+    socket.on("data", (chunk: Buffer) => {
+      buf += chunk.toString("utf8");
+      const idx = buf.indexOf("\n");
+      if (idx >= 0) {
+        const line = buf.slice(0, idx).trim();
+        lines.push(line);
+        socket.end(`${reply(line)}\n`);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(socketPath, resolve);
+  });
+  return {
+    lines,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      }),
+  };
 }
 
 describe("parseNtpOffsetMs", () => {
@@ -226,5 +280,91 @@ describe("LinuxTimeService", () => {
     await expect(service.setTimezone("Mars/Olympus_Mons")).rejects.toThrow(
       "Unknown timezone",
     );
+  });
+
+  it("sets the clock through statusd when the daemon answers", async () => {
+    const socketPath = join(tempDir, "status.sock");
+    const daemon = await startFakeStatusd(socketPath, (line) =>
+      line.startsWith("SET_TIME ")
+        ? `OK ${line.split(" ")[1] ?? ""}`
+        : "ERR unknown verb",
+    );
+    const fallbackCalls: number[] = [];
+    const { service } = createHarness({ statusSocketPath: socketPath, fallbackCalls });
+    services.push(service);
+    try {
+      const state = await service.syncNow();
+      expect(state.error).toBeUndefined();
+      expect(state.lastSyncAt).toBeDefined();
+      // Harness fake NTP: offset 4995 ms; the fake clock advances
+      // 20 ms before the reply lands, so correctedMs is 1_005_015.
+      expect(daemon.lines).toEqual(["SET_TIME 1005015 4995 ntp:ntp-a.example"]);
+      expect(fallbackCalls).toHaveLength(0);
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("falls back without touching the daemon when none answers", async () => {
+    const fallbackCalls: number[] = [];
+    const { service } = createHarness({
+      statusSocketPath: join(tempDir, "no-daemon.sock"),
+      fallbackCalls,
+    });
+    services.push(service);
+    const state = await service.syncNow();
+    expect(state.error).toBeUndefined();
+    expect(state.lastSyncAt).toBeDefined();
+    expect(fallbackCalls).toEqual([1005015]);
+  });
+
+  it("surfaces a daemon ERR instead of falling back", async () => {
+    const socketPath = join(tempDir, "status.sock");
+    const daemon = await startFakeStatusd(
+      socketPath,
+      () => "ERR clock_settime failed: Operation not permitted",
+    );
+    const fallbackCalls: number[] = [];
+    const { service } = createHarness({ statusSocketPath: socketPath, fallbackCalls });
+    services.push(service);
+    try {
+      const state = await service.syncNow();
+      expect(state.error).toMatch(/clock_settime failed/);
+      expect(state.lastSyncAt).toBeUndefined();
+      expect(fallbackCalls).toHaveLength(0);
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("sets the timezone through statusd when the daemon answers", async () => {
+    const zoneinfoDir = join(tempDir, "zoneinfo", "America");
+    await mkdir(zoneinfoDir, { recursive: true });
+    await writeFile(join(zoneinfoDir, "New_York"), "fake-tzdata");
+    const socketPath = join(tempDir, "status.sock");
+    const daemon = await startFakeStatusd(socketPath, (line) =>
+      line.startsWith("SET_TIMEZONE ")
+        ? `OK ${line.split(" ")[1] ?? ""}`
+        : "ERR unknown verb",
+    );
+    const service = new LinuxTimeService({
+      autoStart: false,
+      timezoneFile: join(tempDir, "timezone"),
+      localtimePath: join(tempDir, "localtime"),
+      zoneinfoDir: join(tempDir, "zoneinfo"),
+      statusSocketPath: socketPath,
+      createUdpSocket: () => new FakeSocket() as unknown as Socket,
+      setSystemTime: () => Promise.resolve(),
+    });
+    services.push(service);
+    try {
+      const state = await service.setTimezone("America/New_York");
+      expect(state.timezone).toBe("America/New_York");
+      expect(daemon.lines).toEqual(["SET_TIMEZONE America/New_York"]);
+      // The daemon owns the write: the local files stay untouched.
+      await expect(readFile(join(tempDir, "timezone"), "utf8")).rejects.toThrow();
+    } finally {
+      await daemon.close();
+    }
   });
 });

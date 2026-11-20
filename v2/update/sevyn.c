@@ -35,6 +35,12 @@
  *   sevyn net dns <host>        resolve a name through the guest DNS
  *   sevyn net announce          announce the link state to statusd
  *                               (wifi on/off; init calls this at boot)
+ *   sevyn time status           clock, last sync, timezone, RTC state
+ *   sevyn time sync [--host <h>] [--port <p>]
+ *                               NTP-sync now through the status daemon
+ *   sevyn time set <epoch-ms|ISO-8601>
+ *                               set the clock (+ RTC) by hand
+ *   sevyn time timezone [tz]    show, or set, the IANA timezone
  *   sevyn poweroff              power the system off (clean teardown)
  *   sevyn reboot                reboot the system (clean teardown)
  *
@@ -203,6 +209,15 @@ static void print_usage(FILE *f)
             "                              open); saves it for later\n"
             "  sevyn net wifi disconnect   drop the association\n"
             "  sevyn net wifi forget <ssid> remove a saved network\n"
+            "  sevyn time status         clock, last sync, timezone,\n"
+            "                              RTC state\n"
+            "  sevyn time sync [--host <h>] [--port <p>]\n"
+            "                              NTP-sync now (via the status\n"
+            "                              daemon; --port is a diagnostics\n"
+            "                              affordance for a local NTP server)\n"
+            "  sevyn time set <epoch-ms|ISO-8601>\n"
+            "                              set the clock (+ RTC) by hand\n"
+            "  sevyn time timezone [tz]  show, or set, the IANA timezone\n"
             "  sevyn install probe [--disk <disk>]\n"
             "                              list disks, partitions, and\n"
             "                              detected OSes (read-only)\n"
@@ -5865,6 +5880,399 @@ static int cmd_install(int argc, char **argv)
 /* --- M11 installer, part 1 ends here --- */
 
 /* ------------------------------------------------------------------ */
+/* time — the system clock (GF65: CMOS RTC reads 2010-01-03).          */
+/*                                                                      */
+/* The v1 time service (ac06e00, hosts/linux/src/linux-time-service.ts)
+ * did NTP in-process and set the clock with `date -s` — which only
+ * worked while Genesis ran as root. Phase 2 (cc1639c) dropped the
+ * session to an unprivileged user and never gave time a privileged
+ * path, so every sync has failed EPERM since. This CLI does NOT
+ * reimplement that service: LinuxTimeService keeps its NTP client,
+ * offset math, hooks and UI, and only its clock-writing call now
+ * goes through the status daemon. What lives here is the half the
+ * service cannot do from the session:
+ *   - `sevyn time sync`: a minimal NTP client for init (no Node at
+ *     boot) and the Terminal, using the same four-timestamp offset
+ *     math as LinuxTimeService. The daemon only ever SETs the time
+ *     it is told — the privileged verb stays narrow and auditable.
+ *   - `sevyn time set/timezone/status`: the manual + inspection
+ *     surface over the same daemon verbs.
+ * The daemon (statusd) owns clock_settime, the RTC write
+ * (RTC_SET_TIME on /dev/rtc0), the last-known-time file, and the
+ * sync state; this CLI only asks, over /run/sevyn-status.sock.
+ * ------------------------------------------------------------------ */
+
+#define TIME_NTP_PACKET_SIZE 48
+#define TIME_NTP_EPOCH_OFFSET 2208988800u
+#define TIME_NTP_PORT "123"
+#define TIME_NTP_TIMEOUT_MS 5000
+#define TIME_MIN_MS 1577836800000LL /* 2020-01-01T00:00:00Z */
+#define TIME_MAX_MS 4102444800000LL /* 2100-01-01T00:00:00Z */
+
+static const char *TIME_NTP_HOSTS[] = { "pool.ntp.org", "time.google.com", NULL };
+
+static long long time_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+        return 0;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* NTP timestamp (seconds, fraction) to Unix epoch-ms. Integer math —
+ * the sub-millisecond rounding LinuxTimeService does is noise here. */
+static long long ntp_stamp_to_ms(uint32_t seconds, uint32_t fraction)
+{
+    return ((long long)seconds - (long long)TIME_NTP_EPOCH_OFFSET) * 1000 +
+           (long long)(((uint64_t)fraction * 1000) >> 32);
+}
+
+/* Validate one NTP reply and compute the four-timestamp offset
+ * ((t2 - t1) + (t3 - t4)) / 2 — the same math as
+ * LinuxTimeService.parseNtpOffsetMs. Returns 0 on success. */
+static int ntp_parse_offset(const unsigned char *packet, size_t len,
+                            long long t1, long long t4, long long *offset_out)
+{
+    if (len < TIME_NTP_PACKET_SIZE)
+        return -1;
+    /* Byte 0: LI(2) | VN(3) | Mode(3). Mode 4 = server, VN 3 or 4. */
+    unsigned mode = packet[0] & 0x07;
+    unsigned version = (packet[0] >> 3) & 0x07;
+    if (mode != 4 || (version != 3 && version != 4))
+        return -1;
+    /* Stratum 1..15 (0 = kiss-o'-death, 16 = unsynchronised). */
+    if (packet[1] < 1 || packet[1] > 15)
+        return -1;
+    uint32_t w;
+    memcpy(&w, packet + 32, 4);
+    uint32_t t2s = ntohl(w);
+    memcpy(&w, packet + 36, 4);
+    uint32_t t2f = ntohl(w);
+    memcpy(&w, packet + 40, 4);
+    uint32_t t3s = ntohl(w);
+    memcpy(&w, packet + 44, 4);
+    uint32_t t3f = ntohl(w);
+    if (t3s == 0 && t3f == 0)
+        return -1;
+    long long t2 = ntp_stamp_to_ms(t2s, t2f);
+    long long t3 = ntp_stamp_to_ms(t3s, t3f);
+    *offset_out = ((t2 - t1) + (t3 - t4)) / 2;
+    return 0;
+}
+
+/* One NTP exchange with a host. Returns 0 + offset on success,
+ * -1 on any failure (DNS, send, timeout, malformed reply). The port
+ * is a parameter (default 123) so a local test server on a high
+ * port can prove the client without root (see
+ * v2/services/test-statusd-time.py). */
+static int ntp_query(const char *host, const char *port, long long *offset_out)
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res)
+        return -1;
+    int fd = socket(res->ai_family, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        return -1;
+    }
+    struct timeval tv = { .tv_sec = TIME_NTP_TIMEOUT_MS / 1000,
+                          .tv_usec = (TIME_NTP_TIMEOUT_MS % 1000) * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    unsigned char req[TIME_NTP_PACKET_SIZE];
+    memset(req, 0, sizeof(req));
+    req[0] = 0x1b; /* LI 0, VN 3, Mode 3 (client) */
+    long long t1 = time_now_ms();
+    int rc = -1;
+    if (sendto(fd, req, sizeof(req), 0, res->ai_addr, res->ai_addrlen) >= 0) {
+        unsigned char reply[TIME_NTP_PACKET_SIZE];
+        ssize_t n = recv(fd, reply, sizeof(reply), 0);
+        long long t4 = time_now_ms();
+        if (n >= 0)
+            rc = ntp_parse_offset(reply, (size_t)n, t1, t4, offset_out);
+    }
+    close(fd);
+    freeaddrinfo(res);
+    return rc;
+}
+
+/* Ask statusd one time question; read the single-line reply.
+ * Returns 0 + reply on success, -1 when the daemon cannot be
+ * reached or stays silent (5 s cap, so a wedged daemon cannot hang
+ * the CLI — or init, which calls `time sync` at boot). */
+static int statusd_time_call(const char *line, char *reply, size_t cap)
+{
+    int fd = connect_sock("SEVYN_STATUS_SOCK", STATUS_SOCK);
+    if (fd < 0)
+        return -1;
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    int rc = -1;
+    if (send_line(fd, line) == 0) {
+        int n = read_line(fd, reply, cap);
+        if (n > 0)
+            rc = 0;
+    }
+    close(fd);
+    return rc;
+}
+
+/* Parse <epoch-ms> or an ISO-8601 UTC timestamp ("2026-11-18T21:00:00Z"
+ * or "2026-11-18 21:00:00"). Range-checked — the daemon checks
+ * again, but a typo'd year should fail here with a readable error,
+ * not a bare ERR line. Returns 0 on success. */
+static int parse_epoch_arg(const char *arg, long long *out)
+{
+    char *end = NULL;
+    long long v = strtoll(arg, &end, 10);
+    if (end != arg && *end == '\0') {
+        if (v < TIME_MIN_MS || v > TIME_MAX_MS)
+            return -1;
+        *out = v;
+        return 0;
+    }
+    static const char *fmts[] = { "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", NULL };
+    for (int i = 0; fmts[i]; i++) {
+        struct tm tmv;
+        memset(&tmv, 0, sizeof(tmv));
+        char *rest = strptime(arg, fmts[i], &tmv);
+        if (rest && *rest == '\0') {
+            time_t s = timegm(&tmv);
+            if (s == (time_t)-1)
+                return -1;
+            v = (long long)s * 1000;
+            if (v < TIME_MIN_MS || v > TIME_MAX_MS)
+                return -1;
+            *out = v;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void format_utc_iso(long long epoch_ms, char *buf, size_t cap)
+{
+    time_t s = (time_t)(epoch_ms / 1000);
+    struct tm tmv;
+    if (gmtime_r(&s, &tmv) == NULL) {
+        snprintf(buf, cap, "unknown");
+        return;
+    }
+    snprintf(buf, cap, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+}
+
+/* Value after "key=" in a space-separated key=value reply line, or
+ * NULL when the key is absent. The match must start a field, so
+ * "now_ms=" never matches inside "last_sync_ms=". */
+static const char *reply_field(const char *line, const char *key, char *buf,
+                               size_t cap)
+{
+    size_t klen = strlen(key);
+    const char *p = line;
+    while ((p = strstr(p, key)) != NULL) {
+        if ((p == line || p[-1] == ' ') && p[klen] != '\0') {
+            const char *v = p + klen;
+            size_t n = strcspn(v, " ");
+            if (n >= cap)
+                n = cap - 1;
+            memcpy(buf, v, n);
+            buf[n] = '\0';
+            return buf;
+        }
+        p += klen;
+    }
+    return NULL;
+}
+
+static long long reply_field_ll(const char *line, const char *key,
+                                long long dflt)
+{
+    char buf[32];
+    if (!reply_field(line, key, buf, sizeof(buf)))
+        return dflt;
+    char *end = NULL;
+    long long v = strtoll(buf, &end, 10);
+    return (end == buf || *end != '\0') ? dflt : v;
+}
+
+static int cmd_time_status(void)
+{
+    char reply[512];
+    if (statusd_time_call("GET_TIME", reply, sizeof(reply)) != 0) {
+        fprintf(stderr, "error: cannot reach the status daemon\n");
+        return 1;
+    }
+    char now_s[64], last_s[64], restored_s[64], tz[128];
+    char field[64];
+    long long now = reply_field_ll(reply, "now_ms=", 0);
+    long long last_sync = reply_field_ll(reply, "last_sync_ms=", 0);
+    long long offset = reply_field_ll(reply, "offset_ms=", 0);
+    long long restored = reply_field_ll(reply, "restored_ms=", 0);
+    const char *source = reply_field(reply, "source=", field, sizeof(field));
+    char rtc[32];
+    if (!reply_field(reply, "rtc=", rtc, sizeof(rtc)))
+        snprintf(rtc, sizeof(rtc), "unknown");
+    format_utc_iso(now, now_s, sizeof(now_s));
+    printf("now: %s\n", now_s);
+    printf("now_ms: %lld\n", now);
+    char *tz_file = read_file_cap("/etc/timezone", 128);
+    if (tz_file) {
+        snprintf(tz, sizeof(tz), "%s", tz_file);
+        free(tz_file);
+    } else {
+        snprintf(tz, sizeof(tz), "UTC");
+    }
+    printf("timezone: %s\n", tz);
+    if (last_sync > 0) {
+        format_utc_iso(last_sync, last_s, sizeof(last_s));
+        printf("last_sync: %s\n", last_s);
+    } else {
+        printf("last_sync: never\n");
+    }
+    printf("last_sync_ms: %lld\n", last_sync);
+    printf("offset_ms: %lld\n", offset);
+    printf("source: %s\n", source ? source : "none");
+    printf("rtc: %s\n", rtc);
+    if (restored > 0) {
+        format_utc_iso(restored, restored_s, sizeof(restored_s));
+        printf("restored: %s\n", restored_s);
+    } else {
+        printf("restored: none\n");
+    }
+    printf("restored_ms: %lld\n", restored);
+    return 0;
+}
+
+static int cmd_time_sync(const char *host_override, const char *port)
+{
+    const char *hosts[3];
+    int nhosts = 0;
+    if (host_override) {
+        hosts[nhosts++] = host_override;
+    } else {
+        for (int i = 0; TIME_NTP_HOSTS[i]; i++)
+            hosts[nhosts++] = TIME_NTP_HOSTS[i];
+    }
+    long long offset_ms = 0;
+    const char *used = NULL;
+    for (int i = 0; i < nhosts; i++) {
+        if (ntp_query(hosts[i], port, &offset_ms) == 0) {
+            used = hosts[i];
+            break;
+        }
+    }
+    if (!used) {
+        fprintf(stderr, "error: all NTP servers failed\n");
+        return 1;
+    }
+    long long corrected = time_now_ms() + offset_ms;
+    char line[128];
+    snprintf(line, sizeof(line), "SET_TIME %lld %lld ntp:%s", corrected,
+             offset_ms, used);
+    char reply[256];
+    if (statusd_time_call(line, reply, sizeof(reply)) != 0) {
+        fprintf(stderr, "error: cannot reach the status daemon\n");
+        return 1;
+    }
+    if (strncmp(reply, "ERR ", 4) == 0) {
+        fprintf(stderr, "error: %s\n", reply + 4);
+        return 1;
+    }
+    char when[64];
+    format_utc_iso(corrected, when, sizeof(when));
+    printf("synced: %s offset_ms=%lld source=ntp:%s\n", when, offset_ms, used);
+    return 0;
+}
+
+static int cmd_time_set(const char *arg)
+{
+    long long epoch_ms = 0;
+    if (parse_epoch_arg(arg, &epoch_ms) != 0) {
+        fprintf(stderr,
+                "error: invalid time (epoch-ms or YYYY-MM-DDTHH:MM:SSZ)\n");
+        return 1;
+    }
+    char line[96];
+    snprintf(line, sizeof(line), "SET_TIME %lld 0 manual", epoch_ms);
+    char reply[256];
+    if (statusd_time_call(line, reply, sizeof(reply)) != 0) {
+        fprintf(stderr, "error: cannot reach the status daemon\n");
+        return 1;
+    }
+    if (strncmp(reply, "ERR ", 4) == 0) {
+        fprintf(stderr, "error: %s\n", reply + 4);
+        return 1;
+    }
+    char when[64];
+    format_utc_iso(epoch_ms, when, sizeof(when));
+    printf("set: %s\n", when);
+    return 0;
+}
+
+static int cmd_time_timezone(const char *tz)
+{
+    if (!tz) {
+        char *tz_file = read_file_cap("/etc/timezone", 128);
+        printf("timezone: %s\n", tz_file ? tz_file : "UTC");
+        free(tz_file);
+        return 0;
+    }
+    char line[128];
+    snprintf(line, sizeof(line), "SET_TIMEZONE %s", tz);
+    char reply[256];
+    if (statusd_time_call(line, reply, sizeof(reply)) != 0) {
+        fprintf(stderr, "error: cannot reach the status daemon\n");
+        return 1;
+    }
+    return print_reply(reply);
+}
+
+static int cmd_time(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    if (strcmp(argv[2], "status") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_time_status();
+    }
+    if (strcmp(argv[2], "sync") == 0) {
+        const char *host = NULL;
+        const char *port = TIME_NTP_PORT;
+        for (int i = 3; i + 1 < argc; i += 2) {
+            if (strcmp(argv[i], "--host") == 0)
+                host = argv[i + 1];
+            else if (strcmp(argv[i], "--port") == 0)
+                port = argv[i + 1];
+            else
+                return usage();
+        }
+        if (argc != 3 && (argc - 3) % 2 != 0)
+            return usage();
+        return cmd_time_sync(host, port);
+    }
+    if (strcmp(argv[2], "set") == 0) {
+        if (argc != 4)
+            return usage();
+        return cmd_time_set(argv[3]);
+    }
+    if (strcmp(argv[2], "timezone") == 0) {
+        if (argc == 3)
+            return cmd_time_timezone(NULL);
+        if (argc == 4)
+            return cmd_time_timezone(argv[3]);
+        return usage();
+    }
+    return usage();
+}
+
+/* ------------------------------------------------------------------ */
 /* dispatch + REPL                                                     */
 /* `sevyn poweroff` / `sevyn reboot`: ask statusd to power the
  * system off or reboot it (statusd signals init, which does the
@@ -5924,6 +6332,8 @@ static int dispatch(int argc, char **argv)
         return cmd_comms(argc, argv);
     if (strcmp(argv[1], "net") == 0)
         return cmd_net(argc, argv);
+    if (strcmp(argv[1], "time") == 0)
+        return cmd_time(argc, argv);
     if (strcmp(argv[1], "tokrah") == 0)
         return cmd_tokrah(argc, argv);
     if (strcmp(argv[1], "app") == 0)

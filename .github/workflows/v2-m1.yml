@@ -57,6 +57,9 @@ jobs:
       - name: Build the M1 image
         run: sudo sh v2/image/build-m1-image.sh
 
+      - name: Host-side time-verb tests (statusd + sevyn time)
+        run: python3 v2/services/test-statusd-time.py
+
       - name: Run the M1 check in QEMU
         run: |
           # The build step runs under sudo, so v2/image/build/ is

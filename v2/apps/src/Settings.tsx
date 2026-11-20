@@ -20,6 +20,13 @@
 // scrolls, so the new section never clips the older ones at the
 // default 800x500 window.
 //
+// The Date & Time section shows the clock, last sync, and timezone
+// through `sevyn time` (status/sync/timezone). Sync Now runs the
+// NTP client in the CLI and the privileged set in statusd, so it
+// works from the unprivileged session — the path Genesis lost in
+// cc1639c. The section degrades to "unavailable" where statusd is
+// unreachable.
+//
 // The Power section (shutdown fix) shuts down or restarts the
 // system through `sevyn poweroff` / `sevyn reboot` — the same verbs
 // the tray power menu runs.
@@ -62,6 +69,39 @@ function readWifi(): WifiState {
 
 type WifiNetwork = { ssid: string; signal: number; secured: boolean };
 
+type TimeState = {
+  available: boolean;
+  now: string;
+  lastSync: string;
+  offsetMs: string;
+  source: string;
+  timezone: string;
+  rtc: string;
+};
+
+function readTime(): TimeState {
+  const unavailable: TimeState = {
+    available: false,
+    now: "",
+    lastSync: "",
+    offsetMs: "",
+    source: "",
+    timezone: "",
+    rtc: "",
+  };
+  const { code, out } = runCli("sevyn time status");
+  if (code !== 0) return unavailable;
+  return {
+    available: true,
+    now: parseField(out, "now") ?? "",
+    lastSync: parseField(out, "last_sync") ?? "never",
+    offsetMs: parseField(out, "offset_ms") ?? "",
+    source: parseField(out, "source") ?? "",
+    timezone: parseField(out, "timezone") ?? "",
+    rtc: parseField(out, "rtc") ?? "",
+  };
+}
+
 // Double-quote one CLI argument (the host's tokenizer strips the
 // quotes and unescapes \" / \\, so SSIDs and passwords with spaces
 // pass through intact).
@@ -88,6 +128,10 @@ export function Settings(): React.ReactElement {
   const [password, setPassword] = React.useState<string>("");
   const [wifiMessage, setWifiMessage] = React.useState<string>("");
   const [powerMessage, setPowerMessage] = React.useState<string>("");
+  const [timeState, setTimeState] = React.useState<TimeState>(() => readTime());
+  const [timezoneInput, setTimezoneInput] = React.useState<string>(timeState.timezone);
+  const [syncing, setSyncing] = React.useState<boolean>(false);
+  const [timeMessage, setTimeMessage] = React.useState<string>("");
   const color = Sevyn.appColor;
 
   function setChannelTo(next: string): void {
@@ -205,6 +249,55 @@ export function Settings(): React.ReactElement {
     if (wifi.ssid && wifi.ssid !== "none")
       return "Connected to " + wifi.ssid + " (" + wifi.address + ")";
     return "Not connected";
+  }
+
+  function timeStatusLine(): string {
+    if (!timeState.available)
+      return "Clock status unavailable (status daemon unreachable).";
+    return "Clock: " + (timeState.now || "unknown");
+  }
+
+  function timeSyncLine(): string {
+    if (!timeState.available) return "";
+    if (!timeState.lastSync || timeState.lastSync === "never") return "Never synced.";
+    const offset =
+      timeState.offsetMs !== ""
+        ? " (offset " +
+          timeState.offsetMs +
+          " ms" +
+          (timeState.source !== "" ? ", " + timeState.source : "") +
+          ")"
+        : "";
+    return "Last synced " + timeState.lastSync + offset + ".";
+  }
+
+  async function syncTime(): Promise<void> {
+    if (syncing) return;
+    setSyncing(true);
+    setTimeMessage("");
+    const { code, out } = await runCliAsync("sevyn time sync");
+    setSyncing(false);
+    if (code !== 0) {
+      setTimeMessage(out.trim().split("\n")[0] || "Sync failed.");
+      return;
+    }
+    setTimeState(readTime());
+    setTimeMessage("Clock synced.");
+    Sevyn.log("SETTINGS time=synced");
+  }
+
+  async function applyTimezone(): Promise<void> {
+    const tz = timezoneInput.trim();
+    if (tz === "") return;
+    setTimeMessage("");
+    const { code, out } = await runCliAsync("sevyn time timezone " + q(tz));
+    if (code !== 0) {
+      setTimeMessage(out.trim().split("\n")[0] || "Could not set the timezone.");
+      return;
+    }
+    setTimeState(readTime());
+    setTimeMessage("Timezone set to " + tz + ".");
+    Sevyn.log("SETTINGS timezone=" + tz);
   }
 
   function networkRow(n: WifiNetwork): React.ReactElement {
@@ -492,6 +585,97 @@ export function Settings(): React.ReactElement {
           {message ? (
             <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
               {message}
+            </Text>
+          ) : null}
+          <Text
+            style={{ fontSize: 16, fontWeight: "bold", color: "#111827", marginTop: 24 }}
+          >
+            Date & Time
+          </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            {timeStatusLine()}
+          </Text>
+          {timeState.available ? (
+            <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+              {timeSyncLine()}
+            </Text>
+          ) : null}
+          {timeState.available && timeState.rtc !== "" ? (
+            <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+              Hardware clock: {timeState.rtc}
+            </Text>
+          ) : null}
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            <Pressable
+              onPress={() => void syncTime()}
+              style={{
+                width: 120,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: syncing ? "#9ca3af" : "#111827",
+                justifyContent: "center",
+                alignItems: "center",
+                marginRight: 12,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 15,
+                  fontWeight: "bold",
+                  color: "#ffffff",
+                  textAlign: "center",
+                }}
+              >
+                {syncing ? "Syncing…" : "Sync Now"}
+              </Text>
+            </Pressable>
+          </View>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 12 }}>
+            Timezone (IANA name, e.g. America/New_York)
+          </Text>
+          <TextInput
+            value={timezoneInput}
+            onChangeText={setTimezoneInput}
+            placeholder="America/New_York"
+            style={{
+              height: 36,
+              backgroundColor: "#ffffff",
+              borderRadius: 8,
+              paddingLeft: 12,
+              paddingRight: 12,
+              marginTop: 8,
+              fontSize: 15,
+              color: "#111827",
+            }}
+          />
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            <Pressable
+              onPress={() => void applyTimezone()}
+              style={{
+                width: 120,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: "#111827",
+                justifyContent: "center",
+                alignItems: "center",
+                marginRight: 12,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 15,
+                  fontWeight: "bold",
+                  color: "#ffffff",
+                  textAlign: "center",
+                }}
+              >
+                Apply
+              </Text>
+            </Pressable>
+          </View>
+          {timeMessage ? (
+            <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
+              {timeMessage}
             </Text>
           ) : null}
           <Text
