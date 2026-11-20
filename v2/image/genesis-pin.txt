@@ -1,0 +1,7 @@
+# Genesis (realkevonporter/genesis) pinned commit, consumed by
+# pinned-commit fetch at image-build time (see v2/image/fetch-genesis.sh
+# and COMPOSITOR_PLAN.md in the genesis repo). Not a submodule, not a
+# vendored copy: the builder fetches the tarball below, verifies the
+# sha256, and builds the compositor + test client from the fetched tree.
+# Format: <commit sha> <tarball sha256> (one line; comment lines start #).
+e556485c09bf1494be7beb8b2948819d01fd110e 455170100533b4949cd213c42f9c6ab04b6c8c3454b3a4713e1a85b2b444a8ef

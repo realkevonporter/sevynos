@@ -16,6 +16,9 @@
 #
 # Requirements: a kernel in /boot (linux-image-generic), busybox-static,
 # cpio, gcc, pkg-config, libwayland-dev, wayland-protocols, weston, seatd.
+# The M1 test client is fetched from the pinned Genesis commit
+# (v2/image/genesis-pin.txt) — see v2/image/fetch-genesis.sh;
+# SEVYN_GENESIS_SRC overrides the fetch with a local checkout.
 # SEVYN_V2_SYSROOT (default /) is the tree the packages are copied from:
 # on CI it is the runner itself; locally it is the extracted-deb sysroot.
 # Outputs (SEVYN_V2_BUILD_DIR, default v2/image/build/):
@@ -75,6 +78,10 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$BUILD_TMP" "$STAGE"' EXIT INT TERM
 
 # --- compile the SevynOS programs ---------------------------------------
+# The M1 test client lives in the Genesis repo now (split 2026-11-19):
+# fetch the pinned tree into the build temp dir (the existing trap
+# cleans it up) and compile the client from the fetched tree.
+GENESIS_TREE="$(sh "$ROOT/image/fetch-genesis.sh" tree "$BUILD_TMP/genesis")"
 wayland-scanner client-header \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-client-protocol.h"
@@ -83,7 +90,7 @@ wayland-scanner private-code \
   "$BUILD_TMP/xdg-shell-protocol.c"
 
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-test-client" \
-  "$ROOT/compositor/test-client.c" "$BUILD_TMP/xdg-shell-protocol.c" \
+  "$GENESIS_TREE/compositor/tests/test-client.c" "$BUILD_TMP/xdg-shell-protocol.c" \
   -I"$BUILD_TMP" $(pkg-config --cflags --libs wayland-client)
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-statusd" "$ROOT/services/statusd.c"
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-status-client" "$ROOT/services/status-client.c"

@@ -62,6 +62,7 @@ You need Node.js 22+, the pinned pnpm version, and Docker for Linux image work.
 git clone https://github.com/realkevonporter/sevynos.git
 cd sevynos
 corepack enable
+sh v2/image/fetch-genesis.sh model # materialize graphics/core/ from the pinned Genesis commit — required before pnpm install
 pnpm install
 pnpm check
 ```
