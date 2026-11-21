@@ -18,6 +18,15 @@
  *   sevyn files cat <path>      print a file (64 KB cap)
  *   sevyn files mkdir <path>    create a directory
  *   sevyn files write <path> <text...>  write text to a file (create/truncate)
+ *   sevyn files copy <src> <dst>   copy a file or directory
+ *   sevyn files move <src> <dst>   move (rename; copy+delete across devices)
+ *   sevyn files delete <path>   delete a file or directory (never / or /data)
+ *   sevyn files volumes         list mounted volumes (/proc/mounts + statvfs)
+ *   sevyn files eject <mount>   unmount a removable volume
+ *   sevyn files clipboard [set <cut|copy> <path> <name> <file|directory>|clear]
+ *                               the File Explorer clipboard, kept in
+ *                               /data/.files-clipboard.json so it
+ *                               survives an app restart
  *   sevyn code status           Sevyn Code: running, serving, version,
  *                               terminal shell
  *   sevyn browser open [url]    open a URL (launch Chromium if needed).
@@ -66,8 +75,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -160,6 +171,17 @@ static void print_usage(FILE *f)
             "  sevyn files mkdir <path>    create a directory\n"
             "  sevyn files write <path> <text...>\n"
             "                              write text to a file\n"
+            "  sevyn files copy <src> <dst>  copy a file or directory\n"
+            "  sevyn files move <src> <dst>  move (rename; copy+delete\n"
+            "                              across devices)\n"
+            "  sevyn files delete <path>     delete a file or directory\n"
+            "                              (never / or /data)\n"
+            "  sevyn files volumes           list mounted volumes\n"
+            "  sevyn files eject <mount>     unmount a removable volume\n"
+            "  sevyn files clipboard         show the cut/copy clipboard\n"
+            "  sevyn files clipboard set <cut|copy> <path> <name>\n"
+            "      <file|directory>        set the clipboard\n"
+            "  sevyn files clipboard clear   clear the clipboard\n"
             "  sevyn ai list               list the plugged-in AIs\n"
             "  sevyn ai select <id>        plug in a different AI\n"
             "  sevyn ai status             show the selected AI + grant\n"
@@ -755,6 +777,461 @@ static int cmd_files_cat(const char *path, long start, long count)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* files copy/move/delete — the #122 File Explorer port                */
+/* ------------------------------------------------------------------ */
+
+/* Copy one regular file, preserving its mode bits. */
+static int copy_file_contents(const char *src, const char *dst, mode_t mode)
+{
+    int in = open(src, O_RDONLY);
+    if (in < 0)
+        return -1;
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+    char buf[65536];
+    ssize_t n;
+    int rc = 0;
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                rc = -1;
+                break;
+            }
+            off += w;
+        }
+        if (rc != 0)
+            break;
+    }
+    if (n < 0)
+        rc = -1;
+    if (close(out) != 0)
+        rc = -1;
+    close(in);
+    return rc;
+}
+
+/* Recursively copy a file, directory, or symlink. */
+static int copy_tree(const char *src, const char *dst)
+{
+    struct stat st;
+    if (lstat(src, &st) != 0)
+        return -1;
+    if (S_ISLNK(st.st_mode)) {
+        char target[4096];
+        ssize_t n = readlink(src, target, sizeof(target) - 1);
+        if (n < 0)
+            return -1;
+        target[n] = '\0';
+        if (symlink(target, dst) != 0)
+            return -1;
+        return 0;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        if (mkdir(dst, st.st_mode & 0777) != 0 && errno != EEXIST)
+            return -1;
+        DIR *d = opendir(src);
+        if (!d)
+            return -1;
+        struct dirent *de;
+        int rc = 0;
+        while ((de = readdir(d)) != NULL) {
+            if (strcmp(de->d_name, ".") == 0 ||
+                strcmp(de->d_name, "..") == 0)
+                continue;
+            char s[4096], t[4096];
+            snprintf(s, sizeof(s), "%s/%s", src, de->d_name);
+            snprintf(t, sizeof(t), "%s/%s", dst, de->d_name);
+            if (copy_tree(s, t) != 0) {
+                rc = -1;
+                break;
+            }
+        }
+        closedir(d);
+        return rc;
+    }
+    if (S_ISREG(st.st_mode))
+        return copy_file_contents(src, dst, st.st_mode & 0777);
+    fprintf(stderr, "error: cannot copy %s: unsupported file type\n", src);
+    return -1;
+}
+
+/* Recursively delete a file, directory, or symlink. */
+static int delete_tree(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return -1;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (!d)
+            return -1;
+        struct dirent *de;
+        int rc = 0;
+        while ((de = readdir(d)) != NULL) {
+            if (strcmp(de->d_name, ".") == 0 ||
+                strcmp(de->d_name, "..") == 0)
+                continue;
+            char child[4096];
+            snprintf(child, sizeof(child), "%s/%s", path, de->d_name);
+            if (delete_tree(child) != 0) {
+                rc = -1;
+                break;
+            }
+        }
+        closedir(d);
+        if (rc != 0)
+            return -1;
+        if (rmdir(path) != 0)
+            return -1;
+        return 0;
+    }
+    if (unlink(path) != 0)
+        return -1;
+    return 0;
+}
+
+/* True for the two paths delete must never touch, trailing slashes
+ * aside. The File Explorer delete button refuses these. */
+static int is_protected_delete_path(const char *path)
+{
+    char buf[4096];
+    snprintf(buf, sizeof(buf), "%s", path);
+    size_t len = strlen(buf);
+    while (len > 1 && buf[len - 1] == '/')
+        buf[--len] = '\0';
+    return strcmp(buf, "/") == 0 || strcmp(buf, "/data") == 0;
+}
+
+static int cmd_files_move(const char *src, const char *dst)
+{
+    if (rename(src, dst) == 0) {
+        printf("moved %s to %s\n", src, dst);
+        return 0;
+    }
+    if (errno != EXDEV) {
+        fprintf(stderr, "error: cannot move %s to %s: %s\n", src, dst,
+                strerror(errno));
+        return 1;
+    }
+    /* Cross-device move: copy + delete (the #122 EXDEV fallback). */
+    if (copy_tree(src, dst) != 0) {
+        fprintf(stderr, "error: cannot move %s to %s: %s\n", src, dst,
+                strerror(errno));
+        return 1;
+    }
+    if (delete_tree(src) != 0) {
+        fprintf(stderr,
+                "error: moved %s to %s but could not remove the source: %s\n",
+                src, dst, strerror(errno));
+        return 1;
+    }
+    printf("moved %s to %s\n", src, dst);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* files volumes/eject — /proc/mounts + statvfs                       */
+/* ------------------------------------------------------------------ */
+
+struct volume_entry {
+    char mount[4096];
+    char label[256];
+    int removable;
+    unsigned long long size;
+    unsigned long long avail;
+};
+
+static int cmp_volume(const void *a, const void *b)
+{
+    const struct volume_entry *va = a, *vb = b;
+    if (strcmp(va->mount, "/") == 0)
+        return -1;
+    if (strcmp(vb->mount, "/") == 0)
+        return 1;
+    return strcmp(va->mount, vb->mount);
+}
+
+/* Decode the \040-style escapes /proc/mounts uses in mount points. */
+static void unescape_mount(char *s)
+{
+    char *r = s, *w = s;
+    while (*r) {
+        if (r[0] == '\\' && r[1] >= '0' && r[1] <= '7' && r[2] >= '0' &&
+            r[2] <= '7' && r[3] >= '0' && r[3] <= '7') {
+            *w++ = (char)((r[1] - '0') * 64 + (r[2] - '0') * 8 +
+                          (r[3] - '0'));
+            r += 4;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+}
+
+/* Base block device for a /dev source: vda1 -> vda, sda1 -> sda,
+ * nvme0n1p2 -> nvme0n1, mmcblk0p1 -> mmcblk0. */
+static void block_device_for(const char *source, char *out, size_t out_size)
+{
+    const char *base = source;
+    if (strncmp(source, "/dev/", 5) == 0)
+        base = source + 5;
+    snprintf(out, out_size, "%s", base);
+    size_t len = strlen(out);
+    if (strncmp(out, "nvme", 4) == 0 || strncmp(out, "mmcblk", 6) == 0) {
+        /* Strip a trailing p<digits> partition suffix. */
+        while (len > 0 && out[len - 1] >= '0' && out[len - 1] <= '9')
+            out[--len] = '\0';
+        if (len > 0 && out[len - 1] == 'p')
+            out[--len] = '\0';
+        return;
+    }
+    if (strncmp(out, "dm-", 3) == 0)
+        return;
+    while (len > 0 && out[len - 1] >= '0' && out[len - 1] <= '9')
+        out[--len] = '\0';
+}
+
+/* True when the block device behind a /dev source is removable
+ * (/sys/block/<dev>/removable == 1). Unknown devices are not removable. */
+static int device_is_removable(const char *source)
+{
+    char dev[256];
+    block_device_for(source, dev, sizeof(dev));
+    char path[512];
+    snprintf(path, sizeof(path), "/sys/block/%s/removable", dev);
+    char *value = read_file_cap(path, 16);
+    if (!value)
+        return 0;
+    int removable = strcmp(value, "1") == 0;
+    free(value);
+    return removable;
+}
+
+static void fill_volume(struct volume_entry *v, const char *mount,
+                        const char *source)
+{
+    snprintf(v->mount, sizeof(v->mount), "%s", mount);
+    if (strcmp(mount, "/") == 0) {
+        snprintf(v->label, sizeof(v->label), "Internal Drive");
+    } else {
+        const char *base = strrchr(mount, '/');
+        snprintf(v->label, sizeof(v->label), "%s",
+                 base && base[1] ? base + 1 : "Drive");
+    }
+    v->removable = source ? device_is_removable(source) : 0;
+    v->size = 0;
+    v->avail = 0;
+    struct statvfs sv;
+    if (statvfs(mount, &sv) == 0) {
+        v->size = (unsigned long long)sv.f_blocks * sv.f_frsize;
+        v->avail = (unsigned long long)sv.f_bavail * sv.f_frsize;
+    }
+}
+
+/* Real disk mounts from /proc/mounts (sources under /dev/), with /
+ * always present first. Pseudo-filesystems (proc, sysfs, tmpfs,
+ * devtmpfs, cgroup, …) are skipped. */
+static int collect_volumes(struct volume_entry **out, size_t *out_n)
+{
+    struct volume_entry *list = NULL;
+    size_t n = 0, cap = 0;
+    FILE *f = fopen("/proc/mounts", "r");
+    if (f) {
+        char line[8192];
+        while (fgets(line, sizeof(line), f)) {
+            char source[4096], mount[4096], fstype[64];
+            if (sscanf(line, "%4095s %4095s %63s", source, mount, fstype) !=
+                3)
+                continue;
+            if (strncmp(source, "/dev/", 5) != 0)
+                continue;
+            unescape_mount(mount);
+            /* Bind-mounted files (e.g. /etc/hosts) are not volumes. */
+            struct stat ms;
+            if (stat(mount, &ms) != 0 || !S_ISDIR(ms.st_mode))
+                continue;
+            int seen = 0;
+            for (size_t i = 0; i < n; i++)
+                if (strcmp(list[i].mount, mount) == 0)
+                    seen = 1;
+            if (seen)
+                continue;
+            if (n == cap) {
+                cap = cap ? cap * 2 : 8;
+                list = realloc(list, cap * sizeof(*list));
+                if (!list) {
+                    fclose(f);
+                    return -1;
+                }
+            }
+            fill_volume(&list[n], mount, source);
+            n++;
+        }
+        fclose(f);
+    }
+    int have_root = 0;
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(list[i].mount, "/") == 0)
+            have_root = 1;
+    if (!have_root) {
+        if (n == cap) {
+            cap = cap ? cap * 2 : 8;
+            list = realloc(list, cap * sizeof(*list));
+            if (!list)
+                return -1;
+        }
+        fill_volume(&list[n], "/", NULL);
+        n++;
+    }
+    qsort(list, n, sizeof(*list), cmp_volume);
+    *out = list;
+    *out_n = n;
+    return 0;
+}
+
+static int cmd_files_volumes(void)
+{
+    struct volume_entry *list = NULL;
+    size_t n = 0;
+    if (collect_volumes(&list, &n) != 0) {
+        fprintf(stderr, "error: cannot read volumes\n");
+        return 1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        printf("%s\t%s\t%d\t%llu\t%llu\n", list[i].mount, list[i].label,
+               list[i].removable, list[i].size, list[i].avail);
+    }
+    free(list);
+    return 0;
+}
+
+static int cmd_files_eject(const char *mount)
+{
+    struct volume_entry *list = NULL;
+    size_t n = 0;
+    if (collect_volumes(&list, &n) != 0) {
+        fprintf(stderr, "error: cannot read volumes\n");
+        return 1;
+    }
+    const struct volume_entry *found = NULL;
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(list[i].mount, mount) == 0)
+            found = &list[i];
+    if (!found) {
+        fprintf(stderr, "error: no such volume %s\n", mount);
+        free(list);
+        return 1;
+    }
+    if (!found->removable) {
+        fprintf(stderr, "error: %s is not removable\n", mount);
+        free(list);
+        return 1;
+    }
+    if (umount(mount) != 0) {
+        fprintf(stderr, "error: cannot eject %s: %s\n", mount,
+                strerror(errno));
+        free(list);
+        return 1;
+    }
+    printf("ejected %s\n", mount);
+    free(list);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* files clipboard — /data/.files-clipboard.json                      */
+/*                                                                    */
+/* The File Explorer clipboard lives in a per-user file (not in       */
+/* memory) so it survives an app restart and is testable from the     */
+/* Terminal. SEVYN_FILES_CLIPBOARD overrides the path for host-side   */
+/* tests. Format is one JSON object: {"kind","sourcePath","sourceName", */
+/* "sourceKind"}.                                                      */
+/* ------------------------------------------------------------------ */
+
+#define FILES_CLIPBOARD_PATH "/data/.files-clipboard.json"
+
+static const char *clipboard_path(void)
+{
+    return env_or("SEVYN_FILES_CLIPBOARD", FILES_CLIPBOARD_PATH);
+}
+
+static void fprint_json_escaped(FILE *f, const char *s)
+{
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"')
+            fputs("\\\"", f);
+        else if (c == '\\')
+            fputs("\\\\", f);
+        else if (c < 0x20)
+            fprintf(f, "\\u%04x", c);
+        else
+            fputc(c, f);
+    }
+}
+
+static int cmd_files_clipboard_get(void)
+{
+    char *text = read_file_cap(clipboard_path(), 4096);
+    if (!text) {
+        printf("empty\n");
+        return 0;
+    }
+    printf("%s\n", text);
+    free(text);
+    return 0;
+}
+
+static int cmd_files_clipboard_set(const char *kind, const char *source_path,
+                                   const char *source_name,
+                                   const char *source_kind)
+{
+    if (strcmp(kind, "cut") != 0 && strcmp(kind, "copy") != 0) {
+        fprintf(stderr, "error: clipboard kind must be cut or copy\n");
+        return 1;
+    }
+    if (strcmp(source_kind, "file") != 0 &&
+        strcmp(source_kind, "directory") != 0) {
+        fprintf(stderr, "error: clipboard source kind must be file or directory\n");
+        return 1;
+    }
+    FILE *f = fopen(clipboard_path(), "w");
+    if (!f) {
+        fprintf(stderr, "error: cannot write %s: %s\n", clipboard_path(),
+                strerror(errno));
+        return 1;
+    }
+    fputs("{\"kind\":\"", f);
+    fprint_json_escaped(f, kind);
+    fputs("\",\"sourcePath\":\"", f);
+    fprint_json_escaped(f, source_path);
+    fputs("\",\"sourceName\":\"", f);
+    fprint_json_escaped(f, source_name);
+    fputs("\",\"sourceKind\":\"", f);
+    fprint_json_escaped(f, source_kind);
+    fputs("\"}\n", f);
+    fclose(f);
+    printf("clipboard set: %s %s\n", kind, source_name);
+    return 0;
+}
+
+static int cmd_files_clipboard_clear(void)
+{
+    if (unlink(clipboard_path()) != 0 && errno != ENOENT) {
+        fprintf(stderr, "error: cannot clear %s: %s\n", clipboard_path(),
+                strerror(errno));
+        return 1;
+    }
+    printf("clipboard cleared\n");
+    return 0;
+}
+
 static int cmd_files(int argc, char **argv)
 {
     if (argc < 3)
@@ -862,6 +1339,57 @@ static int cmd_files(int argc, char **argv)
         fclose(f);
         printf("wrote %zu bytes to %s\n", total, argv[3]);
         return 0;
+    }
+    if (strcmp(argv[2], "copy") == 0) {
+        if (argc != 5)
+            return usage();
+        if (copy_tree(argv[3], argv[4]) != 0) {
+            fprintf(stderr, "error: cannot copy %s to %s: %s\n", argv[3],
+                    argv[4], strerror(errno));
+            return 1;
+        }
+        printf("copied %s to %s\n", argv[3], argv[4]);
+        return 0;
+    }
+    if (strcmp(argv[2], "move") == 0) {
+        if (argc != 5)
+            return usage();
+        return cmd_files_move(argv[3], argv[4]);
+    }
+    if (strcmp(argv[2], "delete") == 0) {
+        if (argc != 4)
+            return usage();
+        if (is_protected_delete_path(argv[3])) {
+            fprintf(stderr, "error: refusing to delete %s\n", argv[3]);
+            return 1;
+        }
+        if (delete_tree(argv[3]) != 0) {
+            fprintf(stderr, "error: cannot delete %s: %s\n", argv[3],
+                    strerror(errno));
+            return 1;
+        }
+        printf("deleted %s\n", argv[3]);
+        return 0;
+    }
+    if (strcmp(argv[2], "volumes") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_files_volumes();
+    }
+    if (strcmp(argv[2], "eject") == 0) {
+        if (argc != 4)
+            return usage();
+        return cmd_files_eject(argv[3]);
+    }
+    if (strcmp(argv[2], "clipboard") == 0) {
+        if (argc == 3)
+            return cmd_files_clipboard_get();
+        if (argc == 4 && strcmp(argv[3], "clear") == 0)
+            return cmd_files_clipboard_clear();
+        if (argc == 8 && strcmp(argv[3], "set") == 0)
+            return cmd_files_clipboard_set(argv[4], argv[5], argv[6],
+                                           argv[7]);
+        return usage();
     }
     return usage();
 }
