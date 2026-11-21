@@ -54,7 +54,8 @@ for tool in busybox cpio gcc g++ pkg-config wayland-scanner python3 zstd modinfo
   }
 done
 for f in "$SYSROOT/usr/bin/weston" "$SYSROOT/usr/sbin/seatd" \
-         "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"; do
+         "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
+         "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml"; do
   if [ ! -f "$f" ]; then
     echo "error: missing $f (install weston, seatd, wayland-protocols)" >&2
     exit 1
@@ -86,6 +87,12 @@ wayland-scanner client-header \
 wayland-scanner private-code \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-protocol.c"
+wayland-scanner client-header \
+  "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
+  "$BUILD_TMP/presentation-time-client-protocol.h"
+wayland-scanner private-code \
+  "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
+  "$BUILD_TMP/presentation-time-protocol.c"
 
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-statusd" "$ROOT/services/statusd.c"
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-status-client" "$ROOT/services/status-client.c"
