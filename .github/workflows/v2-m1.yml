@@ -31,6 +31,13 @@ jobs:
     # v2-image.yml; left for a follow-up so this PR stays M1-only.)
     timeout-minutes: 60
     steps:
+      - name: Reclaim workspace from a previous sudo build
+        # The image build runs under sudo, so a previous job killed
+        # before its end-of-job chown can leave root-owned files in
+        # the workspace; checkout cannot clean them (EACCES) and dies
+        # before any later chown can run. Reclaim first.
+        run: sudo chown -R "$USER" "$GITHUB_WORKSPACE" || true
+
       - uses: actions/checkout@v4
 
       - name: Install build + boot dependencies

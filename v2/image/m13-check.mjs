@@ -87,9 +87,9 @@
 // appd takes LAUNCH/CLOSE/LIST on the second (ttyS2); the updater
 // takes STATUS/CHECK/APPLY on the third (ttyS3); aid takes
 // PING/LIST/SELECT/STATUS/ASK on the fourth (ttyS4). The host serves
-// the test pages on 127.0.0.1:18080 — the guest reaches them at
-// 10.0.2.2:18080 through QEMU user networking (virtio-net). Results
-// go to m13-check.json; boot logs, screendumps and the data disk stay
+// the test pages on an ephemeral 127.0.0.1 port — the guest reaches
+// them at 10.0.2.2:<port> through QEMU user networking (virtio-net).
+// Results go to m13-check.json; boot logs, screendumps and the data disk stay
 // in the build dir as artifacts.
 //
 // Usage: node v2/image/m13-check.mjs
@@ -112,7 +112,13 @@ const DISK = join(OUT, "m13-data.img");
 const TIMEOUT_S = Number(process.env.SEVYN_V2_M13_TIMEOUT || 3600);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
 const INTERNET = process.env.SEVYN_V2_M13_INTERNET !== "0";
-const HTTP_PORT = 18080;
+// The host test-page server binds an EPHEMERAL port (listen(0)):
+// m5 and m13 share the KVM box, and two concurrent jobs binding
+// the old fixed 18080 collided with EADDRINUSE (run 44803329836).
+// The actual port is read back after the server starts; the guest
+// reaches it at 10.0.2.2:<port> through QEMU user networking, so
+// every guest URL below is built from HTTP_PORT.
+let HTTP_PORT = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const started = Date.now();
@@ -624,7 +630,7 @@ async function boot(tag) {
       // (10.0.2.15, gateway 10.0.2.2, slirp DNS 10.0.2.3). The plain
       // `-nic user` default is an e1000 with no guest driver — no
       // eth0 at all. The host's test-page server is reachable by the
-      // guest at 10.0.2.2:18080.
+      // guest at 10.0.2.2:<port> (ephemeral; see HTTP_PORT).
       "-nic",
       "user,model=virtio-net-pci",
       "-no-reboot",
@@ -836,8 +842,8 @@ async function pollPixels(b, name, pred, timeoutMs = 120000) {
 }
 
 // --- the host test-page server ------------------------------------------
-// Serves the test pages on 127.0.0.1:18080; the guest reaches them
-// at 10.0.2.2:18080. Pages A and B are m5's, verbatim (same names
+// Serves the test pages on an ephemeral 127.0.0.1 port; the guest
+// reaches them at 10.0.2.2:<port>. Pages A and B are m5's, verbatim (same names
 // and URLs, so the server code is a verbatim copy): both paint their
 // FULL viewport one flat colour (red / green): any visible sliver
 // of the Chromium window is detectable in a screendump and clickable
@@ -886,7 +892,7 @@ function startTestServer() {
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(HTTP_PORT, "127.0.0.1", () => resolve(server));
+    server.listen(0, "127.0.0.1", () => resolve(server));
   });
 }
 
@@ -1445,7 +1451,8 @@ async function main() {
     JSON.stringify(state0),
   );
   const server = await startTestServer();
-  check("setup: host test-page server on 127.0.0.1:18080", true);
+  HTTP_PORT = server.address().port;
+  check(`setup: host test-page server on 127.0.0.1:${HTTP_PORT}`, true);
 
   // 1. Boot + Genesis intact (the m12 regression, first).
   const b = await boot("1");
@@ -1722,7 +1729,9 @@ async function main() {
   // failure (Terminal focus lost; one failed run typed the command
   // into Calculator) — which the lifecycle check reports distinctly
   // instead of claiming Chromium is still running.
-  const pollBrowserStopped = async (timeoutMs = 60000) => {
+  // 120 s cap (was 60 s): the stop poll passed in 44 s in run
+  // 44803329836 — too thin a margin on the loaded 3-runner box.
+  const pollBrowserStopped = async (timeoutMs = 120000) => {
     const deadline = Date.now() + timeoutMs;
     let sawExec = false;
     while (Date.now() < deadline) {
@@ -2194,9 +2203,25 @@ async function main() {
     await moveTo(run.x, run.y, before.width, before.height);
     await sleep(300);
     await click();
-    await sleep(1000);
-    const after = await shot(b.qmp, join(OUT, `m13-shot-${name}.ppm`));
-    return { img: after, count: countColor(after, r, g, bl) };
+    // The click raises Chromium, but the repaint lags under load:
+    // a single frame 1 s after the click can still show the old
+    // strip (run 44803329836: green=10704px 2 s after the click,
+    // full viewport ~166000px). Poll until the colour fills a real
+    // viewport (count + width), up to 60 s — a fast raise still
+    // passes on the first frame.
+    const polled = await pollPixels(
+      b,
+      name,
+      (img) => {
+        const n = countColor(img, r, g, bl);
+        if (n <= 40000) return 0;
+        const bx = findColorBBox(img, r, g, bl);
+        if (!bx || bx.x1 - bx.x0 < RED_MIN_WIDTH_PX) return 0;
+        return n;
+      },
+      60000,
+    );
+    return { img: polled.img, count: polled.count };
   };
   // Raise Chromium by clicking a CORNER of its visible viewport.
   // Used where the viewport centre is itself clickable (step 5:
@@ -2232,9 +2257,21 @@ async function main() {
     await moveTo(cx, cy, before.width, before.height);
     await sleep(300);
     await click();
-    await sleep(1000);
-    const after = await shot(b.qmp, join(OUT, `m13-shot-${name}.ppm`));
-    return { img: after, count: countColor(after, r, g, bl), box };
+    // Same repaint lag as raiseChromium (see above): poll until
+    // the colour fills a real viewport, up to 60 s.
+    const polled = await pollPixels(
+      b,
+      name,
+      (img) => {
+        const n = countColor(img, r, g, bl);
+        if (n <= 40000) return 0;
+        const bx = findColorBBox(img, r, g, bl);
+        if (!bx || bx.x1 - bx.x0 < RED_MIN_WIDTH_PX) return 0;
+        return n;
+      },
+      60000,
+    );
+    return { img: polled.img, count: polled.count, box };
   };
   // Raise Chromium by clicking a VERIFIED page pixel as seen in a
   // FRESH frame taken immediately before the click. Unlike
@@ -2270,9 +2307,21 @@ async function main() {
     await moveTo(run.x, run.y, frame.width, frame.height);
     await sleep(300);
     await click();
-    await sleep(1000);
-    const after = await shot(b.qmp, join(OUT, `m13-shot-${name}.ppm`));
-    return { img: after, count: countColor(after, r, g, bl) };
+    // Same repaint lag as raiseChromium (see above): poll until
+    // the colour fills a real viewport, up to 60 s.
+    const polled = await pollPixels(
+      b,
+      name,
+      (img) => {
+        const n = countColor(img, r, g, bl);
+        if (n <= 40000) return 0;
+        const bx = findColorBBox(img, r, g, bl);
+        if (!bx || bx.x1 - bx.x0 < RED_MIN_WIDTH_PX) return 0;
+        return n;
+      },
+      60000,
+    );
+    return { img: polled.img, count: polled.count };
   };
 
   // Drag the Browser app window by its title bar (round 6).
@@ -2396,14 +2445,23 @@ async function main() {
     const appReady = await waitForLog(
       b.logPath,
       /HOST app running \(SEVYNOS_M3_APP_READY\) terminal/,
-      30000,
+      60000,
     );
     check("terminal: host ready in its own runtime", !!appReady);
   }
-  await sleep(800);
-  const shotTerm = await shot(b.qmp, join(OUT, "m13-shot-terminal.ppm"));
+  // The window may not have painted yet when the host is ready
+  // (run 44803329836: the check fired 1.1 s after host-ready and
+  // saw no header). Poll for the header instead of trusting one
+  // frame — a fast paint still passes on the first shot.
+  let shotTerm = await shot(b.qmp, join(OUT, "m13-shot-terminal.ppm"));
+  let termHeader = findWindowHeader(shotTerm, 17, 24, 39);
+  const termHeaderDeadline = Date.now() + 30000;
+  while (!termHeader && Date.now() < termHeaderDeadline) {
+    await sleep(1000);
+    shotTerm = await shot(b.qmp, join(OUT, "m13-shot-terminal.ppm"));
+    termHeader = findWindowHeader(shotTerm, 17, 24, 39);
+  }
   // The Terminal window header is #111827.
-  const termHeader = findWindowHeader(shotTerm, 17, 24, 39);
   check("terminal: window on screen (header found)", !!termHeader);
   if (termHeader) {
     termPos = termHeader;
@@ -2433,7 +2491,9 @@ async function main() {
   // step could use it. Steps that need the current tab re-read
   // its id fresh (see currentTabId).
   {
-    const { exec } = await termCmd("browser open http://10.0.2.2:18080/m5-page.html");
+    const { exec } = await termCmd(
+      `browser open http://10.0.2.2:${HTTP_PORT}/m5-page.html`,
+    );
     check("embed: `browser open` the local page runs (EXEC 0)", !!exec, exec || "");
   }
   {
@@ -2669,19 +2729,26 @@ async function main() {
     const appReady = await waitForLog(
       b.logPath,
       /HOST app running \(SEVYNOS_M3_APP_READY\) browser/,
-      30000,
+      60000,
     );
     check("browser-app: host ready in its own runtime", !!appReady);
   }
-  await sleep(800);
-  const shotBrowser = await shot(b.qmp, join(OUT, "m13-shot-browser.ppm"));
+  // Same single-frame hazard as the Terminal header above (the
+  // browser header passed this run by only 1.1 s): poll up to 30 s.
+  let shotBrowser = await shot(b.qmp, join(OUT, "m13-shot-browser.ppm"));
+  let browserHeader = findWindowHeader(shotBrowser, 14, 165, 233);
+  const browserHeaderDeadline = Date.now() + 30000;
+  while (!browserHeader && Date.now() < browserHeaderDeadline) {
+    await sleep(1000);
+    shotBrowser = await shot(b.qmp, join(OUT, "m13-shot-browser.ppm"));
+    browserHeader = findWindowHeader(shotBrowser, 14, 165, 233);
+  }
   // The Browser window header is its registered colour #0ea5e9.
-  const browserHeader = findWindowHeader(shotBrowser, 14, 165, 233);
   check("browser-app: window on screen (header found)", !!browserHeader);
   if (browserHeader) {
     // Address input: header (44) + tab strip (36), input centred in
     // its 44px row -> top + 44 + 36 + 22.
-    const page2Url = "http://10.0.2.2:18080/m5-page2.html";
+    const page2Url = `http://10.0.2.2:${HTTP_PORT}/m5-page2.html`;
     await moveTo(
       browserHeader.left + 200,
       browserHeader.top + 102,
@@ -2735,7 +2802,10 @@ async function main() {
     const appMarkerRe = new RegExp(
       `BROWSER (open title=.* url=${page2Url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}|tabs [1-9][0-9]*)`,
     );
-    let appMarker = await waitForLog(b.logPath, appMarkerRe, 15000, before);
+    // 60 s (was 15 s): the Browser app's own marker log line lags
+    // a slow warm open under load — run 44803329836 burned both
+    // waits in full while the navigation itself had succeeded.
+    let appMarker = await waitForLog(b.logPath, appMarkerRe, 60000, before);
     let regoed = false;
     if (!appMarker) {
       const shotAgain = await shot(b.qmp, join(OUT, "m13-shot-browser-again.ppm"));
@@ -2752,7 +2822,7 @@ async function main() {
         await click();
         await sleep(300);
         await key("ret");
-        appMarker = await waitForLog(b.logPath, appMarkerRe, 30000, before);
+        appMarker = await waitForLog(b.logPath, appMarkerRe, 60000, before);
       }
     }
     check(
@@ -2964,7 +3034,9 @@ async function main() {
   let aside5 = null;
   {
     await refocusTerminal();
-    const { exec } = await termCmd("browser open http://10.0.2.2:18080/m13-link.html");
+    const { exec } = await termCmd(
+      `browser open http://10.0.2.2:${HTTP_PORT}/m13-link.html`,
+    );
     check("link-nav: `browser open` the link page runs (EXEC 0)", !!exec, exec || "");
   }
   await refocusTerminal();
@@ -3122,7 +3194,9 @@ async function main() {
   //   diagnostic line in the check detail.
   {
     await refocusTerminal();
-    const { exec } = await termCmd("browser open http://10.0.2.2:18080/m5-page.html");
+    const { exec } = await termCmd(
+      `browser open http://10.0.2.2:${HTTP_PORT}/m5-page.html`,
+    );
     check(
       "chromeless: `browser open` the red page again runs (EXEC 0)",
       !!exec,
