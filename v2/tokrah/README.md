@@ -20,7 +20,7 @@ decompilable.
 - `metro.config.js` — Metro + Expo config. Resolves against Tokrah's
   own node_modules plus the v2 renderer's React copies; aliases
   `react-native` to the shim and native modules to stubs. Nothing is
-  hoisted into this monorepo's pnpm catalog.
+  hoisted into this repo.
 - `build-tokrah.mjs` — `TOKRAH_SRC=… node build-tokrah.mjs
 ./entry-tokrah.js <out.js> [platform]` (platform `ios` — native
   packages ship only `.ios`/`.android` files, so a custom platform

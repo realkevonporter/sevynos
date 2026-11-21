@@ -64,6 +64,3 @@ out/
 
 # SevynOS v2 native deps (fetched + built by build-deps.sh; third-party)
 v2/rn/host/deps/
-
-# Generated from the pinned Genesis commit (v2/image/fetch-genesis.sh model)
-graphics/core/
