@@ -1139,12 +1139,14 @@ if ! grep -q "SEVYNOS_M2_READY" /tmp/sevyn-host.log 2>/dev/null; then
 fi
 echo "SEVYNOS_M2_READY"
 # Sevyn Code must be serving before the harness starts driving the
-# Terminal: give it up to 10 s to answer on its port. A failure here
-# does NOT fail the boot — the M4 check asserts code status
-# separately, with the server log as the diagnostic.
+# Terminal: give it up to 120 s to answer on its port. code-server is
+# a 457 MB Node app and under TCG load its startup can exceed 10 s,
+# which used to leave CODE_OK=0 on slow boots. A failure here does
+# NOT fail the boot — the M4 check asserts code status separately,
+# with the server log as the diagnostic.
 CODE_OK=0
 i=0
-while [ "$i" -lt 100 ]; do
+while [ "$i" -lt 1200 ]; do
   if wget -qO- http://127.0.0.1:8080/ 2>/dev/null | grep -q codeServerVersion; then CODE_OK=1; break; fi
   sleep 0.1
   i=$((i + 1))
