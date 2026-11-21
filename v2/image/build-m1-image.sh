@@ -61,7 +61,8 @@ done
 # busybox is resolved from the sysroot below (it is not on the host PATH
 # in local testing); the build fails there if it cannot be found.
 for f in "$SYSROOT/usr/bin/weston" "$SYSROOT/usr/sbin/seatd" \
-         "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"; do
+         "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
+         "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml"; do
   if [ ! -f "$f" ]; then
     echo "error: missing $f (install weston, seatd, wayland-protocols)" >&2
     exit 1
@@ -88,9 +89,16 @@ wayland-scanner client-header \
 wayland-scanner private-code \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-protocol.c"
+wayland-scanner client-header \
+  "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
+  "$BUILD_TMP/presentation-time-client-protocol.h"
+wayland-scanner private-code \
+  "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
+  "$BUILD_TMP/presentation-time-protocol.c"
 
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-test-client" \
   "$GENESIS_TREE/compositor/tests/test-client.c" "$BUILD_TMP/xdg-shell-protocol.c" \
+  "$BUILD_TMP/presentation-time-protocol.c" \
   -I"$BUILD_TMP" $(pkg-config --cflags --libs wayland-client)
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-statusd" "$ROOT/services/statusd.c"
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-status-client" "$ROOT/services/status-client.c"
