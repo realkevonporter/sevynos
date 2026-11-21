@@ -463,4 +463,80 @@ check("ScrollView: a point outside it does not scroll it", () => {
 // Restore the shell tree for a clean end state.
 renderer.update(h(App));
 
-console.log(`\n${passed} renderer checks passed`);
+// --- App store: first-boot race (M9) -----------------------------------
+// appd seeds the registry before its socket listens, so the shell's
+// first listApps() can return [] while appd is still seeding. The
+// snapshot must not memoize the empty list: it retries on a 1s timer
+// until appd answers, and handleAppEvent re-LISTs on any event while
+// the snapshot is still empty. These run last and async (the timer
+// path needs a real 1s wait); the summary prints after them.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  const realListApps = Sevyn.listApps;
+  try {
+    // Timer path: empty first snapshot, appd answers before any
+    // event arrives — the retry refills the snapshot and notifies.
+    Sevyn.listApps = () => [];
+    const first = renderer.getAppsSnapshot();
+    assert.equal(first.apps.length, 0, "empty while appd seeds");
+    const presentsBefore = Sevyn._presents.length;
+    Sevyn.listApps = realListApps;
+    await sleep(1200);
+    const refilled = renderer.getAppsSnapshot();
+    assert.equal(refilled.apps.length, 12, "retry refilled the snapshot");
+    assert.ok(
+      refilled.apps.some((a) => a.id === "terminal"),
+      "refilled list holds the stock apps",
+    );
+    assert.ok(
+      Sevyn._presents.length > presentsBefore,
+      "listeners notified on refill (re-presented)",
+    );
+    passed++;
+    console.log("ok - apps snapshot: empty listApps retried until appd answers");
+  } finally {
+    Sevyn.listApps = realListApps;
+  }
+
+  // Backstop path: a fresh module, empty snapshot, then an event
+  // arrives before the timer fires — the event re-LISTs immediately.
+  delete require.cache[require.resolve("../sevyn-renderer")];
+  Sevyn._reset();
+  const renderer2 = require("../sevyn-renderer");
+  renderer2.render(h(App), { width: 1024, height: 768 });
+  try {
+    Sevyn.listApps = () => [];
+    const first2 = renderer2.getAppsSnapshot();
+    assert.equal(first2.apps.length, 0, "empty while appd seeds (backstop)");
+    Sevyn.listApps = realListApps;
+    // Unknown event kind while empty: the backstop still re-LISTs.
+    Sevyn._handlers.appEvent("EVENT SOMETHING terminal");
+    const afterUnknown = renderer2.getAppsSnapshot();
+    assert.equal(
+      afterUnknown.apps.length,
+      12,
+      "unknown event backstop refilled the snapshot",
+    );
+    // Unknown event kind with a full snapshot: no re-render, the
+    // snapshot object is untouched (pre-existing behaviour).
+    Sevyn._handlers.appEvent("EVENT SOMETHING terminal");
+    assert.strictEqual(
+      renderer2.getAppsSnapshot(),
+      afterUnknown,
+      "unknown event left a full snapshot alone",
+    );
+    Sevyn._handlers.appEvent("EVENT LAUNCHED terminal");
+    const afterEvent = renderer2.getAppsSnapshot();
+    assert.equal(afterEvent.apps.length, 12, "event backstop refilled the snapshot");
+    assert.ok(
+      afterEvent.running.includes("terminal"),
+      "the LAUNCHED event still processed normally",
+    );
+    passed++;
+    console.log("ok - apps snapshot: event backstop re-LISTs while empty");
+  } finally {
+    Sevyn.listApps = realListApps;
+  }
+
+  console.log(`\n${passed} renderer checks passed`);
+})();
