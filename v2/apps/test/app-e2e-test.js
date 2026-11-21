@@ -566,6 +566,9 @@ check("files: lists a real directory, navigates into it", () => {
     if (cmd === "sevyn files list /data")
       return "0\nd m4-files-test\nf slot-state.json\n";
     if (cmd === "sevyn files list /data/m4-files-test") return "0\nf hello.txt\n";
+    if (cmd === "sevyn files volumes")
+      return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+    if (cmd === "sevyn files clipboard") return "0\nempty\n";
     return "1\nerror: no such directory\n";
   };
   loadAs(
@@ -587,7 +590,14 @@ check("files: lists a real directory, navigates into it", () => {
   );
   assert.ok(texts.includes("slot-state.json"), "file entry shown");
   assert.ok(Sevyn._logs.includes("FILES listed /data (2)"), "initial listing logged");
-  pressTab(5); // —, ▢, X, .., m4-files-test
+  // Focus order: [—, ▢, X, Cut, Copy, Paste, Delete, Internal Drive,
+  // .., m4-files-test, slot-state.json] — the toolbar and the Devices
+  // sidebar sit before the listing, so m4-files-test is the tenth Tab
+  // from no-focus (files are pressable now, so slot-state.json is
+  // eleventh). The first Enter selects the directory; the second
+  // opens it (tap-to-select, tap-again-to-open).
+  pressTab(10);
+  pressEnter();
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("FILES listed /data/m4-files-test (1)"),
@@ -596,6 +606,110 @@ check("files: lists a real directory, navigates into it", () => {
   texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
   assert.ok(texts.includes("/data/m4-files-test"), "path bar updated");
   assert.ok(texts.includes("hello.txt"), "file inside shown");
+});
+
+// The #122 port: selection + Cut/Copy/Paste/Delete through the toolbar
+// (no right-click in v2). The handler is a fake filesystem: the paste
+// lands on the collision-suffixed name and the listing grows.
+check("files: select, copy, paste, delete via the toolbar", () => {
+  let pasted = false;
+  let clipboard = null;
+  const handler = (cmd) => {
+    if (cmd === "sevyn files volumes")
+      return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+    if (cmd === "sevyn files clipboard")
+      return "0\n" + (clipboard === null ? "empty\n" : clipboard + "\n");
+    if (cmd === "sevyn files list /data")
+      return pasted
+        ? "0\nd m4-files-test\nd m4-files-test (1)\nf slot-state.json\n"
+        : "0\nd m4-files-test\nf slot-state.json\n";
+    if (
+      cmd === "sevyn files clipboard set copy /data/m4-files-test m4-files-test directory"
+    ) {
+      clipboard =
+        '{"kind":"copy","sourcePath":"/data/m4-files-test",' +
+        '"sourceName":"m4-files-test","sourceKind":"directory"}';
+      return "0\nclipboard set: copy m4-files-test\n";
+    }
+    if (cmd === "sevyn files copy /data/m4-files-test /data/m4-files-test (1)") {
+      pasted = true;
+      return "0\ncopied /data/m4-files-test to /data/m4-files-test (1)\n";
+    }
+    if (cmd === "sevyn files delete /data/m4-files-test (1)") {
+      return "0\ndeleted /data/m4-files-test (1)\n";
+    }
+    return "1\nerror: no such directory\n";
+  };
+  loadAs(
+    {
+      id: "files",
+      name: "Files",
+      color: "#3b82f6",
+      glyph: "F",
+      permissions: ["cli.exec"],
+    },
+    filesBundle,
+    handler,
+  );
+  let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Devices"), "Devices sidebar shown");
+  assert.ok(texts.includes("Internal Drive"), "internal drive row shown");
+  assert.ok(texts.includes("Clipboard empty"), "empty clipboard in the status bar");
+  assert.ok(texts.includes("Cut"), "Cut on the toolbar");
+  assert.ok(texts.includes("Paste"), "Paste on the toolbar");
+  pressTab(10); // —, ▢, X, Cut, Copy, Paste, Delete, Internal Drive, .., m4-files-test
+  pressEnter(); // first tap selects the directory (second tap would open it)
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Selected m4-files-test")),
+    "selection shown in the status bar",
+  );
+  pressTab(6); // slot-state.json, —, ▢, X, Cut, Copy
+  pressEnter(); // Copy
+  assert.ok(
+    Sevyn._logs.includes(
+      "EXEC sevyn files clipboard set copy /data/m4-files-test m4-files-test directory",
+    ),
+    "copy sets the clipboard, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Copied m4-files-test")),
+    "copy status shown",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("Clipboard: copy m4-files-test")),
+    "clipboard indicator updated",
+  );
+  pressTab(1); // Paste
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes(
+      "EXEC sevyn files copy /data/m4-files-test /data/m4-files-test (1)",
+    ),
+    "paste copies with the collision suffix, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Pasted m4-files-test (1)")),
+    "paste status shown",
+  );
+  assert.ok(texts.includes("m4-files-test (1)"), "pasted entry listed");
+  // Focus stayed on Paste across the listing refresh (the toolbar
+  // instance is reused); the pasted copy is five Tabs on.
+  pressTab(5); // Delete, Internal Drive, .., m4-files-test, m4-files-test (1)
+  pressEnter(); // select the pasted copy
+  pressTab(8); // slot-state.json, —, ▢, X, Cut, Copy, Paste, Delete
+  pressEnter(); // Delete
+  assert.ok(
+    Sevyn._logs.includes("EXEC sevyn files delete /data/m4-files-test (1)"),
+    "delete runs for the selected entry, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Deleted m4-files-test (1)")),
+    "delete status shown",
+  );
 });
 
 check("browser: tabs on mount, address-bar navigation opens a page", () => {
