@@ -1265,7 +1265,15 @@ while [ ! -S /run/wayland-0 ] && kill -0 "$WESTON_PID" 2>/dev/null && [ "$i" -lt
 if [ ! -S /run/wayland-0 ]; then
   echo "GENESIS weston GL renderer failed to start; falling back to pixman"
   kill "$WESTON_PID" 2>/dev/null
-  sleep 1
+  # Wait for the GL Weston to actually exit before starting the
+  # pixman one: seatd allows one client per VT-bound seat, and a
+  # still-dying GL Weston holds the seat, so the pixman Weston's
+  # client is rejected ("Device or resource busy") and the shell
+  # host's Wayland connection is reset (M13 att1/att2 on #148).
+  # A fixed 1 s sleep is not enough under TCG load.
+  i=0
+  while kill -0 "$WESTON_PID" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$WESTON_PID" 2>/dev/null; then kill -9 "$WESTON_PID" 2>/dev/null || true; sleep 1; fi
   # Save the GL attempt's weston log before the pixman fallback
   # overwrites it: --log=/tmp/weston.log is shared, and /tmp is
   # tmpfs (lost on shutdown), so without this the GL failure's
