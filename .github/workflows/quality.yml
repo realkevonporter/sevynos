@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, sevynos-kvm]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -28,7 +28,7 @@ jobs:
       - run: pnpm check
 
   native-wayland:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, sevynos-kvm]
     timeout-minutes: 15
     defaults:
       run:
@@ -46,7 +46,7 @@ jobs:
   # CI. The image build (v2-m13.yml) is the gate for staging; this
   # job is the gate for the daemon itself.
   camd:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, sevynos-kvm]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5

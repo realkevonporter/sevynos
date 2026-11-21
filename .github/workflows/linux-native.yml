@@ -6,7 +6,7 @@ on:
     paths: ["hosts/linux/**", ".github/workflows/linux-native.yml"]
 jobs:
   wayland:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, sevynos-kvm]
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
