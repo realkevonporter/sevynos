@@ -482,7 +482,7 @@ TOKRAH_VERSION="$(node -e "console.log(require('$TOKRAH_SRC/tokrah/package.json'
 echo "Tokrah version: $TOKRAH_VERSION"
 # Tokrah installs with its pinned yarn (packageManager yarn@1.22.22);
 # the app's node_modules are its own — nothing is hoisted into this
-# monorepo's pnpm catalog (the dogfooding rule).
+# repo (the dogfooding rule).
 command -v yarn >/dev/null 2>&1 || { echo "error: yarn not found (Tokrah installs with yarn 1.22.22)" >&2; exit 1; }
 if [ ! -d "$TOKRAH_SRC/tokrah/node_modules" ]; then
   (cd "$TOKRAH_SRC/tokrah" && yarn install --frozen-lockfile --non-interactive) \

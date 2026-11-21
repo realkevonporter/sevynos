@@ -465,7 +465,7 @@ untouched, so the M12 check keeps proving its own image.
 ## Verification plan
 
 1. Local: `npx prettier --check` on the touched md/yml files before
-   pushing (no full-tree lint/test — turbo OOMs in the sandbox);
+   pushing (no full-tree lint/test exists anymore);
    `bash -n` on the builder; YAML parse on the workflow.
 2. CI: the PR runs all workflows (it touches `v2/`). M13's own
    workflow builds the M13 image, runs `m13-check.mjs` in QEMU,

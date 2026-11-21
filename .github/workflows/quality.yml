@@ -10,36 +10,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  # Prettier over the whole remaining tree (v2/, workflows, docs).
+  # The old pnpm/turbo workspace is gone (removed 2026-11-21); the v2
+  # milestone workflows own typecheck/lint/test/build for v2 itself.
+  format:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
-      # graphics/core/ is generated, not tracked: materialize it from the
-      # pinned Genesis commit before pnpm install — the workspace lockfile
-      # expects @sevynos/graphics at graphics/core/.
-      - run: sh v2/image/fetch-genesis.sh model
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm check
-
-  native-wayland:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: hosts/linux/native
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install native build dependencies
-        run: >-
-          sudo apt-get update && sudo apt-get install --yes
-          libwayland-dev libxkbcommon-dev pkg-config
-      - run: cargo test --locked
+      - run: npx -y prettier@3.9.6 --check "v2/**/*.{ts,tsx,js,mjs,json,md}" ".github/workflows/*.yml" "*.md"
 
   # camd (native camera daemon): compile it and prove the socket
   # protocol against the synthetic source — no camera hardware in
@@ -50,15 +32,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      # setup-node's package-manager cache lookup needs pnpm on
-      # PATH (it fails the job before any step runs without it —
-      # the `check` job installs it the same way). No pnpm install
-      # runs in this job (one plain node script), so the
-      # auto-detected pnpm cache has nothing to save and the
-      # post-job save errors with a Path Validation Error — disable
-      # it (setup-node v5 auto-enables caching from the
-      # packageManager field otherwise).
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
           node-version: 24
