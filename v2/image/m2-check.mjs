@@ -426,9 +426,13 @@ async function main() {
   // 3. Dock fits at 15 apps: the first tile (Files, #3b82f6) is fully
   // visible, the pill is floating and centred (no glass at the far
   // left/right of the bottom band), and there is no scroll chevron
-  // (#1f2937) anywhere in the dock band. Tile 0 sits at
-  // (pillX + 8, pillTop + 1 + 8); at 1280x800 that is x104..168,
-  // y711..775 (at 1024x768 it was x84..148, y677..743).
+  // (#1f2937) in the pill's padding strips. The chevron count is
+  // scoped to the strips (like m9), NOT the whole dock band: the
+  // pill's bottom shade now composites to (41,43,47) over the
+  // wallpaper, which falls within tolerance 10 of the chevron colour
+  // and reads ~915px across the full band — the shade, not a chevron.
+  // Tile 0 sits at (pillX + 8, pillTop + 1 + 8); at 1280x800 that is
+  // x104..168, y711..775 (at 1024x768 it was x84..148, y677..743).
   const tile0 = {
     x0: g15.pillX + 8,
     y0: g15.pillTop + 1 + 8,
@@ -448,7 +452,19 @@ async function main() {
     x1: W,
     y1: H,
   });
-  const chevron = countColor(img, 31, 41, 55, 10, dockBand);
+  const chevron =
+    countColor(img, 31, 41, 55, 10, {
+      x0: g15.pillX,
+      y0: g15.pillTop,
+      x1: g15.pillX + 8,
+      y1: g15.pillTop + g15.pillH,
+    }) +
+    countColor(img, 31, 41, 55, 10, {
+      x0: g15.pillX + g15.pillW - 8,
+      y0: g15.pillTop,
+      x1: g15.pillX + g15.pillW,
+      y1: g15.pillTop + g15.pillH,
+    });
   check(
     "dock: first tile fully visible (Files blue)",
     filesBlue > 1000,

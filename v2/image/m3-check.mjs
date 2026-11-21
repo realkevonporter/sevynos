@@ -522,7 +522,12 @@ async function main() {
   // Tile 0 sits at (pillX + 8, pillTop + 1 + 8); at 1280x800 that
   // is x76..139, y712..775 (at 1024x768 it was x84..148, y677..743).
   // The pill floats and centres (no glass at the far edges) and
-  // there is no scroll chevron.
+  // there is no scroll chevron in the pill's padding strips. The
+  // chevron count is scoped to the strips (like m9), NOT the whole
+  // dock band: the pill's bottom shade now composites to (41,43,47)
+  // over the wallpaper, which falls within tolerance 10 of the
+  // chevron colour and reads ~915px across the full band — the shade,
+  // not a chevron.
   const tile0 = {
     x0: g16.pillX + 8,
     y0: g16.pillTop + 1 + 8,
@@ -542,7 +547,19 @@ async function main() {
     x1: W,
     y1: H,
   });
-  const chevron = countColor(img, 31, 41, 55, 10, dockBand);
+  const chevron =
+    countColor(img, 31, 41, 55, 10, {
+      x0: g16.pillX,
+      y0: g16.pillTop,
+      x1: g16.pillX + 8,
+      y1: g16.pillTop + g16.pillH,
+    }) +
+    countColor(img, 31, 41, 55, 10, {
+      x0: g16.pillX + g16.pillW - 8,
+      y0: g16.pillTop,
+      x1: g16.pillX + g16.pillW,
+      y1: g16.pillTop + g16.pillH,
+    });
   check(
     "dock: first tile fully visible (Browser blue)",
     browserBlue > 1000,
@@ -570,15 +587,21 @@ async function main() {
   // keyboard focus at boot but no activation until a pointer button
   // press lands on it, so click the main area first (it has no
   // pressable, so nothing launches and focus stays unset).
-  // Tab TWICE: the renderer's focus list is the tree order, and the
-  // tray POWER button is focusable list[0] (shutdown fix) — with no
-  // scroll chevrons the first tile is list[1]. One Tab + Enter would
-  // land on the power button; three would overshoot to the second tile.
+  // Tab FOUR times: the renderer's focus list is the tree order, and
+  // the tray POWER button is focusable list[0] (shutdown fix) — the
+  // shell's two desktop actions ("New folder", "New text file") sit
+  // before the dock, so the Browser tile is list[3], not list[1].
+  // One Tab + Enter would land on the power button; two would land
+  // on "New folder" and launch Files.
   {
     const before = logLines().length;
     await moveTo(512, 300, W, H); // main area (welcome text), no pressable
     await sleep(300);
     await click();
+    await sleep(300);
+    await key("tab");
+    await sleep(300);
+    await key("tab");
     await sleep(300);
     await key("tab");
     await sleep(300);

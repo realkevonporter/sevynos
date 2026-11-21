@@ -921,7 +921,9 @@ async function main() {
   // [—, ▢, X, Scan, Nightly, Stable, Sync Now, Timezone, Apply,
   // echo-ai, plan-ai] (#134's Date & Time section sits after the
   // channel buttons, adding Sync Now, the timezone input, and Apply
-  // there). Tab x11 -> plan-ai.
+  // there). Tab x11 -> plan-ai. (The wallpaper PR's Appearance
+  // section appends 4 style buttons AFTER plan-ai, so x11 still
+  // holds — anything after plan-ai is unaffected.)
   await key("tab");
   await key("tab");
   await key("tab");
