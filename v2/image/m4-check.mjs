@@ -724,10 +724,21 @@ async function main() {
     await sleep(300);
   }
   {
-    const { exec, hit } = await termCmd(
-      "code status",
-      /TERMINAL code-status running=yes serving=yes terminal-shell=\/usr\/local\/bin\/sevyn/,
-    );
+    // code-server is a 457 MB Node app; under TCG load its startup can
+    // outrun the boot poll, so a single `code status` may catch it
+    // before it is serving. Retry for up to ~120 s before failing.
+    const deadline = Date.now() + 120000;
+    let exec = null;
+    let hit = null;
+    while (!hit && Date.now() < deadline) {
+      const r = await termCmd(
+        "code status",
+        /TERMINAL code-status running=yes serving=yes terminal-shell=\/usr\/local\/bin\/sevyn/,
+      );
+      exec = r.exec || exec;
+      hit = r.hit;
+      if (!hit && Date.now() < deadline) await sleep(5000);
+    }
     check("terminal: `code status` runs (EXEC 0)", !!exec, exec || "");
     check(
       "terminal: Sevyn Code running + serving, terminal is the Sevyn CLI",
