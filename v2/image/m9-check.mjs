@@ -611,10 +611,12 @@ async function screenSettled(b, timeoutMs = 30000) {
       });
       // M9: the dock sits at the bottom of the CURRENT frame (1920x1080
       // in this check, not the M7 1024x768) — measure from the frame.
-      // The settled signal is the dock's glass interior (57,57,59):
+      // The settled signal is the dock's glass interior (52,54,59):
       // the edge ring's #ffffff14 paints under the pill, then the
-      // pill's own #ffffff1f fill composites over it.
-      const dockBg = countColor(img, 57, 57, 59, 10, {
+      // pill's own #ffffff1f fill composites over it, over the
+      // default wallpaper's flat base #06080F (the auras do not
+      // reach the dock band).
+      const dockBg = countColor(img, 52, 54, 59, 10, {
         x0: 0,
         y0: img.height - 96,
         x1: img.width,
@@ -1713,13 +1715,13 @@ async function main() {
   // (969px), while a chevron — if one were drawn — would sit in the
   // padding, where only glass lives.
   if (settled) {
-    const glassLeft = countColor(settled, 57, 57, 59, 10, {
+    const glassLeft = countColor(settled, 52, 54, 59, 10, {
       x0: 0,
       y0: 984,
       x1: 200,
       y1: 1080,
     });
-    const glassRight = countColor(settled, 57, 57, 59, 10, {
+    const glassRight = countColor(settled, 52, 54, 59, 10, {
       x0: 1720,
       y0: 984,
       x1: 1920,

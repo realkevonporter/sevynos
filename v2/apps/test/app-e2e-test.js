@@ -524,7 +524,9 @@ check("settings: channel switch applies and logs", () => {
   // the channel buttons, so it adds three focusables there (Sync Now,
   // the timezone input, Apply): the order is now [—, ▢, X, Scan,
   // Nightly, Stable, Sync Now, Timezone, Apply, echo-ai, plan-ai,
-  // Shut Down, Restart].
+  // Shut Down, Restart, Default, Solid, Cosmic, Minimal] — the
+  // Appearance section sits after Power, so it appends four
+  // focusables at the end (eight more swatches when Solid is picked).
   pressTab(6); // —, ▢, X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
@@ -538,10 +540,11 @@ check("settings: channel switch applies and logs", () => {
     "confirmation shown",
   );
   // Focus order is now [—, ▢, X, Scan, Nightly, Stable, Sync Now,
-  // Timezone, Apply, echo-ai, plan-ai, Shut Down, Restart]: Stable ->
-  // Sync Now -> Timezone -> Apply -> echo-ai -> plan-ai -> Shut Down
-  // -> Restart -> — -> ▢ -> X -> Scan -> Nightly.
-  pressTab(12);
+  // Timezone, Apply, echo-ai, plan-ai, Shut Down, Restart, Default,
+  // Solid, Cosmic, Minimal]: Stable -> Sync Now -> Timezone -> Apply
+  // -> echo-ai -> plan-ai -> Shut Down -> Restart -> Default ->
+  // Solid -> Cosmic -> Minimal -> — -> ▢ -> X -> Scan -> Nightly.
+  pressTab(16);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> Sync Now -> Timezone -> Apply -> echo-ai ->
@@ -558,6 +561,89 @@ check("settings: channel switch applies and logs", () => {
   assert.ok(
     texts.some((t) => t.includes("AI set to plan-ai.")),
     "AI confirmation shown",
+  );
+});
+
+check("settings: wallpaper style + color apply and log", () => {
+  let channel = "nightly";
+  let aiSelected = "echo-ai";
+  let wallpaperStyle = "default";
+  let wallpaperColor = "#090b11";
+  const handler = (cmd) => {
+    if (cmd === "sevyn update status")
+      return `0\nversion=1 channel=${channel} active=A\n`;
+    if (cmd === "sevyn ai list")
+      return `0\nselected=${aiSelected} backends=echo-ai,plan-ai\n`;
+    if (cmd === "sevyn code status")
+      return "0\nrunning: yes\nserving: yes\nversion: 4.105.0\\nterminal-shell: /usr/local/bin/sevyn\\n";
+    if (cmd === "sevyn settings get wallpaperStyle")
+      return `0\nwallpaperStyle=${wallpaperStyle}\n`;
+    if (cmd === "sevyn settings get wallpaperColor")
+      return `0\nwallpaperColor=${wallpaperColor}\n`;
+    if (cmd.startsWith("sevyn settings set wallpaperStyle ")) {
+      wallpaperStyle = cmd.slice("sevyn settings set wallpaperStyle ".length);
+      return "0\n";
+    }
+    if (cmd.startsWith("sevyn settings set wallpaperColor ")) {
+      wallpaperColor = cmd.slice("sevyn settings set wallpaperColor ".length);
+      return "0\n";
+    }
+    return "0\n";
+  };
+  loadAs(
+    {
+      id: "settings",
+      name: "Settings",
+      color: "#6b7280",
+      glyph: "S",
+      permissions: ["cli.exec"],
+    },
+    settingsBundle,
+    handler,
+  );
+  let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Appearance"), "appearance section shown");
+  assert.ok(texts.includes("Default"), "default style button shown");
+  assert.ok(texts.includes("Solid"), "solid style button shown");
+  assert.ok(texts.includes("Cosmic"), "cosmic style button shown");
+  assert.ok(texts.includes("Minimal"), "minimal style button shown");
+  assert.ok(
+    texts.some((t) => t.includes("Custom image wallpapers are not supported yet.")),
+    "no-custom-image note shown for a gradient style",
+  );
+  // Focus order is [—, ▢, X, Scan, Nightly, Stable, Sync Now,
+  // Timezone, Apply, echo-ai, plan-ai, Shut Down, Restart, Default,
+  // Solid, Cosmic, Minimal]: Default is the 14th focusable.
+  pressTab(14);
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("SETTINGS wallpaperStyle=default"),
+    "style apply logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  pressTab(1); // Solid
+  pressEnter();
+  assert.ok(Sevyn._logs.includes("SETTINGS wallpaperStyle=solid"), "solid style logged");
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Color: Sevyn Night")),
+    "current color shown once solid is picked",
+  );
+  // Swatches join the focus order after Minimal: Solid -> Cosmic ->
+  // Minimal -> Sevyn Night -> Slate.
+  pressTab(4);
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("SETTINGS wallpaperColor=#1E293B"),
+    "color apply logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Color: Slate")),
+    "new color shown",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("Applies when Settings closes.")),
+    "applies-on-close note shown",
   );
 });
 

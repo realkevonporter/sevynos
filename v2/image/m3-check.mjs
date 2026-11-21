@@ -460,14 +460,16 @@ async function main() {
       await sleep(1000);
       continue;
     }
-    // Top bar #15151c (21,21,28); dock glass (57,57,59) — the pill
+    // Top bar #15151c (21,21,28); dock glass (52,54,59) — the pill
     // interior: the edge ring's #ffffff14 paints under the pill,
-    // then the pill's own #ffffff1f fill composites over it. The
+    // then the pill's own #ffffff1f fill composites over it, over
+    // the default wallpaper's flat base #06080F (the auras do not
+    // reach the dock band). The
     // band is the bottom 128px of the frame — the pill sits at the
     // bottom with an 8px margin, so this holds at any surface size
     // (CI runs at 1280x800, not 1024x768).
     topBar = countColor(img, 21, 21, 28, 10, { x0: 0, y0: 0, x1: img.width, y1: 48 });
-    dockBg = countColor(img, 57, 57, 59, 10, {
+    dockBg = countColor(img, 52, 54, 59, 10, {
       x0: 0,
       y0: img.height - 128,
       x1: img.width,
@@ -528,13 +530,13 @@ async function main() {
     y1: g16.pillTop + 1 + 8 + g16.tile,
   };
   const browserBlue = countColor(img, 14, 165, 233, 12, tile0);
-  const glassLeft = countColor(img, 57, 57, 59, 10, {
+  const glassLeft = countColor(img, 52, 54, 59, 10, {
     x0: 0,
     y0: dockBand.y0,
     x1: Math.max(0, g16.pillX - 8),
     y1: H,
   });
-  const glassRight = countColor(img, 57, 57, 59, 10, {
+  const glassRight = countColor(img, 52, 54, 59, 10, {
     x0: g16.pillX + g16.pillW + 8,
     y0: dockBand.y0,
     x1: W,
@@ -763,7 +765,7 @@ async function main() {
   {
     const imgAlive = await shot(qmp, join(OUT, "m3-shot-after-crash.ppm"));
     const t = countColor(imgAlive, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-    const d = countColor(imgAlive, 57, 57, 59, 10, { x0: 0, y0: H - 128, x1: W, y1: H });
+    const d = countColor(imgAlive, 52, 54, 59, 10, { x0: 0, y0: H - 128, x1: W, y1: H });
     check(
       "sandbox: shell still on screen after app crash",
       t > 10000 && d > 2000,
@@ -836,7 +838,7 @@ async function main() {
   const shotFinal = join(OUT, "m3-shot-final.ppm");
   const imgFinal = await shot(qmp, shotFinal);
   const fTop = countColor(imgFinal, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+  const fDock = countColor(imgFinal, 52, 54, 59, 10, {
     x0: 0,
     y0: H - 128,
     x1: W,

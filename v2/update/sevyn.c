@@ -160,6 +160,10 @@ static void print_usage(FILE *f)
             "  sevyn files mkdir <path>    create a directory\n"
             "  sevyn files write <path> <text...>\n"
             "                              write text to a file\n"
+            "  sevyn settings get <key>    show a setting (wallpaperStyle|\n"
+            "                              wallpaperColor; the default when unset)\n"
+            "  sevyn settings set <key> <value>\n"
+            "                              set a setting (validated)\n"
             "  sevyn ai list               list the plugged-in AIs\n"
             "  sevyn ai select <id>        plug in a different AI\n"
             "  sevyn ai status             show the selected AI + grant\n"
@@ -862,6 +866,150 @@ static int cmd_files(int argc, char **argv)
         fclose(f);
         printf("wrote %zu bytes to %s\n", total, argv[3]);
         return 0;
+    }
+    return usage();
+}
+
+/* ------------------------------------------------------------------ */
+/* settings — plain /data/settings.json (no daemon)                     */
+/* ------------------------------------------------------------------ */
+
+/* Desktop wallpaper settings (port of #123): wallpaperStyle and
+ * wallpaperColor, read by the shell on render and written by the
+ * Settings app. A missing file — or a missing key — falls back to
+ * the defaults (default / #090b11), so a fresh system just works.
+ * `get` prints `key=value` so the apps' parseField reads it, the
+ * same shape as `sevyn update status`. The path honours
+ * SEVYN_SETTINGS_PATH (same env_or pattern as the shell pid file)
+ * so the verbs are testable off-device. */
+
+#define DEFAULT_WALLPAPER_STYLE "default"
+#define DEFAULT_WALLPAPER_COLOR "#090b11"
+
+static const char *settings_path(void)
+{
+    return env_or("SEVYN_SETTINGS_PATH", "/data/settings.json");
+}
+
+static int valid_wallpaper_style(const char *v)
+{
+    return strcmp(v, "default") == 0 || strcmp(v, "solid") == 0 ||
+           strcmp(v, "cosmic") == 0 || strcmp(v, "minimal") == 0;
+}
+
+static int valid_wallpaper_color(const char *v)
+{
+    if (strlen(v) != 7 || v[0] != '#')
+        return 0;
+    for (int i = 1; i < 7; i++) {
+        char c = v[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    return 1;
+}
+
+static int valid_settings_key(const char *key)
+{
+    return strcmp(key, "wallpaperStyle") == 0 ||
+           strcmp(key, "wallpaperColor") == 0;
+}
+
+/* Current settings from disk (defaults for anything absent or
+ * invalid, so a hand-edited file can never wedge the shell). The
+ * caller frees the returned strings. */
+static void read_settings(char **style, char **color)
+{
+    *style = strdup(DEFAULT_WALLPAPER_STYLE);
+    *color = strdup(DEFAULT_WALLPAPER_COLOR);
+    char *text = read_file_cap(settings_path(), 4096);
+    if (!text)
+        return;
+    char *s = json_string_after(text, NULL, "\"wallpaperStyle\"");
+    if (s) {
+        if (valid_wallpaper_style(s)) {
+            free(*style);
+            *style = s;
+        } else {
+            free(s);
+        }
+    }
+    char *c = json_string_after(text, NULL, "\"wallpaperColor\"");
+    if (c) {
+        if (valid_wallpaper_color(c)) {
+            free(*color);
+            *color = c;
+        } else {
+            free(c);
+        }
+    }
+    free(text);
+}
+
+static int cmd_settings_get(const char *key)
+{
+    char *style = NULL, *color = NULL;
+    read_settings(&style, &color);
+    printf("%s=%s\n", key,
+           strcmp(key, "wallpaperStyle") == 0 ? style : color);
+    free(style);
+    free(color);
+    return 0;
+}
+
+static int cmd_settings_set(const char *key, const char *value)
+{
+    if (strcmp(key, "wallpaperStyle") == 0) {
+        if (!valid_wallpaper_style(value)) {
+            fprintf(stderr,
+                    "error: wallpaperStyle must be default|solid|cosmic|minimal\n");
+            return 1;
+        }
+    } else if (!valid_wallpaper_color(value)) {
+        fprintf(stderr,
+                "error: wallpaperColor must be a #rrggbb hex color\n");
+        return 1;
+    }
+    char *style = NULL, *color = NULL;
+    read_settings(&style, &color);
+    if (strcmp(key, "wallpaperStyle") == 0) {
+        free(style);
+        style = strdup(value);
+    } else {
+        free(color);
+        color = strdup(value);
+    }
+    FILE *f = fopen(settings_path(), "w");
+    if (!f) {
+        fprintf(stderr, "error: cannot write %s: %s\n", settings_path(),
+                strerror(errno));
+        free(style);
+        free(color);
+        return 1;
+    }
+    fprintf(f, "{\"wallpaperStyle\": \"%s\", \"wallpaperColor\": \"%s\"}\n",
+            style, color);
+    fclose(f);
+    printf("%s=%s\n", key, value);
+    free(style);
+    free(color);
+    return 0;
+}
+
+static int cmd_settings(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    if (strcmp(argv[2], "get") == 0) {
+        if (argc != 4 || !valid_settings_key(argv[3]))
+            return usage();
+        return cmd_settings_get(argv[3]);
+    }
+    if (strcmp(argv[2], "set") == 0) {
+        if (argc != 5 || !valid_settings_key(argv[3]))
+            return usage();
+        return cmd_settings_set(argv[3], argv[4]);
     }
     return usage();
 }
@@ -6457,6 +6605,8 @@ static int dispatch(int argc, char **argv)
         return cmd_shell(argc, argv);
     if (strcmp(argv[1], "files") == 0)
         return cmd_files(argc, argv);
+    if (strcmp(argv[1], "settings") == 0)
+        return cmd_settings(argc, argv);
     if (strcmp(argv[1], "code") == 0)
         return cmd_code(argc, argv);
     if (strcmp(argv[1], "browser") == 0)

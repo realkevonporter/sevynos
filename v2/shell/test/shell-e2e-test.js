@@ -3,7 +3,9 @@
 // Loads the bundle with the mock Sevyn host and drives it like the real
 // host would: mount -> present, pointer click on a dock tile -> LAUNCH
 // + "Starting …" state, status push -> tray re-render, pointer move
-// over the dock -> no magnification (tiles stay flat).
+// over the dock -> no magnification (tiles stay flat). The wallpaper
+// (default variant) and the desktop icons (/data/Desktop, canned)
+// are asserted from the same mount.
 //
 // The mock's app list is extended to 14 apps (the 12 stock apps plus
 // the two M10 call apps under their working titles) so the dock's
@@ -48,6 +50,20 @@ Sevyn.listApps = () => [
   },
 ];
 
+// The shell reads its wallpaper + desktop icons through Sevyn.exec
+// on render: canned answers so the wallpaper and desktop checks
+// below drive the real paths (default style/color + two desktop
+// entries). Installed before the bundle runs: the shell execs
+// during mount.
+Sevyn._execHandler = (cmd) => {
+  if (cmd === "sevyn settings get wallpaperStyle") return "0\nwallpaperStyle=default\n";
+  if (cmd === "sevyn settings get wallpaperColor") return "0\nwallpaperColor=#090b11\n";
+  if (cmd === "sevyn files list /data/Desktop") return "0\nd Photos\nf Notes.txt\n";
+  if (cmd.startsWith("sevyn files mkdir ")) return "0\ncreated\n";
+  if (cmd.startsWith("sevyn files write ")) return "0\nwrote\n";
+  return "0\n";
+};
+
 const bundle = fs.readFileSync(path.join(__dirname, "..", "dist", "shell.js"), "utf8");
 
 let passed = 0;
@@ -66,9 +82,45 @@ const lastPresent = () => Sevyn._presents[Sevyn._presents.length - 1];
 // Tile pressables, left to right. The tray power button (#100) is also a
 // rect with a nodeId, but it lives in the top tray (y < 48); the dock
 // tiles are below it, so the y filter keeps it out of the count.
+// Dock tiles are the only SQUARE pressables down here: the desktop
+// "New folder" / "New text file" actions are 132x34 and the desktop
+// icons are 104x92, so the square filter keeps them out too (and the
+// 6x6 running dots are excluded by the size floor).
 const tiles = (ops) =>
   ops
-    .filter((o) => o.nodeId != null && o.nodeId >= 0 && o.type === "rect" && o.y >= 48)
+    .filter(
+      (o) =>
+        o.nodeId != null &&
+        o.nodeId >= 0 &&
+        o.type === "rect" &&
+        o.y >= 48 &&
+        o.w === o.h &&
+        o.w > 10,
+    )
+    .sort((a, b) => a.x - b.x);
+// Desktop icon pressables (104x92) and desktop action pressables
+// (132x34), left to right.
+const desktopItems = (ops) =>
+  ops
+    .filter(
+      (o) =>
+        o.nodeId != null &&
+        o.nodeId >= 0 &&
+        o.type === "rect" &&
+        o.w === 104 &&
+        o.h === 92,
+    )
+    .sort((a, b) => a.x - b.x);
+const desktopActions = (ops) =>
+  ops
+    .filter(
+      (o) =>
+        o.nodeId != null &&
+        o.nodeId >= 0 &&
+        o.type === "rect" &&
+        o.w === 132 &&
+        o.h === 34,
+    )
     .sort((a, b) => a.x - b.x);
 // Running dots are the white 6x6 rects; every tile also carries a
 // transparent 6x6 spacer so columns stay aligned.
@@ -104,6 +156,46 @@ check("shell mounts and presents the full frame", () => {
   assert.ok(
     images.some((a) => a.endsWith("symbols/volume.png")),
     "volume symbol in tray",
+  );
+});
+
+check("wallpaper: default variant paints the #06080F base + auras", () => {
+  const last = lastPresent();
+  const colors = last.ops.filter((o) => o.type === "rect").map((o) => o.color);
+  assert.ok(colors.includes("#06080F"), "default base present");
+  assert.ok(colors.includes("rgba(139, 156, 254, 0.20)"), "violet aura present");
+  assert.ok(colors.includes("rgba(240, 208, 138, 0.16)"), "gold aura present");
+  assert.ok(colors.includes("rgba(139, 156, 254, 0.08)"), "horizon band present");
+  assert.ok(colors.includes("rgba(6, 8, 15, 0.35)"), "grain present");
+  // The wallpaper reads its setting through exec on render.
+  assert.ok(
+    Sevyn._logs.some((l) => l === "EXEC sevyn settings get wallpaperStyle"),
+    "wallpaper style read, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.ok(
+    Sevyn._logs.some((l) => l === "EXEC sevyn settings get wallpaperColor"),
+    "wallpaper color read",
+  );
+});
+
+check("desktop icons: /data/Desktop entries render as tiles", () => {
+  const last = lastPresent();
+  const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(texts.includes("Photos"), "folder entry shown");
+  assert.ok(texts.includes("Notes.txt"), "file entry shown");
+  assert.ok(texts.includes("New folder"), "new-folder action shown");
+  assert.ok(texts.includes("New text file"), "new-text-file action shown");
+  const items = desktopItems(last.ops);
+  assert.equal(items.length, 2, "2 desktop icons, got " + items.length);
+  // Direction-C tile colors: folder amber, document blue.
+  const tileColors = last.ops
+    .filter((o) => o.type === "rect" && o.w === 48 && o.h === 48)
+    .map((o) => o.color);
+  assert.ok(tileColors.includes("#F5A623"), "folder tile amber");
+  assert.ok(tileColors.includes("#3B82F6"), "document tile blue");
+  assert.ok(
+    Sevyn._logs.some((l) => l === "EXEC sevyn files list /data/Desktop"),
+    "desktop listed, logs=" + JSON.stringify(Sevyn._logs),
   );
 });
 
@@ -195,6 +287,68 @@ check(
     assert.equal(runningDots(after.ops).length, 0, "dot gone after STOPPED");
   },
 );
+
+check("desktop icons: tapping one launches Files", () => {
+  const last = lastPresent();
+  const items = desktopItems(last.ops);
+  assert.equal(items.length, 2, "2 desktop icons");
+  const before = Sevyn._logs.filter((l) => l === "LAUNCH files").length;
+  // The previous check ended on STOPPED files, and the shell
+  // deliberately shows no second "Starting…" flash for a relaunch
+  // right after a STOPPED for the same id — move lastEvent off
+  // files first so the tap's Starting… state is observable.
+  Sevyn._handlers.appEvent("EVENT STOPPED terminal signal 15");
+  const photos = items[0];
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: photos.x + 2,
+    y: photos.y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: photos.nodeId,
+  });
+  assert.equal(
+    Sevyn._logs.filter((l) => l === "LAUNCH files").length,
+    before + 1,
+    "one more LAUNCH files, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.ok(
+    Sevyn._logs.some((l) => l === "DESKTOP open /data/Desktop/Photos"),
+    "desktop open logged",
+  );
+  const after = lastPresent();
+  const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+  assert.ok(
+    texts.some((t) => t.includes("Starting Files")),
+    "Starting… state shown",
+  );
+  // Clear the launch again so later checks start clean.
+  Sevyn._handlers.appEvent("EVENT LAUNCHED files");
+});
+
+check("desktop icons: New folder runs sevyn files mkdir", () => {
+  const last = lastPresent();
+  const actions = desktopActions(last.ops);
+  assert.equal(actions.length, 2, "2 desktop actions, got " + actions.length);
+  const newFolder = actions[0];
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: newFolder.x + 2,
+    y: newFolder.y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: newFolder.nodeId,
+  });
+  assert.ok(
+    Sevyn._logs.some((l) => l === 'EXEC sevyn files mkdir "/data/Desktop/New folder"'),
+    "mkdir run, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  // The create re-renders (and re-lists) the desktop.
+  assert.ok(
+    Sevyn._logs.filter((l) => l === "EXEC sevyn files list /data/Desktop").length >= 2,
+    "desktop re-listed after create",
+  );
+});
 
 check("status push re-renders the tray", () => {
   Sevyn._status.battery = "42";

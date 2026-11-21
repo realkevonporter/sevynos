@@ -17,7 +17,26 @@ import { View, Text, Pressable } from "./host";
 import { Dock } from "./Dock";
 import { APPS, type ShellApp } from "./apps";
 import { StatusTray } from "./StatusTray";
+import { Wallpaper } from "./Wallpaper";
+import { DesktopIcons } from "./DesktopIcons";
+import {
+  normalizeWallpaperStyle,
+  normalizeWallpaperColor,
+  wallpaperVariantFor,
+} from "./wallpaper-variants";
 import { subscribeApps, getAppsSnapshot } from "../../rn/renderer/sevyn-renderer";
+
+// One `sevyn settings get` field: the CLI prints `key=value` (the
+// same shape `sevyn update status` prints, read with parseField in
+// the apps). Null when the call fails or the field is absent — the
+// normalizers repair that to the default.
+function readSetting(key: string): string | null {
+  const raw = Sevyn.exec("sevyn settings get " + key);
+  const nl = raw.indexOf("\n");
+  if (nl < 0) return null;
+  const m = raw.slice(nl + 1).match(new RegExp(key + "=([^\\s]+)"));
+  return m ? m[1] : null;
+}
 
 export function Shell(): React.ReactElement {
   const [launching, setLaunching] = React.useState<string | null>(null);
@@ -72,14 +91,24 @@ export function Shell(): React.ReactElement {
       snap.lastEvent.id === launching
     );
 
+  // Wallpaper: re-read on every render, so a style picked in
+  // Settings applies when Settings closes (its STOPPED event
+  // re-renders the shell). Not instant while Settings stays open —
+  // the renderer has no proven effect/timer flush to poll on, and
+  // no renderer settings store is in scope for this port.
+  const wallpaperStyle = normalizeWallpaperStyle(readSetting("wallpaperStyle"));
+  const wallpaperColor = normalizeWallpaperColor(readSetting("wallpaperColor"));
+  const variant = wallpaperVariantFor(wallpaperStyle, wallpaperColor);
+
   return (
     <View
       style={{
         flex: 1,
         flexDirection: "column",
-        backgroundColor: "#0b0b0f",
+        backgroundColor: variant.background,
       }}
     >
+      <Wallpaper style={wallpaperStyle} color={wallpaperColor} />
       <View
         style={{
           flexDirection: "row",
@@ -101,9 +130,11 @@ export function Shell(): React.ReactElement {
           flex: 1,
           justifyContent: "center",
           alignItems: "center",
-          backgroundColor: "#0b0b0f",
         }}
       >
+        {/* Desktop icons paint over the wallpaper, under the
+            centered welcome text. */}
+        <DesktopIcons onLaunch={onLaunch} />
         {showStarting ? (
           <Text style={{ fontSize: 22, color: "#ffffff", textAlign: "center" }}>
             {"Starting " + (app as ShellApp).name + "…"}

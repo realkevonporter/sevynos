@@ -14,9 +14,11 @@
 //   1. The image boots and the shell mounts (SEVYNOS_M2_READY on serial).
 //   2. The shell surface is on screen: top bar, main area, and dock
 //      colours are all present in the first screendump. The dock is
-//      a floating glass pill — its interior reads (57,57,59): the
+//      a floating glass pill — its interior reads (52,54,59): the
 //      edge ring (#ffffff14) paints under the pill too, then the
-//      pill's own #ffffff1f fill composites over it. That glass,
+//      pill's own #ffffff1f fill composites over it — over the
+//      default wallpaper's flat base #06080F (the auras do not
+//      reach the dock band). That glass,
 //      not the old #101014 bar, is the settled signal.
 //   3. The dock fits at 15 apps: the first tile is fully visible,
 //      the pill is floating and centred (no glass at the far edges
@@ -362,16 +364,18 @@ async function main() {
       await sleep(1000);
       continue;
     }
-    // Top bar #15151c (21,21,28); dock glass (57,57,59) — the pill
+    // Top bar #15151c (21,21,28); dock glass (52,54,59) — the pill
     // interior: the edge ring's #ffffff14 paints under the pill,
-    // then the pill's own #ffffff1f fill composites over it.
+    // then the pill's own #ffffff1f fill composites over it, over
+    // the default wallpaper's flat base #06080F (the auras do not
+    // reach the dock band).
     // (No true backdrop blur: the painter only sees its own surface,
     // so the glass is a translucent fill + highlight, not a blur of
     // what's behind.) The band is the bottom 128px of the frame —
     // the pill sits at the bottom with an 8px margin, so this holds
     // at any surface size (CI runs at 1280x800, not 1024x768).
     topBar = countColor(img, 21, 21, 28, 10, { x0: 0, y0: 0, x1: img.width, y1: 48 });
-    dockBg = countColor(img, 57, 57, 59, 10, {
+    dockBg = countColor(img, 52, 54, 59, 10, {
       x0: 0,
       y0: img.height - 128,
       x1: img.width,
@@ -432,13 +436,13 @@ async function main() {
     y1: g15.pillTop + 1 + 8 + g15.tile,
   };
   const filesBlue = countColor(img, 59, 130, 246, 12, tile0);
-  const glassLeft = countColor(img, 57, 57, 59, 10, {
+  const glassLeft = countColor(img, 52, 54, 59, 10, {
     x0: 0,
     y0: dockBand.y0,
     x1: Math.max(0, g15.pillX - 8),
     y1: H,
   });
-  const glassRight = countColor(img, 57, 57, 59, 10, {
+  const glassRight = countColor(img, 52, 54, 59, 10, {
     x0: g15.pillX + g15.pillW + 8,
     y0: dockBand.y0,
     x1: W,
@@ -557,7 +561,7 @@ async function main() {
   const shotFinal = join(OUT, "m2-shot-final.ppm");
   const imgFinal = await shot(qmp, shotFinal);
   const fTop = countColor(imgFinal, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+  const fDock = countColor(imgFinal, 52, 54, 59, 10, {
     x0: 0,
     y0: H - 128,
     x1: W,
