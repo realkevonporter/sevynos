@@ -59,6 +59,8 @@ on:
 jobs:
   m13-check:
     runs-on: [self-hosted, sevynos-kvm]
+    env:
+      SEVYN_V2_ACCEL: kvm
     timeout-minutes: 300
     steps:
       - name: Reclaim workspace from a previous sudo build

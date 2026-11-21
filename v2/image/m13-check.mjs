@@ -111,6 +111,9 @@ const OUT = process.env.SEVYN_V2_BUILD_DIR || join(ROOT, "image", "build");
 const DISK = join(OUT, "m13-data.img");
 const TIMEOUT_S = Number(process.env.SEVYN_V2_M13_TIMEOUT || 3600);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
+// QEMU accelerator: "tcg" in the sandbox (no /dev/kvm), "kvm" on a
+// box with real KVM.
+const ACCEL = process.env.SEVYN_V2_ACCEL || "tcg";
 const INTERNET = process.env.SEVYN_V2_M13_INTERNET !== "0";
 // The host test-page server binds an EPHEMERAL port (listen(0)):
 // m5 and m13 share the KVM box, and two concurrent jobs binding
@@ -570,7 +573,7 @@ async function boot(tag) {
     QEMU,
     [
       "-machine",
-      "q35",
+      `q35,accel=${ACCEL}`,
       // Chromium + code-server need the headroom: the M4/M4.5 boots
       // ran -m 2048; the M5 boot notes say -m 4096.
       "-m",

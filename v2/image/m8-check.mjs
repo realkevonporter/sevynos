@@ -72,6 +72,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const OUT = process.env.SEVYN_V2_BUILD_DIR || join(ROOT, "v2", "image", "build");
 const TIMEOUT_S = Number(process.env.SEVYN_V2_M8_TIMEOUT || 1500);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
+// QEMU accelerator: "tcg" in the sandbox (no /dev/kvm), "kvm" on a
+// box with real KVM.
+const ACCEL = process.env.SEVYN_V2_ACCEL || "tcg";
 const QEMU_EXTRA = (process.env.SEVYN_V2_QEMU_EXTRA_ARGS || "")
   .split(/\s+/)
   .filter(Boolean);
@@ -390,7 +393,7 @@ async function boot(tag) {
     QEMU,
     [
       "-machine",
-      "q35",
+      `q35,accel=${ACCEL}`,
       "-m",
       "512",
       "-smp",
