@@ -22,6 +22,46 @@ import { subscribeApps, getAppsSnapshot } from "../../rn/renderer/sevyn-renderer
 export function Shell(): React.ReactElement {
   const [launching, setLaunching] = React.useState<string | null>(null);
   const [powerMenu, setPowerMenu] = React.useState(false);
+  // Hourly time resync (#134 follow-up): the old time service
+  // re-synced every hour (DEFAULT_RESYNC_INTERVAL_MS); the v2
+  // image init only syncs once at boot, so the shell owns the
+  // recurring sync. Fire-and-forget, best-effort — a failed sync
+  // never touches the UI, and the next hour retries. Off the JS
+  // thread (execAsync), so an NTP round trip never freezes the
+  // shell. The boot sync already covers the first sync, so the
+  // first tick is an hour out.
+  //
+  // A self-rescheduling setTimeout, not setInterval: the host
+  // (v2/rn/host/sevyn-rn-host.cc) installs setTimeout /
+  // clearTimeout only — there is no setInterval in the shell's
+  // runtime. The timer is unref'd where the runtime offers it
+  // (Node, in the e2e harness) so a pending hour-long timer
+  // doesn't keep a test process alive; the real host runs
+  // forever anyway. (Same guarded-unref shape as the old
+  // linux-*-service timers.)
+  React.useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unref = (t: ReturnType<typeof setTimeout> | undefined): void => {
+      if (typeof t === "object" && t !== null && "unref" in t) {
+        (t as { unref: () => void }).unref();
+      }
+    };
+    const arm = (): void => {
+      timer = setTimeout(tick, 60 * 60 * 1000);
+      unref(timer);
+    };
+    const tick = (): void => {
+      if (stopped) return;
+      void Sevyn.execAsync("sevyn time sync").catch(() => undefined);
+      arm();
+    };
+    arm();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, []);
   const snap = React.useSyncExternalStore(subscribeApps, getAppsSnapshot);
   // appd's list is the source of truth; the built-in 12 are the
   // fallback when it is empty (appd down at first mount).
