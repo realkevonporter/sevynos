@@ -13,7 +13,7 @@
 //      when SEVYN_V2_M5_INTERNET=0 and CI is the gate for it).
 //   3. The old build's named failure — "wifi connected, browser
 //      dead" — is the acceptance test: `browser open` a page served
-//      by the host over the guest network (10.0.0.2.2:18080), then
+//      by the host over the guest network (10.0.2.2:<ephemeral port>), then
 //      prove it RENDERS: the tab title arrives over CDP AND the
 //      page's red viewport is visible as pixels in Chromium's
 //      window. A fetch alone would not count.
@@ -50,9 +50,9 @@
 // appd takes LAUNCH/CLOSE/LIST on the second (ttyS2); the updater
 // takes STATUS/CHECK/APPLY on the third (ttyS3); aid takes
 // PING/LIST/SELECT/STATUS/ASK on the fourth (ttyS4). The host serves
-// the test pages on 127.0.0.1:18080 — the guest reaches them at
-// 10.0.2.2:18080 through QEMU user networking (virtio-net). Results
-// go to m5-check.json; boot logs, screendumps and the data disk stay
+// the test pages on an ephemeral 127.0.0.1 port — the guest reaches
+// them at 10.0.2.2:<port> through QEMU user networking (virtio-net).
+// Results go to m5-check.json; boot logs, screendumps and the data disk stay
 // in the build dir as artifacts.
 //
 // Usage: node v2/image/m5-check.mjs
@@ -74,7 +74,13 @@ const DISK = join(OUT, "m5-data.img");
 const TIMEOUT_S = Number(process.env.SEVYN_V2_M5_TIMEOUT || 1200);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
 const INTERNET = process.env.SEVYN_V2_M5_INTERNET !== "0";
-const HTTP_PORT = 18080;
+// The host test-page server binds an EPHEMERAL port (listen(0)):
+// m5 and m13 share the KVM box, and two concurrent jobs binding
+// the old fixed 18080 collided with EADDRINUSE (run 44803329836).
+// The actual port is read back after the server starts; the guest
+// reaches it at 10.0.2.2:<port> through QEMU user networking, so
+// every guest URL below is built from HTTP_PORT.
+let HTTP_PORT = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const started = Date.now();
@@ -525,7 +531,7 @@ async function boot(tag) {
       // (10.0.2.15, gateway 10.0.2.2, slirp DNS 10.0.2.3). The plain
       // `-nic user` default is an e1000 with no guest driver — no
       // eth0 at all. The host's test-page server is reachable by the
-      // guest at 10.0.2.2:18080.
+      // guest at 10.0.2.2:<port> (ephemeral; see HTTP_PORT).
       "-nic",
       "user,model=virtio-net-pci",
       "-no-reboot",
@@ -735,8 +741,8 @@ async function pollPixels(b, name, pred, timeoutMs = 120000) {
 }
 
 // --- the host test-page server ------------------------------------------
-// Serves the two test pages on 127.0.0.1:18080; the guest reaches them
-// at 10.0.2.2:18080. Both pages paint their FULL viewport one flat
+// Serves the two test pages on an ephemeral 127.0.0.1 port; the guest
+// reaches them at 10.0.2.2:<port>. Both pages paint their FULL viewport one flat
 // colour (red / green): any visible sliver of the Chromium window is
 // detectable in a screendump and clickable to raise it, even with
 // the Terminal window on top — the old build's "browser dead" failure
@@ -767,7 +773,7 @@ function startTestServer() {
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(HTTP_PORT, "127.0.0.1", () => resolve(server));
+    server.listen(0, "127.0.0.1", () => resolve(server));
   });
 }
 
@@ -1332,7 +1338,8 @@ async function main() {
     JSON.stringify(state0),
   );
   const server = await startTestServer();
-  check("setup: host test-page server on 127.0.0.1:18080", true);
+  HTTP_PORT = server.address().port;
+  check(`setup: host test-page server on 127.0.0.1:${HTTP_PORT}`, true);
 
   // 1. Boot.
   const b = await boot("1");
@@ -2016,7 +2023,9 @@ async function main() {
   // step could use it. Step 6 re-reads the current tab's id
   // fresh.
   {
-    const { exec } = await termCmd("browser open http://10.0.2.2:18080/m5-page.html");
+    const { exec } = await termCmd(
+      `browser open http://10.0.2.2:${HTTP_PORT}/m5-page.html`,
+    );
     check("browser: `browser open` the local page runs (EXEC 0)", !!exec, exec || "");
   }
   {
@@ -2413,7 +2422,7 @@ async function main() {
   if (browserHeader) {
     // Address input: header (44) + tab strip (36), input centred in
     // its 44px row -> top + 44 + 36 + 22.
-    const page2Url = "http://10.0.2.2:18080/m5-page2.html";
+    const page2Url = `http://10.0.2.2:${HTTP_PORT}/m5-page2.html`;
     await moveTo(
       browserHeader.left + 200,
       browserHeader.top + 102,

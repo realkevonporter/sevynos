@@ -44,6 +44,13 @@ jobs:
     runs-on: [self-hosted, sevynos-kvm]
     timeout-minutes: 180
     steps:
+      - name: Reclaim workspace from a previous sudo build
+        # The image build runs under sudo, so a previous job killed
+        # before its end-of-job chown can leave root-owned files in
+        # the workspace; checkout cannot clean them (EACCES) and dies
+        # before any later chown can run. Reclaim first.
+        run: sudo chown -R "$USER" "$GITHUB_WORKSPACE" || true
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v5

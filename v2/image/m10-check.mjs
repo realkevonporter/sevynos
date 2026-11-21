@@ -1091,10 +1091,14 @@ async function main() {
   check("comms: sevyn comms status runs (daemon reachable)", !!statusOk);
 
   // Login as alice against the mock homeserver (a mock test
-  // password — no real account, no real secret).
+  // password — no real account, no real secret). Explicit 6 min:
+  // the default 180 s is too tight for the loaded 3-runner box —
+  // bob's login needed >180 s in run 44803329879 (the check failed
+  // while the login completed just after the timeout fired).
   const loginOk = await termCmd(
     b,
     "comms login @alice:test.local testpass http://127.0.0.1:7071",
+    360000,
   );
   check("comms: login as @alice:test.local against the mock homeserver", !!loginOk);
 
@@ -1129,10 +1133,14 @@ async function main() {
 
   // Bob logs in against his own daemon (the --socket flag: the
   // Terminal has no shell env assignment, so the socket rides on
-  // the command line).
+  // the command line). Explicit 6 min: the default 180 s is too
+  // tight for the loaded 3-runner box — this login needed >180 s
+  // and at most ~295 s in run 44803329879 (typing ~30 s + the full
+  // wait burned, and bob was demonstrably logged in just after).
   const bobLogin = await termCmd(
     b,
     "comms --socket /tmp/commsd-bob.sock login @bob:test.local testpass http://127.0.0.1:7071",
+    360000,
   );
   check("comms: bob logs in against the second daemon", !!bobLogin);
 
