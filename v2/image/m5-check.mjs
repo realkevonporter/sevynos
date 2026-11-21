@@ -2474,14 +2474,17 @@ async function main() {
     // a stale `tabs 1` by itself — every warm open's refresh
     // samples the transient 2 — which is exactly why the gate
     // accepts the open line, not the count.
-    // PRODUCT NOTE (not a harness fix — for the coordinator to
-    // dispatch to Browser.tsx): the app's refresh() runs once
-    // and never re-samples, so its tab strip shows a stale 0/2
-    // until the next user action. Minimal product fix: in go(),
-    // after the first refresh(), re-refresh until the opened
-    // tab appears in the list (bounded, e.g. ~10 s) — that
-    // re-emits `BROWSER tabs 1` in steady state and the literal
-    // poll would pass again.
+    // PRODUCT NOTE (stale — the fix already shipped): an earlier
+    // version of this comment said the app's refresh() runs once
+    // and never re-samples, and proposed re-refreshing in go().
+    // Browser.tsx already does that: settleOpenedTab() calls
+    // refresh() in a loop (~10 s max) until the opened tab
+    // appears with a real title, and refresh() logs `BROWSER
+    // tabs N` on every call — so `BROWSER tabs 1` DOES appear
+    // in steady state. The gate below still accepts the open
+    // line (not only the literal `BROWSER tabs 1`) because the
+    // FIRST refresh's sample is transient — see above — and the
+    // open line is the app's own post-go confirmation.
     const appMarkerRe = new RegExp(
       `BROWSER (open title=.* url=${page2Url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}|tabs [1-9][0-9]*)`,
     );
@@ -2505,6 +2508,24 @@ async function main() {
         appMarker = await waitForLog(b.logPath, appMarkerRe, 30000, before);
       }
     }
+    // Raise Chromium FIRST, before refocusTerminal: the fresh
+    // --app window is on top when it launches, and raising it
+    // now keeps it there for the green check. refocusTerminal
+    // (below) raises the Terminal OVER Chromium, so a raise after
+    // it can only see a sliver of green behind the Terminal /
+    // Browser windows and fails the solid-run gate (run
+    // 43992687404: green=678px in a 3px sliver, no run >=100px —
+    // the page HAD loaded, the window was just covered). m13
+    // raises first and passes (green=389011px); m5 is reordered
+    // to match. No drag-aside fallback here: the
+    // raise-before-refocus order is the proven one, and the
+    // fallback stays m13-only until a KVM run shows otherwise.
+    const raised = await raiseChromium(0, 200, 83, "green");
+    check(
+      "browser-app: the green page renders in Chromium",
+      !!raised && raised.count > 40000,
+      raised ? `green=${raised.count}px` : "no green on screen",
+    );
     // Steady-state single-tab proof over CDP: the app's own count
     // is transient (see above), so the contract is verified here,
     // after the open has settled — n=1 with the Second Page
@@ -2518,12 +2539,6 @@ async function main() {
       "browser-app: the address bar opens the second page (BROWSER open + CDP tabs 1)",
       !!appMarker && !!cdpMarker,
       `app=${appMarker ?? "(no BROWSER open/tabs marker)"}${regoed ? " (after one re-go)" : ""} cdp=${cdpMarker ?? "(no TERMINAL browser-tabs n=1 Second Page)"}`,
-    );
-    const raised = await raiseChromium(0, 200, 83, "green");
-    check(
-      "browser-app: the green page renders in Chromium",
-      !!raised && raised.count > 40000,
-      raised ? `green=${raised.count}px` : "no green on screen",
     );
   } else {
     check(
