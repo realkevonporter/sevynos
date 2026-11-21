@@ -1,4 +1,9 @@
 import { createServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 import {
@@ -469,5 +474,191 @@ describe("Linux native module services: bluetooth/display/power dispatch", () =>
       services.request("display.rotation.set", { outputId: "card0-x", degrees: 45 }),
     ).rejects.toThrow(/must be one of/);
     services.close();
+  });
+});
+
+describe("Linux camera service via camd", () => {
+  /* Fake camd: speaks the one-line-in / one-JSON-line-out protocol
+   * over a temp Unix socket, writing canned RGBA/JPEG bytes the way
+   * the real daemon does. The service under test is pointed at it
+   * through the constructor's socket-path parameter. */
+  async function startFakeCamd(
+    root: string,
+    handler: (line: string) => Record<string, unknown>,
+  ): Promise<{ sock: string; close: () => Promise<void> }> {
+    const sock = join(root, "camd.sock");
+    const server = createNetServer((conn) => {
+      let buf = Buffer.alloc(0);
+      conn.on("data", (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        let idx = buf.indexOf(0x0a);
+        while (idx >= 0) {
+          const line = buf.subarray(0, idx).toString("utf8");
+          buf = buf.subarray(idx + 1);
+          conn.write(`${JSON.stringify(handler(line))}\n`);
+          idx = buf.indexOf(0x0a);
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(sock, resolve));
+    return {
+      sock,
+      close: () => {
+        return new Promise<void>((resolve) => {
+          server.close(() => {
+            resolve();
+          });
+        });
+      },
+    };
+  }
+
+  function healthyCamd(root: string) {
+    return (line: string): Record<string, unknown> => {
+      const [verb, a1, a2] = line.split(" ");
+      if (verb === "STATUS")
+        return {
+          ok: true,
+          available: true,
+          source: "v4l2",
+          device: "/dev/video0",
+          formats: ["MJPG", "YUYV"],
+          width: 1280,
+          height: 720,
+        };
+      if (verb === "PREVIEW") {
+        const rgba = join(root, "preview.rgba");
+        const png = join(root, "preview.png");
+        // Synchronous: the service reads the path as soon as the
+        // reply lands, so the bytes must be on disk first.
+        writeFileSync(rgba, Buffer.alloc(640 * 360 * 4));
+        writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        return {
+          ok: true,
+          available: true,
+          width: 640,
+          height: 360,
+          rgba,
+          png,
+          timestamp: Date.now(),
+        };
+      }
+      if (verb === "CAPTURE" && a1 !== undefined) {
+        writeFileSync(a1, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+        return {
+          ok: true,
+          path: a1,
+          width: 1280,
+          height: 720,
+          bytes: 4,
+          timestamp: Date.now(),
+        };
+      }
+      if (verb === "DECODE" && a1 !== undefined && a2 !== undefined) {
+        writeFileSync(a2, Buffer.alloc(1280 * 720 * 4));
+        return {
+          ok: true,
+          available: true,
+          width: 1280,
+          height: 720,
+          path: a2,
+          png: `${a2}.png`,
+          timestamp: Date.now(),
+        };
+      }
+      return { ok: false, error: `unexpected: ${line}` };
+    };
+  }
+
+  it("status, preview, capture and readImage flow through camd", async () => {
+    const root = mkdtempSync(join(tmpdir(), "sevynos-cam-test-"));
+    const fake = await startFakeCamd(root, healthyCamd(root));
+    const services = new LinuxNativeModuleServices(root, undefined, undefined, fake.sock);
+    try {
+      const status = await services.request("camera.status", null);
+      expect(status).toMatchObject({
+        available: true,
+        hasCamera: true,
+        device: "/dev/video0",
+      });
+      expect(status).toHaveProperty("formats", ["MJPG", "YUYV"]);
+
+      const preview = await services.request("camera.preview", null);
+      expect(preview).toMatchObject({
+        available: true,
+        width: 640,
+        height: 360,
+      });
+      const previewPath = (preview as Record<string, unknown>)["path"];
+      expect(typeof previewPath).toBe("string");
+      expect((await readFile(previewPath as string)).length).toBe(640 * 360 * 4);
+
+      const capture = await services.request("camera.capture", null);
+      const capturePath = (capture as Record<string, unknown>)["path"];
+      expect(typeof capturePath).toBe("string");
+      expect((capturePath as string).startsWith(`${root}/photos/`)).toBe(true);
+      expect(capture).toMatchObject({
+        mediaType: "image/jpeg",
+        width: 1280,
+        height: 720,
+      });
+      expect((await readFile(capturePath as string)).subarray(0, 2)).toEqual(
+        Buffer.from([0xff, 0xd8]),
+      );
+
+      const read = await services.request("camera.readImage", capturePath as string);
+      expect(read).toMatchObject({ available: true, width: 1280, height: 720 });
+      const readPath = (read as Record<string, unknown>)["path"];
+      expect((await readFile(readPath as string)).length).toBe(1280 * 720 * 4);
+    } finally {
+      await fake.close();
+      services.close();
+    }
+  });
+
+  it("a camd ok:false surfaces as a clean error, never a crash", async () => {
+    const root = mkdtempSync(join(tmpdir(), "sevynos-cam-test-"));
+    const fake = await startFakeCamd(root, () => ({
+      ok: false,
+      error: "No usable Video4Linux capture device was detected.",
+    }));
+    const services = new LinuxNativeModuleServices(root, undefined, undefined, fake.sock);
+    try {
+      await expect(services.request("camera.capture", null)).rejects.toThrow(
+        "No usable Video4Linux capture device was detected.",
+      );
+      // STATUS is the same: the daemon answered, so its word is
+      // authoritative and the error surfaces instead of a fallback.
+      await expect(services.request("camera.status", null)).rejects.toThrow(
+        /No usable Video4Linux/,
+      );
+    } finally {
+      await fake.close();
+      services.close();
+    }
+  });
+
+  it("an unreachable camd falls back to the legacy path (available:false here)", async () => {
+    // CI and this sandbox have no /dev/video*, so the legacy probe
+    // finds no device — the point is the fallback answers cleanly
+    // instead of throwing a socket error at the app.
+    const root = mkdtempSync(join(tmpdir(), "sevynos-cam-test-"));
+    const services = new LinuxNativeModuleServices(
+      root,
+      undefined,
+      undefined,
+      join(root, "no-such-camd.sock"),
+    );
+    try {
+      const status = await services.request("camera.status", null);
+      expect(status).toMatchObject({ available: false, hasCamera: false });
+      const preview = await services.request("camera.preview", null);
+      expect(preview).toMatchObject({ available: false });
+      await expect(services.request("camera.capture", null)).rejects.toThrow(
+        "No usable Video4Linux capture device was detected.",
+      );
+    } finally {
+      services.close();
+    }
   });
 });
