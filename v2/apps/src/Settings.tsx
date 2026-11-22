@@ -30,12 +30,47 @@
 // The Power section (shutdown fix) shuts down or restarts the
 // system through `sevyn poweroff` / `sevyn reboot` — the same verbs
 // the tray power menu runs.
+//
+// The Appearance section picks the desktop wallpaper (style +
+// solid color) through `sevyn settings get/set`, backed by
+// /data/settings.json. The shell re-reads the setting when
+// Settings closes, so the new wallpaper applies then — not while
+// Settings stays open.
 
 import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView, TextInput } from "./host";
 import { WindowButtons } from "./window-buttons";
 import { runCli, runCliAsync, parseField } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
+
+function readWallpaperStyle(): string {
+  const { out } = runCli("sevyn settings get wallpaperStyle");
+  return parseField(out, "wallpaperStyle") ?? "default";
+}
+
+function readWallpaperColor(): string {
+  const { out } = runCli("sevyn settings get wallpaperColor");
+  return parseField(out, "wallpaperColor") ?? "#090b11";
+}
+
+const WALLPAPER_STYLES = [
+  { label: "Default", value: "default" },
+  { label: "Solid", value: "solid" },
+  { label: "Cosmic", value: "cosmic" },
+  { label: "Minimal", value: "minimal" },
+] as const;
+
+/** Flat colors offered for the solid wallpaper style. */
+const WALLPAPER_COLORS = [
+  { name: "Sevyn Night", value: "#090b11" },
+  { name: "Slate", value: "#1E293B" },
+  { name: "Indigo", value: "#312E81" },
+  { name: "Violet", value: "#4C1D95" },
+  { name: "Crimson", value: "#7F1D1D" },
+  { name: "Forest", value: "#14532D" },
+  { name: "Amber", value: "#78350F" },
+  { name: "Teal", value: "#0F766E" },
+] as const;
 
 function readChannel(): string {
   const { out } = runCli("sevyn update status");
@@ -132,6 +167,13 @@ export function Settings(): React.ReactElement {
   const [timezoneInput, setTimezoneInput] = React.useState<string>(timeState.timezone);
   const [syncing, setSyncing] = React.useState<boolean>(false);
   const [timeMessage, setTimeMessage] = React.useState<string>("");
+  const [wallpaperStyle, setWallpaperStyle] = React.useState<string>(() =>
+    readWallpaperStyle(),
+  );
+  const [wallpaperColor, setWallpaperColor] = React.useState<string>(() =>
+    readWallpaperColor(),
+  );
+  const [wallpaperMessage, setWallpaperMessage] = React.useState<string>("");
   const color = Sevyn.appColor;
 
   function setChannelTo(next: string): void {
@@ -162,6 +204,41 @@ export function Settings(): React.ReactElement {
         : "AI is " + current.selected + ".",
     );
     Sevyn.log("SETTINGS ai=" + current.selected);
+  }
+
+  // Wallpaper (port of #123): the choice is written to
+  // /data/settings.json and the shell picks it up when Settings
+  // closes — it does not apply while Settings stays open.
+  function setWallpaperStyleTo(next: string): void {
+    const { code } = runCli("sevyn settings set wallpaperStyle " + next);
+    if (code !== 0) {
+      setWallpaperMessage("Could not set the wallpaper style.");
+      return;
+    }
+    const current = readWallpaperStyle();
+    setWallpaperStyle(current);
+    setWallpaperMessage(
+      current === next
+        ? "Wallpaper style set to " + next + ". Applies when Settings closes."
+        : "Wallpaper style is " + current + ".",
+    );
+    Sevyn.log("SETTINGS wallpaperStyle=" + current);
+  }
+
+  function setWallpaperColorTo(next: string): void {
+    const { code } = runCli("sevyn settings set wallpaperColor " + next);
+    if (code !== 0) {
+      setWallpaperMessage("Could not set the wallpaper color.");
+      return;
+    }
+    const current = readWallpaperColor();
+    setWallpaperColor(current);
+    setWallpaperMessage(
+      current === next
+        ? "Wallpaper color set. Applies when Settings closes."
+        : "Wallpaper color is " + current + ".",
+    );
+    Sevyn.log("SETTINGS wallpaperColor=" + current);
   }
 
   async function shutdownSystem(): Promise<void> {
@@ -441,6 +518,68 @@ export function Settings(): React.ReactElement {
         >
           {label}
         </Text>
+      </Pressable>
+    );
+  }
+
+  function wallpaperStyleButton(label: string, value: string): React.ReactElement {
+    const active = wallpaperStyle === value;
+    return (
+      <Pressable
+        onPress={() => setWallpaperStyleTo(value)}
+        style={{
+          width: 120,
+          height: 36,
+          borderRadius: 8,
+          backgroundColor: active ? "#111827" : "#e5e7eb",
+          justifyContent: "center",
+          alignItems: "center",
+          marginRight: 12,
+        }}
+      >
+        <Text
+          style={{
+            fontSize: 15,
+            fontWeight: active ? "bold" : "normal",
+            color: active ? "#ffffff" : "#111827",
+            textAlign: "center",
+          }}
+        >
+          {label}
+        </Text>
+      </Pressable>
+    );
+  }
+
+  function wallpaperColorSwatch(name: string, value: string): React.ReactElement {
+    const active = wallpaperColor === value;
+    return (
+      <Pressable
+        key={value}
+        onPress={() => setWallpaperColorTo(value)}
+        style={{
+          width: 44,
+          height: 44,
+          borderRadius: 8,
+          backgroundColor: value,
+          justifyContent: "center",
+          alignItems: "center",
+          marginRight: 8,
+          marginTop: 8,
+        }}
+      >
+        {active ? (
+          <Text
+            style={{
+              fontSize: 18,
+              fontWeight: "bold",
+              color: "#ffffff",
+              textAlign: "center",
+            }}
+          >
+            ✓
+          </Text>
+        ) : null}
       </Pressable>
     );
   }
@@ -750,6 +889,39 @@ export function Settings(): React.ReactElement {
           {powerMessage ? (
             <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
               {powerMessage}
+            </Text>
+          ) : null}
+          <Text
+            style={{ fontSize: 16, fontWeight: "bold", color: "#111827", marginTop: 24 }}
+          >
+            Appearance
+          </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            Choose the desktop wallpaper. It applies when Settings closes and is kept
+            across reboots.
+          </Text>
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            {WALLPAPER_STYLES.map((s) => wallpaperStyleButton(s.label, s.value))}
+          </View>
+          {wallpaperStyle === "solid" ? (
+            <View>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 12 }}>
+                Color:{" "}
+                {WALLPAPER_COLORS.find((c) => c.value === wallpaperColor)?.name ??
+                  wallpaperColor}
+              </Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+                {WALLPAPER_COLORS.map((c) => wallpaperColorSwatch(c.name, c.value))}
+              </View>
+            </View>
+          ) : (
+            <Text style={{ fontSize: 14, color: "#374151", marginTop: 12 }}>
+              Custom image wallpapers are not supported yet.
+            </Text>
+          )}
+          {wallpaperMessage ? (
+            <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
+              {wallpaperMessage}
             </Text>
           ) : null}
         </View>

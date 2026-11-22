@@ -547,7 +547,7 @@ async function screenSettled(b, timeoutMs = 30000) {
         x1: img.width,
         y1: 48,
       });
-      const dockBg = countColor(img, 57, 57, 59, 10, {
+      const dockBg = countColor(img, 52, 54, 59, 10, {
         x0: 0,
         y0: 672,
         x1: img.width,
@@ -789,7 +789,8 @@ async function main() {
       y1: 48,
     });
     // The dock is a floating glass pill now, so its glass interior
-    // (57,57,59) IS distinguishable from Weston's desktop background
+    // (52,54,59) — over the default wallpaper's flat base #06080F —
+    // IS distinguishable from Weston's desktop background
     // (16,16,16) at tolerance 10 — but the dock is still proven gone
     // by its tiles, which vanish with the shell: the first dock tile
     // is Browser blue #0ea5e9 (64x64 since the dock redesign).
@@ -930,17 +931,29 @@ async function main() {
   // M9: scan for the button instead of a hardcoded offset (+76, +135)
   // — the offset missed on the M4.5 image (different layout), which
   // is why the M4 regression failed there while standalone M4 passed.
+  // The window was proven up for the Stable step, but a fresh shot
+  // can still miss it (slow paint / dropped present under TCG load —
+  // the wallpaper PR's M4.5 run: the window was absent from the first
+  // nightly shot with no input in between). Retry the screenshot up
+  // to 3x before concluding the window is gone, like the Settings
+  // launch above. NEVER fall back to the Stable step's header: a
+  // stale header makes the finder scan the bare desktop and the
+  // "window still up" check pass falsely — and there is NO Tab
+  // fallback here either. The Tab path from Stable to Nightly is
+  // focus-order-dependent (the wallpaper PR's Appearance section
+  // appends 4 style buttons after Apply, so the count moved again),
+  // and when the window is gone the Tabs walk the SHELL's focus list
+  // instead: the wallpaper PR's run Tabbed x4 onto the Browser tile
+  // (the two new desktop actions sit before the dock) and launched
+  // the browser instead of applying nightly. If the click finder
+  // misses the button, the waitForLog below fails honestly.
   const beforeNightly = logLines(b.logPath).length;
-  let clickedNightly = false;
-  const shotNightly = await shot(b.qmp, join(OUT, "m4-shot-settings-nightly.ppm"));
-  let nightlyHeader = findWindowHeader(shotNightly, 107, 113, 128);
-  if (
-    settingsHeader &&
-    (!nightlyHeader ||
-      Math.abs(nightlyHeader.left - settingsHeader.left) > 5 ||
-      Math.abs(nightlyHeader.top - settingsHeader.top) > 5)
-  ) {
-    nightlyHeader = settingsHeader;
+  let shotNightly = null;
+  let nightlyHeader = null;
+  for (let attempt = 0; attempt < 3 && !nightlyHeader; attempt++) {
+    if (attempt > 0) await sleep(1000);
+    shotNightly = await shot(b.qmp, join(OUT, "m4-shot-settings-nightly.ppm"));
+    nightlyHeader = findWindowHeader(shotNightly, 107, 113, 128);
   }
   if (nightlyHeader) {
     const btn = findInactiveChannelButton(shotNightly, nightlyHeader);
@@ -949,23 +962,9 @@ async function main() {
       await sleep(300);
       await click();
       await sleep(300);
-      clickedNightly = true;
     }
   }
   check("settings: Settings window still up for the nightly step", !!nightlyHeader);
-  if (!clickedNightly) {
-    // Fallback: Tab from Stable to Nightly. The focus order depends
-    // on the image: M4 has no echo-ai/plan-ai, so it is [—, ▢, X,
-    // Scan, Nightly, Stable, Sync Now, Timezone, Apply] and Tab x4
-    // from Stable reaches Nightly; M4.5 adds echo-ai/plan-ai, making
-    // it x10. Try x4 first (M4); the waitForLog below will fail if it
-    // landed elsewhere, and the check reports it.
-    await key("tab");
-    await key("tab");
-    await key("tab");
-    await key("tab");
-    await key("ret");
-  }
   {
     const hit = await waitForLog(
       b.logPath,
@@ -1051,7 +1050,7 @@ async function main() {
     x1: imgFinal.width,
     y1: 48,
   });
-  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+  const fDock = countColor(imgFinal, 52, 54, 59, 10, {
     x0: 0,
     y0: 672,
     x1: imgFinal.width,

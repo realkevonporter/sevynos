@@ -51,15 +51,20 @@ export const DOCK_DOT = 6;
 export const DOCK_DOT_GAP = 4;
 export const DOCK_RADIUS = 24;
 
-// Glass: the pill's #ffffff1f fill composites over the #0b0b0f
-// desktop — but the edge ring is a slightly larger View BEHIND the
-// pill, so its #ffffff14 fill paints under the pill too and tints
-// the interior a second time. The interior therefore reads
-// (57,57,59): ring 8% over #0b0b0f is (30,30,33), then fill 12%
-// over that is (57,57,59). The ring edge alone reads (30,30,33);
-// the top highlight white at 25% reads (106,106,108); the bottom
-// shade black at 20% reads (45,45,47). (Measured from a real
-// 1920x1080 frame; the m-checks assert the (57,57,59) interior.)
+// Glass: the pill's #ffffff1f fill composites over the desktop —
+// but the edge ring is a slightly larger View BEHIND the pill, so
+// its #ffffff14 fill paints under the pill too and tints the
+// interior a second time. The desktop under the dock is the default
+// wallpaper's flat base #06080F (6,8,15) — the auras, horizon, and
+// grain do not reach the dock band — so the interior reads
+// (52,54,59): ring 8% over #06080F is (25,27,33), then fill 12%
+// over that is (52,54,59). The ring edge alone reads (25,27,33);
+// the top highlight white at 25% over the interior reads
+// (102,104,108); the bottom shade black at 20% reads (41,43,47).
+// (Composites computed from the #0b0b0f-era measured values
+// (57,57,59) / (30,30,33) / (106,106,108) / (45,45,47) with the
+// same floor-truncating blend; the m-checks assert the (52,54,59)
+// interior.)
 export const DOCK_GLASS = "#ffffff1f";
 export const DOCK_GLASS_EDGE = "#ffffff14";
 export const DOCK_GLASS_HIGHLIGHT = "#ffffff40";

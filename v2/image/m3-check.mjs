@@ -463,14 +463,16 @@ async function main() {
       await sleep(1000);
       continue;
     }
-    // Top bar #15151c (21,21,28); dock glass (57,57,59) — the pill
+    // Top bar #15151c (21,21,28); dock glass (52,54,59) — the pill
     // interior: the edge ring's #ffffff14 paints under the pill,
-    // then the pill's own #ffffff1f fill composites over it. The
+    // then the pill's own #ffffff1f fill composites over it, over
+    // the default wallpaper's flat base #06080F (the auras do not
+    // reach the dock band). The
     // band is the bottom 128px of the frame — the pill sits at the
     // bottom with an 8px margin, so this holds at any surface size
     // (CI runs at 1280x800, not 1024x768).
     topBar = countColor(img, 21, 21, 28, 10, { x0: 0, y0: 0, x1: img.width, y1: 48 });
-    dockBg = countColor(img, 57, 57, 59, 10, {
+    dockBg = countColor(img, 52, 54, 59, 10, {
       x0: 0,
       y0: img.height - 128,
       x1: img.width,
@@ -523,7 +525,12 @@ async function main() {
   // Tile 0 sits at (pillX + 8, pillTop + 1 + 8); at 1280x800 that
   // is x76..139, y712..775 (at 1024x768 it was x84..148, y677..743).
   // The pill floats and centres (no glass at the far edges) and
-  // there is no scroll chevron.
+  // there is no scroll chevron in the pill's padding strips. The
+  // chevron count is scoped to the strips (like m9), NOT the whole
+  // dock band: the pill's bottom shade now composites to (41,43,47)
+  // over the wallpaper, which falls within tolerance 10 of the
+  // chevron colour and reads ~915px across the full band — the shade,
+  // not a chevron.
   const tile0 = {
     x0: g16.pillX + 8,
     y0: g16.pillTop + 1 + 8,
@@ -531,19 +538,31 @@ async function main() {
     y1: g16.pillTop + 1 + 8 + g16.tile,
   };
   const browserBlue = countColor(img, 14, 165, 233, 12, tile0);
-  const glassLeft = countColor(img, 57, 57, 59, 10, {
+  const glassLeft = countColor(img, 52, 54, 59, 10, {
     x0: 0,
     y0: dockBand.y0,
     x1: Math.max(0, g16.pillX - 8),
     y1: H,
   });
-  const glassRight = countColor(img, 57, 57, 59, 10, {
+  const glassRight = countColor(img, 52, 54, 59, 10, {
     x0: g16.pillX + g16.pillW + 8,
     y0: dockBand.y0,
     x1: W,
     y1: H,
   });
-  const chevron = countColor(img, 31, 41, 55, 10, dockBand);
+  const chevron =
+    countColor(img, 31, 41, 55, 10, {
+      x0: g16.pillX,
+      y0: g16.pillTop,
+      x1: g16.pillX + 8,
+      y1: g16.pillTop + g16.pillH,
+    }) +
+    countColor(img, 31, 41, 55, 10, {
+      x0: g16.pillX + g16.pillW - 8,
+      y0: g16.pillTop,
+      x1: g16.pillX + g16.pillW,
+      y1: g16.pillTop + g16.pillH,
+    });
   check(
     "dock: first tile fully visible (Browser blue)",
     browserBlue > 1000,
@@ -571,15 +590,21 @@ async function main() {
   // keyboard focus at boot but no activation until a pointer button
   // press lands on it, so click the main area first (it has no
   // pressable, so nothing launches and focus stays unset).
-  // Tab TWICE: the renderer's focus list is the tree order, and the
-  // tray POWER button is focusable list[0] (shutdown fix) — with no
-  // scroll chevrons the first tile is list[1]. One Tab + Enter would
-  // land on the power button; three would overshoot to the second tile.
+  // Tab FOUR times: the renderer's focus list is the tree order, and
+  // the tray POWER button is focusable list[0] (shutdown fix) — the
+  // shell's two desktop actions ("New folder", "New text file") sit
+  // before the dock, so the Browser tile is list[3], not list[1].
+  // One Tab + Enter would land on the power button; two would land
+  // on "New folder" and launch Files.
   {
     const before = logLines().length;
     await moveTo(512, 300, W, H); // main area (welcome text), no pressable
     await sleep(300);
     await click();
+    await sleep(300);
+    await key("tab");
+    await sleep(300);
+    await key("tab");
     await sleep(300);
     await key("tab");
     await sleep(300);
@@ -766,7 +791,7 @@ async function main() {
   {
     const imgAlive = await shot(qmp, join(OUT, "m3-shot-after-crash.ppm"));
     const t = countColor(imgAlive, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-    const d = countColor(imgAlive, 57, 57, 59, 10, { x0: 0, y0: H - 128, x1: W, y1: H });
+    const d = countColor(imgAlive, 52, 54, 59, 10, { x0: 0, y0: H - 128, x1: W, y1: H });
     check(
       "sandbox: shell still on screen after app crash",
       t > 10000 && d > 2000,
@@ -839,7 +864,7 @@ async function main() {
   const shotFinal = join(OUT, "m3-shot-final.ppm");
   const imgFinal = await shot(qmp, shotFinal);
   const fTop = countColor(imgFinal, 21, 21, 28, 10, { x0: 0, y0: 0, x1: W, y1: 48 });
-  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+  const fDock = countColor(imgFinal, 52, 54, 59, 10, {
     x0: 0,
     y0: H - 128,
     x1: W,
