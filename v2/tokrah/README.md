@@ -57,7 +57,10 @@ decompilable.
       keep-awake, vector-icons, expo-ui, livekit (fake room +
       local participant, state "disconnected" — no media publishes),
       callkeep (all methods resolve), toast-message, google-mobile-ads,
-      expo, firebase-messaging.
+      expo, firebase-messaging, netinfo (fixed online state:
+      fetch() resolves an online NetInfoState, addEventListener
+      delivers it on subscribe — the generic stub's undefined
+      return broke `.then` on the mount path, M6/M7/M9 2026-11-22).
     - **Generic** (`stub-generic.js`): packages the mount path only
       touches at load time — renders children, no-ops calls.
   - `stub-empty.js`, `stub-native-module.js`,
