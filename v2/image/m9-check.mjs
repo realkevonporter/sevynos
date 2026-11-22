@@ -1697,6 +1697,17 @@ async function main() {
     iconsOk,
     settled ? iconDetail.join(" | ") : "no settled frame",
   );
+  // Diagnosability (M9 race): the shell's snapshot line lives only
+  // in the guest log inside the ~387 MB artifact. When the icons
+  // check fails, surface it in the job log so the next occurrence is
+  // diagnosable without downloading the artifact — it pins the gap
+  // to appd still seeding (snapshot 0 apps) vs the dock.
+  if (!iconsOk) {
+    const snapLines = logLines(b.logPath).filter(
+      (l) => l.includes("apps snapshot") || l.includes("HOST listApps"),
+    );
+    for (const l of snapLines.slice(-4)) console.log(`  guest: ${l.trim()}`);
+  }
   // Dock redesign: the dock is a floating glass pill (macOS 27 style),
   // not a full-width bar. 16 apps at 64px tiles: pill 1160 wide, ring
   // 1162, pill x380..1540, tiles y989..1053. First tile Browser at
