@@ -12,7 +12,7 @@
  *                               code-server spawns as its terminal
  *                               shell, so it must work with no args.
  *   sevyn help                  print this help
- *   sevyn update check|apply|status|channel <c>
+ *   sevyn update check|apply|status|channel <c>|url <url>
  *   sevyn shell kill|start|restart|status
  *   sevyn files list [path]     list a real directory (default /data)
  *   sevyn files cat <path>      print a file (64 KB cap)
@@ -157,6 +157,8 @@ static void print_usage(FILE *f)
             "and reboot\n"
             "  sevyn update status         show version, channel, slots\n"
             "  sevyn update channel <c>    set channel (nightly|stable)\n"
+            "  sevyn update url <url>      set feed URL (signed feed; "
+            "local/dev feeds)\n"
             "  sevyn shell kill            stop the shell (recover from "
             "the Terminal)\n"
             "  sevyn shell start           start the shell\n"
@@ -442,11 +444,15 @@ static int cmd_update(int argc, char **argv)
     const char *verb = argv[2];
 
     if (strcmp(verb, "check") != 0 && strcmp(verb, "apply") != 0 &&
-        strcmp(verb, "status") != 0 && strcmp(verb, "channel") != 0)
+        strcmp(verb, "status") != 0 && strcmp(verb, "channel") != 0 &&
+        strcmp(verb, "url") != 0)
         return usage();
     if (strcmp(verb, "channel") == 0 && argc != 4)
         return usage();
-    if (strcmp(verb, "channel") != 0 && argc != 3)
+    if (strcmp(verb, "url") == 0 && argc != 4)
+        return usage();
+    if (strcmp(verb, "channel") != 0 && strcmp(verb, "url") != 0 &&
+        argc != 3)
         return usage();
 
     int fd = connect_daemon();
@@ -466,8 +472,12 @@ static int cmd_update(int argc, char **argv)
         }
         char line[2048];
         int rc = 1;
-        /* The apply child downloads ~50 MB and reboots; wait up to
-         * 10 minutes for the terminal event (60 s per poll tick). */
+        /* The apply child downloads a ~15 MiB kernel plus a ~450 MiB
+         * initramfs and reboots; wait up to 30 minutes for the
+         * terminal event (60 s per poll tick). The old 10-minute
+         * wait predates the Genesis initramfs growth and timed out
+         * on slow links while the apply was still running — the
+         * daemon keeps going, but the CLI reported a failure. */
         int waited_s = 0;
         for (;;) {
             struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -479,7 +489,7 @@ static int cmd_update(int argc, char **argv)
             }
             if (pr == 0) {
                 waited_s += 60;
-                if (waited_s >= 600) {
+                if (waited_s >= 1800) {
                     fprintf(stderr, "error: timed out waiting for the "
                                     "update to finish\n");
                     break;
@@ -523,6 +533,8 @@ static int cmd_update(int argc, char **argv)
     char cmd[2048];
     if (strcmp(verb, "channel") == 0)
         snprintf(cmd, sizeof(cmd), "CHANNEL %s", argv[3]);
+    else if (strcmp(verb, "url") == 0)
+        snprintf(cmd, sizeof(cmd), "URL %s", argv[3]);
     else
         snprintf(cmd, sizeof(cmd), "%s", verb);
     /* Socket verbs are uppercase; the CLI verbs are lowercase. */

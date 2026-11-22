@@ -96,6 +96,18 @@
  *                        a child; progress and the outcome arrive as
  *                        UPDATE log lines + EVENT lines to subscribers)
  *   CHANNEL <c>       -> OK channel <c> / ERR <reason>
+ *   URL <url>         -> OK url <url> / ERR <reason>
+ *                        Sets the feed URL (persisted in
+ *                        /data/update-config.json alongside the
+ *                        channel). The feed at that URL must still
+ *                        be signed by a trusted key — the URL only
+ *                        chooses where the signed feed comes from,
+ *                        so a local/dev feed (a build just made on
+ *                        another machine, served over plain HTTP on
+ *                        the LAN) is testable without waiting for
+ *                        the nightly release pipeline. The URL is
+ *                        sticky across channel changes; STATUS shows
+ *                        it, so a dev override is never silent.
  *   SUBSCRIBE         -> OK subscribed (then receives EVENT lines)
  * Events (subscribers only):
  *   EVENT APPLY STARTED <version>
@@ -641,7 +653,8 @@ static int load_trusted_keys(struct trusted_key *keys, size_t cap)
 
 /* Run wget (or $SEVYN_UPDATE_WGET) with a timeout, writing the
  * response body to out_path. Returns 0 when wget exits 0. */
-static int run_wget(const char *url, const char *out_path, int timeout_s)
+static int run_wget_once(const char *url, const char *out_path,
+                         int timeout_s)
 {
     char timeout[16];
     snprintf(timeout, sizeof(timeout), "%d", timeout_s);
@@ -663,6 +676,27 @@ static int run_wget(const char *url, const char *out_path, int timeout_s)
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
         ;
     return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+/* Retry a download: one transient failure (a dropped connection
+ * partway through a ~450 MiB initramfs, a 300 s timeout on a slow
+ * link) must not kill the whole apply — the next attempt overwrites
+ * the previous attempt's partial file. 3 attempts, 1 s apart;
+ * every failed attempt is logged so a flaky link is visible, not
+ * silent. Covers both the manifest fetch and the artifact
+ * downloads, which both go through here. */
+#define WGET_ATTEMPTS 3
+static int run_wget(const char *url, const char *out_path, int timeout_s)
+{
+    for (int attempt = 1; attempt <= WGET_ATTEMPTS; attempt++) {
+        if (run_wget_once(url, out_path, timeout_s) == 0)
+            return 0;
+        log_line("UPDATE download attempt %d/%d failed: %s", attempt,
+                 WGET_ATTEMPTS, url);
+        if (attempt < WGET_ATTEMPTS)
+            sleep(1);
+    }
+    return -1;
 }
 
 /* Fetch + verify the feed. On success fills `feed` and returns 0.
@@ -1439,10 +1473,16 @@ static int esp_sync_files(const char *esp_dir,
     if (partuuid)
         snprintf(data_arg, sizeof(data_arg),
                  " sevyn.data=PARTUUID=%s", partuuid);
-    char cfg_text[2048];
-    int n;
+    /* The menu is built on the heap, sized to what it actually
+     * holds: the preserved other-OS entries are unbounded input
+     * (a hand-edited menu, several detected OSes), and the old
+     * fixed 2048-byte buffer refused the whole update ("grub.cfg
+     * too long") once they passed ~1.4 KiB — the update never
+     * landed, for a menu the updater itself did not write. */
+    size_t other_len = other ? strlen(other) : 0;
+    int sevyn_len;
     if (prev_on_disk) {
-        n = snprintf(cfg_text, sizeof(cfg_text),
+        sevyn_len = snprintf(NULL, 0,
              "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
              "# Written by sevyn-updated (ESP sync): the default entry boots\n"
              "# the active slot from /vmlinuz; the previous entry boots the\n"
@@ -1462,7 +1502,7 @@ static int esp_sync_files(const char *esp_dir,
         log_line("UPDATE ESP sync: WARNING — no .prev on disk; the "
                  "GRUB 'previous' entry is omitted for this update; "
                  "the slot restore remains the fallback");
-        n = snprintf(cfg_text, sizeof(cfg_text),
+        sevyn_len = snprintf(NULL, 0,
              "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
              "# Written by sevyn-updated (ESP sync): the default entry boots\n"
              "# the active slot from /vmlinuz. No 'previous' entry: the\n"
@@ -1476,36 +1516,73 @@ static int esp_sync_files(const char *esp_dir,
              "}\n",
              active_slot, data_arg);
     }
-    if (n < 0 || (size_t)n >= sizeof(cfg_text)) {
+    if (sevyn_len < 0) {
         free(other);
-        snprintf(err, errcap, "ESP sync: grub.cfg too long");
+        snprintf(err, errcap, "ESP sync: cannot build grub.cfg");
         return -1;
     }
+    char *cfg_text = malloc((size_t)sevyn_len + other_len + 1);
+    if (!cfg_text) {
+        free(other);
+        snprintf(err, errcap, "ESP sync: out of memory for grub.cfg");
+        return -1;
+    }
+    if (prev_on_disk) {
+        snprintf(cfg_text, (size_t)sevyn_len + 1,
+             "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
+             "# Written by sevyn-updated (ESP sync): the default entry boots\n"
+             "# the active slot from /vmlinuz; the previous entry boots the\n"
+             "# good slot from the preserved /vmlinuz.prev.\n"
+             "set timeout=3\n"
+             "set default=0\n"
+             "menuentry \"SevynOS\" {\n"
+             "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=%c%s\n"
+             "    initrd /initramfs.cpio.gz\n"
+             "}\n"
+             "menuentry \"SevynOS (previous)\" {\n"
+             "    linux /vmlinuz.prev console=tty0 console=ttyS0 sevyn.slot=%c%s\n"
+             "    initrd /initramfs.prev.cpio.gz\n"
+             "}\n",
+             active_slot, data_arg, good_slot, data_arg);
+    } else {
+        snprintf(cfg_text, (size_t)sevyn_len + 1,
+             "# SevynOS boot menu (GRUB, loaded by shim under Secure Boot).\n"
+             "# Written by sevyn-updated (ESP sync): the default entry boots\n"
+             "# the active slot from /vmlinuz. No 'previous' entry: the\n"
+             "# previous kernel could not be preserved on this ESP\n"
+             "# (see the update log); the slot restore is the fallback.\n"
+             "set timeout=3\n"
+             "set default=0\n"
+             "menuentry \"SevynOS\" {\n"
+             "    linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=%c%s\n"
+             "    initrd /initramfs.cpio.gz\n"
+             "}\n",
+             active_slot, data_arg);
+    }
     if (other) {
-        if (strlen(cfg_text) + strlen(other) + 1 > sizeof(cfg_text)) {
-            free(other);
-            snprintf(err, errcap, "ESP sync: grub.cfg too long");
-            return -1;
-        }
         strcat(cfg_text, other);
         free(other);
     }
     char efi_dir[PATH_MAX];
     if (snprintf(efi_dir, sizeof(efi_dir), "%s/EFI/ubuntu", esp_dir) >=
         (int)sizeof(efi_dir)) {
+        free(cfg_text);
         snprintf(err, errcap, "ESP sync: EFI dir path too long");
         return -1;
     }
     /* The EFI/ubuntu dir exists on every image (GRUB lives there);
      * create it if a test ESP is bare. */
     if (mkdir_p(efi_dir) != 0) {
+        free(cfg_text);
         snprintf(err, errcap, "ESP sync: cannot create EFI dir");
         return -1;
     }
     if (write_file_atomic(cfg_path, cfg_text) != 0) {
+        free(cfg_text);
         snprintf(err, errcap, "ESP sync: cannot write grub.cfg");
         return -1;
     }
+    free(cfg_text);
     return 0;
 }
 
@@ -2064,10 +2141,11 @@ static void status_line(char *out, size_t outcap)
     }
     snprintf(out, outcap,
              "version=%s channel=%s active=%c good=%c attempts=%d "
-             "applying=%s available=%s",
+             "applying=%s available=%s url=%s",
              g_version, g_channel, st.active, st.good, st.attempts,
              g_applying ? "yes" : "no",
-             g_available[0] ? g_available : "unknown");
+             g_available[0] ? g_available : "unknown",
+             g_url[0] ? g_url : "(default)");
 }
 
 static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
@@ -2103,13 +2181,17 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         return;
     }
     if (strcmp(line, "STATUS") == 0) {
-        char st[1024];
+        char st[2048]; /* a long feed URL rides in the status line */
         status_line(st, sizeof(st));
         if (from_ctl)
             log_line("UPDATE STATUS %s", st);
         else if (reply) {
-            snprintf(out, sizeof(out), "OK %s\n", st);
-            reply(ctx, out);
+            /* The reply buffer is LINE_CAP (2048); the status line
+             * alone can fill it. Build the reply in its own buffer
+             * so a long URL is never truncated mid-value. */
+            char full[4096];
+            snprintf(full, sizeof(full), "OK %s\n", st);
+            reply(ctx, full);
         }
         return;
     }
@@ -2239,6 +2321,51 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
             log_line("UPDATE CHANNEL OK %s", arg);
         else if (reply) {
             snprintf(out, sizeof(out), "OK channel %s\n", arg);
+            reply(ctx, out);
+        }
+        return;
+    }
+    if (strcmp(line, "URL") == 0) {
+        /* Set the feed URL (persisted with the channel). The URL
+         * only chooses where the signed feed comes from: CHECK and
+         * APPLY still verify the feed signature against the trusted
+         * keys, so pointing at a local/dev feed cannot install
+         * unsigned code. http/https only, no whitespace — the verb
+         * line is space-split, and a URL with a space in it is
+         * never a real feed URL. Sticky across channel changes;
+         * STATUS shows the current URL so a dev override is never
+         * silent. */
+        if (!arg || strlen(arg) >= sizeof(g_url) ||
+            (strncmp(arg, "http://", 7) != 0 &&
+             strncmp(arg, "https://", 8) != 0) ||
+            strchr(arg, ' ') != NULL || strchr(arg, '\t') != NULL ||
+            strchr(arg, '\r') != NULL || strchr(arg, '\n') != NULL) {
+            if (from_ctl)
+                log_line("UPDATE URL FAIL usage");
+            else if (reply)
+                reply(ctx, "ERR usage: URL <http://...|https://...>\n");
+            return;
+        }
+        if (!data_disk_present()) {
+            if (from_ctl)
+                log_line("UPDATE URL FAIL no-data-disk");
+            else if (reply)
+                reply(ctx, "ERR no-data-disk\n");
+            return;
+        }
+        snprintf(g_url, sizeof(g_url), "%s", arg);
+        if (save_config() != 0) {
+            if (from_ctl)
+                log_line("UPDATE URL FAIL cannot save config");
+            else if (reply)
+                reply(ctx, "ERR cannot save config\n");
+            return;
+        }
+        snprintf(g_available, sizeof(g_available), "%s", "");
+        if (from_ctl)
+            log_line("UPDATE URL OK %s", arg);
+        else if (reply) {
+            snprintf(out, sizeof(out), "OK url %s\n", arg);
             reply(ctx, out);
         }
         return;
