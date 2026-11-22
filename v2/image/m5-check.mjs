@@ -280,41 +280,87 @@ function findWindowHeader(img, r, g, b) {
   let top = -1;
   let bottom = -1;
   // Per-row match extents, kept so left/right can be recomputed
-  // from the header band only (see below).
+  // from the header band only (see below). Each row also records
+  // its longest contiguous run of matching pixels (runLeft /
+  // runRight): the window is one large block of its colour, while
+  // a wallpaper band in the same colour range is either
+  // full-width (a horizon band) or a short stray run (an aura).
   const rows = [];
   for (let y = 48; y < 672; y++) {
     let n = 0;
     let rowLeft = W;
     let rowRight = -1;
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 3;
-      if (
-        Math.abs(pixels[i] - r) <= 10 &&
-        Math.abs(pixels[i + 1] - g) <= 10 &&
-        Math.abs(pixels[i + 2] - b) <= 10
-      ) {
+    let bestRunLeft = W;
+    let bestRunRight = -1;
+    let bestRunLen = 0;
+    let runStart = -1;
+    // x === W is a sentinel that closes any open run.
+    for (let x = 0; x <= W; x++) {
+      let m = false;
+      if (x < W) {
+        const i = (y * W + x) * 3;
+        m =
+          Math.abs(pixels[i] - r) <= 10 &&
+          Math.abs(pixels[i + 1] - g) <= 10 &&
+          Math.abs(pixels[i + 2] - b) <= 10;
+      }
+      if (m) {
         n++;
         if (x < rowLeft) rowLeft = x;
         if (x > rowRight) rowRight = x;
+        if (runStart < 0) runStart = x;
+      } else if (runStart >= 0) {
+        const runLen = x - runStart;
+        if (runLen > bestRunLen) {
+          bestRunLen = runLen;
+          bestRunLeft = runStart;
+          bestRunRight = x - 1;
+        }
+        runStart = -1;
       }
     }
     if (n > 700) {
       if (top < 0) top = y;
       bottom = y;
     }
-    rows.push({ n, left: rowLeft, right: rowRight });
+    rows.push({
+      n,
+      left: rowLeft,
+      right: rowRight,
+      runLeft: bestRunLeft,
+      runRight: bestRunRight,
+    });
   }
   if (top < 0) return null;
-  let left = W;
-  let right = -1;
+  // Left/right are the MEDIAN of the header band's per-row
+  // longest run — NOT the min/max over all matching pixels.
+  // The #146 default wallpaper's horizon band renders inside
+  // (17,24,39)±10 across the full screen width, so the min/max
+  // over matching pixels is the whole desktop (left 0, right
+  // ~1149), not the Terminal window: refocus clicks then land
+  // on bare desktop (which hides the windows) and on the dock
+  // (which launches Calculator), and the Terminal rect
+  // subtracts the whole Chromium viewport in M5. The window is
+  // the longest run on most header-band rows, and the polluted
+  // rows (horizon band) are a minority of the band, so the
+  // median is the window's edge. A bare min/max is only correct
+  // while no wallpaper colour shares the window's range.
+  const bandLefts = [];
+  const bandRights = [];
   for (let y = top; y <= Math.min(bottom, top + 43); y++) {
     const row = rows[y - 48];
     if (row.n > 700) {
-      if (row.left < left) left = row.left;
-      if (row.right > right) right = row.right;
+      bandLefts.push(row.runLeft);
+      bandRights.push(row.runRight);
     }
   }
-  return { top, bottom, left, right };
+  if (bandLefts.length === 0) return null;
+  const median = (xs) => {
+    const s = [...xs].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+  };
+  return { top, bottom, left: median(bandLefts), right: median(bandRights) };
 }
 
 // Partial header band (round 8, shared with m13): a window whose
