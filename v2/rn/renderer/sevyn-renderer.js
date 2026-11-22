@@ -940,25 +940,69 @@ function handleStatus(ev) {
 // is the most recent parsed event, for the shell's "Starting…" logic.
 let appsSnapshot = null;
 const appsListeners = new Set();
+// First-boot race (M9): appd seeds the registry before its socket is
+// listening, so the shell's first listApps() can return [] while appd
+// is still seeding. An empty snapshot must never be memoized —
+// re-LIST on a short timer until appd answers with the real list,
+// then replace the snapshot and notify so the shell re-renders with
+// all apps. The shell mounts with the 15-app fallback meanwhile and
+// corrects itself seconds later; first render is never blocked.
+let appsRetryTimer = null;
+function notifyAppsListeners() {
+  for (const fn of Array.from(appsListeners)) {
+    try {
+      fn();
+    } catch (e) {
+      Sevyn.log("apps listener failed: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+  SevynReconciler.flushSyncWork();
+  presentRoot();
+}
+// Re-LIST from appd and replace the snapshot, preserving the running
+// set and last event. Returns true once the list is non-empty.
+function refreshAppsSnapshot() {
+  let apps = [];
+  try {
+    apps = Sevyn.listApps() || [];
+  } catch (e) {
+    apps = [];
+  }
+  // Diagnostic (icons PR #102): the dock showed 15 apps while
+  // appd lists 16 — log what the shell's snapshot holds so the
+  // next CI run pins the gap to the host, the bridge, or the shell.
+  try {
+    Sevyn.log(
+      "apps snapshot " + apps.length + " apps: " + apps.map((a) => a.id).join(","),
+    );
+  } catch (e) {
+    // Logging must never break the snapshot.
+  }
+  const prev = appsSnapshot;
+  appsSnapshot = {
+    apps,
+    running: prev ? prev.running : [],
+    lastEvent: prev ? prev.lastEvent : null,
+    seq: prev ? prev.seq + 1 : 0,
+  };
+  if (!apps.length) return false;
+  notifyAppsListeners();
+  return true;
+}
+function scheduleAppsRetry() {
+  if (appsRetryTimer) return;
+  appsRetryTimer = setTimeout(() => {
+    appsRetryTimer = null;
+    // Another path (e.g. handleAppEvent's backstop) may already have
+    // filled the snapshot — only keep retrying while it is empty.
+    if (appsSnapshot && appsSnapshot.apps.length) return;
+    if (!refreshAppsSnapshot()) scheduleAppsRetry();
+  }, 1000);
+}
 function getAppsSnapshot() {
   if (!appsSnapshot) {
-    let apps = [];
-    try {
-      apps = Sevyn.listApps() || [];
-    } catch (e) {
-      apps = [];
-    }
-    // Diagnostic (icons PR #102): the dock showed 15 apps while
-    // appd lists 16 — log what the shell's snapshot holds so the
-    // next CI run pins the gap to the host, the bridge, or the shell.
-    try {
-      Sevyn.log(
-        "apps snapshot " + apps.length + " apps: " + apps.map((a) => a.id).join(","),
-      );
-    } catch (e) {
-      // Logging must never break the snapshot.
-    }
-    appsSnapshot = { apps, running: [], lastEvent: null, seq: 0 };
+    appsSnapshot = { apps: [], running: [], lastEvent: null, seq: 0 };
+    if (!refreshAppsSnapshot()) scheduleAppsRetry();
   }
   return appsSnapshot;
 }
@@ -974,6 +1018,19 @@ function handleAppEvent(line) {
   const id = parts[2] || "";
   const prev = getAppsSnapshot();
   let { apps, running } = prev;
+  // Backstop for the first-boot race (M9): if the snapshot is still
+  // empty, appd was seeding when the shell first asked. Re-LIST on
+  // any event kind — the first event after boot refreshes the dock
+  // before the icons check runs.
+  let backstopRefilled = false;
+  if (!apps.length) {
+    try {
+      apps = Sevyn.listApps() || [];
+      backstopRefilled = apps.length > 0;
+    } catch (e) {
+      apps = prev.apps;
+    }
+  }
   if (kind === "LAUNCHED") {
     if (!running.includes(id)) running = [...running, id];
   } else if (kind === "STOPPED" || kind === "CRASHED") {
@@ -992,8 +1049,8 @@ function handleAppEvent(line) {
     } catch (e) {
       apps = prev.apps;
     }
-  } else {
-    return; // Unknown event: no re-render.
+  } else if (!backstopRefilled) {
+    return; // Unknown event: no re-render (unless the backstop just filled the snapshot).
   }
   appsSnapshot = {
     apps,
@@ -1001,15 +1058,7 @@ function handleAppEvent(line) {
     lastEvent: { kind, id },
     seq: prev.seq + 1,
   };
-  for (const fn of Array.from(appsListeners)) {
-    try {
-      fn();
-    } catch (e) {
-      Sevyn.log("apps listener failed: " + (e && e.message ? e.message : String(e)));
-    }
-  }
-  SevynReconciler.flushSyncWork();
-  presentRoot();
+  notifyAppsListeners();
 }
 
 // Window state store for useSyncExternalStore. The snapshot is
