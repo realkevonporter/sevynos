@@ -10,8 +10,14 @@ sign-feed.mjs — the same tooling the nightly uses).
 Coverage:
   - canonical byte parity with tools/update-signing/canonical.mjs
   - daemon start, boot-attempt counting, health good-mark
-  - STATUS / CHECK / APPLY / CHANNEL over the socket and the
-    control serial (pty)
+  - STATUS / CHECK / APPLY / CHANNEL / URL over the socket and the
+    control serial (pty); the URL verb persists a feed-URL override
+    (http/https only) and STATUS shows it
+  - download retry: a wget that fails once, then works — the apply
+    lands instead of dying on the transient failure
+  - big preserved grub.cfg: ~1.6 KiB of other-OS entries no longer
+    refuse the update (the menu is built on the heap, not a fixed
+    2048-byte buffer); every other entry survives verbatim
   - feed verification: unsigned / unknown-key / tampered / bad-hash /
     channel-mismatch / no-trusted-keys — all refused (fail-closed)
   - apply: verified artifacts land in the idle slot, state flips,
@@ -364,11 +370,39 @@ def main():
     check("STATUS reports slot A, version m8-test-1",
           d.sock("STATUS") ==
           "OK version=m8-test-1 channel=nightly active=A good=A "
-          "attempts=1 applying=no available=unknown",
+          "attempts=1 applying=no available=unknown url=" + feed_url,
           d.sock("STATUS"))
     check("PING", d.sock("PING") == "OK pong")
     check("unknown verb rejected",
           d.sock("BOGUS") == "ERR unknown verb")
+    check("url verb: non-http scheme rejected",
+          d.sock("URL ftp://example.com/updates.json") ==
+          "ERR usage: URL <http://...|https://...>")
+    check("url verb: bare host rejected",
+          d.sock("URL updates.example.com") ==
+          "ERR usage: URL <http://...|https://...>")
+    alt_url = feed_url + "?v=2"
+    check("url verb: http(s) URL accepted",
+          d.sock("URL " + alt_url) == "OK url " + alt_url)
+    check("url verb: STATUS shows the new URL",
+          d.sock("STATUS").endswith(" url=" + alt_url))
+    check("url verb: persists in update-config.json",
+          json.loads((data / "update-config.json").read_text())
+          ["url"] == alt_url)
+    check("url verb: invalid URL leaves config untouched",
+          d.sock("URL ftp://example.com/x").startswith("ERR") and
+          json.loads((data / "update-config.json").read_text())
+          ["url"] == alt_url)
+    check("url verb: CLI sets the URL",
+          subprocess.run(
+              [str(tmp / "sevyn"), "update", "url", feed_url],
+              capture_output=True, text=True,
+              env={**os.environ,
+                   "SEVYN_UPDATE_SOCK": str(tmp / "update.sock")})
+          .stdout.strip() == "url " + feed_url)
+    check("url verb: CLI round-trips back to the feed URL",
+          json.loads((data / "update-config.json").read_text())
+          ["url"] == feed_url)
 
     # Control serial: send STATUS through the pty, reply lands in the log.
     os.write(master_fd, b"STATUS\n")
@@ -1125,6 +1159,100 @@ def main():
     os.close(slave5)
     shutil.rmtree(gd3)
     shutil.rmtree(gesp3)
+
+    # Case 4 — a big preserved menu: the old fixed 2048-byte grub.cfg
+    # buffer refused the whole update ("grub.cfg too long") once the
+    # preserved other-OS entries passed ~1.4 KiB. The menu is now
+    # built on the heap, so the update lands and every other entry
+    # survives verbatim.
+    gd4, gesp4, kern_b4, init_b4 = geo_fixture("bigmenu", 144 * 1024 * 1024)
+    other_entries = (
+        "menuentry \"Windows 11\" {\n"
+        "    chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n"
+        "}\n" +
+        "".join(
+            f"menuentry \"Other OS {i}\" {{\n"
+            f"    linux /vmlinuz-{i} root=UUID=11111111-1111-1111-1111-"
+            f"11111111111{i} ro quiet splash\n"
+            "    initrd /initrd.img\n"
+            "}\n" for i in range(14)))
+    assert len(other_entries) > 1600, len(other_entries)
+    grub4_path = gesp4 / "EFI" / "ubuntu" / "grub.cfg"
+    grub4_path.write_text(grub4_path.read_text() + other_entries)
+    master6, slave6 = pty.openpty()
+    env_geo4 = geo_env("bigmenu", gd4, gesp4, 144 * 1024 * 1024)
+    env_geo4["SEVYN_UPDATE_CTL"] = os.ttyname(slave6)
+    d_geo4 = Daemon(tmp, env_geo4)
+    check("big menu: daemon starts", d_geo4.start())
+    write_feed(server_dir, key_file, "geo-bigmenu-2", "nightly",
+               artifacts_for(kern_b4, init_b4))
+    n_rb = geo_reboots()
+    check("big menu: APPLY accepted",
+          d_geo4.sock("APPLY") == "OK applying geo-bigmenu-2")
+    check("big menu: apply requested a reboot",
+          geo_wait_reboot(n_rb))
+    st_geo4 = json.loads((gd4 / "slot-state.json").read_text())
+    check("big menu: apply flipped state to B",
+          st_geo4["active"] == "B" and st_geo4["good"] == "A" and
+          st_geo4["version"] == "geo-bigmenu-2", str(st_geo4))
+    grub_geo4 = grub4_path.read_text()
+    check("big menu: grub.cfg exceeds the old 2048-byte cap",
+          len(grub_geo4) > 2048, str(len(grub_geo4)))
+    check("big menu: every other entry preserved verbatim",
+          all(entry in grub_geo4 for entry in
+              other_entries.split("menuentry ")[1:]) and
+          "menuentry \"Windows 11\" {" in grub_geo4, grub_geo4)
+    check("big menu: default entry boots the new slot",
+          "linux /vmlinuz console=tty0 console=ttyS0 sevyn.slot=B"
+          in grub_geo4, grub_geo4)
+    d_geo4.stop()
+    os.close(master6)
+    os.close(slave6)
+    shutil.rmtree(gd4)
+    shutil.rmtree(gesp4)
+
+    # Case 5 — transient download failure: a wget that fails its
+    # first call, then works. The old single attempt killed the
+    # whole apply; the retry wrapper (3 attempts, 1 s apart) lands
+    # the update and logs the failed attempt.
+    real_wget = shutil.which("wget")
+    assert real_wget, "wget missing"
+    wget_marker = tmp / "wget-failed-once"
+    (tmp / "bin" / "wget").write_text(
+        "#!/bin/sh\n"
+        "# Fail the first wget call, then behave normally.\n"
+        f"if [ ! -f \"{wget_marker}\" ]; then\n"
+        f"    touch \"{wget_marker}\"\n"
+        "    exit 1\n"
+        "fi\n"
+        f"exec {real_wget} \"$@\"\n")
+    (tmp / "bin" / "wget").chmod(0o755)
+    gd5, gesp5, kern_b5, init_b5 = geo_fixture("retry", 144 * 1024 * 1024)
+    master7, slave7 = pty.openpty()
+    env_geo5 = geo_env("retry", gd5, gesp5, 144 * 1024 * 1024)
+    env_geo5["SEVYN_UPDATE_CTL"] = os.ttyname(slave7)
+    d_geo5 = Daemon(tmp, env_geo5)
+    check("retry: daemon starts", d_geo5.start())
+    write_feed(server_dir, key_file, "geo-retry-2", "nightly",
+               artifacts_for(kern_b5, init_b5))
+    n_rb = geo_reboots()
+    check("retry: APPLY accepted",
+          d_geo5.sock("APPLY") == "OK applying geo-retry-2")
+    check("retry: failed attempt is logged",
+          d_geo5.watcher.wait_for("download attempt 1/3 failed",
+                                  timeout=15))
+    check("retry: apply requested a reboot",
+          geo_wait_reboot(n_rb))
+    st_geo5 = json.loads((gd5 / "slot-state.json").read_text())
+    check("retry: apply flipped state to B",
+          st_geo5["active"] == "B" and st_geo5["good"] == "A" and
+          st_geo5["version"] == "geo-retry-2", str(st_geo5))
+    d_geo5.stop()
+    os.close(master7)
+    os.close(slave7)
+    (tmp / "bin" / "wget").unlink()
+    shutil.rmtree(gd5)
+    shutil.rmtree(gesp5)
 
     server.shutdown()
     os.close(master_fd)
