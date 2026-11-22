@@ -379,35 +379,56 @@ function findWindowHeader(img, r, g, b) {
     });
   }
   if (top < 0) return null;
-  // Left/right are the MEDIAN of the header band's per-row
-  // longest run — NOT the min/max over all matching pixels.
-  // The #146 default wallpaper's horizon band renders inside
-  // (17,24,39)±10 across the full screen width, so the min/max
-  // over matching pixels is the whole desktop (left 0, right
-  // ~1149), not the Terminal window: refocus clicks then land
-  // on bare desktop (which hides the windows) and on the dock
-  // (which launches Calculator), and the Terminal rect
-  // subtracts the whole Chromium viewport in M5. The window is
-  // the longest run on most header-band rows, and the polluted
-  // rows (horizon band) are a minority of the band, so the
-  // median is the window's edge. A bare min/max is only correct
-  // while no wallpaper colour shares the window's range.
-  const bandLefts = [];
-  const bandRights = [];
+  // Left/right start as the min/max over all matching pixels in
+  // the header band — correct while no wallpaper colour shares
+  // the window's range (a title in the header does not move it:
+  // matching pixels still sit at the window's edges).
+  let left = W;
+  let right = -1;
   for (let y = top; y <= Math.min(bottom, top + 43); y++) {
     const row = rows[y - 48];
     if (row.n > 700) {
-      bandLefts.push(row.runLeft);
-      bandRights.push(row.runRight);
+      if (row.left < left) left = row.left;
+      if (row.right > right) right = row.right;
     }
   }
-  if (bandLefts.length === 0) return null;
-  const median = (xs) => {
-    const s = [...xs].sort((a, b) => a - b);
-    const mid = Math.floor(s.length / 2);
-    return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
-  };
-  return { top, bottom, left: median(bandLefts), right: median(bandRights) };
+  // A wallpaper band in the window's colour range pollutes the
+  // min/max: the #146 default wallpaper's horizon band renders
+  // inside (17,24,39)±10 across the full screen width, so the
+  // min/max is the whole desktop (left 0, right ~1149), not the
+  // Terminal window — refocus clicks then land on bare desktop
+  // (which hides the windows) and on the dock (which launches
+  // Calculator), and the Terminal rect subtracts the whole
+  // Chromium viewport in M5. These app windows are ~800px wide,
+  // so a rect over 1000px wide is a wallpaper band, not a
+  // window: fall back to the median of the header band's
+  // per-row longest run, which is the window on most rows (the
+  // polluted rows are a minority of the band). The fallback runs
+  // ONLY for a polluted rect — an unpolluted window keeps its
+  // min/max rect exactly, because a longest-run median would
+  // misplace a header whose title splits the run (the Browser
+  // header's left edge reads 225/370 instead of 107).
+  if (right - left > 1000) {
+    const bandLefts = [];
+    const bandRights = [];
+    for (let y = top; y <= Math.min(bottom, top + 43); y++) {
+      const row = rows[y - 48];
+      if (row.n > 700) {
+        bandLefts.push(row.runLeft);
+        bandRights.push(row.runRight);
+      }
+    }
+    if (bandLefts.length > 0) {
+      const median = (xs) => {
+        const s = [...xs].sort((a, b) => a - b);
+        const mid = Math.floor(s.length / 2);
+        return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+      };
+      left = median(bandLefts);
+      right = median(bandRights);
+    }
+  }
+  return { top, bottom, left, right };
 }
 
 // Partial header band (round 7, m13 only): a window dragged
