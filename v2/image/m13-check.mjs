@@ -1418,42 +1418,97 @@ function findTerminalDockIcon(img, known) {
 // When the Terminal is absent the frame shows the dock icon, not
 // input-row pixels, so the guard refuses and the caller fails
 // fast instead of launching an app. Returns {x, y} or null.
+//
+// Fix v3 (run 45000107835): the fixed point is x-fragile — when a
+// covering window hides the input row at left+200, the row may
+// still be visible further right (in that run the row showed at
+// (750,768) while (303,768) was Browser body). So the fixed point
+// is tried first (unchanged behaviour on every frame where it
+// works), and only when it fails does the guard scan the input row
+// across the known rect for the longest run of input-row pixels
+// and return its centre — still only verified Terminal-input
+// pixels, never a blind click (same pattern as dragStartPoint's
+// longest-run fallback). Minimum 20px, matching the fragment-raise
+// minimum; ties go to the run nearest the fixed point.
 function refocusInputPointSafe(known, img, W, H) {
   if (!known) return null;
-  const x = known.left + 200;
   const y = known.top + 482;
-  if (
-    x < known.left ||
-    x > known.right ||
-    y < known.top ||
-    y > known.top + TERMINAL_WINDOW_HEIGHT_PX ||
-    x < 0 ||
-    x >= W ||
-    y < 0 ||
-    y >= H
-  ) {
-    return null;
-  }
-  let n = 0;
-  let tot = 0;
-  for (let yy = Math.max(0, y - 5); yy <= Math.min(H - 1, y + 5); yy++) {
-    for (let xx = Math.max(0, x - 20); xx <= Math.min(W - 1, x + 20); xx++) {
-      tot++;
-      if (
-        pixelMatches(
-          img,
-          xx,
-          yy,
-          TERMINAL_INPUT_RGB[0],
-          TERMINAL_INPUT_RGB[1],
-          TERMINAL_INPUT_RGB[2],
-        )
-      ) {
-        n++;
+  // The neighbourhood rule, shared by both paths: at least half
+  // the pixels in a 41x11 box around (x, y) must be the input-row
+  // background colour. Returns {x, y} or null.
+  const inputRowAt = (x) => {
+    if (
+      x < known.left ||
+      x > known.right ||
+      y < known.top ||
+      y > known.top + TERMINAL_WINDOW_HEIGHT_PX ||
+      x < 0 ||
+      x >= W ||
+      y < 0 ||
+      y >= H
+    ) {
+      return null;
+    }
+    let n = 0;
+    let tot = 0;
+    for (let yy = Math.max(0, y - 5); yy <= Math.min(H - 1, y + 5); yy++) {
+      for (let xx = Math.max(0, x - 20); xx <= Math.min(W - 1, x + 20); xx++) {
+        tot++;
+        if (
+          pixelMatches(
+            img,
+            xx,
+            yy,
+            TERMINAL_INPUT_RGB[0],
+            TERMINAL_INPUT_RGB[1],
+            TERMINAL_INPUT_RGB[2],
+          )
+        ) {
+          n++;
+        }
       }
     }
+    return tot > 0 && n / tot >= 0.5 ? { x, y } : null;
+  };
+  const fixed = inputRowAt(known.left + 200);
+  if (fixed) return fixed;
+  if (y < known.top || y > known.top + TERMINAL_WINDOW_HEIGHT_PX || y < 0 || y >= H) {
+    return null;
   }
-  return tot > 0 && n / tot >= 0.5 ? { x, y } : null;
+  const x0 = Math.max(known.left, 0);
+  const x1 = Math.min(known.right, W - 1);
+  if (x0 > x1) return null;
+  let best = null;
+  let s = -1;
+  for (let x = x0; x <= x1 + 1; x++) {
+    const m =
+      x <= x1 &&
+      pixelMatches(
+        img,
+        x,
+        y,
+        TERMINAL_INPUT_RGB[0],
+        TERMINAL_INPUT_RGB[1],
+        TERMINAL_INPUT_RGB[2],
+      );
+    if (m && s < 0) s = x;
+    if (!m && s >= 0) {
+      const len = x - s;
+      const centre = (s + x - 1) / 2;
+      if (
+        !best ||
+        len > best.len ||
+        (len === best.len &&
+          Math.abs(centre - (known.left + 200)) <
+            Math.abs((best.x0 + best.x1) / 2 - (known.left + 200)))
+      ) {
+        best = { x0: s, x1: x - 1, len };
+      }
+      s = -1;
+    }
+  }
+  if (!best || best.len < 20) return null;
+  return inputRowAt(Math.round((best.x0 + best.x1) / 2));
 }
 
 // The gpu mode Chromium is running in, as reported in the boot log:
@@ -2126,6 +2181,7 @@ async function main() {
     }
     let raised = false;
     let relaunched = false;
+    let raisedViaFragment = false;
     // Round 8: when the strict scan finds no header, the
     // Terminal may still be on screen as a fragment (see
     // refocusFragmentRaisePointPartial) — the crash run's
@@ -2149,6 +2205,7 @@ async function main() {
       await click();
       await sleep(300);
       raised = true;
+      raisedViaFragment = true;
     } else {
       const dockIcon = findTerminalDockIcon(shotNow, termPos);
       if (dockIcon) {
@@ -2172,25 +2229,18 @@ async function main() {
         ));
       }
     }
-    if (raised) {
-      // Round 8: when the dock click relaunched Terminal, do
-      // NOT enter the attempt loop yet — the fresh app is still
-      // booting, and the loop's two attempts + 25 s verify
-      // windows would expire before it paints. Wait for
-      // readiness first (up to 30 s); the 25 s verify window in
-      // verifyFocus then starts FRESH, after the window is
-      // frame-proven ready. A readiness timeout fails fast with
-      // its own message, not the generic refocus one.
-      if (relaunched) {
-        const readyFrame = await waitForRelaunchedTerminal();
-        if (!readyFrame) {
-          throw new Error(
-            "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
-          );
-        }
-      }
-      // The window needs a moment to come forward; re-shot once
-      // if the first fresh frame still shows no header.
+    // The post-raise attempt loop, shared by the primary raise and
+    // the fix-v3 dock fallback below: re-derive the header from a
+    // fresh frame (the raise changes what is on top) and accept it
+    // only when it is consistent with the known window; then click
+    // title + input and re-verify. Only if the header is STILL
+    // undetectable after the raise does the guarded last-known-good
+    // input click run — and only when the fresh frame itself proves
+    // the input row is on screen at that point (see
+    // refocusInputPointSafe). Returns true when focus is verified.
+    // The window needs a moment to come forward; re-shot once if
+    // the first fresh frame still shows no header.
+    const tryRefocusAttempts = async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const shotFresh = await shot(b.qmp, join(OUT, "m13-shot-refocus-fresh.ppm"));
         const fresh2 = findWindowHeader(shotFresh, 17, 24, 39);
@@ -2226,6 +2276,64 @@ async function main() {
           if (await verifyFocus()) return true;
         }
         if (attempt === 0) await sleep(2000);
+      }
+      return false;
+    };
+    // Round 8: when the dock click relaunched Terminal, do NOT
+    // enter the attempt loop yet — the fresh app is still booting,
+    // and the loop's two attempts + 25 s verify windows would
+    // expire before it paints. Wait for readiness first (up to
+    // 30 s); the 25 s verify window in verifyFocus then starts
+    // FRESH, after the window is frame-proven ready. A readiness
+    // timeout fails fast with its own message, not the generic
+    // refocus one.
+    const waitForRelaunchReady = async () => {
+      const readyFrame = await waitForRelaunchedTerminal();
+      if (!readyFrame) {
+        throw new Error(
+          "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
+        );
+      }
+    };
+    if (raised) {
+      if (relaunched) await waitForRelaunchReady();
+      if (await tryRefocusAttempts()) return true;
+    }
+    // Fix v3 (run 45000107835): the fragment raise demonstrably
+    // does not always raise — in that run the click landed on a
+    // verified Terminal body pixel (751,495) and the stacking did
+    // not change (frame diff: only the cursor moved). Last resort:
+    // the Terminal's dock icon, tried on a FRESH frame. It runs
+    // ONLY when the raise came from the fragment point — never
+    // when the dock was already the primary path (it already had
+    // its chance there, and a second click could toggle-hide a
+    // Terminal the first click raised). The toggle-hide hazard is
+    // mitigated the same way as the primary dock path: the
+    // fallback runs only after the fragment raise failed to
+    // re-derive a header AND the input-row scan found nothing,
+    // i.e. the Terminal is buried and unfocused as far as the
+    // frames can tell (the focused app at the final refocus is
+    // Chromium — link-nav just opened a page in it). A hide (no
+    // APPD launched line) falls through to the same throw below,
+    // ~5 s later; a raise re-enters the attempt loop, and a
+    // relaunch waits for readiness first.
+    if (raisedViaFragment) {
+      const dockFrame = await shot(b.qmp, join(OUT, "m13-shot-refocus-dock.ppm"));
+      const dockIcon2 = findTerminalDockIcon(dockFrame, termPos);
+      if (dockIcon2) {
+        const dockClickLines = logLines(b.logPath).length;
+        await moveTo(dockIcon2.x, dockIcon2.y, dockFrame.width, dockFrame.height);
+        await sleep(300);
+        await click();
+        await sleep(1000);
+        const relaunched2 = !!(await waitForLog(
+          b.logPath,
+          /APPD launched terminal \(pid \d+\)/,
+          5000,
+          dockClickLines,
+        ));
+        if (relaunched2) await waitForRelaunchReady();
+        if (await tryRefocusAttempts()) return true;
       }
     }
     throw new Error(
