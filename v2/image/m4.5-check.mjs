@@ -566,7 +566,7 @@ async function screenSettled(b, timeoutMs = 30000) {
         x1: img.width,
         y1: 48,
       });
-      const dockBg = countColor(img, 57, 57, 59, 10, {
+      const dockBg = countColor(img, 52, 54, 59, 10, {
         x0: 0,
         y0: 672,
         x1: img.width,
@@ -924,7 +924,9 @@ async function main() {
   // [—, ▢, X, Scan, Nightly, Stable, Sync Now, Timezone, Apply,
   // echo-ai, plan-ai] (#134's Date & Time section sits after the
   // channel buttons, adding Sync Now, the timezone input, and Apply
-  // there). Tab x11 -> plan-ai.
+  // there). Tab x11 -> plan-ai. (The wallpaper PR's Appearance
+  // section appends 4 style buttons AFTER plan-ai, so x11 still
+  // holds — anything after plan-ai is unaffected.)
   await key("tab");
   await key("tab");
   await key("tab");
@@ -1024,7 +1026,7 @@ async function main() {
     x1: imgFinal.width,
     y1: 48,
   });
-  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+  const fDock = countColor(imgFinal, 52, 54, 59, 10, {
     x0: 0,
     y0: 672,
     x1: imgFinal.width,

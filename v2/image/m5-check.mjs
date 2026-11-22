@@ -280,31 +280,62 @@ function findWindowHeader(img, r, g, b) {
   let top = -1;
   let bottom = -1;
   // Per-row match extents, kept so left/right can be recomputed
-  // from the header band only (see below).
+  // from the header band only (see below). Each row also records
+  // its longest contiguous run of matching pixels (runLeft /
+  // runRight): the window is one large block of its colour, while
+  // a wallpaper band in the same colour range is either
+  // full-width (a horizon band) or a short stray run (an aura).
   const rows = [];
   for (let y = 48; y < 672; y++) {
     let n = 0;
     let rowLeft = W;
     let rowRight = -1;
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 3;
-      if (
-        Math.abs(pixels[i] - r) <= 10 &&
-        Math.abs(pixels[i + 1] - g) <= 10 &&
-        Math.abs(pixels[i + 2] - b) <= 10
-      ) {
+    let bestRunLeft = W;
+    let bestRunRight = -1;
+    let bestRunLen = 0;
+    let runStart = -1;
+    // x === W is a sentinel that closes any open run.
+    for (let x = 0; x <= W; x++) {
+      let m = false;
+      if (x < W) {
+        const i = (y * W + x) * 3;
+        m =
+          Math.abs(pixels[i] - r) <= 10 &&
+          Math.abs(pixels[i + 1] - g) <= 10 &&
+          Math.abs(pixels[i + 2] - b) <= 10;
+      }
+      if (m) {
         n++;
         if (x < rowLeft) rowLeft = x;
         if (x > rowRight) rowRight = x;
+        if (runStart < 0) runStart = x;
+      } else if (runStart >= 0) {
+        const runLen = x - runStart;
+        if (runLen > bestRunLen) {
+          bestRunLen = runLen;
+          bestRunLeft = runStart;
+          bestRunRight = x - 1;
+        }
+        runStart = -1;
       }
     }
     if (n > 700) {
       if (top < 0) top = y;
       bottom = y;
     }
-    rows.push({ n, left: rowLeft, right: rowRight });
+    rows.push({
+      n,
+      left: rowLeft,
+      right: rowRight,
+      runLeft: bestRunLeft,
+      runRight: bestRunRight,
+    });
   }
   if (top < 0) return null;
+  // Left/right start as the min/max over all matching pixels in
+  // the header band — correct while no wallpaper colour shares
+  // the window's range (a title in the header does not move it:
+  // matching pixels still sit at the window's edges).
   let left = W;
   let right = -1;
   for (let y = top; y <= Math.min(bottom, top + 43); y++) {
@@ -312,6 +343,42 @@ function findWindowHeader(img, r, g, b) {
     if (row.n > 700) {
       if (row.left < left) left = row.left;
       if (row.right > right) right = row.right;
+    }
+  }
+  // A wallpaper band in the window's colour range pollutes the
+  // min/max: the #146 default wallpaper's horizon band renders
+  // inside (17,24,39)±10 across the full screen width, so the
+  // min/max is the whole desktop (left 0, right ~1149), not the
+  // Terminal window — refocus clicks then land on bare desktop
+  // (which hides the windows) and on the dock (which launches
+  // Calculator), and the Terminal rect subtracts the whole
+  // Chromium viewport in M5. These app windows are ~800px wide,
+  // so a rect over 1000px wide is a wallpaper band, not a
+  // window: fall back to the median of the header band's
+  // per-row longest run, which is the window on most rows (the
+  // polluted rows are a minority of the band). The fallback runs
+  // ONLY for a polluted rect — an unpolluted window keeps its
+  // min/max rect exactly, because a longest-run median would
+  // misplace a header whose title splits the run (the Browser
+  // header's left edge reads 225/370 instead of 107).
+  if (right - left > 1000) {
+    const bandLefts = [];
+    const bandRights = [];
+    for (let y = top; y <= Math.min(bottom, top + 43); y++) {
+      const row = rows[y - 48];
+      if (row.n > 700) {
+        bandLefts.push(row.runLeft);
+        bandRights.push(row.runRight);
+      }
+    }
+    if (bandLefts.length > 0) {
+      const median = (xs) => {
+        const s = [...xs].sort((a, b) => a - b);
+        const mid = Math.floor(s.length / 2);
+        return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+      };
+      left = median(bandLefts);
+      right = median(bandRights);
     }
   }
   return { top, bottom, left, right };
@@ -708,7 +775,7 @@ async function screenSettled(b, timeoutMs = 30000) {
         x1: img.width,
         y1: 48,
       });
-      const dockBg = countColor(img, 57, 57, 59, 10, {
+      const dockBg = countColor(img, 52, 54, 59, 10, {
         x0: 0,
         y0: 672,
         x1: img.width,
@@ -2554,7 +2621,7 @@ async function main() {
     x1: imgFinal.width,
     y1: 48,
   });
-  const fDock = countColor(imgFinal, 57, 57, 59, 10, {
+  const fDock = countColor(imgFinal, 52, 54, 59, 10, {
     x0: 0,
     y0: 672,
     x1: imgFinal.width,
