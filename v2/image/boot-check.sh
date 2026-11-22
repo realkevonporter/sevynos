@@ -11,6 +11,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${SEVYN_V2_BUILD_DIR:-$ROOT/image/build}"
 LOG="$OUT/boot.log"
 TIMEOUT="${SEVYN_V2_BOOT_TIMEOUT:-120}"
+ACCEL="${SEVYN_V2_ACCEL:-tcg}"
 
 for f in "$OUT/vmlinuz" "$OUT/initramfs.cpio.gz"; do
   if [ ! -f "$f" ]; then
@@ -25,7 +26,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || {
 
 : >"$LOG"
 qemu-system-x86_64 \
-  -machine q35 -m 256 -smp 1 \
+  -machine "q35,accel=$ACCEL" -m 256 -smp 1 \
   -kernel "$OUT/vmlinuz" -initrd "$OUT/initramfs.cpio.gz" \
   -append "console=ttyS0" \
   -display none -monitor none -serial stdio -no-reboot -nic none \

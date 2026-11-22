@@ -43,6 +43,9 @@ const OUT = process.env.SEVYN_V2_BUILD_DIR || join(ROOT, "image", "build");
 const DISK = join(OUT, "m4-data.img");
 const TIMEOUT_S = Number(process.env.SEVYN_V2_M4_TIMEOUT || 900);
 const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
+// QEMU accelerator: "tcg" in the sandbox (no /dev/kvm), "kvm" on a
+// box with real KVM.
+const ACCEL = process.env.SEVYN_V2_ACCEL || "tcg";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const started = Date.now();
@@ -338,7 +341,7 @@ async function boot(tag) {
     QEMU,
     [
       "-machine",
-      "q35",
+      `q35,accel=${ACCEL}`,
       "-m",
       "2048",
       "-smp",
