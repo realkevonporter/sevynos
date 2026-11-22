@@ -78,6 +78,11 @@ declare global {
     // One-shot run of /usr/local/bin/sevyn only; returns
     // "<exit-code>\n<output>". Gated by the cli.exec permission.
     exec(cmdline: string): string;
+    // Same run off the JS thread (M9 wifi scan/connect): a Promise
+    // of the same "<exit-code>\n<output>" shape. The shell uses it
+    // for the hourly time resync (#134 follow-up) so an NTP round
+    // trip never blocks the shell's JS thread.
+    execAsync(cmdline: string): Promise<string>;
     listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
     // Focus a running app (dock click on a running single-instance

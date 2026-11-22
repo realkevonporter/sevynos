@@ -1197,8 +1197,9 @@ echo "M5 init: $WIFI"
 # the network is up (DHCP ran above) and statusd is running — the
 # clock must be right before Genesis starts, or Chromium fails
 # every HTTPS page with ERR_CERT_DATE_INVALID. Backgrounded +
-# best-effort: a failed sync never fails the boot (Genesis retries
-# on network-up + hourly, and `sevyn time sync` covers it by hand).
+# best-effort: a failed sync never fails the boot (the shell
+# re-syncs hourly via its own timer, and `sevyn time sync`
+# covers it by hand).
 ( /usr/local/bin/sevyn time sync >/tmp/sevyn-time-sync.log 2>&1 && echo "SEVYN_TIME_SYNCED $(head -n 1 /tmp/sevyn-time-sync.log)" || echo "SEVYN_TIME_SYNC_FAILED" ) &
 # App daemon next: seeds the registry from pristine on first boot and
 # owns /run/sevyn-apps.sock. The shell connects to it for its dock
