@@ -1,7 +1,7 @@
 "use strict";
 // End-to-end Node test for the built app bundles (dist/app.js,
 // dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js,
-// dist/comms.js) and the crash bundle (dist/crash.js). Loads the app
+// dist/comms.js, dist/camera.js) and the crash bundle (dist/crash.js). Loads the app
 // bundle with the mock Sevyn host as several apps — files (status.read
 // granted, the fallback screen) and notes/music/calculator/calendar/store
 // (the M9 real screens) — and drives the close X. The crash bundle
@@ -14,7 +14,14 @@
 // with a canned `sevyn comms` handler: login form, room list, thread
 // + send, and the call screens (the async login/send run in the
 // async section at the end — the mock's execAsync resolves on a
-// microtask, so those checks await a setImmediate flush).
+// microtask, so those checks await a setImmediate flush). The
+// Camera bundle loads with cli.exec + the camera permission and a
+// canned `sevyn camera` handler: first-use Allow screen, no-device
+// state, and the live flow (preview image op, shutter, gallery,
+// viewer decode). The camera preview polls on a 1s interval — the
+// async camera check unmounts at the end so the interval cannot
+// keep the process alive; the sync camera checks never start it
+// (no consent, or no device).
 //
 // Run: node test/app-e2e-test.js   (from v2/apps, after npm run build)
 const assert = require("node:assert/strict");
@@ -48,6 +55,10 @@ const browserBundle = fs.readFileSync(
 );
 const commsBundle = fs.readFileSync(
   path.join(__dirname, "..", "dist", "comms.js"),
+  "utf8",
+);
+const cameraBundle = fs.readFileSync(
+  path.join(__dirname, "..", "dist", "camera.js"),
   "utf8",
 );
 const crashBundle = fs.readFileSync(
@@ -962,6 +973,90 @@ check("comms voice-calls (logged in): incoming call banner", () => {
   assert.ok(texts.includes("Decline"), "decline button shown");
 });
 
+// --- Camera --------------------------------------------------------------
+// Canned `sevyn camera` + `sevyn files` answers. `consent` flips the
+// mount between the first-use Allow screen and the camera view;
+// `available` flips between the live view and the no-device state.
+function cameraHandler({ consent, available, photos }) {
+  const listed = photos.slice();
+  return (cmd) => {
+    if (cmd === "sevyn camera status")
+      return available
+        ? '0\n{"ok":true,"available":true,"device":"/dev/video0","driver":"uvcvideo"}'
+        : '0\n{"ok":true,"available":false,"device":null}';
+    if (cmd === "sevyn files list /data/camera")
+      return consent ? "0\nf .consent\n" : "0\n";
+    if (cmd === "sevyn files list /data/photos")
+      return "0\n" + listed.map((p) => "f " + p + "\n").join("");
+    if (cmd === "sevyn camera preview")
+      return '0\n{"ok":true,"available":true,"device":"/dev/video0","width":640,"height":360,"png":"/data/camera/preview-1.png","rgba":"/data/camera/preview-1.rgba","frame":1}';
+    if (cmd.startsWith("sevyn camera capture ")) {
+      const name = cmd.slice("sevyn camera capture /data/photos/".length);
+      listed.push(name);
+      return (
+        '0\n{"ok":true,"path":"/data/photos/' +
+        name +
+        '","width":1280,"height":720,"size":12345}'
+      );
+    }
+    if (cmd.startsWith("sevyn camera decode ")) {
+      const parts = cmd.split(" ");
+      return (
+        '0\n{"ok":true,"available":true,"width":1280,"height":720,"png":"/data/camera/view-1.png","rgba":"' +
+        parts[parts.length - 1] +
+        '"}'
+      );
+    }
+    return "0\n";
+  };
+}
+
+function loadCameraAs(handler) {
+  return loadAs(
+    {
+      id: "camera",
+      name: "Camera",
+      color: "#14b8a6",
+      glyph: "O",
+      permissions: ["camera", "cli.exec"],
+    },
+    cameraBundle,
+    handler,
+  );
+}
+
+check("camera (no consent): first-use Allow screen", () => {
+  loadCameraAs(cameraHandler({ consent: false, available: true, photos: [] }));
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Allow Camera to use your camera?")),
+    "consent prompt shown",
+  );
+  assert.ok(texts.includes("Allow camera"), "allow button shown");
+  assert.ok(texts.includes("Not now"), "decline button shown");
+});
+
+check("camera (no device): honest no-camera state + Retry", () => {
+  loadCameraAs(
+    cameraHandler({
+      consent: true,
+      available: false,
+      photos: ["01-mountain-golden-hour.jpg"],
+    }),
+  );
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("No camera yet"), "no-device title shown");
+  assert.ok(
+    texts.some((t) => t.includes("No usable Video4Linux")),
+    "honest reason shown",
+  );
+  tapText("Retry", 15);
+  assert.ok(
+    Sevyn._logs.includes("CAMERA status available=no"),
+    "retry re-reads status, logs=" + JSON.stringify(Sevyn._logs),
+  );
+});
+
 // Async flows (login + open room + send): the mock's execAsync
 // resolves on a microtask, so flush with setImmediate after each tap.
 const flush = () => new Promise((r) => setImmediate(r));
@@ -1026,6 +1121,71 @@ async function checkAsync(name, fn) {
       "send marker logged",
     );
   });
+
+  await checkAsync(
+    "camera: preview frame, shutter saves a photo, gallery + viewer",
+    async () => {
+      loadCameraAs(
+        cameraHandler({
+          consent: true,
+          available: true,
+          photos: ["01-mountain-golden-hour.jpg"],
+        }),
+      );
+      // The preview poll is a useEffect + setInterval: give the
+      // passive effect a macrotask to fire, then flush the async
+      // exec's microtasks.
+      await new Promise((r) => setTimeout(r, 100));
+      await flush();
+      await flush();
+      let present = Sevyn._presents[Sevyn._presents.length - 1];
+      assert.ok(
+        present.ops.some(
+          (o) => o.type === "image" && o.asset === "/data/camera/preview-1.png",
+        ),
+        "preview frame drawn, ops=" +
+          JSON.stringify(
+            present.ops.map((o) => o.type + ":" + (o.asset || o.text || "")),
+          ),
+      );
+      tapText("Take photo", 15);
+      await flush();
+      await flush();
+      await flush();
+      const captureLog = Sevyn._logs.find((l) =>
+        l.startsWith("CAMERA capture /data/photos/camera-"),
+      );
+      assert.ok(captureLog, "shutter marker logged, logs=" + JSON.stringify(Sevyn._logs));
+      const capturedName = captureLog.slice("CAMERA capture /data/photos/".length);
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Saved to Photos"), "save confirmation shown");
+      tapText("Photos (2)", 15);
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.includes("01-mountain-golden-hour.jpg"),
+        "fixture photo listed in gallery",
+      );
+      assert.ok(texts.includes(capturedName), "captured photo listed in gallery");
+      tapText(capturedName, 15);
+      await flush();
+      await flush();
+      await flush();
+      present = Sevyn._presents[Sevyn._presents.length - 1];
+      assert.ok(
+        present.ops.some(
+          (o) => o.type === "image" && o.asset === "/data/camera/view-1.png",
+        ),
+        "viewer draws the decoded photo",
+      );
+      assert.ok(
+        Sevyn._logs.includes("CAMERA view /data/photos/" + capturedName),
+        "viewer marker logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      // Unmount: clears the 1s preview interval so the process exits.
+      renderer.unmount();
+      Sevyn._reset();
+    },
+  );
 
   console.log(`\n${passed} app e2e checks passed`);
 })();

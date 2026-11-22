@@ -69,6 +69,10 @@ OVERRIDES = {
     "files": {"permissions": ["status.read", "cli.exec"],
               "singleInstance": False},
     "browser": {"permissions": ["cli.exec"], "singleInstance": False},
+    # Camera is a real app with its own hbc (native camd via
+    # `sevyn camera`): cli.exec for the CLI, plus the camera
+    # capability the app checks on launch (first-use consent screen).
+    "camera": {"permissions": ["camera", "cli.exec"]},
     # Notes is a template app (no own hbc) — multi-instance like
     # Files/Terminal/Browser, so it gets the flag here.
     "notes": {"singleInstance": False},
@@ -169,6 +173,8 @@ def main():
                     help="comms app.hbc (defaults to the template)")
     ap.add_argument("--installer-hbc", default=None,
                     help="installer app.hbc (defaults to the template)")
+    ap.add_argument("--camera-hbc", default=None,
+                    help="camera app.hbc (defaults to the template)")
     ap.add_argument("--out", required=True, help="stock bundles dir")
     ap.add_argument("--trusted-keys-dir", required=True)
     ap.add_argument("--test-bundles-dir", default=None)
@@ -177,8 +183,8 @@ def main():
     hbc = Path(args.hbc).read_bytes()
     crash_hbc = Path(args.crash_hbc).read_bytes()
     # M4 real apps ship their own bundles; M10's three comms apps
-    # share one comms.hbc; anything without one falls back to the
-    # template (the other eight stock apps).
+    # share one comms.hbc; Camera ships its own camera.hbc; anything
+    # without one falls back to the template (the other six stock apps).
     hbc_for = {
         "terminal": (Path(args.terminal_hbc).read_bytes()
                      if args.terminal_hbc else hbc),
@@ -196,6 +202,8 @@ def main():
                         if args.comms_hbc else hbc),
         "installer": (Path(args.installer_hbc).read_bytes()
                      if args.installer_hbc else hbc),
+        "camera": (Path(args.camera_hbc).read_bytes()
+                   if args.camera_hbc else hbc),
     }
     out_dir = Path(args.out)
     trusted_dir = Path(args.trusted_keys_dir)

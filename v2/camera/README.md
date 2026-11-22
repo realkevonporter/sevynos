@@ -6,12 +6,12 @@ bridge PR (#125) is superseded and is not built on here.
 
 ## Pieces
 
-| Piece                           | Where                                             | Status            |
-| ------------------------------- | ------------------------------------------------- | ----------------- |
-| `camd` — V4L2 capture daemon    | `v2/camera/camd.c`                                | PR 1 (this stack) |
-| `sevyn camera` CLI verbs        | `v2/update/sevyn.c`                               | PR 1              |
-| RN camera module (host adapter) | `hosts/linux/src/linux-native-module-services.ts` | PR 2              |
-| Camera app                      | `v2/apps/src/Camera.tsx`, `camera-main.tsx`       | PR 3              |
+| Piece                           | Where                                             | Status                                                         |
+| ------------------------------- | ------------------------------------------------- | -------------------------------------------------------------- |
+| `camd` — V4L2 capture daemon    | `v2/camera/camd.c`                                | PR 1 (this stack)                                              |
+| `sevyn camera` CLI verbs        | `v2/update/sevyn.c`                               | PR 1                                                           |
+| RN camera module (host adapter) | `hosts/linux/src/linux-native-module-services.ts` | PR 2 — camd-first, ffmpeg legacy fallback on dev machines only |
+| Camera app                      | `v2/apps/src/Camera.tsx`, `camera-main.tsx`       | PR 3                                                           |
 
 ## Why a daemon, and why C
 
