@@ -1014,11 +1014,19 @@ async function main() {
     await click();
     await sleep(300);
   }
-  // Focus order: [—, ▢, X, .., lost+found, m4-files-test, slots] —
-  // /data always carries lost+found (ext4) and slots/, both
-  // directories, so m4-files-test is the sixth Tab from no-focus
-  // (files are not pressable, so the two .json files never enter
-  // the order).
+  // Focus order: [—, ▢, X, Cut, Copy, Paste, Delete, Internal Drive,
+  // data, .., lost+found, m4-files-test, slot-state.json, slots,
+  // update-config.json] — /data always carries lost+found (ext4) and
+  // slots/, both directories, and the volumes verb reports the root
+  // mount plus the /dev/vda data disk, so the Devices sidebar has two
+  // rows. m4-files-test is the twelfth Tab from no-focus (files are
+  // pressable now, so the two .json files enter the order after it).
+  await key("tab");
+  await key("tab");
+  await key("tab");
+  await key("tab");
+  await key("tab");
+  await key("tab");
   await key("tab");
   await key("tab");
   await key("tab");
@@ -1027,6 +1035,9 @@ async function main() {
   await key("tab");
   {
     const before = logLines(b.logPath).length;
+    // First Enter selects the directory; the second opens it
+    // (tap-to-select, tap-again-to-open — the #122 port's model).
+    await key("ret");
     await key("ret");
     const hit = await waitForLog(
       b.logPath,
