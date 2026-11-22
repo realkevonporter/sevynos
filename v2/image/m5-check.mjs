@@ -2513,9 +2513,17 @@ async function main() {
     // after the open has settled — n=1 with the Second Page
     // title. The poll retries, so a transient n=2 settles; a
     // stuck n=2 fails honestly as a single-tab violation.
+    // The poll gets 8 attempts, not the default 4: tab closes
+    // from earlier steps land slowly under TCG load, and on
+    // #148 M5 att1 CDP still reported 3 tabs after the default
+    // window (att2 passed with the same code, so the contract
+    // holds eventually — the closes are slow, not stuck). If it
+    // still fails after the longer poll, the close path needs a
+    // product investigation, not a longer poll.
     await refocusTerminal();
     const cdpMarker = await pollTabsTitle(
       /TERMINAL browser-tabs n=1 titles=.*Second Page/,
+      8,
     );
     check(
       "browser-app: the address bar opens the second page (BROWSER open + CDP tabs 1)",
