@@ -507,6 +507,11 @@ def main():
     check("APPLY bad image accepted (it verifies; boot proves it)",
           d2.sock("APPLY") == "OK applying m8-test-bad")
     ok_reboot = False
+    # The reboot is requested by a forked `reboot -f` stub; under
+    # box saturation the fork/exec can land >10 s after APPLY
+    # returns (9 occurrences across the queue, e.g. #143 M10 att2,
+    # #148 M9/M12/M13 att1). Poll 30 s — the loop exits on the
+    # first sighting, so a healthy run pays nothing extra.
     for _ in range(300):
         if reboot_marker.exists() and \
                 len(reboot_marker.read_text().splitlines()) > n_reboots:
@@ -773,7 +778,12 @@ def main():
     check("ESP APPLY accepted",
           d_esp.sock("APPLY") == "OK applying m9-esp-2")
     ok_reboot = False
-    for _ in range(300):
+    # Same forked-stub race as the bad-apply poll, but the ESP path
+    # does the heaviest synchronous work before the reboot (full
+    # ESP sync + grub.cfg rewrite), and its reboot was seen >30 s
+    # late under load (#148 M7 att1 — every other reboot check in
+    # that run passed). Poll 60 s; the loop exits early on success.
+    for _ in range(600):
         if reboot_marker.exists() and \
                 len(reboot_marker.read_text().splitlines()) > n_reboots:
             ok_reboot = True
@@ -969,6 +979,10 @@ def main():
             if reboot_marker.exists() else 0
 
     def geo_wait_reboot(n_before, timeout=30.0):
+        # 30 s, not 10 s: the same forked-stub race as the bad-apply
+        # poll — under load the reboot marker lands late, and a late
+        # geometry reboot also trips the following no-fit check (the
+        # late line increments the count after no-fit read it).
         end = time.time() + timeout
         while time.time() < end:
             if geo_reboots() > n_before:

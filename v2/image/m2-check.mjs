@@ -512,7 +512,11 @@ async function main() {
   );
 
   // 5. Status is live: push battery/wifi/volume; the tray (top-right)
-  // must repaint.
+  // must repaint. Under TCG load the repaint can land after the
+  // first screenshot, so poll the tray diff instead of taking a
+  // single shot (M2 att2 on #143: tray differing pixels=0 at 42.2s
+  // with 14/15 assertions passing). The loop exits on the first
+  // over-threshold sample, so a healthy run pays nothing extra.
   const shotTrayBefore = await shot(qmp, join(OUT, "m2-shot-tray-before.ppm"));
   ctl.write("SET battery 87\n");
   await sleep(300);
@@ -520,13 +524,17 @@ async function main() {
   await sleep(300);
   ctl.write("SET volume 55\n");
   await sleep(1500);
-  const shotTrayAfter = await shot(qmp, join(OUT, "m2-shot-tray-after.ppm"));
-  const trayDiff = diffBox(shotTrayBefore, shotTrayAfter, {
-    x0: 600,
-    y0: 0,
-    x1: W,
-    y1: 48,
-  });
+  let trayDiff = 0;
+  for (let i = 0; i < 10 && trayDiff <= 20; i++) {
+    const shotTrayAfter = await shot(qmp, join(OUT, "m2-shot-tray-after.ppm"));
+    trayDiff = diffBox(shotTrayBefore, shotTrayAfter, {
+      x0: 600,
+      y0: 0,
+      x1: W,
+      y1: 48,
+    });
+    if (trayDiff <= 20) await sleep(1000);
+  }
   check(
     "status: tray repaints on pushed battery/wifi/volume",
     trayDiff > 20,

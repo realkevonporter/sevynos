@@ -82,7 +82,13 @@ class SockClient:
         line, self.buf = self.buf.split(b"\n", 1)
         return line.decode()
 
-    def read_until(self, prefix, timeout=10.0):
+    def read_until(self, prefix, timeout=30.0):
+        # 30 s, not 10 s: host-side, under load the daemon can take
+        # >10 s to emit the next event even after ~100 assertions
+        # passed (EVENT STOPPED TimeoutError on recv — #143 M5 att2
+        # job 136860174176, #148 M9 att1 job 136949866868,
+        # #148 M11 att1). The wait exits on the first matching line,
+        # so a healthy run pays nothing extra.
         self.s.settimeout(timeout)
         while True:
             line = self.readline()
