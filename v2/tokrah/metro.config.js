@@ -94,6 +94,10 @@ const DEDICATED = {
   "react-native-google-mobile-ads": "stub-google-mobile-ads.js",
   expo: "stub-expo.js",
   "@react-native-firebase/messaging": "stub-firebase-messaging.js",
+  // Dedicated since 2026-11-22 (M6/M7/M9 harness fix): the mount
+  // path calls fetch() for real (Tokrah offline layer) and the
+  // generic stub's undefined return broke `.then` on it.
+  "@react-native-community/netinfo": "stub-netinfo.js",
 };
 
 // Native packages the mount path only touches at load time (or not
@@ -102,7 +106,6 @@ const GENERIC_PKGS = [
   "react-native-webview",
   "react-native-qrcode-svg",
   "@stripe/stripe-react-native",
-  "@react-native-community/netinfo",
   "@maplibre/maplibre-react-native",
   "react-native-voip-push-notification",
   "react-native-video-trim",
