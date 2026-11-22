@@ -696,15 +696,32 @@ if ! grep -q "SEVYNOS_M2_READY" /tmp/sevyn-host.log 2>/dev/null; then
 fi
 echo "SEVYNOS_M2_READY"
 # Sevyn Code must be serving before the harness starts driving the
-# Terminal: give it up to 10 s to answer on its port. A failure here
-# does NOT fail the boot — the M4 check asserts code status
-# separately, with the server log as the diagnostic.
+# Terminal: give it up to 120 s to answer on its port. code-server is
+# a 457 MB Node app and under TCG load its startup can exceed 10 s,
+# which used to leave CODE_OK=0 on slow boots. A longer wait is not
+# enough on its own: under load code-server can die during startup
+# (it logs "error timed out" ~11 s after writing its config and never
+# serves), so a failed attempt relaunches it, up to 3 launches; a
+# relaunch after Weston + the shell are up runs under less startup
+# load. A failure here does NOT fail the boot -- the M4 check asserts
+# code status separately, with the server log as the diagnostic.
 CODE_OK=0
-i=0
-while [ "$i" -lt 100 ]; do
-  if wget -qO- http://127.0.0.1:8080/ 2>/dev/null | grep -q codeServerVersion; then CODE_OK=1; break; fi
-  sleep 0.1
-  i=$((i + 1))
+attempt=1
+while [ "$attempt" -le 3 ] && [ "$CODE_OK" = "0" ]; do
+  i=0
+  while [ "$i" -lt 1200 ]; do
+    if wget -qO- http://127.0.0.1:8080/ 2>/dev/null | grep -q codeServerVersion; then CODE_OK=1; break; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$CODE_OK" = "0" ] && [ "$attempt" -lt 3 ]; then
+    echo "M4 init: code-server attempt $attempt did not serve; relaunching"
+    if [ -f /run/code-server.pid ]; then kill "$(cat /run/code-server.pid)" 2>/dev/null || true; fi
+    sleep 1
+    /usr/share/sevyn/code-server/bin/code-server --auth none --disable-telemetry --disable-update-check --bind-addr 127.0.0.1:8080 >>/tmp/code-server.log 2>&1 &
+    echo $! > /run/code-server.pid
+  fi
+  attempt=$((attempt + 1))
 done
 if [ "$CODE_OK" = "1" ]; then echo "M4 init: code-server serving"; else echo "M4 init: code-server NOT serving (see /tmp/code-server.log)"; echo "--- code-server.log ---"; cat /tmp/code-server.log 2>/dev/null || echo "(no code-server log)"; echo "--- end code-server.log ---"; fi
 echo "SEVYNOS_M4_READY"

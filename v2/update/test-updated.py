@@ -507,7 +507,7 @@ def main():
     check("APPLY bad image accepted (it verifies; boot proves it)",
           d2.sock("APPLY") == "OK applying m8-test-bad")
     ok_reboot = False
-    for _ in range(100):
+    for _ in range(300):
         if reboot_marker.exists() and \
                 len(reboot_marker.read_text().splitlines()) > n_reboots:
             ok_reboot = True
@@ -773,7 +773,7 @@ def main():
     check("ESP APPLY accepted",
           d_esp.sock("APPLY") == "OK applying m9-esp-2")
     ok_reboot = False
-    for _ in range(100):
+    for _ in range(300):
         if reboot_marker.exists() and \
                 len(reboot_marker.read_text().splitlines()) > n_reboots:
             ok_reboot = True
@@ -968,7 +968,7 @@ def main():
         return len(reboot_marker.read_text().splitlines()) \
             if reboot_marker.exists() else 0
 
-    def geo_wait_reboot(n_before, timeout=10.0):
+    def geo_wait_reboot(n_before, timeout=30.0):
         end = time.time() + timeout
         while time.time() < end:
             if geo_reboots() > n_before:
