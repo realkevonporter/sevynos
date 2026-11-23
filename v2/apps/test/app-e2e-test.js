@@ -552,10 +552,10 @@ check("settings: channel switch applies and logs", () => {
   );
   // Focus order is now [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, Shut Down, Restart, Default,
-  // Solid, Cosmic, Minimal, macOS]: Stable -> Sync Now -> Timezone -> Apply
+  // Solid, Cosmic, Minimal, macOS, macOS Light]: Stable -> Sync Now -> Timezone -> Apply
   // -> echo-ai -> plan-ai -> Shut Down -> Restart -> Default ->
-  // Solid -> Cosmic -> Minimal -> macOS -> — -> ▢ -> X -> Scan -> Nightly.
-  pressTab(17);
+  // Solid -> Cosmic -> Minimal -> macOS -> macOS Light -> — -> ▢ -> X -> Scan -> Nightly.
+  pressTab(18);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> Sync Now -> Timezone -> Apply -> echo-ai ->
@@ -619,13 +619,14 @@ check("settings: wallpaper style + color apply and log", () => {
   assert.ok(texts.includes("Cosmic"), "cosmic style button shown");
   assert.ok(texts.includes("Minimal"), "minimal style button shown");
   assert.ok(texts.includes("macOS"), "macos style button shown");
+  assert.ok(texts.includes("macOS Light"), "macos-light style button shown");
   assert.ok(
     texts.some((t) => t.includes("Custom image wallpapers are not supported yet.")),
     "no-custom-image note shown for a gradient style",
   );
   // Focus order is [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, Shut Down, Restart, Default,
-  // Solid, Cosmic, Minimal, macOS]: Default is the 14th focusable.
+  // Solid, Cosmic, Minimal, macOS, macOS Light]: Default is the 14th focusable.
   pressTab(14);
   pressEnter();
   assert.ok(
@@ -640,9 +641,9 @@ check("settings: wallpaper style + color apply and log", () => {
     texts.some((t) => t.includes("Color: Sevyn Night")),
     "current color shown once solid is picked",
   );
-  // Swatches join the focus order after macOS: Solid -> Cosmic ->
-  // Minimal -> macOS -> Sevyn Night -> Slate.
-  pressTab(5);
+  // Swatches join the focus order after macOS Light: Solid -> Cosmic ->
+  // Minimal -> macOS -> macOS Light -> Sevyn Night -> Slate.
+  pressTab(6);
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS wallpaperColor=#1E293B"),
