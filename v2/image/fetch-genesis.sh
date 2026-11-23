@@ -13,11 +13,6 @@
 #     With dest-dir, extracts the tarball there; otherwise a fresh temp
 #     dir (the caller owns it). The M1 image builder passes its own
 #     temp dir so its trap cleans it up.
-#   fetch-genesis.sh model
-#     Materialize the genesis model/ at graphics/core/ (gitignored,
-#     generated). Run this BEFORE pnpm install — a fresh clone has no
-#     graphics/core/ until this runs, and the workspace lockfile expects
-#     @sevynos/graphics at that path. Re-running it replaces the tree.
 #
 # Requirements: curl (or wget), sha256sum, tar. The tarball sha256 from
 # the pin file is verified before anything is extracted.
@@ -93,28 +88,8 @@ case "$cmd" in
   tree)
     resolve_tree "${2:-}"
     ;;
-  model)
-    TREE="$(resolve_tree)"
-    if [ -z "${SEVYN_GENESIS_SRC:-}" ]; then
-      # Fetched into a temp dir: clean it up. A SEVYN_GENESIS_SRC
-      # checkout is the user's own tree and is never deleted.
-      trap 'rm -rf "$TREE"' EXIT INT TERM
-    fi
-    NAME="$(grep '"name":' "$TREE/model/package.json" | head -n 1)"
-    case "$NAME" in
-      *'"@sevynos/graphics"'*) ;;
-      *)
-        echo "error: genesis model/package.json is not @sevynos/graphics: $NAME" >&2
-        exit 1
-        ;;
-    esac
-    rm -rf "$ROOT/graphics/core"
-    mkdir -p "$ROOT/graphics"
-    cp -a "$TREE/model" "$ROOT/graphics/core"
-    echo "materialized graphics/core/ from genesis $TREE"
-    ;;
   *)
-    echo "usage: fetch-genesis.sh {tree [dest-dir]|model}" >&2
+    echo "usage: fetch-genesis.sh tree [dest-dir]" >&2
     exit 1
     ;;
 esac

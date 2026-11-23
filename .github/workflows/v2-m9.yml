@@ -67,11 +67,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          # setup-node v5 defaults package-manager-cache to true and
-          # auto-detects pnpm from the repo root's packageManager field —
-          # but this job uses npm only (v2/rn/renderer, v2/shell) and
-          # never installs pnpm, so the cache step fails with "Unable to
-          # locate executable file: pnpm". The Hermes/Yoga deps cache is
+          # No package-manager cache here: this job installs deps
+          # with npm ci directly. The Hermes/Yoga deps cache is
           # handled by the actions/cache step below.
           package-manager-cache: false
 
@@ -165,15 +162,9 @@ jobs:
 
       - name: Install yarn (Tokrah's pinned 1.22.22)
         run: |
-          # yarn 1.22 refuses to run inside a checkout whose
-          # package.json pins a different manager (sevynos pins
-          # pnpm@11.17.0) — corepack failed the same way, and
-          # running from /tmp does not help. Install yarn
-          # globally with npm, then run every yarn command from
-          # the Tokrah consumer app dir, whose package.json pins
-          # yarn@1.22.22. The clone ROOT has no package.json, so
-          # yarn walks up from there and hits sevynos's pnpm pin.
-          # Sevynos itself stays pnpm.
+          # Install yarn globally with npm, then run every yarn
+          # command from the Tokrah consumer app dir, whose
+          # package.json pins yarn@1.22.22.
           npm install -g yarn@1.22.22
           cd "$GITHUB_WORKSPACE/tokrah/tokrah"
           yarn config set registry https://registry.npmjs.org
@@ -221,7 +212,6 @@ jobs:
           # is missing in CI. Install the API deps here; the api
           # package pins yarn@1.22.22 and has a yarn.lock. Run
           # yarn from the api dir, never the sevynos checkout
-          # (yarn 1.22 refuses a pnpm-pinned package.json).
           cd "$GITHUB_WORKSPACE/tokrah/api"
           yarn install --frozen-lockfile --non-interactive
 

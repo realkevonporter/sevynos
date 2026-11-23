@@ -156,15 +156,10 @@ layer Kevon can replace later without touching the shell.
 ## Nightly
 
 The `nightly` release (published by the `Public build` workflow on every
-push to main) ships the **old tree's ISO and the v2 image side by side**:
-`vmlinuz` + `initramfs.cpio.gz` + `v2-SHA256SUMS` + `v2-BOOT-NOTES.txt`
-are the M8 system-updates image — boot it in QEMU with the command in the boot
-notes. The v2 image is also a CI artifact of the `SevynOS v2 M8`
-workflow on every PR. `updates-v2.json` is the v2 update feed: an
-installed v2 system checks it and updates itself in place (A/B slots,
-signed) — no USB re-flash. It is a separate feed file from the old
-tree's `updates.json`, which describes the old tree's kernel and
-initramfs, not the v2 image.
+push to main) ships the v2 image: `vmlinuz` + `initramfs.cpio.gz` +
+`sevynos.img` + `v2-SHA256SUMS` + `v2-BOOT-NOTES.txt`. `updates-v2.json`
+is the v2 update feed: an installed v2 system checks it and updates
+itself in place (A/B slots, signed) — no USB re-flash.
 
 **Update-key provisioning (one-time, Kevon's action).** The feed is
 signed with Ed25519 (the same protocol as `tools/update-signing/`:
@@ -390,8 +385,10 @@ serial log, and `m3-check.json` are kept as artifacts.
 
 ## The old tree
 
-The original build's code still lives at the repository root, untouched by
-this PR. It is reference only — nothing in `v2/` imports or reuses it. Its
-disposition is an open question for Kevon: when the v2 tree is ready to
-become the root, do we move `v2/` to the root (deleting the old tree then),
-or keep `v2/` as the new home? No old code is deleted in this PR.
+The original build's code used to live at the repository root. It was
+deleted in 2026-11-21 (the old tree was reference only since the
+2026-11-06 rebuild, and new work kept landing in it by mistake — the
+wallpaper picker is the example that proved it). `v2/` is the home now;
+nothing was moved to the root. One piece survived the deletion on
+purpose: `tools/update-signing/` (feed signing + canonical-body oracle),
+which the v2 image builders and update tests still call by path.
