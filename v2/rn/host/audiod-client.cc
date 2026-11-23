@@ -83,7 +83,7 @@ std::string AudiodClient::errorJson(const std::string& code,
 AudiodClient::AudiodClient(std::string socketPath, int timeoutMs)
     : socketPath_(std::move(socketPath)), timeoutMs_(timeoutMs) {}
 
-std::string AudiodClient::play(const std::string& path) {
+std::string AudiodClient::play(const std::string& path) const {
   if (path.empty())
     return errorJson("bad-argument", "Audio playback requires a file path.");
   if (path[0] != '/')
@@ -92,13 +92,13 @@ std::string AudiodClient::play(const std::string& path) {
   return roundtrip("PLAY " + path);
 }
 
-std::string AudiodClient::pause() { return roundtrip("PAUSE"); }
+std::string AudiodClient::pause() const { return roundtrip("PAUSE"); }
 
-std::string AudiodClient::resume() { return roundtrip("RESUME"); }
+std::string AudiodClient::resume() const { return roundtrip("RESUME"); }
 
-std::string AudiodClient::stop() { return roundtrip("STOP"); }
+std::string AudiodClient::stop() const { return roundtrip("STOP"); }
 
-std::string AudiodClient::seek(double seconds) {
+std::string AudiodClient::seek(double seconds) const {
   if (!std::isfinite(seconds) || seconds < 0)
     return errorJson(
         "bad-argument",
@@ -108,7 +108,7 @@ std::string AudiodClient::seek(double seconds) {
   return roundtrip(std::string("SEEK ") + buf);
 }
 
-std::string AudiodClient::setVolume(double volume) {
+std::string AudiodClient::setVolume(double volume) const {
   if (!std::isfinite(volume))
     return errorJson("bad-argument", "Volume requires a finite number 0..100.");
   // The daemon clamps out-of-range values (amixer-style) and the
@@ -118,9 +118,9 @@ std::string AudiodClient::setVolume(double volume) {
   return roundtrip(std::string("VOLUME ") + buf);
 }
 
-std::string AudiodClient::status() { return roundtrip("STATUS"); }
+std::string AudiodClient::status() const { return roundtrip("STATUS"); }
 
-std::string AudiodClient::scan(const std::optional<std::string>& directory) {
+std::string AudiodClient::scan(const std::optional<std::string>& directory) const {
   if (!directory.has_value())
     return roundtrip("SCAN");
   if (directory->empty())
@@ -128,7 +128,7 @@ std::string AudiodClient::scan(const std::optional<std::string>& directory) {
   return roundtrip("SCAN " + *directory);
 }
 
-std::string AudiodClient::roundtrip(const std::string& line) {
+std::string AudiodClient::roundtrip(const std::string& line) const {
   struct timespec deadline = deadlineFromMs(timeoutMs_);
   int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0)

@@ -62,20 +62,20 @@ class AudiodClient {
 
   // Validated verbs. Each returns the daemon's reply line, or a
   // synthesized error line. Never throws.
-  std::string play(const std::string& path);
-  std::string pause();
-  std::string resume();
-  std::string stop();
-  std::string seek(double seconds);
-  std::string setVolume(double volume);
-  std::string status();
+  std::string play(const std::string& path) const;
+  std::string pause() const;
+  std::string resume() const;
+  std::string stop() const;
+  std::string seek(double seconds) const;
+  std::string setVolume(double volume) const;
+  std::string status() const;
   // std::nullopt = the daemon's default directory; an explicit empty
   // string is a bad-argument error (mirrors the old client).
-  std::string scan(const std::optional<std::string>& directory);
+  std::string scan(const std::optional<std::string>& directory) const;
 
  private:
   // One line out, one reply line back (or a synthesized error line).
-  std::string roundtrip(const std::string& line);
+  std::string roundtrip(const std::string& line) const;
 
   std::string socketPath_;
   int timeoutMs_;
