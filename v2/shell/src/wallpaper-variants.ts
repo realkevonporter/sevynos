@@ -7,17 +7,25 @@
 // "cosmic" is a second gradient in the same visual language
 // (magenta/teal nebula over deep indigo); "minimal" is a near-flat
 // field with a single faint aura; "solid" is the chosen color, flat.
+// "macos" is the macOS-style colorful abstract — warm orange,
+// magenta, and purple auras over a deep midnight base, in the
+// spirit of the Sonoma / Sequoia default wallpapers.
+// "macos-light" is its light twin: the same auras, softened,
+// over a pale sky base.
 // Custom image wallpapers are not supported (same call as #123:
 // the image loader only accepts http(s), data URIs, or files under
 // the app asset roots, and there is no binary read for user files).
 
-export type WallpaperStyle = "default" | "solid" | "cosmic" | "minimal";
+export type WallpaperStyle =
+  "default" | "solid" | "cosmic" | "minimal" | "macos" | "macos-light";
 
 export const WALLPAPER_STYLES: readonly { label: string; value: WallpaperStyle }[] = [
   { label: "Default", value: "default" },
   { label: "Solid", value: "solid" },
   { label: "Cosmic", value: "cosmic" },
   { label: "Minimal", value: "minimal" },
+  { label: "macOS", value: "macos" },
+  { label: "macOS Light", value: "macos-light" },
 ];
 
 /** Flat colors offered for the solid wallpaper style. */
@@ -39,7 +47,12 @@ export function isWallpaperStyle(
   value: string | null | undefined,
 ): value is WallpaperStyle {
   return (
-    value === "default" || value === "solid" || value === "cosmic" || value === "minimal"
+    value === "default" ||
+    value === "solid" ||
+    value === "cosmic" ||
+    value === "minimal" ||
+    value === "macos" ||
+    value === "macos-light"
   );
 }
 
@@ -120,6 +133,78 @@ export function wallpaperVariantFor(
             height: 300,
             top: "45%",
             left: "55%",
+          }),
+        ]),
+        horizon: true,
+        grain: true,
+      });
+    case "macos":
+      return Object.freeze({
+        background: "#0c0a26",
+        auras: Object.freeze([
+          Object.freeze({
+            backgroundColor: "rgba(139, 92, 246, 0.24)",
+            width: 460,
+            height: 460,
+            top: -140,
+            left: -160,
+          }),
+          Object.freeze({
+            backgroundColor: "rgba(217, 70, 239, 0.24)",
+            width: 480,
+            height: 480,
+            top: -160,
+            right: -160,
+          }),
+          Object.freeze({
+            backgroundColor: "rgba(249, 115, 22, 0.26)",
+            width: 560,
+            height: 560,
+            bottom: -180,
+            left: -140,
+          }),
+          Object.freeze({
+            backgroundColor: "rgba(59, 130, 246, 0.22)",
+            width: 440,
+            height: 440,
+            bottom: -200,
+            right: -120,
+          }),
+        ]),
+        horizon: true,
+        grain: true,
+      });
+    case "macos-light":
+      return Object.freeze({
+        background: "#eef1fb",
+        auras: Object.freeze([
+          Object.freeze({
+            backgroundColor: "rgba(139, 92, 246, 0.30)",
+            width: 460,
+            height: 460,
+            top: -140,
+            left: -160,
+          }),
+          Object.freeze({
+            backgroundColor: "rgba(217, 70, 239, 0.28)",
+            width: 480,
+            height: 480,
+            top: -160,
+            right: -160,
+          }),
+          Object.freeze({
+            backgroundColor: "rgba(249, 115, 22, 0.32)",
+            width: 560,
+            height: 560,
+            bottom: -180,
+            left: -140,
+          }),
+          Object.freeze({
+            backgroundColor: "rgba(59, 130, 246, 0.28)",
+            width: 440,
+            height: 440,
+            bottom: -200,
+            right: -120,
           }),
         ]),
         horizon: true,
