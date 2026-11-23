@@ -58,6 +58,7 @@ const WALLPAPER_STYLES = [
   { label: "Solid", value: "solid" },
   { label: "Cosmic", value: "cosmic" },
   { label: "Minimal", value: "minimal" },
+  { label: "macOS", value: "macos" },
 ] as const;
 
 /** Flat colors offered for the solid wallpaper style. */
