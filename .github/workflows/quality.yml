@@ -65,3 +65,25 @@ jobs:
         run: python3 v2/audio/gen-test-media.py /tmp/sevyn-test-media/audio
       - name: Run audiod harness (null device, 7 test WAVs + fixtures)
         run: SEVYN_AUDIOD_BIN=/tmp/sevyn-audiod SEVYN_AUDIO_TEST_MEDIA=/tmp/sevyn-test-media/audio node v2/audio/test-audiod.mjs
+
+  # rn-audio: the RN audio module (v2/rn) — the audiod client the host
+  # speaks plus the JS media/audio adapters. The C++ test drives the
+  # client against a fake audiod (no daemon, no hardware); the JS
+  # test drives the adapters against a mock Sevyn.audio* host. No
+  # Hermes/Yoga build needed for either — the host compile itself is
+  # covered by the milestone image builds.
+  rn-audio:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Compile + run the audiod client test (fake daemon)
+        run: >-
+          g++ -O2 -std=c++17 -Wall -Wextra -o /tmp/test-audiod-client
+          v2/rn/host/audiod-client.cc v2/rn/host/test-audiod-client.cc
+          -lpthread && /tmp/test-audiod-client
+      - name: Run the JS audio adapter tests (mock host)
+        run: node v2/rn/renderer/test/audio-test.js

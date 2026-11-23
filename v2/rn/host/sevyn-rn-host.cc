@@ -26,6 +26,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +46,7 @@
 #include <jsi/jsi.h>
 
 #include "appclient.h"
+#include "audiod-client.h"
 #include "common.h"
 #include "painter.h"
 #include "status.h"
@@ -268,6 +270,41 @@ struct ExecCompletion {
 };
 std::mutex g_execMutex;
 std::queue<ExecCompletion> g_execCompletions;
+
+// Build a Promise<string> whose executor runs `work` on a detached
+// thread and resolves with its result through the completion queue
+// above (drained on the JS thread by drainExecCompletions). Used by
+// the Sevyn.audio* host functions: a socket roundtrip must never
+// block the JS thread. `work` runs off the JS thread and must not
+// touch the runtime or capture `this` — capture plain values only
+// (the audio client is copied, not shared).
+jsi::Value makeAsyncPromise(jsi::Runtime& rt,
+                            std::function<std::string()> work) {
+  auto promiseCtor = rt.global().getPropertyAsFunction(rt, "Promise");
+  auto executor = jsi::Function::createFromHostFunction(
+      rt, jsi::PropNameID::forAscii(rt, "sevynAsyncExecutor"), 2,
+      [work](jsi::Runtime& rt2, const jsi::Value&,
+             const jsi::Value* eargs, size_t ecount) {
+        if (ecount < 1)
+          return jsi::Value::undefined();
+        jsi::Function resolve = eargs[0].asObject(rt2).asFunction(rt2);
+        // Detached worker: the work blocks (socket roundtrip, up to
+        // the client timeout). It never touches the runtime, and the
+        // completion queue is file-static, so nothing here can dangle.
+        std::thread([work, resolve = std::move(resolve)]() mutable {
+          std::string result = work();
+          std::lock_guard<std::mutex> lk(g_execMutex);
+          g_execCompletions.push(
+              ExecCompletion{std::move(resolve), std::move(result)});
+        }).detach();
+        return jsi::Value::undefined();
+      });
+  // Construct (not call): Promise(...) without `new` throws
+  // "Promises must be constructed via new" in Hermes.
+  jsi::Value executorValue(std::move(executor));
+  return promiseCtor.callAsConstructor(rt, {std::move(executorValue)});
+}
+
 class RnHost {
  public:
   RnHost(int width, int height, std::string bundle, std::string appId,
@@ -407,6 +444,11 @@ class RnHost {
   std::unique_ptr<YogaBridge> yoga_;
   std::unique_ptr<StatusClient> status_;
   std::unique_ptr<AppClient> appClient_;
+  // The audiod client for the RN audio module (Sevyn.audio*): one
+  // client per host process, stateless (one short-lived socket
+  // connection per call). Copied — never shared — into the worker
+  // threads that run the calls.
+  AudiodClient audiod_;
   std::unique_ptr<jsi::Runtime> runtime_;
   std::unordered_map<std::string, std::string> statusSnapshot_;
   std::mutex statusMutex_;
@@ -1115,6 +1157,93 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            // "Promises must be constructed via new" in Hermes.
            jsi::Value executorValue(std::move(executor));
            return promiseCtor.callAsConstructor(rt, {std::move(executorValue)});
+         });
+  // Sevyn.audio*: the RN audio module (port of PR #129) — async audiod
+  // calls, off the JS thread via makeAsyncPromise (a dead daemon must
+  // never block the UI). Each returns a Promise<string> resolving to
+  // the daemon's JSON reply line (or a synthesized {ok:false,...} line
+  // on validation/transport failure); the JS adapter
+  // (v2/rn/renderer/sevyn-audio.js) parses the line and rejects with
+  // an AudiodError carrying the stable code. Argument shape is
+  // checked on the JS thread first (a non-number seek/volume or a
+  // non-string scan dir is a bad-argument reply, never a throw); the
+  // client validates values before any I/O.
+  hostFn("audioPlay", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           std::string path = count >= 1 ? jsString(rt, args[0]) : "";
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client, path] {
+             return client.play(path);
+           });
+         });
+  hostFn("audioPause", 0,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client] { return client.pause(); });
+         });
+  hostFn("audioResume", 0,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client] { return client.resume(); });
+         });
+  hostFn("audioStop", 0,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client] { return client.stop(); });
+         });
+  hostFn("audioSeek", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count < 1 || !args[0].isNumber())
+             return makeAsyncPromise(rt, [] {
+               return AudiodClient::errorJson(
+                   "bad-argument", "Seek requires a number of seconds.");
+             });
+           double seconds = args[0].asNumber();
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client, seconds] {
+             return client.seek(seconds);
+           });
+         });
+  hostFn("audioVolume", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count < 1 || !args[0].isNumber())
+             return makeAsyncPromise(rt, [] {
+               return AudiodClient::errorJson(
+                   "bad-argument", "Volume requires a finite number 0..100.");
+             });
+           double volume = args[0].asNumber();
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client, volume] {
+             return client.setVolume(volume);
+           });
+         });
+  hostFn("audioStatus", 0,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client] { return client.status(); });
+         });
+  hostFn("audioScan", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count >= 1 && !args[0].isString())
+             return makeAsyncPromise(rt, [] {
+               return AudiodClient::errorJson(
+                   "bad-argument", "Scan requires a directory path.");
+             });
+           std::optional<std::string> dir;
+           if (count >= 1)
+             dir = jsString(rt, args[0]);
+           AudiodClient client = audiod_;
+           return makeAsyncPromise(rt, [client, dir] {
+             return client.scan(dir);
+           });
          });
   hostFn("listApps", 0,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
