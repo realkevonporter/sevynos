@@ -4,110 +4,78 @@
 
 [![Repository quality](https://github.com/realkevonporter/sevynos/actions/workflows/quality.yml/badge.svg)](https://github.com/realkevonporter/sevynos/actions/workflows/quality.yml)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Project status](https://img.shields.io/badge/status-early%20development-f4b942.svg)](docs/roadmap/phase-1.md)
 
-SevynOS is an open computing platform built on Linux, TypeScript, and React
-Native. The goal is one understandable application model across desktop,
-mobile, embedded, and future devices—without taking ownership away from the
-people using or building them.
+SevynOS is an open computing platform built on Linux and React Native.
+The goal is one understandable application model across desktop, mobile,
+embedded, and future devices — without taking ownership away from the
+people using or building them. Linux-level openness and freedom with
+Apple-level premium design and security.
 
-This repository is public so engineers, designers, technical writers, testers,
-and curious builders can shape the platform while its foundations are still
-flexible.
+This repository is public so engineers, designers, technical writers,
+testers, and curious builders can shape the platform while its
+foundations are still flexible.
 
 ## What works today
 
-SevynOS is early-stage software, not a production operating system. The current
-Genesis milestone includes:
+SevynOS is early-stage software, not a production operating system. The
+v2 rebuild (started 2026-11-06, zero old code reused) boots to a React
+Native shell — top bar with live status, dock with 12 apps — and the
+stock apps are real: Terminal (the `sevyn` CLI only, no bash), Settings,
+Files, Browser (a real Chromium embed), and Tokrah as a third-party app.
+The system updates itself in place (A/B slots, signed feed), installs
+alongside Windows 11, and paints through Genesis, the GPU compositor,
+with a CPU fallback. See [v2/README.md](v2/README.md) for the full
+milestone list and the locked criteria.
 
-- a bootable x86-64 Linux live image with BIOS and UEFI support;
-- a Weston/Wayland desktop presented through a native Rust bridge;
-- a TypeScript runtime for applications, lifecycle, permissions, and services;
-- a native SevynOS React Native renderer with Yoga layout and Hermes execution;
-- React Native shell surfaces and system applications;
-- an installer exercised against blank BIOS and UEFI virtual disks;
-- Electron and deterministic headless hosts for fast development and testing.
+## Nightly
 
-Clipboard, keyboard input, camera capture, audible audio output, and Wi-Fi do
-not currently work on target hardware. Graphics, sleep, power, and other device
-behavior also need broader real-device testing. See the [Genesis
-roadmap](docs/roadmap/phase-1.md) for the honest project status.
+Every push to main publishes a nightly: `sevynos.img` (a GPT USB-boot
+disk image — `dd` it to a stick and boot), plus `vmlinuz` and
+`initramfs.cpio.gz` for QEMU. An installed system updates itself from
+the `updates-v2.json` feed — no USB re-flash. This is a development
+snapshot, not a stable release.
 
-## The platform, not a collection of ports
+## Repository map
 
-Applications should remain normal React Native and TypeScript projects. When an
-application expects a React Native or native API, the preferred solution is to
-implement a reusable platform contract in SevynOS—not create an app-specific
-fork. Contributors can bring their own React Native applications as real-world
-compatibility workloads.
+| Directory                | Responsibility                                               |
+| ------------------------ | ------------------------------------------------------------ |
+| `v2/`                    | The whole OS: shell, apps, loader, updater, image, checks    |
+| `v2/shell/`              | React Native shell: top bar, status tray, dock               |
+| `v2/apps/`               | Stock system apps (Terminal, Settings, Files, Browser, …)    |
+| `v2/rn/`                 | The native RN host (Hermes + Yoga + Wayland + painter)       |
+| `v2/loader/`             | `.sevyn` loader + app daemon (registry, permissions)         |
+| `v2/update/`             | System update daemon + `sevyn` CLI (A/B slots, signed feed)  |
+| `v2/camera/`             | Native V4L2 camera daemon                                    |
+| `v2/comms/`              | Matrix comms daemon + RCS skeleton                           |
+| `v2/image/`              | Image builders, QEMU check harnesses, nightly feed           |
+| `tools/update-signing/`  | Feed-signing scripts (kept: the v2 builders still call them) |
+| `BROWSER_PLAN.md`        | Browser embed plan (v2)                                      |
+| `GPU_COMPOSITOR_PLAN.md` | Genesis GPU compositor plan (v2)                             |
 
-```text
-React Native application
-  -> @sevynos/react-native
-  -> Sevyn Runtime and capability broker
-  -> Genesis shell, windows, input, and graphics
-  -> native host services
-  -> Weston / Wayland / Linux
-```
-
-Read [React Native on SevynOS](docs/react-native-platform.md) and
-[Application development](docs/application-development.md) before extending
-the compatibility surface.
+The pre-rebuild tree that used to live at the repository root was
+deleted in 2026-11-21: it was reference only since the rebuild, and new
+work kept landing in it by mistake. `v2/` is the home now.
 
 ## Start contributing
 
-You need Node.js 22+, the pinned pnpm version, and Docker for Linux image work.
+You need Node.js 24+ for the shell/apps checks, and QEMU + a Linux
+toolchain for the image builds. The v2 milestone workflows
+(`.github/workflows/v2-*.yml`) are the gates: each builds its image and
+runs its QEMU check on every PR touching `v2/`. The repository-quality
+workflow runs Prettier over the tree and the `camd` daemon check.
 
 ```sh
 git clone https://github.com/realkevonporter/sevynos.git
 cd sevynos
-corepack enable
-sh v2/image/fetch-genesis.sh model # materialize graphics/core/ from the pinned Genesis commit — required before pnpm install
-pnpm install
-pnpm check
+npx -y prettier@3.9.6 --check "v2/**/*.{ts,tsx,js,mjs,json,md}" ".github/workflows/*.yml" "*.md"
+node v2/camera/camd-check.mjs
 ```
-
-Useful workflows:
-
-```sh
-pnpm desktop        # run the Genesis desktop in Electron
-pnpm desktop:dev    # desktop development with isolated app reload
-pnpm linux:headless # deterministic Linux-host execution
-pnpm qemu:build     # build Linux/QEMU artifacts and the live ISO
-pnpm qemu:run       # boot the graphical VM
-pnpm usb:smoke      # prove no-disk BIOS live-media boot
-pnpm usb:uefi:smoke # prove no-disk UEFI live-media boot
-```
-
-The live image is written to `tools/qemu/build/sevynos-live.iso`. Writing it to
-a USB drive erases that drive; follow the
-[Linux, Wayland, and QEMU guide](docs/linux-wayland-qemu.md).
 
 The best first contributions are focused and testable: hardware reports,
-device-driver coverage, accessibility, input and layout compatibility, system
-application fixes, documentation, and small React Native API additions. Read
-[Contributing](docs/contributing.md), the [community guide](docs/community.md),
-and the [Code of Conduct](CODE_OF_CONDUCT.md) before opening a change.
-
-## Repository map
-
-| Directory       | Responsibility                                                  |
-| --------------- | --------------------------------------------------------------- |
-| `runtime/`      | Application identity, lifecycle, packages, policy, and sessions |
-| `graphics/`     | Displays, scenes, surfaces, rendering, and windows              |
-| `input/`        | Keyboard, pointer, touch, focus, gestures, and routing          |
-| `shell/`        | Host-independent desktop and mobile shell composition           |
-| `hosts/`        | Electron, Linux/Wayland, headless, and native adapters          |
-| `frameworks/`   | React Native compatibility and framework services               |
-| `applications/` | React Native system applications and examples                   |
-| `services/`     | Reusable operating-system services                              |
-| `sdk/`          | Public developer contracts and tools                            |
-| `tools/`        | CLI, Metro, QEMU, image, and repository tooling                 |
-| `docs/`         | Architecture, decisions, guides, security, and roadmap          |
-
-Architecture changes should start with
-[Architecture v0.1](docs/architecture/v0.1.md) and the
-[architecture decision records](docs/decisions/).
+device-driver coverage, accessibility, input and layout compatibility,
+system application fixes, documentation, and small React Native API
+additions. Read the [Code of Conduct](CODE_OF_CONDUCT.md) before opening
+a change.
 
 ## Project values
 

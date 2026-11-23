@@ -10,7 +10,7 @@
 //
 // Dogfooding rule: Metro resolves against Tokrah's own node_modules
 // plus the v2 renderer's react copies — nothing is hoisted into this
-// monorepo's pnpm catalog.
+// repo.
 const path = require("path");
 
 const TOKRAH_SRC = process.env.TOKRAH_SRC;

@@ -17,23 +17,13 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
-      # graphics/core/ is generated, not tracked: materialize it from the
-      # pinned Genesis commit before pnpm install — the workspace lockfile
-      # expects @sevynos/graphics at graphics/core/.
-      - run: sh v2/image/fetch-genesis.sh model
-      - run: pnpm install --frozen-lockfile
-      - name: Build bootable image
-        run: pnpm qemu:build
       # --- SevynOS v2 image (M8 system updates) ---------------------------
-      # The nightly publishes a real, bootable v2 image alongside the old
-      # tree's ISO: vmlinuz + initramfs.cpio.gz + checksums + boot notes.
-      # The Hermes/Yoga deps are cached on the same key as v2-m3.yml, so
-      # a warm cache makes this a few minutes on top of the old build.
+      # The nightly publishes the v2 image: vmlinuz + initramfs.cpio.gz +
+      # checksums + boot notes. The Hermes/Yoga deps are cached on the same
+      # key as v2-m3.yml, so a warm cache makes this a few minutes.
       - name: Install v2 build dependencies
         run: |
           sudo apt-get update -qq
@@ -92,13 +82,9 @@ jobs:
           git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
       - name: Install yarn (Tokrah's pinned 1.22.22)
         run: |
-          # yarn 1.22 refuses to run inside a checkout whose
-          # package.json pins a different manager (sevynos pins
-          # pnpm@11.17.0). Install yarn globally with npm, then
-          # run every yarn command from the Tokrah consumer app
-          # dir, whose package.json pins yarn@1.22.22. The clone
-          # ROOT has no package.json, so yarn walks up from there
-          # and hits sevynos's pnpm pin. Sevynos itself stays pnpm.
+          # Install yarn globally with npm, then run every yarn
+          # command from the Tokrah consumer app dir, whose
+          # package.json pins yarn@1.22.22.
           npm install -g yarn@1.22.22
           cd "$GITHUB_WORKSPACE/tokrah/tokrah"
           yarn config set registry https://registry.npmjs.org
@@ -312,8 +298,7 @@ jobs:
             M13: the Browser embed — Chromium runs chromeless beside
             the Browser app window, GPU first with a software
             fallback, driven over CDP.
-            The v1 ISO below is the old
-            tree's image. updates-v2.json is the v2 update feed: an
+            updates-v2.json is the v2 update feed: an
             installed v2 system checks it and updates in place (A/B
             slots, signed).
           prerelease: true
@@ -326,7 +311,5 @@ jobs:
           # job stayed green. Both guards below make a missing image
           # fail the build loudly instead.
           artifactErrorsFailBuild: true
-          # rootfs.squashfs + updates.json feed the OS update service's
-          # check/download/apply flow (Settings → Software Update).
           # The v2-* files are the M13 browser-embed image (kernel + initramfs + GPT disk image).
-          artifacts: "tools/qemu/build/sevynos-live.iso,tools/qemu/build/SHA256SUMS,tools/qemu/build/rootfs.squashfs,tools/qemu/build/updates.json,v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/sevynos.img.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"
+          artifacts: "v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/sevynos.img.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"

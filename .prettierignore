@@ -1,5 +1,4 @@
 node_modules
-.pnpm-store
 **/target
 dist
 build
@@ -7,7 +6,6 @@ generated
 artifacts
 coverage
 release
-.turbo
 .cache
 .next
 .parcel-cache
@@ -26,5 +24,4 @@ out
 *.blockmap
 *.dmg
 *.iso
-pnpm-lock.yaml
 third_party

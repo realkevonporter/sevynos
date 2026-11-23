@@ -2,10 +2,9 @@
 
 Status: scope + build in progress (2026-11-13, branch `v2/gpu-compositor`).
 Ordered by Kevon 2026-11-13 ("Start the GPU compositor"). Build to PR, then stop — no merge.
-Compositor name: **Genesis** (Kevon, 2026-11-13) — revives the v1 name. The old
-tree called it "Genesis Compositor" / "Genesis Wayland Engine" (ADR-0006,
-`docs/decisions/ADR-0006-genesis-compositor-strategy.md`); the v2 tree uses
-the name nowhere yet, so there is no competing use to reconcile.
+Compositor name: **Genesis** (Kevon, 2026-11-13) — revives the v1 name.
+The v2 tree uses the name nowhere yet, so there is no competing use to
+reconcile.
 
 ## The bar (locked)
 
@@ -138,11 +137,8 @@ untouched, so the M11 check keeps proving its own image.
 
 ## Verification plan
 
-1. Local: `pnpm format:check && pnpm typecheck && pnpm lint && pnpm
-test && pnpm build` (turbo lint/test with `--concurrency=3` — full
-   parallelism OOMs in the sandbox); `npx prettier --check` before
-   pushing; host C++ compile-checked standalone (EGL headers installed
-   in the sandbox).
+1. Local: `npx -y prettier@3.9.6 --check` before pushing; host C++
+   compile-checked standalone (EGL headers installed in the sandbox).
 2. CI: the PR runs all workflows (it touches `v2/`). M12's own workflow
    builds the M12 image and runs `m12-check.mjs` in QEMU.
 3. KVM box (45.77.162.169) if time allows: `build-m12-image.sh` +
