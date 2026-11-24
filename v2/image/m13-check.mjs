@@ -29,7 +29,10 @@
 //   3. A real page renders: the host-served red page (page A)
 //      renders (red viewport on screen + its title over CDP);
 //      gated on SEVYN_V2_M13_INTERNET, the public example.com
-//      page renders too (white / #eeeeee page on screen).
+//      page renders too (white / #eeeeee page on screen), preceded
+//      by a plain-HTTP example.com probe (same title over CDP)
+//      that discriminates the HTTPS stall: HTTP loading means
+//      guest TCP works and the stall is HTTPS/Chromium-side.
 //   4. Address-bar input (the RN Browser app): launch it, type
 //      the green page's URL into its address bar, and the green
 //      page renders in Chromium; the app reports its gpu mode
@@ -510,18 +513,36 @@ function dragStartPoint(frame, rect, r, g, b) {
   return { x: Math.round((best.x0 + best.x1) / 2), y: best.y };
 }
 
-// Do two window rects show the same window in the same place
-// (every edge within `tol`)? Round 8: the drag-back verifier.
-// A null rect never matches — an unverifiable position is not a
-// returned window.
-function rectsWithin(a, b, tol) {
+// Do two window rects show the same window returned to the same
+// place (round 8: the drag-back verifier; round 10: partial-aware)?
+// Left/top always compare — they are the window's real edges in
+// both rects. Bottom/right compare ONLY when the two rects have
+// (near-)identical dimensions: a rect from findWindowHeaderPartial
+// is truncated on its covered or off-screen edges, so its bottom /
+// right is a coverage or screen boundary, not the window's edge —
+// the att2 drag-back compared the returned window's full 41px
+// header, screen-clipped at right 1279, against the 16px sliver
+// target (right 911) and failed on the right edge (368px) even
+// though the window had moved exactly to its target left. A null
+// rect never matches — an unverifiable position is not a returned
+// window.
+function rectsMatchReturn(a, b, tol) {
   if (!a || !b) return false;
-  return (
-    Math.abs(a.top - b.top) <= tol &&
-    Math.abs(a.left - b.left) <= tol &&
-    Math.abs(a.bottom - b.bottom) <= tol &&
-    Math.abs(a.right - b.right) <= tol
-  );
+  if (Math.abs(a.top - b.top) > tol || Math.abs(a.left - b.left) > tol) return false;
+  // Dimensions agree within 10px: neither rect is truncated
+  // relative to the other, so the edge is comparable.
+  const SAME_DIM_PX = 10;
+  if (
+    Math.abs(a.bottom - a.top - (b.bottom - b.top)) <= SAME_DIM_PX &&
+    Math.abs(a.bottom - b.bottom) > tol
+  )
+    return false;
+  if (
+    Math.abs(a.right - a.left - (b.right - b.left)) <= SAME_DIM_PX &&
+    Math.abs(a.right - b.right) > tol
+  )
+    return false;
+  return true;
 }
 
 // --- QMP client ---
@@ -2633,6 +2654,21 @@ async function main() {
       const dxRight = aside.before.right - backCur.right;
       const dxBack = backCur.left > 0 ? dxLeft : dxRight;
       const dyBack = aside.before.top - backCur.top;
+      // Round 10: a zero remaining delta means the window is
+      // already at the target left/top — a zero-length drag is a
+      // no-op, so verify in place instead of dragging. (Att2:
+      // attempt 1 had already returned the window; attempt 2
+      // computed dx=0, dragged nowhere, and the null return was
+      // misreported as "no header in the before frame".)
+      if (dxBack === 0 && dyBack === 0) {
+        backAttempts++;
+        backOk = rectsMatchReturn(backCur, aside.before, REFOCUS_JUMP_PX);
+        backDetail =
+          `attempt ${backAttempts}: already at target left/top ` +
+          `(${JSON.stringify(backCur)} vs target ${JSON.stringify(aside.before)})` +
+          (backOk ? " — no drag needed" : " — rects do not match");
+        break;
+      }
       const back = await dragBrowserWindow(
         dxBack,
         dyBack,
@@ -2640,7 +2676,7 @@ async function main() {
       );
       backAttempts++;
       if (back?.after) {
-        backOk = rectsWithin(back.after, aside.before, REFOCUS_JUMP_PX);
+        backOk = rectsMatchReturn(back.after, aside.before, REFOCUS_JUMP_PX);
         backDetail =
           `attempt ${backAttempts}: ${JSON.stringify(backCur)} -> ` +
           `${JSON.stringify(back.after)} (target ${JSON.stringify(aside.before)})`;
@@ -2654,10 +2690,31 @@ async function main() {
           `(before ${JSON.stringify(back.before)})`;
         backCur = back.before;
       } else {
-        // No header in the before frame either: no position to
-        // compute a retry delta from — stop.
-        backDetail = `attempt ${backAttempts}: no Browser header in the before frame`;
-        break;
+        // dragBrowserWindow returns null both when no header is
+        // findable in the before frame AND when the drag ran but
+        // the window did not move — the old detail reported both
+        // as "no Browser header in the before frame". Disambiguate
+        // with a fresh shot: a header still present means the
+        // drag had no effect, and the found rect is a position to
+        // retry from.
+        const reShot = await shot(
+          b.qmp,
+          join(OUT, `m13-shot-browser-drag-${tagBase}-retry${attempt}-reshot.ppm`),
+        );
+        const reFound =
+          findWindowHeader(reShot, 14, 165, 233) ??
+          findWindowHeaderPartial(reShot, 14, 165, 233);
+        if (reFound) {
+          backDetail =
+            `attempt ${backAttempts}: drag had no effect ` +
+            `(header still at ${JSON.stringify(reFound)})`;
+          backCur = reFound;
+        } else {
+          // No header in the before frame either: no position to
+          // compute a retry delta from — stop.
+          backDetail = `attempt ${backAttempts}: no Browser header in the before frame`;
+          break;
+        }
       }
     }
     return { ok: backOk, detail: backDetail, attempts: backAttempts };
@@ -2831,6 +2888,37 @@ async function main() {
   // 3b. A real public page over the internet (gated like step 2's
   // internet flag in m5).
   if (INTERNET) {
+    // 3b-i. Discriminating probe for the example.com stall (M13/M5
+    // att1+att2 on head 6f376e9d): guest DNS resolves example.com
+    // but the HTTPS navigation never commits on the warm-open
+    // relaunch. A plain-HTTP open exercises the same relaunch +
+    // external-TCP path without TLS — example.com serves the same
+    // "Example Domain" title over HTTP, so the CDP check is
+    // identical. If this loads, guest external TCP works and the
+    // stall is HTTPS/Chromium-side (the relaunch path); if it
+    // also stalls, external TCP itself is blocked (environmental)
+    // and the next discrimination is the relaunch-bypass test.
+    {
+      const { exec } = await termCmd("browser open http://example.com");
+      check(
+        "browser: `browser open` http://example.com runs (EXEC 0)",
+        !!exec,
+        exec || "",
+      );
+    }
+    await sleep(15000);
+    await refocusTerminal();
+    {
+      const marker = await pollTabsTitle(
+        /TERMINAL browser-tabs n=\d+ titles=.*Example Domain/,
+      );
+      check(
+        "net: guest external HTTP works (plain-http example.com loads — Example Domain over CDP)",
+        !!marker,
+        marker ||
+          "(no tabs marker with the title — external TCP or the relaunch path stalls even without TLS)",
+      );
+    }
     {
       const { exec } = await termCmd("browser open https://example.com");
       check("browser: `browser open` example.com runs (EXEC 0)", !!exec, exec || "");
@@ -2931,6 +3019,11 @@ async function main() {
     await refocusTerminal();
   } else {
     internetSkipped = true;
+    check(
+      "net: guest external HTTP probe SKIPPED (SEVYN_V2_M13_INTERNET=0)",
+      true,
+      "skipped",
+    );
     check("browser: example.com open SKIPPED (SEVYN_V2_M13_INTERNET=0)", true, "skipped");
     check(
       "browser: example.com render SKIPPED (SEVYN_V2_M13_INTERNET=0)",

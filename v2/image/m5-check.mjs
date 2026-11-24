@@ -17,8 +17,12 @@
 //      prove it RENDERS: the tab title arrives over CDP AND the
 //      page's red viewport is visible as pixels in Chromium's
 //      window. A fetch alone would not count.
-//   4. A real public page (gated like step 2): `browser open
-//      https://example.com`, the "Example Domain" tab title over CDP
+//   4. A real public page (gated like step 2): first a plain-HTTP
+//      `browser open http://example.com` probe (same "Example
+//      Domain" title over CDP) — it discriminates the HTTPS stall
+//      seen on head 6f376e9d: if HTTP loads, guest external TCP
+//      works and the stall is HTTPS/Chromium-side; then
+//      `browser open https://example.com`, the title over CDP
 //      plus a white page on screen — the browser loads a real page
 //      over the internet, not just the local test server.
 //   5. Sevyn Code paints in a window (the M4 open item): `browser
@@ -2186,6 +2190,37 @@ async function main() {
 
   // 4. A real public page over the internet (gated like step 2).
   if (INTERNET) {
+    // 4a. Discriminating probe for the example.com stall (M13/M5
+    // att1+att2 on head 6f376e9d): guest DNS resolves example.com
+    // but the HTTPS navigation never commits on the warm-open
+    // relaunch. A plain-HTTP open exercises the same relaunch +
+    // external-TCP path without TLS — example.com serves the same
+    // "Example Domain" title over HTTP, so the CDP check is
+    // identical. If this loads, guest external TCP works and the
+    // stall is HTTPS/Chromium-side (the relaunch path); if it
+    // also stalls, external TCP itself is blocked (environmental)
+    // and the next discrimination is the relaunch-bypass test.
+    {
+      const { exec } = await termCmd("browser open http://example.com");
+      check(
+        "browser: `browser open` http://example.com runs (EXEC 0)",
+        !!exec,
+        exec || "",
+      );
+    }
+    await sleep(15000);
+    await refocusTerminal();
+    {
+      const marker = await pollTabsTitle(
+        /TERMINAL browser-tabs n=\d+ titles=.*Example Domain/,
+      );
+      check(
+        "net: guest external HTTP works (plain-http example.com loads — Example Domain over CDP)",
+        !!marker,
+        marker ||
+          "(no tabs marker with the title — external TCP or the relaunch path stalls even without TLS)",
+      );
+    }
     {
       const { exec } = await termCmd("browser open https://example.com");
       check("browser: `browser open` example.com runs (EXEC 0)", !!exec, exec || "");
@@ -2312,6 +2347,11 @@ async function main() {
     // back to the Terminal so the IDE open below lands in its input.
     await refocusTerminal();
   } else {
+    check(
+      "net: guest external HTTP probe SKIPPED (SEVYN_V2_M5_INTERNET=0)",
+      true,
+      "skipped",
+    );
     check("browser: example.com open SKIPPED (SEVYN_V2_M5_INTERNET=0)", true, "skipped");
     check(
       "browser: example.com render SKIPPED (SEVYN_V2_M5_INTERNET=0)",
