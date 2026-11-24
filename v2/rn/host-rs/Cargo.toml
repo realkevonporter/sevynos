@@ -1,0 +1,3 @@
+[workspace]
+members = ["sevyn-rn-host"]
+resolver = "2"

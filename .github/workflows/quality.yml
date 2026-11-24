@@ -71,7 +71,7 @@ jobs:
   # client against a fake audiod (no daemon, no hardware); the JS
   # test drives the adapters against a mock Sevyn.audio* host. No
   # Hermes/Yoga build needed for either — the host compile itself is
-  # covered by the milestone image builds.
+  # covered by the host-compile job below.
   rn-audio:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -87,3 +87,42 @@ jobs:
           -lpthread && /tmp/test-audiod-client
       - name: Run the JS audio adapter tests (mock host)
         run: node v2/rn/renderer/test/audio-test.js
+
+  # host-compile: the RN host (v2/rn/host) — the gate PR #158's
+  # `namespace` issue proved was missing. The m2–m13 image builds were
+  # the only compile gate for the host, so a host syntax error reached
+  # CI. This job builds the host with the same build-host.sh the
+  # shipping image uses (so the two can never drift) and the Rust
+  # workspace (cargo build, rustup pinned 1.100.0 via
+  # rust-toolchain.toml) on every PR. Hermes + Yoga are cached in
+  # v2/rn/host/deps (build-deps.sh is idempotent via its marker); a
+  # cache miss builds them (~10–20 min), hence the longer timeout.
+  host-compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install host build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          gcc g++ cmake ninja-build pkg-config curl python3
+          libwayland-dev libegl-dev libgles-dev wayland-protocols
+          libfreetype-dev libpng-dev libicu-dev
+      - name: Cache native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevyn-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}
+          restore-keys: |
+            sevyn-deps-
+      - name: Build native deps (Hermes + Yoga; cached after first run)
+        run: sh v2/rn/host/build-deps.sh
+      - name: Build the C++ host (same script as the shipping image)
+        run: >-
+          sh v2/rn/host/build-host.sh v2/rn/host/deps
+          /usr/share/wayland-protocols /tmp/sevyn-rn-host /tmp/sevyn-host-build
+      - name: Build the Rust workspace
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --manifest-path v2/rn/host-rs/Cargo.toml
+          cargo fmt --check --manifest-path v2/rn/host-rs/Cargo.toml

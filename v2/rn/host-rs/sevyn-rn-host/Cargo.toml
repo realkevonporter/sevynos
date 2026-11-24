@@ -1,0 +1,9 @@
+[package]
+name = "sevyn-rn-host"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 0: the binary exists so the toolchain + workspace are proven in
+# CI. The host logic (JSI shim, event loop, presenters) arrives in
+# Phases 1–3; the C++ host still ships until the Phase 5 cutover.
+# See ~/workspace/sevynos-rust-host/SCOPE.md (the scope doc).

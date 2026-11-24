@@ -4,6 +4,8 @@
 # Fetches and builds, from pinned sources:
 #   Hermes 0.13.0  (JS engine + hermesc; libhermes.a + JSI headers)
 #   Yoga @ 41118bd (flexbox layout; libyogacore.a + headers)
+#   Rust 1.100.0   (rustup pinned stable — Kevon's call 2026-11-24;
+#                   apt's rustc 1.75 is too old to rely on)
 # into SEVYN_V2_DEPS_DIR (default v2/rn/host/deps).
 #
 # Layout:
@@ -56,8 +58,28 @@ HERMES_URL="https://github.com/facebook/hermes/archive/refs/tags/v${HERMES_VERSI
 YOGA_COMMIT="41118bd3a86c637fdb43a90fd596e78375137d0f"
 YOGA_SHA256="afddb3b7c273642223d4237f82a41a5bfe1ad865fff1317ef6c38eaf7c9026a4"
 YOGA_URL="https://codeload.github.com/facebook/yoga/tar.gz/${YOGA_COMMIT}"
+RUST_VERSION="1.100.0"
 
 MARKER_CONTENT="hermes=${HERMES_VERSION} yoga=${YOGA_COMMIT}"
+
+# --- Rust toolchain (pinned) -------------------------------------------
+# rustup, exact version in the repo (recorded next to the Hermes/Yoga
+# pins above). Runs before the marker check so a cache-hit Hermes/Yoga
+# build still leaves the toolchain installed on the runner. Idempotent:
+# a matching rustc skips the install entirely.
+if command -v rustc >/dev/null 2>&1 && [ "$(rustc --version 2>/dev/null | awk '{print $2}')" = "$RUST_VERSION" ]; then
+  echo "rust $RUST_VERSION already installed — skipping toolchain install"
+else
+  command -v curl >/dev/null 2>&1 || { echo "error: curl not found (needed for the rustup installer)" >&2; exit 1; }
+  echo "installing rust $RUST_VERSION via rustup"
+  # Download first, then run: a `curl | sh` pipe would swallow a
+  # download failure (no pipefail in this script), so the install
+  # must fail loudly if the fetch fails.
+  curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init.sh https://sh.rustup.rs
+  sh /tmp/rustup-init.sh -y --profile default --default-toolchain "$RUST_VERSION"
+  rm -f /tmp/rustup-init.sh
+  export PATH="$HOME/.cargo/bin:$PATH"
+fi
 
 if [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$MARKER_CONTENT" ] \
    && [ -x "$PREFIX/bin/hermesc" ] \
