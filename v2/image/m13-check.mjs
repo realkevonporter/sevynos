@@ -29,7 +29,10 @@
 //   3. A real page renders: the host-served red page (page A)
 //      renders (red viewport on screen + its title over CDP);
 //      gated on SEVYN_V2_M13_INTERNET, the public example.com
-//      page renders too (white / #eeeeee page on screen).
+//      page renders too (white / #eeeeee page on screen), preceded
+//      by a `net fetch` probe (raw socket GET, no Chromium) that
+//      settles whether guest external TCP works at all, and a
+//      plain-HTTP example.com probe (same title over CDP).
 //   4. Address-bar input (the RN Browser app): launch it, type
 //      the green page's URL into its address bar, and the green
 //      page renders in Chromium; the app reports its gpu mode
@@ -510,18 +513,36 @@ function dragStartPoint(frame, rect, r, g, b) {
   return { x: Math.round((best.x0 + best.x1) / 2), y: best.y };
 }
 
-// Do two window rects show the same window in the same place
-// (every edge within `tol`)? Round 8: the drag-back verifier.
-// A null rect never matches — an unverifiable position is not a
-// returned window.
-function rectsWithin(a, b, tol) {
+// Do two window rects show the same window returned to the same
+// place (round 8: the drag-back verifier; round 10: partial-aware)?
+// Left/top always compare — they are the window's real edges in
+// both rects. Bottom/right compare ONLY when the two rects have
+// (near-)identical dimensions: a rect from findWindowHeaderPartial
+// is truncated on its covered or off-screen edges, so its bottom /
+// right is a coverage or screen boundary, not the window's edge —
+// the att2 drag-back compared the returned window's full 41px
+// header, screen-clipped at right 1279, against the 16px sliver
+// target (right 911) and failed on the right edge (368px) even
+// though the window had moved exactly to its target left. A null
+// rect never matches — an unverifiable position is not a returned
+// window.
+function rectsMatchReturn(a, b, tol) {
   if (!a || !b) return false;
-  return (
-    Math.abs(a.top - b.top) <= tol &&
-    Math.abs(a.left - b.left) <= tol &&
-    Math.abs(a.bottom - b.bottom) <= tol &&
-    Math.abs(a.right - b.right) <= tol
-  );
+  if (Math.abs(a.top - b.top) > tol || Math.abs(a.left - b.left) > tol) return false;
+  // Dimensions agree within 10px: neither rect is truncated
+  // relative to the other, so the edge is comparable.
+  const SAME_DIM_PX = 10;
+  if (
+    Math.abs(a.bottom - a.top - (b.bottom - b.top)) <= SAME_DIM_PX &&
+    Math.abs(a.bottom - b.bottom) > tol
+  )
+    return false;
+  if (
+    Math.abs(a.right - a.left - (b.right - b.left)) <= SAME_DIM_PX &&
+    Math.abs(a.right - b.right) > tol
+  )
+    return false;
+  return true;
 }
 
 // --- QMP client ---
@@ -2367,7 +2388,28 @@ async function main() {
     // inflate it onto bare desktop. No solid run means the raise
     // fails — never click a point that is not Chromium.
     const frags = visibleFragments(box, [termPos], before.width, before.height);
-    const run = findSolidRunPoint(before, r, g, bl, frags);
+    let run = findSolidRunPoint(before, r, g, bl, frags);
+    if (!run) {
+      // Fall back to the full bbox (no Terminal subtraction): a
+      // freshly launched Chromium window is raised above the
+      // Terminal (new windows go on top), so the page colour can
+      // be visible inside termPos even though the fragments
+      // subtract it — the warm-open relaunch creates such a window
+      // on every navigation (run 44231126511: red=169082px with a
+      // 768px run, discarded by the subtraction). A solid run of
+      // the page colour is Chromium content by construction
+      // (neither the Terminal nor the Browser chrome draws a
+      // >=100px run of it), so the fallback cannot click the
+      // Terminal — it only recovers a visible page the
+      // subtraction hid.
+      run = findSolidRunPoint(
+        before,
+        r,
+        g,
+        bl,
+        visibleFragments(box, [], before.width, before.height),
+      );
+    }
     if (!run) return null;
     await moveTo(run.x, run.y, before.width, before.height);
     await sleep(300);
@@ -2571,11 +2613,62 @@ async function main() {
     let backDetail = "";
     let backAttempts = 0;
     let backCur = aside.after;
+    // The aside drag leaves the Browser window behind the Terminal
+    // and the freshly raised Chromium, so only a sliver of its
+    // header is visible (<100 #0ea5e9 px/row, below
+    // findWindowHeaderPartial) and dragBrowserWindow's before-frame
+    // finds no header — the drag-back stops after attempt 1
+    // (runs 44231126511, 44246789402). Raise the window first: a
+    // single verified header pixel inside the aside rect is enough
+    // to click (same click-to-raise as refocusTerminal) — once
+    // raised, the full header is visible and the drag loop below
+    // finds it. Skipped when the header is already findable, so a
+    // working drag-back is untouched.
+    {
+      const probe = await shot(
+        b.qmp,
+        join(OUT, `m13-shot-browser-drag-${tagBase}-raise-before.ppm`),
+      );
+      const visible =
+        findWindowHeader(probe, 14, 165, 233) ??
+        findWindowHeaderPartial(probe, 14, 165, 233);
+      if (!visible) {
+        const headerBox = findColorBBox(probe, 14, 165, 233, 10, {
+          x0: aside.after.left,
+          y0: aside.after.top,
+          x1: aside.after.right,
+          y1: aside.after.bottom,
+        });
+        if (headerBox && headerBox.n > 0) {
+          const cx = Math.floor((headerBox.x0 + headerBox.x1) / 2);
+          const cy = Math.floor((headerBox.y0 + headerBox.y1) / 2);
+          await moveTo(cx, cy, probe.width, probe.height);
+          await sleep(300);
+          await click();
+          await sleep(500);
+        }
+      }
+    }
     for (let attempt = 0; attempt < 3 && !backOk; attempt++) {
       const dxLeft = aside.before.left - backCur.left;
       const dxRight = aside.before.right - backCur.right;
       const dxBack = backCur.left > 0 ? dxLeft : dxRight;
       const dyBack = aside.before.top - backCur.top;
+      // Round 10: a zero remaining delta means the window is
+      // already at the target left/top — a zero-length drag is a
+      // no-op, so verify in place instead of dragging. (Att2:
+      // attempt 1 had already returned the window; attempt 2
+      // computed dx=0, dragged nowhere, and the null return was
+      // misreported as "no header in the before frame".)
+      if (dxBack === 0 && dyBack === 0) {
+        backAttempts++;
+        backOk = rectsMatchReturn(backCur, aside.before, REFOCUS_JUMP_PX);
+        backDetail =
+          `attempt ${backAttempts}: already at target left/top ` +
+          `(${JSON.stringify(backCur)} vs target ${JSON.stringify(aside.before)})` +
+          (backOk ? " — no drag needed" : " — rects do not match");
+        break;
+      }
       const back = await dragBrowserWindow(
         dxBack,
         dyBack,
@@ -2583,7 +2676,7 @@ async function main() {
       );
       backAttempts++;
       if (back?.after) {
-        backOk = rectsWithin(back.after, aside.before, REFOCUS_JUMP_PX);
+        backOk = rectsMatchReturn(back.after, aside.before, REFOCUS_JUMP_PX);
         backDetail =
           `attempt ${backAttempts}: ${JSON.stringify(backCur)} -> ` +
           `${JSON.stringify(back.after)} (target ${JSON.stringify(aside.before)})`;
@@ -2597,10 +2690,31 @@ async function main() {
           `(before ${JSON.stringify(back.before)})`;
         backCur = back.before;
       } else {
-        // No header in the before frame either: no position to
-        // compute a retry delta from — stop.
-        backDetail = `attempt ${backAttempts}: no Browser header in the before frame`;
-        break;
+        // dragBrowserWindow returns null both when no header is
+        // findable in the before frame AND when the drag ran but
+        // the window did not move — the old detail reported both
+        // as "no Browser header in the before frame". Disambiguate
+        // with a fresh shot: a header still present means the
+        // drag had no effect, and the found rect is a position to
+        // retry from.
+        const reShot = await shot(
+          b.qmp,
+          join(OUT, `m13-shot-browser-drag-${tagBase}-retry${attempt}-reshot.ppm`),
+        );
+        const reFound =
+          findWindowHeader(reShot, 14, 165, 233) ??
+          findWindowHeaderPartial(reShot, 14, 165, 233);
+        if (reFound) {
+          backDetail =
+            `attempt ${backAttempts}: drag had no effect ` +
+            `(header still at ${JSON.stringify(reFound)})`;
+          backCur = reFound;
+        } else {
+          // No header in the before frame either: no position to
+          // compute a retry delta from — stop.
+          backDetail = `attempt ${backAttempts}: no Browser header in the before frame`;
+          break;
+        }
       }
     }
     return { ok: backOk, detail: backDetail, attempts: backAttempts };
@@ -2774,6 +2888,68 @@ async function main() {
   // 3b. A real public page over the internet (gated like step 2's
   // internet flag in m5).
   if (INTERNET) {
+    // 3b-0. Discriminating probe for the example.com stall (M13
+    // att1 on head 4174b959): the plain-HTTP browser probe ALSO
+    // stalls, so TLS is ruled out — but a browser probe cannot
+    // separate "guest external TCP blocked" from "Chromium / the
+    // relaunch path stalls". `net fetch` is a raw socket connect +
+    // HTTP GET from the guest CLI itself (sevyn.c, in-tree,
+    // compiled into /usr/local/bin/sevyn by build-m13-image.sh):
+    // it bypasses Chromium entirely. Exit 0 = an HTTP response
+    // arrived, so guest external TCP works and the stall is
+    // Chromium-side; exit 1 (or no EXEC line — the fetch hung and
+    // the host exec killed it) = the transport itself failed, so
+    // external TCP is blocked (environmental) and no browser
+    // change can fix it.
+    // Round 12: the verdict is a regex, NOT endsWith — boot-log
+    // lines end with CR (logLines splits on \n only), so `-> 0\r`
+    // failed endsWith in M5 round 11 even though the fetch exited
+    // 0 (the M5 boot log shows `-> 0^M`).
+    {
+      const { exec: fetchExec } = await termCmd(
+        "net fetch --method GET http://example.com",
+        null,
+        /EXEC sevyn net fetch --method GET http:\/\/example\.com -> ([01])/,
+      );
+      check(
+        "net: guest external TCP works (net fetch http://example.com — raw socket, no Chromium)",
+        !!fetchExec && /-> 0\s*$/.test(fetchExec),
+        fetchExec || "(no EXEC line — the fetch hung or was killed)",
+      );
+    }
+    // 3b-i. Plain-HTTP browser probe for the example.com stall
+    // (M13/M5 att1+att2 on head 6f376e9d): guest DNS resolves
+    // example.com but the HTTPS navigation never commits on the
+    // warm-open relaunch. Whether guest external TCP works at all
+    // was already settled above by the `net fetch` probe: if that
+    // passed, this step tests the relaunch + Chromium path
+    // specifically; if it failed, this step is expected to stall
+    // the same way and the cause is environmental, not the browser.
+    // A plain-HTTP open exercises the same relaunch +
+    // external-TCP path without TLS — example.com serves the same
+    // "Example Domain" title over HTTP, so the CDP check is
+    // identical.
+    {
+      const { exec } = await termCmd("browser open http://example.com");
+      check(
+        "browser: `browser open` http://example.com runs (EXEC 0)",
+        !!exec,
+        exec || "",
+      );
+    }
+    await sleep(15000);
+    await refocusTerminal();
+    {
+      const marker = await pollTabsTitle(
+        /TERMINAL browser-tabs n=\d+ titles=.*Example Domain/,
+      );
+      check(
+        "net: guest external HTTP works (plain-http example.com loads — Example Domain over CDP)",
+        !!marker,
+        marker ||
+          "(no tabs marker with the title — external TCP or the relaunch path stalls even without TLS)",
+      );
+    }
     {
       const { exec } = await termCmd("browser open https://example.com");
       check("browser: `browser open` example.com runs (EXEC 0)", !!exec, exec || "");
@@ -2874,6 +3050,16 @@ async function main() {
     await refocusTerminal();
   } else {
     internetSkipped = true;
+    check(
+      "net: guest external TCP probe SKIPPED (SEVYN_V2_M13_INTERNET=0)",
+      true,
+      "skipped",
+    );
+    check(
+      "net: guest external HTTP probe SKIPPED (SEVYN_V2_M13_INTERNET=0)",
+      true,
+      "skipped",
+    );
     check("browser: example.com open SKIPPED (SEVYN_V2_M13_INTERNET=0)", true, "skipped");
     check(
       "browser: example.com render SKIPPED (SEVYN_V2_M13_INTERNET=0)",
@@ -3302,11 +3488,23 @@ async function main() {
     }
   }
   let navResult = null;
+  let raisedLink = null;
+  // Raise FIRST, before any CDP poll refocuses the Terminal: the
+  // link click navigates the tab in the frontmost Chromium window
+  // and the green paints there. pollTabsTitleCount (below)
+  // refocuses the Terminal, which covers Chromium — a raise after
+  // it can only see a sliver (run 44231126511: green=678px in a
+  // 3px sliver, after the poll). Raising first matches step 4 and
+  // m5 (raise before refocus). The raise polls for the green
+  // bbox, so it waits for the paint; a missed click just makes
+  // the raise wait, and the CDP poll below still decides the
+  // re-click.
   if (linkClick && linkFrame) {
     await moveTo(linkClick.x, linkClick.y, linkFrame.width, linkFrame.height);
     await sleep(300);
     await click();
     await sleep(2000);
+    raisedLink = await raiseChromium(0, 200, 83, "green-link");
     navResult = await pollTabsTitleCount("Second Page", 1, 6);
     if (!navResult || navResult.n < 1) {
       // One re-click at a slightly different offset, still on the
@@ -3317,6 +3515,7 @@ async function main() {
       await sleep(300);
       await click();
       await sleep(2000);
+      raisedLink = await raiseChromium(0, 200, 83, "green-link");
       navResult = await pollTabsTitleCount("Second Page", 1, 4);
     }
   }
@@ -3327,14 +3526,11 @@ async function main() {
       ? `titles=${navResult.titles.join("|")}`
       : "no click point (link page never rendered) or no tabs marker",
   );
-  {
-    const raised = await raiseChromium(0, 200, 83, "green-link");
-    check(
-      "link-nav: the green page renders after the click",
-      !!raised && raised.count > 40000,
-      raised ? `green=${raised.count}px` : "no green on screen",
-    );
-  }
+  check(
+    "link-nav: the green page renders after the click",
+    !!raisedLink && raisedLink.count > 40000,
+    raisedLink ? `green=${raisedLink.count}px` : "no green on screen",
+  );
 
   // 6. Chromeless heuristic (NEW): the red viewport's bbox must be
   // short and wide — height in [150, 360] AND aspect width/height

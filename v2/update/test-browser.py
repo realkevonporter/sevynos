@@ -8,7 +8,11 @@ Chromium's DevTools endpoint: /json/version, /json/list, PUT
 /json/new, /json/activate/<id>, /json/close/<id>) and a FAKE statusd
 (a Unix socket server that records SET lines and answers GET with
 canned STATUS values). No QEMU, no Chromium — the CI harness
-(m5-check) covers the guest end to end.
+(m5-check) covers the guest end to end. A warm `browser open`
+relaunches Chromium with --app=<url> (no PUT /json/new): /json/new
+opens the new tab in a NEW top-level window, and Chrome makes that
+window a normal browser window (tab strip + omnibox), not an --app
+window — so the relaunch is what keeps every navigation chromeless.
 
 Run: python3 v2/update/test-browser.py
 Exit 0 = all checks pass.
@@ -213,6 +217,42 @@ class FakeStatusd(threading.Thread):
             pass
 
 
+def _pid_gone(pid):
+    """True when pid no longer exists, or is a zombie (dead but not
+    yet reaped by its parent — kill(pid, 0) still answers for a
+    zombie, so /proc is the arbiter)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            state = f.read().rsplit(") ", 1)[-1].split()[0]
+        return state == "Z"
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def _wait_for_argv(log_path, timeout=5.0):
+    """Lines the recording fake wrote, waiting for them: the CLI
+    never waits for the launched Chromium (it only reaps the
+    intermediate child), and a fast CDP answer lets the CLI exit
+    before a short-lived fake has finished starting up."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if log_path.exists():
+            lines = log_path.read_text().splitlines()
+            if lines:
+                return lines
+        time.sleep(0.05)
+    return log_path.read_text().splitlines() if log_path.exists() else []
+
+
 def run_cli(binary, args, env_extra):
     env = dict(os.environ)
     env.update(env_extra)
@@ -265,52 +305,342 @@ def main():
     check("browser tabs: browser_ui target excluded",
           "Omnibox" not in r.stdout, r.stdout)
 
-    # --- browser open (Chromium already running: PUT /json/new) ---
-    # M13 is single-tab by design: a warm open replaces the current
-    # tab — after PUT /json/new the CLI closes every other page tab
-    # (their windows die with them, leaving the new tab's window
-    # frontmost) and activates the new tab, so the page-tab list
-    # afterwards holds just the new tab. (The `browser close`
-    # check above removed BBBB from the fake, so reset the tab
-    # list first.)
-    TABS[:] = [dict(t) for t in _INITIAL_TABS]
+    # --- browser open (Chromium already running: relaunch) ---
+    # M13 is single-tab by design, and a warm open relaunches
+    # Chromium with --app=<url> instead of PUT /json/new: /json/new
+    # opens the new tab in a NEW top-level window, and Chrome makes
+    # that window a NORMAL browser window (tab strip + omnibox) —
+    # not an --app window — so after one navigation the user had a
+    # full second Chrome (GF65, 6b3689a). The relaunch keeps every
+    # navigation chromeless. The contract: the old Chromium (pid in
+    # the state file) is SIGTERMed, the new launch carries
+    # --app=<url>, and no PUT /json/new is issued. The fake CDP
+    # server keeps answering throughout (it is not the Chromium
+    # process), so the CLI's wait succeeds at once.
+    # A double-forked dummy stands in for the running Chromium: its
+    # child is reparented to init, so init reaps it on SIGTERM and
+    # the CLI's exit wait sees it go promptly.
+    dummy = tmp / "dummy-chromium.py"
+    dummy.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid > 0:\n"
+        "    sys.exit(0)\n"
+        "os.setsid()\n"
+        "with open(os.environ['DUMMY_PID_FILE'], 'w') as f:\n"
+        "    f.write(str(os.getpid()))\n"
+        "# Close the inherited pipes so the parent's wait returns.\n"
+        "devnull = os.open('/dev/null', os.O_RDWR)\n"
+        "for fd in (0, 1, 2):\n"
+        "    os.dup2(devnull, fd)\n"
+        "time.sleep(60)\n")
+    os.chmod(dummy, 0o755)
+    rec = tmp / "fake-chromium-record.py"
+    rec.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "log = os.environ.get('FAKE_ARGV_LOG', '')\n"
+        "if log:\n"
+        "    with open(log, 'a') as f:\n"
+        "        f.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+    os.chmod(rec, 0o755)
+    argv_log = tmp / "argv.log"
+    state_path = tmp / "chromium.state"
+    warm_env = dict(env)
+    warm_env["SEVYN_CHROMIUM_BIN"] = str(rec)
+    warm_env["SEVYN_CHROMIUM_STATE"] = str(state_path)
+    warm_env["FAKE_ARGV_LOG"] = str(argv_log)
+    warm_env["SEVYN_CDP_WAIT_S"] = "6"
+    # Round 12: the tab list holds ONLY the stale local tab. The
+    # example.com tab must NOT already be open here: with the
+    # trailing-slash fix, `browser open https://example.com` is
+    # idempotent when its tab (canonical URL "https://example.com/")
+    # is already listed, so a fixture containing it would take the
+    # idempotent path and never relaunch. The already-open case is
+    # the idempotent test below; this one is the relaunch path.
+    TABS[:] = [dict(_INITIAL_TABS[0])]
     REQUESTS.clear()
-    r = run_cli(binary, ["browser", "open", "https://example.com"], env)
+    if argv_log.exists():
+        argv_log.unlink()
+    proc = subprocess.run(
+        [sys.executable, str(dummy)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        env={**os.environ,
+             "DUMMY_PID_FILE": str(tmp / "dummy.pid")})
+    deadline = time.time() + 5
+    dummy_pid = None
+    while time.time() < deadline:
+        try:
+            dummy_pid = int((tmp / "dummy.pid").read_text().strip())
+            break
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    check("browser open: dummy Chromium started",
+          dummy_pid is not None, "")
+    if dummy_pid is None:
+        print("FAILURES:", FAILURES)
+        return 1
+    state_path.write_text(f"pid={dummy_pid}\ngpu=yes\n")
+    try:
+        r = run_cli(binary, ["browser", "open", "https://example.com"],
+                    warm_env)
+    finally:
+        # Never leave the dummy behind if the stop failed.
+        try:
+            os.kill(dummy_pid, 9)
+        except OSError:
+            pass
     check("browser open: exit 0", r.returncode == 0, r.stderr)
-    check("browser open: PUT /json/new with the URL",
-          ("PUT", "/json/new?https://example.com") in REQUESTS,
+    check("browser open: prints opened",
+          "opened: https://example.com" in r.stdout, r.stdout)
+    check("browser open: no PUT /json/new on a warm open",
+          ("PUT", "/json/new?https://example.com") not in REQUESTS,
           str(REQUESTS))
-    check("browser open: prints opened + new tab",
-          "opened: https://example.com" in r.stdout and
-          "tab: DDDD" in r.stdout, r.stdout)
-    # The request order is the contract: PUT new, close each other
-    # page tab (AAA + BBB; the browser_ui entry is not a page tab),
-    # then activate the new tab.
-    new_i = REQUESTS.index(("PUT", "/json/new?https://example.com"))
-    close_a = ("GET", "/json/close/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-    close_b = ("GET", "/json/close/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
-    act = ("GET", "/json/activate/DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
-    check("browser open: closes every other page tab after PUT",
-          close_a in REQUESTS and close_b in REQUESTS and
-          REQUESTS.index(close_a) > new_i and
-          REQUESTS.index(close_b) > new_i, str(REQUESTS))
-    check("browser open: activates the new tab last",
-          act in REQUESTS and
-          REQUESTS.index(act) > REQUESTS.index(close_a) and
-          REQUESTS.index(act) > REQUESTS.index(close_b), str(REQUESTS))
-    check("browser open: page-tab list afterwards is just the new tab",
-          [t["id"] for t in TABS if t["type"] == "page"] ==
-          ["DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"], str(TABS))
+    check("browser open: old Chromium pid is dead after the stop",
+          _pid_gone(dummy_pid), f"pid {dummy_pid} still alive")
+    argv_lines = _wait_for_argv(argv_log)
+    check("browser open: relaunch carries --app=<url>",
+          len(argv_lines) == 1 and
+          "--app=https://example.com" in json.loads(argv_lines[0]),
+          str(argv_lines))
+    check("browser open: warm open closes the stale local tab",
+          ("GET", "/json/close/" + "A" * 32) in REQUESTS,
+          str(REQUESTS))
 
-    # Bare hostname gets https:// prepended.
+    # Bare hostname gets https:// prepended — and also relaunches.
     REQUESTS.clear()
-    r = run_cli(binary, ["browser", "open", "example.com"], env)
-    check("browser open: bare hostname normalized to https",
-          ("PUT", "/json/new?https://example.com") in REQUESTS,
+    argv_log.unlink(missing_ok=True)
+    r = run_cli(binary, ["browser", "open", "example.com"], warm_env)
+    argv_lines = _wait_for_argv(argv_log)
+    check("browser open: bare hostname normalized to https on relaunch",
+          len(argv_lines) == 1 and
+          "--app=https://example.com" in json.loads(argv_lines[0]),
+          str(argv_lines))
+
+    # --- browser open: SIGTERM-resistant Chromium is SIGKILLed ---
+    # A Chromium that ignores SIGTERM (a starting Chromium under
+    # TCG can take longer than the grace to shut down) must still
+    # be gone after the open: the stop escalates to SIGKILL and
+    # verifies the pid is gone (zombie-aware) before relaunching.
+    # The contract: the dummy pid is gone, the relaunch still
+    # carries --app=<url>, and the open returns "opened:".
+    dummy_term = tmp / "dummy-chromium-ignore-term.py"
+    dummy_term.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, signal, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid > 0:\n"
+        "    sys.exit(0)\n"
+        "os.setsid()\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "with open(os.environ['DUMMY_PID_FILE'], 'w') as f:\n"
+        "    f.write(str(os.getpid()))\n"
+        "devnull = os.open('/dev/null', os.O_RDWR)\n"
+        "for fd in (0, 1, 2):\n"
+        "    os.dup2(devnull, fd)\n"
+        "time.sleep(60)\n")
+    os.chmod(dummy_term, 0o755)
+    term_pid_file = tmp / "dummy-term.pid"
+    proc = subprocess.run(
+        [sys.executable, str(dummy_term)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        env={**os.environ, "DUMMY_PID_FILE": str(term_pid_file)})
+    deadline = time.time() + 5
+    term_pid = None
+    while time.time() < deadline:
+        try:
+            term_pid = int(term_pid_file.read_text().strip())
+            break
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    check("browser open: SIGTERM-resistant dummy started",
+          term_pid is not None, "")
+    if term_pid is None:
+        print("FAILURES:", FAILURES)
+        return 1
+    # Round 12: local tab only (see the warm-open fixture note
+    # above — an already-open example.com tab would make this
+    # idempotent instead of a relaunch).
+    TABS[:] = [dict(_INITIAL_TABS[0])]
+    REQUESTS.clear()
+    if argv_log.exists():
+        argv_log.unlink()
+    state_path.write_text(f"pid={term_pid}\ngpu=yes\n")
+    try:
+        r = run_cli(binary, ["browser", "open", "https://example.com"],
+                    warm_env)
+    finally:
+        # Never leave the dummy behind if the stop failed.
+        try:
+            os.kill(term_pid, 9)
+        except OSError:
+            pass
+    check("browser open: SIGTERM-resistant Chromium is gone after open",
+          _pid_gone(term_pid), f"pid {term_pid} still alive")
+    check("browser open: SIGTERM-resistant open exits 0 + opened",
+          r.returncode == 0 and "opened: https://example.com" in r.stdout,
+          r.stdout + r.stderr)
+    argv_lines = _wait_for_argv(argv_log)
+    check("browser open: SIGTERM-resistant relaunch carries --app=<url>",
+          len(argv_lines) == 1 and
+          "--app=https://example.com" in json.loads(argv_lines[0]),
+          str(argv_lines))
+
+    # --- browser open: idempotent when the URL is already open ---
+    # A re-go / retry for a URL the running tab already shows must
+    # return that tab, not relaunch: the tab is already there, and
+    # a relaunch while the instance is up just churns the window
+    # (and, if the instance is still starting, a duplicate launch
+    # hands off and accumulates a tab). The contract: exit 0,
+    # "opened:" + the existing tab, NO launch (argv.log empty),
+    # the running Chromium stays alive, and no PUT /json/new.
+    # Round 12: the running tab's URL is the CANONICAL one
+    # ("https://example.com/" — what real Chromium reports for a
+    # bare-host URL), and a stale local tab sits beside it. The
+    # idempotent open must match the canonical URL (not relaunch),
+    # and the single-tab enforcement must close the stale tab while
+    # keeping the just-opened one. With the old exact-strcmp
+    # comparison the canonical URL never matched: the open
+    # relaunched instead of returning, and the enforcement closed
+    # the example.com tab itself — every example.com open stalled
+    # with zero tabs (M5/M13 round 11).
+    TABS[:] = [dict(_INITIAL_TABS[0]), {
+        "description": "",
+        "devtoolsFrontendUrl": "",
+        "id": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+        "title": "Example Domain",
+        "type": "page",
+        "url": "https://example.com/",
+        "webSocketDebuggerUrl": "",
+    }]
+    REQUESTS.clear()
+    if argv_log.exists():
+        argv_log.unlink()
+    idem_pid_file = tmp / "dummy-idem.pid"
+    proc = subprocess.run(
+        [sys.executable, str(dummy)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        env={**os.environ, "DUMMY_PID_FILE": str(idem_pid_file)})
+    deadline = time.time() + 5
+    idem_pid = None
+    while time.time() < deadline:
+        try:
+            idem_pid = int(idem_pid_file.read_text().strip())
+            break
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    check("browser open: idempotent dummy started",
+          idem_pid is not None, "")
+    if idem_pid is None:
+        print("FAILURES:", FAILURES)
+        return 1
+    state_path.write_text(f"pid={idem_pid}\ngpu=yes\n")
+    try:
+        r = run_cli(binary, ["browser", "open", "https://example.com"],
+                    warm_env)
+    finally:
+        try:
+            os.kill(idem_pid, 9)
+        except OSError:
+            pass
+    check("browser open: idempotent open exits 0 + opened + tab id",
+          r.returncode == 0 and "opened: https://example.com" in r.stdout
+          and "tab: " + "E" * 32 in r.stdout,
+          r.stdout + r.stderr)
+    check("browser open: idempotent open issues no PUT /json/new",
+          ("PUT", "/json/new?https://example.com") not in REQUESTS,
           str(REQUESTS))
+    check("browser open: idempotent open launches nothing",
+          not argv_log.exists() or not argv_log.read_text().strip(),
+          argv_log.read_text() if argv_log.exists() else "")
+    check("browser open: idempotent open leaves Chromium alive",
+          not _pid_gone(idem_pid), f"pid {idem_pid} is gone")
+    check("browser open: idempotent open closes the stale local tab",
+          ("GET", "/json/close/" + "A" * 32) in REQUESTS,
+          str(REQUESTS))
+    check("browser open: idempotent open keeps the canonical-URL tab",
+          ("GET", "/json/close/" + "E" * 32) not in REQUESTS
+          and any(t["id"] == "E" * 32 for t in TABS),
+          str(REQUESTS) + " / " + str([t["id"] for t in TABS]))
+
+    # --- browser open: no duplicate launch while Chromium starts ---
+    # CDP is down but a Chromium process is alive (a launch already
+    # in flight — a cold start under TCG takes ~13 s). Launching a
+    # duplicate here hands off to the in-flight instance and
+    # accumulates a tab per open (m13: tabs 1→2→3→4). The contract:
+    # the CLI waits briefly for CDP, then returns "launched:"
+    # without launching a duplicate (argv.log empty) and without
+    # killing the in-flight instance.
+    starting = tmp / "fake-chromium-starting.py"
+    starting.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid > 0:\n"
+        "    sys.exit(0)\n"
+        "os.setsid()\n"
+        "with open(os.environ['STARTING_PID_FILE'], 'w') as f:\n"
+        "    f.write(str(os.getpid()))\n"
+        "devnull = os.open('/dev/null', os.O_RDWR)\n"
+        "for fd in (0, 1, 2):\n"
+        "    os.dup2(devnull, fd)\n"
+        "time.sleep(60)\n")
+    os.chmod(starting, 0o755)
+    start_port = free_port()  # nothing listening: CDP down
+    start_pid_file = tmp / "starting.pid"
+    proc = subprocess.run(
+        [sys.executable, str(starting),
+         f"--remote-debugging-port={start_port}",
+         "--user-data-dir=" + str(tmp / "chromium-profile"),
+         "--app=https://example.com"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        env={**os.environ, "STARTING_PID_FILE": str(start_pid_file)})
+    deadline = time.time() + 5
+    start_pid = None
+    while time.time() < deadline:
+        try:
+            start_pid = int(start_pid_file.read_text().strip())
+            break
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    check("browser open: starting Chromium started",
+          start_pid is not None, "")
+    if start_pid is None:
+        print("FAILURES:", FAILURES)
+        return 1
+    start_env = {"SEVYN_CDP_PORT": str(start_port),
+                 "SEVYN_CHROMIUM_BIN": str(rec),
+                 "SEVYN_CHROMIUM_STATE": str(state_path),
+                 "SEVYN_CDP_WAIT_S": "6",
+                 "FAKE_ARGV_LOG": str(argv_log)}
+    state_path.write_text(f"pid={start_pid}\ngpu=yes\n")
+    if argv_log.exists():
+        argv_log.unlink()
+    t0 = time.time()
+    try:
+        r = run_cli(binary, ["browser", "open", "https://example.com"],
+                    start_env)
+    finally:
+        try:
+            os.kill(start_pid, 9)
+        except OSError:
+            pass
+    dt = time.time() - t0
+    check("browser open: starting instance returns launched (exit 0)",
+          r.returncode == 0 and "launched: https://example.com" in r.stdout,
+          r.stdout + r.stderr)
+    check("browser open: no duplicate launch while starting",
+          not argv_log.exists() or not argv_log.read_text().strip(),
+          argv_log.read_text() if argv_log.exists() else "")
+    check("browser open: starting instance is not killed",
+          not _pid_gone(start_pid), f"pid {start_pid} is gone")
+    check("browser open: starting-instance wait bounded (~2 s)",
+          dt < 8, f"took {dt:.1f}s")
 
     # --- browser activate / close ---
-    # (Reset the tab list: the warm-open check above closed AAA/BBB.)
+    # (Reset the tab list: the `browser close` check above removed
+    # BBBB from the fake.)
     TABS[:] = [dict(t) for t in _INITIAL_TABS]
     r = run_cli(binary, ["browser", "activate",
                          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"], env)
