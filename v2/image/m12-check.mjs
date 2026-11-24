@@ -226,8 +226,19 @@ async function shot(qmp, path) {
 
 // --- data disk (debugfs, read-only from the harness) ---
 async function readState() {
-  const out = await execAsync("debugfs", ["-R", "cat /slot-state.json", DISK]);
-  return JSON.parse(out);
+  // The guest rewrites /slot-state.json on boot; a debugfs read right
+  // after poweroff can catch it empty or truncated (same flush race
+  // as the screendump parse above). Retry instead of crashing on the
+  // first JSON.parse.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const out = await execAsync("debugfs", ["-R", "cat /slot-state.json", DISK]);
+    try {
+      return JSON.parse(out);
+    } catch {
+      await sleep(300);
+    }
+  }
+  throw new Error("slot-state.json: no readable state after retries");
 }
 
 async function dumpSlot(slot, tag) {
