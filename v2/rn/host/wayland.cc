@@ -10,6 +10,14 @@
 #include <wayland-client-protocol.h>
 
 #include "xdg-shell-client-protocol.h"
+// The generated layer-shell header names get_layer_surface's
+// namespace parameter `namespace` — a C++ keyword — so it cannot be
+// included in C++ as-is. Rename it for this include only (the name
+// occurs only in that one function's signature/body; the comment
+// use is untouched by the preprocessor).
+#define namespace sevyn_layer_namespace
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#undef namespace
 
 namespace sevyn {
 
@@ -44,9 +52,14 @@ Wayland::Wayland(int width, int height, bool fullscreen,
     logLine("WAYLAND second roundtrip failed");
     return;
   }
-  if (!compositor_ || !shm_ || !xdgWmBase_) {
-    logLine("WAYLAND missing globals (compositor=%d shm=%d xdg=%d)",
-            compositor_ != nullptr, shm_ != nullptr, xdgWmBase_ != nullptr);
+  // The shell needs xdg_wm_base OR (fullscreen + layer-shell): a
+  // layer-shell compositor may not advertise xdg_wm_base at all, and
+  // the layer path never touches it. App windows always need xdg.
+  if (!compositor_ || !shm_ ||
+      (!xdgWmBase_ && !(fullscreen_ && layerShell_))) {
+    logLine("WAYLAND missing globals (compositor=%d shm=%d xdg=%d layer=%d)",
+            compositor_ != nullptr, shm_ != nullptr,
+            xdgWmBase_ != nullptr, layerShell_ != nullptr);
     return;
   }
   // M9 fullscreen: the shell paints at the output's preferred
@@ -76,10 +89,50 @@ void Wayland::createSurface() {
       &Wayland::onXdgSurfaceConfigure};
   static const xdg_toplevel_listener kXdgToplevelListener = {
       &Wayland::onXdgToplevelConfigure, &Wayland::onXdgToplevelClose};
+  static const zwlr_layer_surface_v1_listener kLayerSurfaceListener = {
+      &Wayland::onLayerSurfaceConfigure, &Wayland::onLayerSurfaceClosed};
   surface_ = wl_compositor_create_surface(compositor_);
   if (!surface_) {
     logLine("WAYLAND create surface failed");
     return;
+  }
+  // Layer-shell background (shell only): a Background layer surface
+  // is never raisable, so a click on the desktop reaches the shell
+  // without covering the app windows. Output null = the output the
+  // surface is on (one output in this guest). Exclusive keyboard
+  // interactivity: the shell takes keyboard focus on click, like
+  // the dock will. Fallback is the fullscreen toplevel below.
+  if (fullscreen_ && layerShell_) {
+    layerSurface_ = zwlr_layer_shell_v1_get_layer_surface(
+        layerShell_, surface_, nullptr,
+        ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "sevyn-shell");
+    if (layerSurface_) {
+      layerMode_ = true;
+      zwlr_layer_surface_v1_add_listener(layerSurface_,
+                                         &kLayerSurfaceListener, this);
+      zwlr_layer_surface_v1_set_size(layerSurface_,
+                                     static_cast<uint32_t>(width_),
+                                     static_cast<uint32_t>(height_));
+      zwlr_layer_surface_v1_set_anchor(
+          layerSurface_, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+                             ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+                             ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+                             ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+      zwlr_layer_surface_v1_set_exclusive_zone(layerSurface_, -1);
+      zwlr_layer_surface_v1_set_keyboard_interactivity(
+          layerSurface_,
+          ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE);
+      logLine("WAYLAND shell as layer-shell background (%dx%d)", width_,
+              height_);
+      wl_surface_commit(surface_);
+      // Collect the initial configure before the caller presents.
+      wl_display_roundtrip(display_);
+      return;
+    }
+    // get_layer_surface only fails on OOM/protocol error; fall back
+    // to the fullscreen toplevel below rather than running surfaceless.
+    logLine("WAYLAND layer surface creation failed, falling back to toplevel");
+    layerSurface_ = nullptr;
   }
   xdgSurface_ = xdg_wm_base_get_xdg_surface(xdgWmBase_, surface_);
   xdgToplevel_ = xdg_surface_get_toplevel(xdgSurface_);
@@ -202,6 +255,8 @@ Wayland::~Wayland() {
     wl_buffer_destroy(buffers_[1]);
   if (xdgToplevel_)
     xdg_toplevel_destroy(xdgToplevel_);
+  if (layerSurface_)
+    zwlr_layer_surface_v1_destroy(layerSurface_);
   if (output_)
     wl_output_destroy(output_);
   if (xdgSurface_)
@@ -220,6 +275,8 @@ Wayland::~Wayland() {
     wl_seat_destroy(seat_);
   if (xdgWmBase_)
     xdg_wm_base_destroy(xdgWmBase_);
+  if (layerShell_)
+    zwlr_layer_shell_v1_destroy(layerShell_);
   if (shm_)
     wl_shm_destroy(shm_);
   if (compositor_)
@@ -279,6 +336,11 @@ void Wayland::onRegistryGlobal(void* data, wl_registry* registry,
     self->xdgWmBase_ = static_cast<xdg_wm_base*>(
         wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
     xdg_wm_base_add_listener(self->xdgWmBase_, &kXdgWmBaseListener, self);
+  } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
+    // Genesis advertises v4; bind at most v4.
+    uint32_t v = version < 4 ? version : 4;
+    self->layerShell_ = static_cast<zwlr_layer_shell_v1*>(wl_registry_bind(
+        registry, name, &zwlr_layer_shell_v1_interface, v));
   }
 }
 
@@ -398,6 +460,34 @@ void Wayland::onXdgSurfaceConfigure(void* data, xdg_surface* surface,
   }
   // The compositor is ready for content; present anything pending.
   self->flushPending();
+}
+
+void Wayland::onLayerSurfaceConfigure(void* data,
+                                      zwlr_layer_surface_v1* layerSurface,
+                                      uint32_t serial, uint32_t width,
+                                      uint32_t height) {
+  Wayland* self = static_cast<Wayland*>(data);
+  zwlr_layer_surface_v1_ack_configure(layerSurface, serial);
+  self->configured_ = true;
+  // The first configure can carry the compositor's fallback size
+  // (Genesis sends it before the client's set_size is read); the
+  // corrected size follows the first commit. Honor whatever size
+  // arrives — resize() is a no-op for the current size, and a
+  // corrected configure later re-lays out at the right size.
+  if (width > 0 && height > 0 &&
+      (static_cast<int>(width) != self->width_ ||
+       static_cast<int>(height) != self->height_)) {
+    self->resize(static_cast<int>(width), static_cast<int>(height));
+  }
+  // The compositor is ready for content; present anything pending.
+  self->flushPending();
+}
+
+void Wayland::onLayerSurfaceClosed(void* data,
+                                   zwlr_layer_surface_v1* layerSurface) {
+  (void)data;
+  (void)layerSurface;
+  logLine("WAYLAND layer surface closed by compositor");
 }
 
 void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
