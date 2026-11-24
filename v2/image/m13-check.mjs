@@ -30,9 +30,9 @@
 //      renders (red viewport on screen + its title over CDP);
 //      gated on SEVYN_V2_M13_INTERNET, the public example.com
 //      page renders too (white / #eeeeee page on screen), preceded
-//      by a plain-HTTP example.com probe (same title over CDP)
-//      that discriminates the HTTPS stall: HTTP loading means
-//      guest TCP works and the stall is HTTPS/Chromium-side.
+//      by a `net fetch` probe (raw socket GET, no Chromium) that
+//      settles whether guest external TCP works at all, and a
+//      plain-HTTP example.com probe (same title over CDP).
 //   4. Address-bar input (the RN Browser app): launch it, type
 //      the green page's URL into its address bar, and the green
 //      page renders in Chromium; the app reports its gpu mode
@@ -2888,16 +2888,43 @@ async function main() {
   // 3b. A real public page over the internet (gated like step 2's
   // internet flag in m5).
   if (INTERNET) {
-    // 3b-i. Discriminating probe for the example.com stall (M13/M5
-    // att1+att2 on head 6f376e9d): guest DNS resolves example.com
-    // but the HTTPS navigation never commits on the warm-open
-    // relaunch. A plain-HTTP open exercises the same relaunch +
+    // 3b-0. Discriminating probe for the example.com stall (M13
+    // att1 on head 4174b959): the plain-HTTP browser probe ALSO
+    // stalls, so TLS is ruled out — but a browser probe cannot
+    // separate "guest external TCP blocked" from "Chromium / the
+    // relaunch path stalls". `net fetch` is a raw socket connect +
+    // HTTP GET from the guest CLI itself (sevyn.c, in-tree,
+    // compiled into /usr/local/bin/sevyn by build-m13-image.sh):
+    // it bypasses Chromium entirely. Exit 0 = an HTTP response
+    // arrived, so guest external TCP works and the stall is
+    // Chromium-side; exit 1 (or no EXEC line — the fetch hung and
+    // the host exec killed it) = the transport itself failed, so
+    // external TCP is blocked (environmental) and no browser
+    // change can fix it.
+    {
+      const { exec: fetchExec } = await termCmd(
+        "net fetch --method GET http://example.com",
+        null,
+        /EXEC sevyn net fetch --method GET http:\/\/example\.com -> ([01])/,
+      );
+      check(
+        "net: guest external TCP works (net fetch http://example.com — raw socket, no Chromium)",
+        !!fetchExec && fetchExec.endsWith("-> 0"),
+        fetchExec || "(no EXEC line — the fetch hung or was killed)",
+      );
+    }
+    // 3b-i. Plain-HTTP browser probe for the example.com stall
+    // (M13/M5 att1+att2 on head 6f376e9d): guest DNS resolves
+    // example.com but the HTTPS navigation never commits on the
+    // warm-open relaunch. Whether guest external TCP works at all
+    // was already settled above by the `net fetch` probe: if that
+    // passed, this step tests the relaunch + Chromium path
+    // specifically; if it failed, this step is expected to stall
+    // the same way and the cause is environmental, not the browser.
+    // A plain-HTTP open exercises the same relaunch +
     // external-TCP path without TLS — example.com serves the same
     // "Example Domain" title over HTTP, so the CDP check is
-    // identical. If this loads, guest external TCP works and the
-    // stall is HTTPS/Chromium-side (the relaunch path); if it
-    // also stalls, external TCP itself is blocked (environmental)
-    // and the next discrimination is the relaunch-bypass test.
+    // identical.
     {
       const { exec } = await termCmd("browser open http://example.com");
       check(
@@ -3019,6 +3046,11 @@ async function main() {
     await refocusTerminal();
   } else {
     internetSkipped = true;
+    check(
+      "net: guest external TCP probe SKIPPED (SEVYN_V2_M13_INTERNET=0)",
+      true,
+      "skipped",
+    );
     check(
       "net: guest external HTTP probe SKIPPED (SEVYN_V2_M13_INTERNET=0)",
       true,
