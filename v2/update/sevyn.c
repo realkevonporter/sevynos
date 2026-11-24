@@ -2475,6 +2475,34 @@ static void normalize_url(const char *url, char *out, size_t cap)
     snprintf(out, cap, "https://%s", url);
 }
 
+/* Tab-identity URL equality (M13 round 12): Chromium canonicalizes
+ * a bare-host URL — the tab for `browser open http://example.com`
+ * reports its URL as "http://example.com/" (trailing slash), while
+ * the CLI keeps the URL as typed ("http://example.com"). An exact
+ * strcmp therefore treated the just-opened tab as an "extra" and
+ * browser_enforce_single_tab closed it, leaving zero tabs — every
+ * example.com open stalled with `browser tabs n=0` (M5/M13 round
+ * 11, runs 45385937670/45385937623; the CLI's own log proves it:
+ * "BROWSER closed 1 extra tab(s) after open http://example.com").
+ * Local pages (paths) and the IDE URL (typed with its slash)
+ * matched exactly, which is why only bare-host URLs failed — and
+ * why example.com passed on #155/#156/#133 heads, whose old CDP
+ * PUT /json/new path never ran the single-tab enforcement. Compare
+ * with one trailing '/' ignored on either side. about:blank and
+ * devtools URLs never reach this helper (their callers exempt
+ * them first). */
+static int browser_url_equal(const char *a, const char *b)
+{
+    if (strcmp(a, b) == 0)
+        return 1;
+    size_t la = strlen(a), lb = strlen(b);
+    if (la > 0 && a[la - 1] == '/')
+        la--;
+    if (lb > 0 && b[lb - 1] == '/')
+        lb--;
+    return la == lb && strncmp(a, b, la) == 0;
+}
+
 /* Extract one page target's id/title/url from a /json/list body.
  * Targets are flat objects; find each `"type": "page"`, take the
  * enclosing { ... } slice, and pull the three fields out of it. The
@@ -2556,7 +2584,7 @@ static void find_tab_by_url(const char *id, const char *title,
     struct tab_by_url *t = (struct tab_by_url *)ctx;
     if (t->id)
         return;
-    if (strcmp(url, t->want) != 0)
+    if (!browser_url_equal(url, t->want))
         return;
     t->id = strdup(id);
     t->title = strdup(title);
@@ -2844,15 +2872,16 @@ static void find_tab_by_url_flag(const char *id, const char *title,
     struct tab_url_found *f = (struct tab_url_found *)ctx;
     (void)id;
     (void)title;
-    if (strcmp(url, f->want) == 0)
+    if (browser_url_equal(url, f->want))
         f->found = 1;
 }
 
 /* True when CDP is answering AND it lists a page tab whose URL is
- * exactly `want`. Used for the idempotent open: a re-go / retry for
- * a URL that is already the running tab must return that tab, not
- * launch a duplicate Chromium. False when CDP is down or the URL
- * is not open. */
+ * `want` (trailing-slash-insensitive — see browser_url_equal).
+ * Used for the idempotent open: a re-go / retry for a URL that is
+ * already the running tab must return that tab, not launch a
+ * duplicate Chromium. False when CDP is down or the URL is not
+ * open. */
 static int browser_opened_tab_is(const char *url)
 {
     char body[262144];
@@ -2875,7 +2904,7 @@ static void close_extra_tab(const char *id, const char *title,
     char path[4096];
     char body[4096];
     (void)title;
-    if (strcmp(url, c->keep_url) == 0)
+    if (browser_url_equal(url, c->keep_url))
         return;
     if (strcmp(url, "about:blank") == 0 ||
         strncmp(url, "chrome-devtools://", 18) == 0 ||

@@ -352,7 +352,14 @@ def main():
     warm_env["SEVYN_CHROMIUM_STATE"] = str(state_path)
     warm_env["FAKE_ARGV_LOG"] = str(argv_log)
     warm_env["SEVYN_CDP_WAIT_S"] = "6"
-    TABS[:] = [dict(t) for t in _INITIAL_TABS]
+    # Round 12: the tab list holds ONLY the stale local tab. The
+    # example.com tab must NOT already be open here: with the
+    # trailing-slash fix, `browser open https://example.com` is
+    # idempotent when its tab (canonical URL "https://example.com/")
+    # is already listed, so a fixture containing it would take the
+    # idempotent path and never relaunch. The already-open case is
+    # the idempotent test below; this one is the relaunch path.
+    TABS[:] = [dict(_INITIAL_TABS[0])]
     REQUESTS.clear()
     if argv_log.exists():
         argv_log.unlink()
@@ -397,6 +404,9 @@ def main():
           len(argv_lines) == 1 and
           "--app=https://example.com" in json.loads(argv_lines[0]),
           str(argv_lines))
+    check("browser open: warm open closes the stale local tab",
+          ("GET", "/json/close/" + "A" * 32) in REQUESTS,
+          str(REQUESTS))
 
     # Bare hostname gets https:// prepended — and also relaunches.
     REQUESTS.clear()
@@ -449,7 +459,10 @@ def main():
     if term_pid is None:
         print("FAILURES:", FAILURES)
         return 1
-    TABS[:] = [dict(t) for t in _INITIAL_TABS]
+    # Round 12: local tab only (see the warm-open fixture note
+    # above — an already-open example.com tab would make this
+    # idempotent instead of a relaunch).
+    TABS[:] = [dict(_INITIAL_TABS[0])]
     REQUESTS.clear()
     if argv_log.exists():
         argv_log.unlink()
@@ -482,13 +495,23 @@ def main():
     # hands off and accumulates a tab). The contract: exit 0,
     # "opened:" + the existing tab, NO launch (argv.log empty),
     # the running Chromium stays alive, and no PUT /json/new.
-    TABS[:] = [{
+    # Round 12: the running tab's URL is the CANONICAL one
+    # ("https://example.com/" — what real Chromium reports for a
+    # bare-host URL), and a stale local tab sits beside it. The
+    # idempotent open must match the canonical URL (not relaunch),
+    # and the single-tab enforcement must close the stale tab while
+    # keeping the just-opened one. With the old exact-strcmp
+    # comparison the canonical URL never matched: the open
+    # relaunched instead of returning, and the enforcement closed
+    # the example.com tab itself — every example.com open stalled
+    # with zero tabs (M5/M13 round 11).
+    TABS[:] = [dict(_INITIAL_TABS[0]), {
         "description": "",
         "devtoolsFrontendUrl": "",
         "id": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
         "title": "Example Domain",
         "type": "page",
-        "url": "https://example.com",
+        "url": "https://example.com/",
         "webSocketDebuggerUrl": "",
     }]
     REQUESTS.clear()
@@ -533,6 +556,13 @@ def main():
           argv_log.read_text() if argv_log.exists() else "")
     check("browser open: idempotent open leaves Chromium alive",
           not _pid_gone(idem_pid), f"pid {idem_pid} is gone")
+    check("browser open: idempotent open closes the stale local tab",
+          ("GET", "/json/close/" + "A" * 32) in REQUESTS,
+          str(REQUESTS))
+    check("browser open: idempotent open keeps the canonical-URL tab",
+          ("GET", "/json/close/" + "E" * 32) not in REQUESTS
+          and any(t["id"] == "E" * 32 for t in TABS),
+          str(REQUESTS) + " / " + str([t["id"] for t in TABS]))
 
     # --- browser open: no duplicate launch while Chromium starts ---
     # CDP is down but a Chromium process is alive (a launch already

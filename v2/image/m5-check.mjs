@@ -2085,6 +2085,10 @@ async function main() {
     // failed, so external TCP is blocked (environmental) and no
     // browser change can fix it. Placed here, before Chromium is
     // even launched, so it measures pure guest TCP.
+    // Round 12: the verdict is a regex, NOT endsWith — boot-log
+    // lines end with CR (logLines splits on \n only), so `-> 0\r`
+    // failed endsWith in M5 round 11 even though the fetch exited
+    // 0 (the M5 boot log shows `-> 0^M`).
     {
       const { exec: fetchExec } = await termCmd(
         "net fetch --method GET http://example.com",
@@ -2093,7 +2097,7 @@ async function main() {
       );
       check(
         "net: guest external TCP works (net fetch http://example.com — raw socket, no Chromium)",
-        !!fetchExec && fetchExec.endsWith("-> 0"),
+        !!fetchExec && /-> 0\s*$/.test(fetchExec),
         fetchExec || "(no EXEC line — the fetch hung or was killed)",
       );
     }
