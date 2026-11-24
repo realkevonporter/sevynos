@@ -651,22 +651,66 @@ static int load_trusted_keys(struct trusted_key *keys, size_t cap)
     return n;
 }
 
+/* Last wget failure, for the error strings: exit code + wget's own
+ * first stderr line (e.g. "exit 5: wget: unable to resolve host
+ * address"). Without this the daemon could only say "download
+ * failed" — the GF65's 2026-11-24 failure was a dead DNS server
+ * and nothing on the device said so. */
+static char g_wget_detail[256] = "";
+
+/* First line of a small text file, for the wget stderr capture
+ * below. Empty string when the file is missing or empty. */
+static void read_first_line(const char *path, char *out, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        out[0] = '\0';
+        return;
+    }
+    if (!fgets(out, (int)cap, f))
+        out[0] = '\0';
+    fclose(f);
+    out[strcspn(out, "\r\n")] = '\0';
+}
+
 /* Run wget (or $SEVYN_UPDATE_WGET) with a timeout, writing the
- * response body to out_path. Returns 0 when wget exits 0. */
+ * response body to out_path. Returns 0 when wget exits 0. On
+ * failure g_wget_detail holds the exit code + wget's first stderr
+ * line, so the caller can say why the download died instead of
+ * just that it died. */
 static int run_wget_once(const char *url, const char *out_path,
                          int timeout_s)
 {
     char timeout[16];
     snprintf(timeout, sizeof(timeout), "%d", timeout_s);
+    /* Capture wget's stderr next to the output file instead of
+     * discarding it: on failure the first line is the diagnosis
+     * ("unable to resolve host address", "connection timed out",
+     * "server returned error: HTTP/1.1 404"). */
+    char err_path[PATH_MAX];
+    if (snprintf(err_path, sizeof(err_path), "%s.stderr",
+                 out_path) >= (int)sizeof(err_path))
+        err_path[0] = '\0';
     pid_t pid = fork();
-    if (pid < 0)
+    if (pid < 0) {
+        snprintf(g_wget_detail, sizeof(g_wget_detail), "fork failed");
         return -1;
+    }
     if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            if (devnull > STDERR_FILENO)
-                close(devnull);
+        int errfd = -1;
+        if (err_path[0])
+            errfd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (errfd >= 0) {
+            dup2(errfd, STDERR_FILENO);
+            if (errfd > STDERR_FILENO)
+                close(errfd);
+        } else {
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDERR_FILENO);
+                if (devnull > STDERR_FILENO)
+                    close(devnull);
+            }
         }
         execlp(g_wget, g_wget, "-q", "-T", timeout, "-O", out_path,
                url, (char *)NULL);
@@ -675,7 +719,31 @@ static int run_wget_once(const char *url, const char *out_path,
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
         ;
-    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        if (err_path[0])
+            unlink(err_path);
+        g_wget_detail[0] = '\0';
+        return 0;
+    }
+    int code = WIFEXITED(status) ? WEXITSTATUS(status)
+                                 : (WIFSIGNALED(status)
+                                        ? 128 + WTERMSIG(status)
+                                        : -1);
+    char first[192] = "";
+    if (err_path[0])
+        read_first_line(err_path, first, sizeof(first));
+    if (err_path[0])
+        unlink(err_path);
+    if (first[0])
+        snprintf(g_wget_detail, sizeof(g_wget_detail),
+                 "wget exit %d: %.180s", code, first);
+    else if (code == 127)
+        snprintf(g_wget_detail, sizeof(g_wget_detail),
+                 "wget not found (exit 127)");
+    else
+        snprintf(g_wget_detail, sizeof(g_wget_detail), "wget exit %d",
+                 code);
+    return -1;
 }
 
 /* Retry a download: one transient failure (a dropped connection
@@ -691,8 +759,8 @@ static int run_wget(const char *url, const char *out_path, int timeout_s)
     for (int attempt = 1; attempt <= WGET_ATTEMPTS; attempt++) {
         if (run_wget_once(url, out_path, timeout_s) == 0)
             return 0;
-        log_line("UPDATE download attempt %d/%d failed: %s", attempt,
-                 WGET_ATTEMPTS, url);
+        log_line("UPDATE download attempt %d/%d failed: %s (%s)", attempt,
+                 WGET_ATTEMPTS, url, g_wget_detail);
         if (attempt < WGET_ATTEMPTS)
             sleep(1);
     }
@@ -715,7 +783,8 @@ static int fetch_feed(struct feed *feed, char *err, size_t errcap)
     snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.%ld.json",
              g_tmp_dir, (long)getpid());
     if (run_wget(g_url, manifest_path, WGET_MANIFEST_TIMEOUT) != 0) {
-        snprintf(err, errcap, "download failed: %.400s", g_url);
+        snprintf(err, errcap, "download failed: %.400s (%.90s)", g_url,
+                 g_wget_detail);
         unlink(manifest_path);
         return -1;
     }
@@ -909,7 +978,8 @@ static int download_verified(const struct feed_artifact *fa,
                              const char *out_path, char *err, size_t errcap)
 {
     if (run_wget(fa->url, out_path, WGET_ARTIFACT_TIMEOUT) != 0) {
-        snprintf(err, errcap, "download failed: %.400s", fa->url);
+        snprintf(err, errcap, "download failed: %.400s (%.90s)", fa->url,
+                 g_wget_detail);
         unlink(out_path);
         return -1;
     }
