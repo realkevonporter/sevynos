@@ -35,14 +35,27 @@
 
 const AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".flac", ".ogg"]);
 
-/** A rejected audio call. `code` is stable — callers switch on it. */
-class AudiodError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.name = "AudiodError";
-    this.code = code;
-  }
+/**
+ * A rejected audio call. `code` is stable — callers switch on it.
+ *
+ * A function constructor, NOT `class AudiodError extends Error`:
+ * esbuild bundles a class as a class expression
+ * (`var AudiodError2 = class extends Error {...}`), and Hermes
+ * 0.13.0 rejects that at the hermesc step ("Invalid expression
+ * encountered") — the Music bundle failed the M13 image build on
+ * it. The function form is identical at runtime: `new
+ * AudiodError(code, message)`, `instanceof AudiodError`,
+ * `instanceof Error`, `.code`, `.message`, `.name`.
+ */
+function AudiodError(code, message) {
+  this.name = "AudiodError";
+  this.code = code;
+  this.message = message;
+  if (typeof Error.captureStackTrace === "function")
+    Error.captureStackTrace(this, AudiodError);
 }
+AudiodError.prototype = Object.create(Error.prototype);
+AudiodError.prototype.constructor = AudiodError;
 
 function extensionOf(path) {
   const dot = path.lastIndexOf(".");
