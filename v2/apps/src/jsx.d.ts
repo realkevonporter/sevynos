@@ -81,6 +81,20 @@ declare global {
     // Same run off the JS thread (M9 wifi scan/connect): a Promise
     // of the same "<exit-code>\n<output>" shape.
     execAsync(cmdline: string): Promise<string>;
+    // RN audio module (port of PR #129): async audiod calls. Each
+    // returns a Promise of ONE JSON line — the daemon's reply, or a
+    // synthesized {ok:false, code, error} line. The JS adapter
+    // (v2/rn/renderer/sevyn-audio.js) parses the line and rejects
+    // with an AudiodError carrying the stable code. Never rejects;
+    // a dead daemon is an {ok:false} line, never a hang.
+    audioPlay(path: string): Promise<string>;
+    audioPause(): Promise<string>;
+    audioResume(): Promise<string>;
+    audioStop(): Promise<string>;
+    audioSeek(seconds: number): Promise<string>;
+    audioVolume(volume: number): Promise<string>;
+    audioStatus(): Promise<string>;
+    audioScan(directory?: string): Promise<string>;
     // Surface resize (M9): the renderer subscribes in render().
     onWindowResize(fn: (ev: { width: number; height: number }) => void): void;
     listApps(): SevynAppInfo[];

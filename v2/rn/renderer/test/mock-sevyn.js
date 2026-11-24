@@ -506,6 +506,153 @@ const Sevyn = {
   execAsync(cmdline) {
     return Promise.resolve(Sevyn.exec(cmdline));
   },
+  // RN audio module (Sevyn.audio*): a fake in-memory audiod behind
+  // the host's contract — each function resolves to ONE JSON line
+  // (the daemon's reply, or a synthesized {ok:false} line), never
+  // rejects. Daemon-faithful semantics: scripted durations, clamped
+  // volume, stable codes. _audio.calls records every command the
+  // adapter sent, so tests can prove bad calls never reached the host.
+  _audio: {
+    playing: false,
+    paused: false,
+    positionSec: 0,
+    durationSec: 0,
+    volume: 100,
+    track: null,
+    calls: [],
+  },
+  _audioReset() {
+    Sevyn._audio.playing = false;
+    Sevyn._audio.paused = false;
+    Sevyn._audio.positionSec = 0;
+    Sevyn._audio.durationSec = 0;
+    Sevyn._audio.volume = 100;
+    Sevyn._audio.track = null;
+    Sevyn._audio.calls.length = 0;
+  },
+  _audioStatusLine() {
+    const a = Sevyn._audio;
+    return JSON.stringify({
+      ok: true,
+      available: true,
+      playing: a.playing,
+      paused: a.paused,
+      positionSec: a.positionSec,
+      durationSec: a.durationSec,
+      volume: a.volume,
+      track: a.track,
+    });
+  },
+  _audioError(code, error) {
+    return JSON.stringify({ ok: false, error, code });
+  },
+  audioPlay(path) {
+    const a = Sevyn._audio;
+    a.calls.push("PLAY " + path);
+    if (path === "/data/missing.wav")
+      return Promise.resolve(Sevyn._audioError("not-found", "audio file not found"));
+    if (path === "/data/not-audio.wav")
+      return Promise.resolve(
+        Sevyn._audioError("unsupported-format", "unsupported audio format"),
+      );
+    if (path === "/data/boom.wav")
+      return Promise.resolve(
+        Sevyn._audioError("decode-error", "not a decodable MP3 file"),
+      );
+    a.playing = true;
+    a.paused = false;
+    a.positionSec = 0;
+    a.durationSec = path.endsWith(".mp3") ? 200 : 21.5;
+    a.track = {
+      path,
+      format: path.endsWith(".mp3") ? "mp3" : "wav",
+      durationSec: a.durationSec,
+    };
+    return Promise.resolve(Sevyn._audioStatusLine());
+  },
+  audioPause() {
+    const a = Sevyn._audio;
+    a.calls.push("PAUSE");
+    if (!a.playing)
+      return Promise.resolve(Sevyn._audioError("idle", "nothing is playing"));
+    a.paused = true;
+    return Promise.resolve(Sevyn._audioStatusLine());
+  },
+  audioResume() {
+    const a = Sevyn._audio;
+    a.calls.push("RESUME");
+    if (!a.playing)
+      return Promise.resolve(Sevyn._audioError("idle", "nothing is playing"));
+    a.paused = false;
+    return Promise.resolve(Sevyn._audioStatusLine());
+  },
+  audioStop() {
+    const a = Sevyn._audio;
+    a.calls.push("STOP");
+    a.playing = false;
+    a.paused = false;
+    a.positionSec = 0;
+    a.track = null;
+    return Promise.resolve(Sevyn._audioStatusLine());
+  },
+  audioSeek(seconds) {
+    const a = Sevyn._audio;
+    a.calls.push("SEEK " + seconds);
+    if (!a.playing)
+      return Promise.resolve(Sevyn._audioError("idle", "nothing is playing"));
+    if (seconds > a.durationSec)
+      return Promise.resolve(
+        Sevyn._audioError(
+          "out-of-range",
+          "seek " + seconds + " is outside 0.." + a.durationSec,
+        ),
+      );
+    a.positionSec = seconds;
+    return Promise.resolve(Sevyn._audioStatusLine());
+  },
+  audioVolume(volume) {
+    const a = Sevyn._audio;
+    a.calls.push("VOLUME " + volume);
+    a.volume = Math.max(0, Math.min(100, Math.round(volume)));
+    return Promise.resolve(Sevyn._audioStatusLine());
+  },
+  audioStatus() {
+    Sevyn._audio.calls.push("STATUS");
+    return Promise.resolve(Sevyn._audioStatusLine());
+  },
+  audioScan(directory) {
+    const a = Sevyn._audio;
+    a.calls.push(directory === undefined ? "SCAN" : "SCAN " + directory);
+    if (directory === "/data/no-such-dir")
+      return Promise.resolve(
+        Sevyn._audioError("not-found", "cannot list /data/no-such-dir"),
+      );
+    return Promise.resolve(
+      JSON.stringify({
+        ok: true,
+        tracks: [
+          {
+            id: "/data/01-sunrise-acoustic.wav",
+            title: "01-sunrise-acoustic",
+            artist: "Unknown Artist",
+            album: "Local Library",
+            durationSec: 21.5,
+            path: "/data/01-sunrise-acoustic.wav",
+            format: "wav",
+          },
+          {
+            id: "/data/song.mp3",
+            title: "song",
+            artist: "Unknown Artist",
+            album: "Local Library",
+            durationSec: 200,
+            path: "/data/song.mp3",
+            format: "mp3",
+          },
+        ],
+      }),
+    );
+  },
   launchApp(appId) {
     logs.push("LAUNCH " + appId);
     return true;
@@ -521,6 +668,7 @@ const Sevyn = {
   _reset() {
     Sevyn._status = { battery: "87", wifi: "on", volume: "43" };
     Sevyn._execHandler = null;
+    Sevyn._audioReset();
     nodes.clear();
     // NOTE: nextId is deliberately NOT reset. Yoga node IDs must be
     // unique for the life of the process (real Yoga never reuses

@@ -130,6 +130,7 @@ g++ -O2 -std=c++17 -Wall -Wextra \
   "$ROOT/rn/host/genesis-presenter.cc" \
   "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
   "$ROOT/rn/host/appclient.cc" \
+  "$ROOT/rn/host/audiod-client.cc" \
   "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
   "$BUILD_TMP/xdg-shell-protocol.o" \
   -Wl,--start-group $HERMES_LIBS "$PREFIX/lib/libyogacore.a" -Wl,--end-group \

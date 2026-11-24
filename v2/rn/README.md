@@ -88,6 +88,22 @@ CRASHED / INSTALLED / UNINSTALLED <id>` lines. The renderer keeps an
   manifests grant it). This is the ONLY way an app runs a command:
   there is no shell, no bash, no escape hatch — the Terminal app is a
   `sevyn` CLI prompt, nothing more.
+- `Sevyn.audioPlay(path)` / `audioPause()` / `audioResume()` /
+  `audioStop()` / `audioSeek(seconds)` / `audioVolume(volume)` /
+  `audioStatus()` / `audioScan(dir?)` — the RN audio module (port of
+  PR #129): async audiod calls, off the JS thread (a dead daemon
+  never blocks the UI). Each returns a `Promise<string>` resolving to
+  ONE JSON line — the daemon's reply, or a synthesized
+  `{ok:false, code, error}` line on validation/transport failure.
+  Apps do not call these directly; they import `SevynAudio` /
+  `SevynMedia` from `v2/rn/renderer/sevyn-audio.js`, which validates
+  arguments, parses the line, and rejects with an `AudiodError`
+  carrying the stable code (`bad-argument`, `audio-unavailable`,
+  plus the daemon's own `idle` / `not-found` / `unsupported-format` /
+  `out-of-range` / ...). The two adapters are the same object — one
+  implementation, two names. Output devices are a single static
+  default (audiod owns one ALSA device); `getOutputs()` /
+  `setOutput()` never touch the daemon.
 
 The bundle's top-level code starts the app (the shell calls the
 renderer's `render`). The host just runs the bundle and drives frames

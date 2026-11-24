@@ -83,6 +83,20 @@ declare global {
     // for the hourly time resync (#134 follow-up) so an NTP round
     // trip never blocks the shell's JS thread.
     execAsync(cmdline: string): Promise<string>;
+    // RN audio module (port of PR #129): async audiod calls. Each
+    // returns a Promise of ONE JSON line — the daemon's reply, or a
+    // synthesized {ok:false, code, error} line. The JS adapter
+    // (v2/rn/renderer/sevyn-audio.js) parses the line and rejects
+    // with an AudiodError carrying the stable code. Never rejects;
+    // a dead daemon is an {ok:false} line, never a hang.
+    audioPlay(path: string): Promise<string>;
+    audioPause(): Promise<string>;
+    audioResume(): Promise<string>;
+    audioStop(): Promise<string>;
+    audioSeek(seconds: number): Promise<string>;
+    audioVolume(volume: number): Promise<string>;
+    audioStatus(): Promise<string>;
+    audioScan(directory?: string): Promise<string>;
     listApps(): SevynAppInfo[];
     launchApp(appId: string): boolean;
     // Focus a running app (dock click on a running single-instance
