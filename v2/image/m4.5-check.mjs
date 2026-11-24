@@ -331,7 +331,7 @@ async function boot(tag) {
       "-mon",
       "chardev=qmp,mode=control",
       "-drive",
-      `file=${DISK},format=raw,if=virtio`,
+      `file=${DISK},format=raw,if=virtio,cache=writethrough`,
       "-device",
       "virtio-gpu-pci",
       "-device",

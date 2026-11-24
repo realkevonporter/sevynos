@@ -377,7 +377,7 @@ async function boot(tag) {
     "-mon",
     "chardev=qmp,mode=control",
   );
-  args.push("-drive", `file=${DISK},format=raw,if=virtio`);
+  args.push("-drive", `file=${DISK},format=raw,if=virtio,cache=writethrough`);
   // virtio-rng: the guest has no hardware RNG, and under TCG the
   // kernel's entropy pool fills slowly — DTLS certificate generation
   // (and any other crypto) can stall waiting for entropy. Feed it
