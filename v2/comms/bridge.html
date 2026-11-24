@@ -221,8 +221,19 @@
           mark("answer-created");
           await entry.pc.setLocalDescription(answer);
           mark("local-desc-set");
-          await drainPending(callId);
-          mark("drained");
+          // Drain the queued remote candidates in the background,
+          // not on the answer's critical path: each addIceCandidate
+          // is a CDP round-trip that takes seconds on a starved
+          // guest (M10: 8 queued candidates cost ~64 s, so
+          // createAnswer took 89 s and the ANSWER verb died at the
+          // 10 s exec kill while the daemon-side answer was still
+          // working). The answer SDP does not depend on the
+          // candidates — ICE pairs after the SDP exchange, once the
+          // drain lands — and the drain still runs to completion
+          // (its failures are counted in queuedDropped); it just
+          // no longer holds the SDP behind it. The "drained" mark
+          // still lands in the timings when the drain finishes.
+          void drainPending(callId).finally(() => mark("drained"));
           return { sdp: answer.sdp };
         },
         async setRemoteAnswer({ callId, sdp }) {

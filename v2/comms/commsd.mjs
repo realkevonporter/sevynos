@@ -68,6 +68,16 @@ function log(obj) {
   console.log(`COMMS ${JSON.stringify(obj)}`);
 }
 
+// Mirror one JSON line to the serial console (fire-and-forget):
+// the daemon's log() goes to its own stdout, which the harness
+// cannot see — the console is the only channel that survives the
+// Terminal/app wedge during a call. Only call-lifecycle lines
+// are mirrored (not every log line). Best-effort: /dev/console
+// does not exist on the sandbox host (log file only there).
+function mirrorConsole(obj) {
+  void fs.appendFile("/dev/console", `COMMS ${JSON.stringify(obj)}\n`).catch(() => {});
+}
+
 function b64(n) {
   return Buffer.from(Array.from({ length: n }, () => Math.floor(Math.random() * 256)))
     .toString("base64")
@@ -273,14 +283,25 @@ function liveCall() {
 async function pollMediaOnce() {
   if (mediaPollRunning || !bridge || calls.size === 0) return;
   mediaPollRunning = true;
+  let statsTimer;
   try {
     // One getStats, not two: refreshMediaState() is the same call
     // plus the frames gate, so derive "connected" here directly —
     // but keep the bridge's own mediaState() as the base: a null
     // bridge reports "none" (never faked), never "connecting".
-    const raw = await bridge
-      .rawMediaState()
-      .catch((e) => ({ error: String(e?.message || e) }));
+    // Bound at 30 s: pc.getStats() can hang on a mid-answer PC
+    // under TCG, and a hung await leaves mediaPollRunning true
+    // forever — the 30 s interval then no-ops and the console
+    // mirror goes silent for the rest of the call (M10: bob
+    // mirrored "connected" twice, then nothing for 1000 s, while
+    // frames were flowing). On timeout, report the stall and let
+    // the next poll retry.
+    const raw = await Promise.race([
+      bridge.rawMediaState(),
+      new Promise((resolve) => {
+        statsTimer = setTimeout(() => resolve({ error: "getStats timeout" }), 30000);
+      }),
+    ]).catch((e) => ({ error: String(e?.message || e) }));
     const base = bridge.mediaState();
     const media =
       base === "none"
@@ -297,15 +318,8 @@ async function pollMediaOnce() {
       // harness can see frames flowing without the Terminal or
       // the app rendering — under TCG the Terminal/app wedge
       // during an active call, so the console is the only live
-      // channel that survives. Best-effort: /dev/console does not
-      // exist on the sandbox host (log file only there).
-      if (media === "connected") {
-        // Fire-and-forget: a slow/blocked console must never stall
-        // the poll.
-        void fs
-          .appendFile("/dev/console", `COMMS ${JSON.stringify(line)}\n`)
-          .catch(() => {});
-      }
+      // channel that survives.
+      if (media === "connected") mirrorConsole(line);
     }
     for (const c of calls.values()) {
       if (c.state === "connected" || c.state === "ringing" || c.state === "incoming") {
@@ -314,6 +328,7 @@ async function pollMediaOnce() {
       }
     }
   } finally {
+    clearTimeout(statsTimer);
     mediaPollRunning = false;
   }
 }
@@ -499,7 +514,9 @@ async function answerCall(callId) {
   call.state = "connected";
   call.media = b.mediaState();
   startPump(call);
-  log({ kind: "call-answered", callId, roomId: call.roomId });
+  const answered = { kind: "call-answered", callId, roomId: call.roomId };
+  log(answered);
+  mirrorConsole(answered);
   return call;
 }
 
@@ -518,7 +535,9 @@ async function endCall(callId, reason) {
   // own timeout ends its side if the event is ever lost.
   call.state = "ended";
   call.media = "none";
-  log({ kind: "call-ended", callId, reason: reason || "hangup" });
+  const ended = { kind: "call-ended", callId, reason: reason || "hangup" };
+  log(ended);
+  mirrorConsole(ended);
   // Dedupe the event: endCall can race (local hangup + a remote
   // hangup arriving on the timeline), and a second hangup event
   // is noise. The bridge teardown stays idempotent per callId.
@@ -569,13 +588,15 @@ function onTimeline(ev, room) {
     };
     calls.set(callId, call);
     ensureMediaPoll();
-    log({
+    const incoming = {
       kind: "call-incoming",
       callId,
       roomId: room.roomId,
       peer: call.peer,
       video: call.video,
-    });
+    };
+    log(incoming);
+    mirrorConsole(incoming);
     // Pre-build the answer SDP so ANSWER is fast; it is only SENT on answer.
     (async () => {
       try {
@@ -599,12 +620,14 @@ function onTimeline(ev, room) {
         try {
           timings = (await getBridge().getTimings?.()) ?? null;
         } catch {}
-        log({
+        const prepFailed = {
           kind: "call-answer-prep-failed",
           callId,
           error: String(e?.message || e),
           ...(timings ? { answerTimings: timings } : {}),
-        });
+        };
+        log(prepFailed);
+        mirrorConsole(prepFailed);
       }
     })();
     call.timer = setTimeout(() => {
@@ -636,7 +659,9 @@ function onTimeline(ev, room) {
       .then(() => {
         call.state = "connected";
         call.media = getBridge().mediaState();
-        log({ kind: "call-connected", callId });
+        const connected = { kind: "call-connected", callId };
+        log(connected);
+        mirrorConsole(connected);
       })
       .catch((e) =>
         log({ kind: "call-answer-failed", callId, error: String(e?.message || e) }),
@@ -674,7 +699,9 @@ function onTimeline(ev, room) {
       .catch(() => {});
     call.state = "ended";
     call.media = "none";
-    log({ kind: "call-ended", callId, reason: type });
+    const endedRemote = { kind: "call-ended", callId, reason: type };
+    log(endedRemote);
+    mirrorConsole(endedRemote);
   }
 }
 
