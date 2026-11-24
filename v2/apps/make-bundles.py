@@ -13,7 +13,7 @@ it), then for each app writes <id>.sevyn (zip: manifest.json + app.hbc
   - terminal, settings, files, browser: permission cli.exec (they run
     the `sevyn` CLI through the host's Sevyn.exec bridge) and each
     ships its OWN bundle (M4: terminal.hbc, settings.hbc, files.hbc;
-    M5: browser.hbc).
+    M5: browser.hbc; music.hbc for the Music app on native audiod).
   - every other stock app: unsigned, no permissions, the template hbc.
 
 Also writes the harness fixtures to the test-bundles dir:
@@ -53,8 +53,8 @@ SIGN_HELPER = REPO / "v2" / "loader" / "ed25519-sign.c"
 
 # Per-app overrides beyond apps.ts (id -> manifest fields). Terminal
 # is the protected system app (the recovery path); terminal, settings,
-# files, browser, and the three M10 comms apps run the `sevyn` CLI,
-# so they hold cli.exec. Files keeps status.read too: the M3 template
+# files, browser, music, and the three M10 comms apps run the `sevyn`
+# CLI, so they hold cli.exec. Files keeps status.read too: the M3 template
 # still shows a live status line in its window (m3-check step 5), and
 # the real M4 Files app simply never subscribes — it has no status line.
 OVERRIDES = {
@@ -73,6 +73,9 @@ OVERRIDES = {
     # `sevyn camera`): cli.exec for the CLI, plus the camera
     # capability the app checks on launch (first-use consent screen).
     "camera": {"permissions": ["camera", "cli.exec"]},
+    # Music is a real app with its own hbc (native audiod via the
+    # SevynAudio adapter): cli.exec for the files-list fallback only.
+    "music": {"permissions": ["cli.exec"]},
     # Notes is a template app (no own hbc) — multi-instance like
     # Files/Terminal/Browser, so it gets the flag here.
     "notes": {"singleInstance": False},
@@ -175,6 +178,8 @@ def main():
                     help="installer app.hbc (defaults to the template)")
     ap.add_argument("--camera-hbc", default=None,
                     help="camera app.hbc (defaults to the template)")
+    ap.add_argument("--music-hbc", default=None,
+                    help="music app.hbc (defaults to the template)")
     ap.add_argument("--out", required=True, help="stock bundles dir")
     ap.add_argument("--trusted-keys-dir", required=True)
     ap.add_argument("--test-bundles-dir", default=None)
@@ -183,8 +188,9 @@ def main():
     hbc = Path(args.hbc).read_bytes()
     crash_hbc = Path(args.crash_hbc).read_bytes()
     # M4 real apps ship their own bundles; M10's three comms apps
-    # share one comms.hbc; Camera ships its own camera.hbc; anything
-    # without one falls back to the template (the other six stock apps).
+    # share one comms.hbc; Camera ships its own camera.hbc; Music ships
+    # its own music.hbc; anything without one falls back to the
+    # template (the other five stock apps).
     hbc_for = {
         "terminal": (Path(args.terminal_hbc).read_bytes()
                      if args.terminal_hbc else hbc),
@@ -204,6 +210,8 @@ def main():
                      if args.installer_hbc else hbc),
         "camera": (Path(args.camera_hbc).read_bytes()
                    if args.camera_hbc else hbc),
+        "music": (Path(args.music_hbc).read_bytes()
+                  if args.music_hbc else hbc),
     }
     out_dir = Path(args.out)
     trusted_dir = Path(args.trusted_keys_dir)

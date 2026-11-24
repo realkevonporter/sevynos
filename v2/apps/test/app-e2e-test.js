@@ -1,10 +1,11 @@
 "use strict";
 // End-to-end Node test for the built app bundles (dist/app.js,
 // dist/terminal.js, dist/settings.js, dist/files.js, dist/browser.js,
-// dist/comms.js, dist/camera.js) and the crash bundle (dist/crash.js). Loads the app
-// bundle with the mock Sevyn host as several apps — files (status.read
-// granted, the fallback screen) and notes/music/calculator/calendar/store
-// (the M9 real screens) — and drives the close X. The crash bundle
+// dist/comms.js, dist/camera.js, dist/music.js) and the crash bundle
+// (dist/crash.js). Loads the app bundle with the mock Sevyn host as
+// several apps — files (status.read granted, the fallback screen)
+// and notes/calculator/calendar/store (the M9 real screens) — and
+// drives the close X. The crash bundle
 // must throw during evaluation. The M4 apps load with cli.exec and a
 // canned exec handler, and drive their real flows (terminal typing,
 // settings channel switch + AI selection, files navigation). The M5
@@ -21,7 +22,15 @@
 // viewer decode). The camera preview polls on a 1s interval — the
 // async camera check unmounts at the end so the interval cannot
 // keep the process alive; the sync camera checks never start it
-// (no consent, or no device).
+// (no consent, or no device). The Music bundle loads with cli.exec
+// and talks to the mock's fake in-memory audiod (Sevyn._audio)
+// through the SevynAudio adapter — no `sevyn music` CLI anywhere:
+// the scan lists the fake's 2 tracks, play/pause/resume/stop/seek/
+// volume drive the fake's state, and the 1 s position poll reads it
+// back. A scan failure is scripted by stubbing Sevyn.audioScan per
+// check (restored after), and the files-list fallback answers
+// through a canned `sevyn files` handler. The async music checks
+// unmount at the end so the interval cannot keep the process alive.
 //
 // Run: node test/app-e2e-test.js   (from v2/apps, after npm run build)
 const assert = require("node:assert/strict");
@@ -59,6 +68,10 @@ const commsBundle = fs.readFileSync(
 );
 const cameraBundle = fs.readFileSync(
   path.join(__dirname, "..", "dist", "camera.js"),
+  "utf8",
+);
+const musicBundle = fs.readFileSync(
+  path.join(__dirname, "..", "dist", "music.js"),
   "utf8",
 );
 const crashBundle = fs.readFileSync(
@@ -1059,6 +1072,47 @@ check("camera (no device): honest no-camera state + Retry", () => {
   );
 });
 
+// --- Music ---------------------------------------------------------------
+// The library comes from the mock's fake audiod (Sevyn._audio): the
+// scan returns 2 tracks (01-sunrise-acoustic.wav 21.5 s, song.mp3
+// 200 s). The files-list fallback answers through the exec handler
+// below; MUSIC_TRACKS is the /data fixture it lists. Stubbing
+// Sevyn.audioScan per check scripts a scan failure (fallback) or an
+// extra track (failed play) — the stub is restored at the end of
+// the check, because loadAs/_reset does not restore host functions.
+const MUSIC_TRACKS = [
+  "01-sunrise-acoustic.wav",
+  "02-midnight-jazz.wav",
+  "03-ocean-breeze.wav",
+  "04-city-lights.wav",
+  "05-forest-dawn.wav",
+  "06-desert-drive.wav",
+  "07-starlight-lullaby.wav",
+];
+
+function musicFilesHandler(files) {
+  const listed = files || MUSIC_TRACKS;
+  return (cmd) => {
+    if (cmd === "sevyn files list /data")
+      return "0\n" + listed.map((f) => "f " + f + "\n").join("");
+    return "0\n";
+  };
+}
+
+function loadMusicAs(handler, permissions) {
+  return loadAs(
+    {
+      id: "music",
+      name: "Music",
+      color: "#ec4899",
+      glyph: "M",
+      permissions: permissions || ["cli.exec"],
+    },
+    musicBundle,
+    handler,
+  );
+}
+
 // Async flows (login + open room + send): the mock's execAsync
 // resolves on a microtask, so flush with setImmediate after each tap.
 const flush = () => new Promise((r) => setImmediate(r));
@@ -1066,6 +1120,15 @@ async function checkAsync(name, fn) {
   await fn();
   passed++;
   console.log("ok - " + name);
+}
+
+// The mount scan is async: give the passive effect a macrotask to
+// fire, then flush the adapter promise's microtasks (same pattern
+// as the camera preview check below).
+async function waitForMusicScan() {
+  await new Promise((r) => setTimeout(r, 100));
+  await flush();
+  await flush();
 }
 
 (async () => {
@@ -1184,6 +1247,297 @@ async function checkAsync(name, fn) {
         "viewer marker logged, logs=" + JSON.stringify(Sevyn._logs),
       );
       // Unmount: clears the 1s preview interval so the process exits.
+      renderer.unmount();
+      Sevyn._reset();
+    },
+  );
+
+  await checkAsync("music: library lists the 2 scanned tracks", async () => {
+    loadMusicAs(musicFilesHandler());
+    await waitForMusicScan();
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(texts.includes("2 tracks"), "count shown");
+    assert.ok(texts.includes("01-sunrise-acoustic"), "track 01 listed");
+    assert.ok(texts.includes("song"), "mp3 track listed");
+    assert.ok(
+      texts.some((t) => t.includes("0:21")),
+      "01 duration shown",
+    );
+    assert.ok(
+      texts.some((t) => t.includes("3:20")),
+      "song duration shown",
+    );
+    assert.ok(
+      !texts.some((t) => t.includes("durations unknown")),
+      "scan source, not the fallback",
+    );
+    assert.ok(texts.includes("Tap a track to play it."), "now-playing idle line shown");
+    assert.ok(texts.includes("Volume 100%"), "volume shown");
+    assert.ok(
+      Sevyn._audio.calls.includes("SCAN /data"),
+      "scan reached the host adapter, calls=" + JSON.stringify(Sevyn._audio.calls),
+    );
+  });
+
+  await checkAsync("music: adapter needs no permission", async () => {
+    loadMusicAs(musicFilesHandler(), []);
+    await waitForMusicScan();
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(texts.includes("2 tracks"), "library lists without cli.exec");
+    assert.ok(!texts.some((t) => t.includes("permission")), "no permission gate shown");
+  });
+
+  await checkAsync("music: scan failure falls back to the files list", async () => {
+    const realScan = Sevyn.audioScan;
+    Sevyn.audioScan = () =>
+      Promise.resolve(
+        JSON.stringify({ ok: false, error: "cannot list /data", code: "not-found" }),
+      );
+    loadMusicAs(musicFilesHandler());
+    await waitForMusicScan();
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("7 tracks")),
+      "count shown",
+    );
+    assert.ok(
+      texts.some((t) => t.includes("durations unknown")),
+      "fallback note shown",
+    );
+    assert.ok(texts.includes("01-sunrise-acoustic"), "track listed");
+    assert.ok(
+      !texts.some((t) => t.includes("0:21")),
+      "no fake durations in the fallback",
+    );
+    Sevyn.audioScan = realScan;
+  });
+
+  await checkAsync("music: empty library + Retry re-scans", async () => {
+    const realScan = Sevyn.audioScan;
+    Sevyn.audioScan = () =>
+      Promise.resolve(
+        JSON.stringify({ ok: false, error: "cannot list /data", code: "not-found" }),
+      );
+    loadMusicAs(musicFilesHandler([]));
+    await waitForMusicScan();
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(texts.includes("No music yet"), "empty state shown");
+    assert.ok(texts.includes("Retry"), "retry button shown");
+    tapText("Retry", 15);
+    assert.ok(
+      Sevyn._logs.includes("MUSIC rescan"),
+      "retry re-scans, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    // Let the re-scan settle before the next check loads.
+    await waitForMusicScan();
+    Sevyn.audioScan = realScan;
+  });
+
+  await checkAsync(
+    "music: play, position poll, pause/resume, seek, volume, next/prev wrap, stop",
+    async () => {
+      loadMusicAs(musicFilesHandler());
+      await waitForMusicScan();
+      tapText("01-sunrise-acoustic", 15);
+      await flush();
+      await flush();
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Playing"), "playing state shown");
+      assert.ok(
+        Sevyn._logs.includes("MUSIC play /data/01-sunrise-acoustic.wav"),
+        "play marker logged, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      // The 1 s position poll fires STATUS; the fake holds the
+      // position the test sets, so the poll is observable.
+      Sevyn._audio.positionSec = 5;
+      await new Promise((r) => setTimeout(r, 1200));
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("0:05 / 0:21")),
+        "poll picked up the daemon position, texts=" + JSON.stringify(texts),
+      );
+      tapText("Pause", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Paused"), "paused state shown");
+      await new Promise((r) => setTimeout(r, 1200));
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("0:05 / 0:21")),
+        "position frozen while paused, texts=" + JSON.stringify(texts),
+      );
+      tapText("Resume", 15);
+      await flush();
+      await flush();
+      tapText("+10s", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("0:15 / 0:21")),
+        "seek +10s to 0:15, texts=" + JSON.stringify(texts),
+      );
+      tapText("Volume −", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Volume 90%"), "volume down to 90%");
+      tapText("Next", 15);
+      await flush();
+      await flush();
+      assert.ok(
+        Sevyn._logs.includes("MUSIC play /data/song.mp3"),
+        "next plays song.mp3, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      tapText("Previous", 15);
+      await flush();
+      await flush();
+      assert.ok(
+        Sevyn._logs.includes("MUSIC play /data/01-sunrise-acoustic.wav"),
+        "previous returns to track 01",
+      );
+      // Wrap: Next from the last track plays the first.
+      tapText("song", 15);
+      await flush();
+      await flush();
+      tapText("Next", 15);
+      await flush();
+      await flush();
+      const playLogs = Sevyn._logs.filter((l) =>
+        l.startsWith("MUSIC play /data/01-sunrise-acoustic.wav"),
+      );
+      assert.ok(playLogs.length >= 2, "next wraps to track 01");
+      tapText("Stop", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Stopped"), "stopped state shown");
+      // Unmount: clears the 1 s status interval so the process exits.
+      renderer.unmount();
+      Sevyn._reset();
+    },
+  );
+
+  await checkAsync(
+    "music: failed play surfaces a clean error and the app recovers",
+    async () => {
+      const realScan = Sevyn.audioScan;
+      Sevyn.audioScan = () =>
+        Promise.resolve(
+          JSON.stringify({
+            ok: true,
+            tracks: [
+              {
+                id: "/data/01-sunrise-acoustic.wav",
+                title: "01-sunrise-acoustic",
+                artist: "Unknown Artist",
+                album: "Local Library",
+                durationSec: 21.5,
+                path: "/data/01-sunrise-acoustic.wav",
+                format: "wav",
+              },
+              {
+                id: "/data/boom.wav",
+                title: "boom",
+                artist: "Unknown Artist",
+                album: "Local Library",
+                durationSec: 10,
+                path: "/data/boom.wav",
+                format: "wav",
+              },
+            ],
+          }),
+        );
+      loadMusicAs(musicFilesHandler());
+      await waitForMusicScan();
+      tapText("boom", 15);
+      await flush();
+      await flush();
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("not a decodable MP3 file")),
+        "daemon error shown, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(
+        texts.some((t) => t.includes("decode-error")),
+        "stable error code shown",
+      );
+      assert.ok(
+        texts.includes("01-sunrise-acoustic"),
+        "library still listed after the bad call",
+      );
+      tapText("01-sunrise-acoustic", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Playing"), "a good track plays after the error");
+      assert.ok(
+        !texts.some((t) => t.includes("not a decodable MP3 file")),
+        "error cleared by the next success",
+      );
+      // Stop first: the 1 s status interval is cleared by the
+      // playing->stopped state change (unmount alone does not flush
+      // the effect cleanup in this harness, so an active interval
+      // would keep the process alive).
+      tapText("Stop", 15);
+      await flush();
+      await flush();
+      renderer.unmount();
+      Sevyn._reset();
+      Sevyn.audioScan = realScan;
+    },
+  );
+
+  await checkAsync(
+    "music: volume with the daemon down surfaces an error, never throws",
+    async () => {
+      loadMusicAs(musicFilesHandler());
+      await waitForMusicScan();
+      tapText("01-sunrise-acoustic", 15);
+      await flush();
+      await flush();
+      const realVolume = Sevyn.audioVolume;
+      Sevyn.audioVolume = () =>
+        Promise.resolve(
+          JSON.stringify({
+            ok: false,
+            error: "Could not reach the audio service.",
+            code: "audio-unavailable",
+          }),
+        );
+      tapText("Volume +", 15);
+      await flush();
+      await flush();
+      let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(
+        texts.some((t) => t.includes("Could not reach the audio service")),
+        "daemon-down error shown, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(
+        texts.includes("Playing"),
+        "app still alive after the failed volume call",
+      );
+      Sevyn.audioVolume = realVolume;
+      tapText("Volume −", 15);
+      await flush();
+      await flush();
+      texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      assert.ok(texts.includes("Volume 90%"), "volume recovers when the daemon does");
+      assert.ok(
+        !texts.some((t) => t.includes("Could not reach the audio service")),
+        "error cleared by the next success",
+      );
+      // Stop first: the 1 s status interval is cleared by the
+      // playing->stopped state change (unmount alone does not flush
+      // the effect cleanup in this harness, so an active interval
+      // would keep the process alive).
+      tapText("Stop", 15);
+      await flush();
+      await flush();
       renderer.unmount();
       Sevyn._reset();
     },
