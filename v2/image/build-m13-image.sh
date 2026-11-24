@@ -853,6 +853,20 @@ case "$1" in
     for r in $router; do /bin/busybox route add default gw "$r" 2>/dev/null; done
     : > /etc/resolv.conf
     for d in $dns; do printf 'nameserver %s\n' "$d" >> /etc/resolv.conf; done
+    # Fallback public resolvers (GF65, 2026-11-24: the ISP DNS
+    # stopped answering mid-session and every lookup died — the
+    # updater's download failed with it. The DHCP servers stay
+    # first and are always consulted first; these are only reached
+    # after they time out. glibc consults at most three
+    # nameservers, so only fill up to three total.)
+    n=$(grep -c '^nameserver ' /etc/resolv.conf 2>/dev/null || true)
+    n=${n:-0}
+    for fb in 1.1.1.1 8.8.8.8; do
+      if [ "$n" -lt 3 ] && ! grep -qx "nameserver $fb" /etc/resolv.conf 2>/dev/null; then
+        printf 'nameserver %s\n' "$fb" >> /etc/resolv.conf
+        n=$((n + 1))
+      fi
+    done
     ;;
   deconfig)
     /bin/busybox ifconfig "$interface" 0.0.0.0
@@ -865,6 +879,13 @@ chmod +x "$STAGE/etc/udhcpc.script"
 # loopback client) asks the slirp DNS, which is slow to answer and
 # unreachable where the guest has no internet.
 printf '127.0.0.1 localhost\n::1 localhost\n' >"$STAGE/etc/hosts"
+# Resolver for the no-DHCP case: slirp DNS first (QEMU), then the
+# same public fallbacks the udhcpc script appends. The m7–m12
+# scripts claimed a staged resolv.conf but never wrote one — a
+# guest that got no lease had no resolver at all (glibc falls back
+# to 127.0.0.1 and every lookup fails). Overwritten by the udhcpc
+# script whenever a lease arrives.
+printf 'nameserver 10.0.2.3\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n' >"$STAGE/etc/resolv.conf"
 
 # Data Weston and its stack load with dlopen / by path (not via ldd).
 for d in \
