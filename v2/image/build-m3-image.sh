@@ -55,13 +55,18 @@ for tool in busybox cpio gcc g++ pkg-config wayland-scanner python3 zstd modinfo
 done
 for f in "$SYSROOT/usr/bin/weston" "$SYSROOT/usr/sbin/seatd" \
          "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
-         "$SYSROOT/usr/share/wayland-protocols/unstable/wlr-layer-shell-unstable-v1.xml" \
          "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml"; do
   if [ ! -f "$f" ]; then
     echo "error: missing $f (install weston, seatd, wayland-protocols)" >&2
     exit 1
   fi
 done
+# wlr-layer-shell is a wlroots extension, not part of upstream
+# wayland-protocols: the XML is vendored in the repo.
+[ -f "$ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml" ] || {
+  echo "error: missing $ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml (vendored protocol — the checkout is incomplete)" >&2
+  exit 1
+}
 
 mkdir -p "$OUT"
 cp "$kernel" "$OUT/vmlinuz"
@@ -86,13 +91,13 @@ wayland-scanner client-header \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-client-protocol.h"
 wayland-scanner client-header \
-  "$SYSROOT/usr/share/wayland-protocols/unstable/wlr-layer-shell-unstable-v1.xml" \
+  "$ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml" \
   "$BUILD_TMP/wlr-layer-shell-unstable-v1-client-protocol.h"
 wayland-scanner private-code \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-protocol.c"
 wayland-scanner private-code \
-  "$SYSROOT/usr/share/wayland-protocols/unstable/wlr-layer-shell-unstable-v1.xml" \
+  "$ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml" \
   "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.c"
 wayland-scanner client-header \
   "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
