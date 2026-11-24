@@ -1,17 +1,20 @@
 // SevynOS v2 M3 — Wayland client for the RN host.
 //
-// One xdg_toplevel surface. The shell runs fullscreen at the output's
-// preferred mode (M9 — weston.ini no longer pins 1024x768); an app
-// runs windowed (800x500) with its own title and app id, and the
-// compositor's close request ends the app (the shell is not closable).
-// M9: the toplevel configure is honored — a resize drag or an output
-// mode change resizes the painters and fires the size handler; a
-// left-button press in the title bar (minus the close-X zone) starts
-// an interactive move, and in the 8px right/bottom edge strips an
-// interactive resize. Double-buffered SHM: two Painters, each with
-// its own wl_buffer; a buffer is only reused after the compositor
-// releases it, so frames never tear. Pointer + keyboard events are
-// forwarded to the host.
+// The shell is a layer-shell Background surface when the compositor
+// offers zwlr_layer_shell_v1 (Genesis Stage 4+; the Shell must never
+// be raisable above app windows, so it is not a toplevel at all —
+// a click on the desktop reaches it without raising it). With no
+// layer-shell global (e.g. Weston dev), the shell falls back to a
+// fullscreen xdg_toplevel. An app runs windowed (800x500) with its
+// own title and app id, and the compositor's close request ends the
+// app (the shell is not closable). M9: the toplevel configure is
+// honored — a resize drag or an output mode change resizes the
+// painters and fires the size handler; a left-button press in the
+// title bar (minus the close-X zone) starts an interactive move, and
+// in the 8px right/bottom edge strips an interactive resize.
+// Double-buffered SHM: two Painters, each with its own wl_buffer; a
+// buffer is only reused after the compositor releases it, so frames
+// never tear. Pointer + keyboard events are forwarded to the host.
 #pragma once
 
 #include <functional>
@@ -29,6 +32,8 @@
 struct xdg_wm_base;
 struct xdg_surface;
 struct xdg_toplevel;
+struct zwlr_layer_shell_v1;
+struct zwlr_layer_surface_v1;
 
 namespace sevyn {
 
@@ -139,9 +144,13 @@ class Wayland {
   int outputHeight() const { return outputHeight_; }
 
  private:
-  // Create the wl_surface + xdg_surface + xdg_toplevel for the
-  // current width_/height_/title_/appId_/fullscreen_ and collect the
-  // initial configure. Used by the constructor and by remap().
+  // Create the wl_surface for the current width_/height_/title_/
+  // appId_/fullscreen_ and collect the initial configure. Used by
+  // the constructor and by remap(). The fullscreen shell prefers a
+  // layer-shell Background surface (namespace "sevyn-shell") when
+  // the compositor offers zwlr_layer_shell_v1, and falls back to a
+  // fullscreen xdg_toplevel otherwise; app windows always use the
+  // toplevel path.
   void createSurface();
 
   void onFrameDone();
@@ -185,6 +194,18 @@ class Wayland {
                                      int32_t width, int32_t height,
                                      wl_array* states);
   static void onXdgToplevelClose(void* data, xdg_toplevel* toplevel);
+  // Layer-shell surface events (shell only): the configure carries
+  // the size the background must paint at — ack it, resize when it
+  // differs (the first configure can carry the compositor's fallback
+  // size; the corrected one follows the first commit), and flush
+  // any pending present. Closed means the compositor killed the
+  // background; the shell logs it (it has no close handler).
+  static void onLayerSurfaceConfigure(void* data,
+                                      zwlr_layer_surface_v1* layerSurface,
+                                      uint32_t serial, uint32_t width,
+                                      uint32_t height);
+  static void onLayerSurfaceClosed(void* data,
+                                   zwlr_layer_surface_v1* layerSurface);
   static void onBufferReleaseCb(void* data, wl_buffer* buffer);
   static void onFrameDoneCb(void* data, wl_callback* callback,
                             uint32_t time);
@@ -247,6 +268,13 @@ class Wayland {
   wl_surface* surface_ = nullptr;
   xdg_surface* xdgSurface_ = nullptr;
   xdg_toplevel* xdgToplevel_ = nullptr;
+  // Layer-shell (shell only): the zwlr_layer_shell_v1 global and
+  // the Background layer surface, when the compositor offers it.
+  // layerMode_ is true while the surface is a layer surface (never
+  // for app windows); xdgSurface_/xdgToplevel_ stay null then.
+  zwlr_layer_shell_v1* layerShell_ = nullptr;
+  zwlr_layer_surface_v1* layerSurface_ = nullptr;
+  bool layerMode_ = false;
   // Genesis (M12): the GPU present path. Created lazily on the first
   // present; null means "not attempted yet" (CPU painter in use) and
   // genesisDead_ means "attempted and unavailable — never retry".

@@ -186,6 +186,7 @@ for f in "$SYSROOT/usr/sbin/wpa_supplicant" "$SYSROOT/usr/sbin/wpa_cli" \
 done
 for f in "$SYSROOT/usr/bin/weston" "$SYSROOT/usr/sbin/seatd" \
          "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
+         "$SYSROOT/usr/share/wayland-protocols/unstable/wlr-layer-shell-unstable-v1.xml" \
          "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml"; do
   if [ ! -f "$f" ]; then
     echo "error: missing $f (install weston, seatd, wayland-protocols)" >&2
@@ -223,9 +224,15 @@ HERMES_SRC="$(ls -d "$DEPS_DIR"/src/hermes-*/)"
 wayland-scanner client-header \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-client-protocol.h"
+wayland-scanner client-header \
+  "$SYSROOT/usr/share/wayland-protocols/unstable/wlr-layer-shell-unstable-v1.xml" \
+  "$BUILD_TMP/wlr-layer-shell-unstable-v1-client-protocol.h"
 wayland-scanner private-code \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-protocol.c"
+wayland-scanner private-code \
+  "$SYSROOT/usr/share/wayland-protocols/unstable/wlr-layer-shell-unstable-v1.xml" \
+  "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.c"
 wayland-scanner client-header \
   "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
   "$BUILD_TMP/presentation-time-client-protocol.h"
@@ -292,6 +299,10 @@ gcc -O2 -c $(pkg-config --cflags wayland-client) \
   -I"$BUILD_TMP" \
   -o "$BUILD_TMP/xdg-shell-protocol.o" \
   "$BUILD_TMP/xdg-shell-protocol.c"
+gcc -O2 -c $(pkg-config --cflags wayland-client) \
+  -I"$BUILD_TMP" \
+  -o "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.o" \
+  "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.c"
 
 # The RN host: Hermes embed + Yoga + Wayland + painter + status bridge.
 # Hermes's public headers (HermesExport.h, RuntimeConfig.h) are NOT
@@ -317,6 +328,7 @@ g++ -O2 -std=c++17 -Wall -Wextra \
   "$ROOT/rn/host/audiod-client.cc" \
   "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
   "$BUILD_TMP/xdg-shell-protocol.o" \
+  "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.o" \
   -Wl,--start-group $HERMES_LIBS "$PREFIX/lib/libyogacore.a" -Wl,--end-group \
   $(pkg-config --libs wayland-client wayland-cursor freetype2 libpng) $(pkg-config --libs icu-uc icu-i18n) -lpthread -ldl
 
