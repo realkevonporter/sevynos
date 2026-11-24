@@ -268,8 +268,8 @@ for f in "$SYSROOT/usr/bin/weston" "$SYSROOT/usr/sbin/seatd" \
 done
 # wlr-layer-shell is a wlroots extension, not part of upstream
 # wayland-protocols: the XML is vendored in the repo.
-[ -f "$ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml" ] || {
-  echo "error: missing $ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml (vendored protocol — the checkout is incomplete)" >&2
+[ -f "$ROOT/rn/host/wlr-layer-shell-unstable-v1.xml" ] || {
+  echo "error: missing $ROOT/rn/host/wlr-layer-shell-unstable-v1.xml (vendored protocol — the checkout is incomplete)" >&2
   exit 1
 }
 
@@ -304,13 +304,13 @@ wayland-scanner client-header \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-client-protocol.h"
 wayland-scanner client-header \
-  "$ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml" \
+  "$ROOT/rn/host/wlr-layer-shell-unstable-v1.xml" \
   "$BUILD_TMP/wlr-layer-shell-unstable-v1-client-protocol.h"
 wayland-scanner private-code \
   "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
   "$BUILD_TMP/xdg-shell-protocol.c"
 wayland-scanner private-code \
-  "$ROOT/v2/rn/host/wlr-layer-shell-unstable-v1.xml" \
+  "$ROOT/rn/host/wlr-layer-shell-unstable-v1.xml" \
   "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.c"
 wayland-scanner client-header \
   "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
