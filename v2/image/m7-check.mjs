@@ -391,7 +391,7 @@ async function boot(tag, mode = "kernel") {
     "chardev=qmp,mode=control",
   );
   if (!uefi) {
-    args.push("-drive", `file=${DISK},format=raw,if=virtio`);
+    args.push("-drive", `file=${DISK},format=raw,if=virtio,cache=writethrough`);
   }
   args.push(
     "-device",

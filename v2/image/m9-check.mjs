@@ -459,7 +459,7 @@ async function boot(tag, mode = "kernel") {
     "chardev=qmp,mode=control",
   );
   if (!uefi) {
-    args.push("-drive", `file=${DISK},format=raw,if=virtio`);
+    args.push("-drive", `file=${DISK},format=raw,if=virtio,cache=writethrough`);
   }
   // M9: the GPU offers a 1920x1080 mode; weston.ini no longer pins
   // 1024x768, so Weston takes the output's preferred mode and the
