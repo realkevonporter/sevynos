@@ -1,1 +1,15 @@
-{ "permissions": ["app.launch", "app.close", "app.list", "status.set", "app.install", "app.uninstall", "system.reboot", "system.update", "file.read", "file.write", "cli.exec"] }
+{
+  "permissions": [
+    "app.launch",
+    "app.close",
+    "app.list",
+    "status.set",
+    "app.install",
+    "app.uninstall",
+    "system.reboot",
+    "system.update",
+    "file.read",
+    "file.write",
+    "cli.exec"
+  ]
+}
