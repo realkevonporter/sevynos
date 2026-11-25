@@ -1306,9 +1306,9 @@ echo "audiod started @ $(cut -d" " -f1 /proc/uptime)s"
 # tailscaled's default /var/lib/tailscale sits in the initramfs
 # root, which does not persist. The socket stays on /run (tmpfs,
 # recreated at boot). Log to /data/logs/tailscaled.log, same as
-# the other daemons. No join happens here: 1a only proves the
-# daemon runs; `tailscale up` (the join) is 1b, and until then
-# `tailscale status` reports "Logged out.".
+# the other daemons. No join happens here unless the user already
+# joined: 1b re-joins from the /data/ai/relay.json marker below,
+# and until a first join `tailscale status` reports "Logged out.".
 # NO RESTART (known gap): init has no supervisor — if tailscaled
 # dies it stays dead until reboot. A watchdog is a follow-up; the
 # daemon's death is at least visible in its log + the missing
@@ -1318,13 +1318,44 @@ echo "audiod started @ $(cut -d" " -f1 /proc/uptime)s"
 # rewrites on every DHCP renewal — there is no DNS manager in the
 # image to arbitrate. The 1b join therefore defaults to
 # `tailscale up --accept-dns=false` (keep DHCP DNS, address the
-# device by its 100.x tailnet IP, give up MagicDNS names). 1a
-# starts no tailnet, so nothing rewrites resolv.conf yet.
+# device by its 100.x tailnet IP, give up MagicDNS names).
 mkdir -p /data/tailscale /data/logs
 TAILSCALED_VERSION=$(/usr/local/bin/tailscaled --version 2>/dev/null | head -n 1)
 echo "TAILSCALE tailscaled ${TAILSCALED_VERSION:-unknown}"
 /usr/local/bin/tailscaled --statedir /data/tailscale >/data/logs/tailscaled.log 2>&1 &
 echo "tailscaled started @ $(cut -d" " -f1 /proc/uptime)s"
+# AI relay 1b: re-join on boot (R6) — the /data/ai/relay.json marker
+# written by `sevyn tailscale up` is the user's persisted intent to
+# stay on the tailnet. If it exists, re-run `tailscale up` with the
+# stored login server (no auth key needed — the node key in
+# /data/tailscale re-authenticates) and --accept-dns=false (keep DHCP
+# DNS; see the DNS note above). Backgrounded with a retry loop, so a
+# slow daemon or a failing control plane cannot stall boot; the
+# result lands on the console (TAILSCALE re-join rc=) and in
+# tailscaled.log. A `sevyn tailscale down` removes the marker, so a
+# left tailnet stays left. The login server is pulled out of the
+# marker JSON with sed — the CLI writes it in a fixed format, so the
+# single-line pattern is stable.
+if [ -f /data/ai/relay.json ]; then
+  (
+    LOGIN_SERVER=$(sed -n 's/.*"login_server": *"\([^"]*\)".*/\1/p' /data/ai/relay.json)
+    if [ -n "$LOGIN_SERVER" ]; then
+      echo "TAILSCALE re-joining $LOGIN_SERVER"
+      RC=1
+      I=0
+      while [ "$I" -lt 5 ]; do
+        /usr/local/bin/tailscale up --login-server "$LOGIN_SERVER" --accept-dns=false >>/data/logs/tailscaled.log 2>&1
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
+          break
+        fi
+        I=$((I + 1))
+        sleep 2
+      done
+      echo "TAILSCALE re-join rc=$RC"
+    fi
+  ) &
+fi
 # Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
 # (localhost only — the browser that paints it arrives in M5). It
 # needs HOME for its user-data dir (the staged settings file lives

@@ -1,7 +1,8 @@
 /* SevynOS v2 M1 — status daemon (sevyn-statusd).
  *
- * The live system-status service. It owns three values — battery, wifi,
- * volume — and pushes every change to all subscribers over a Unix socket.
+ * The live system-status service. It owns five values — battery, wifi,
+ * volume, ai.god_mode (P2), ai.relay (relay 1b) — and pushes every
+ * change to all subscribers over a Unix socket.
  * Nothing in the system polls for status: changes arrive by event.
  *
  * Event sources (all watched with poll()/inotify, no polling loops):
@@ -136,12 +137,16 @@ struct value {
  * (log + drop) — a writer that asks for a key it does not own is a
  * bug, not a crash. `ai.god_mode` is the God Mode mark (P2): the AI
  * daemon SETs it on/off as the mode changes, and the shell tray
- * reads it from the snapshot to show the GOD pill. */
+ * reads it from the snapshot to show the GOD pill. `ai.relay` is
+ * the relay mark (1b): `sevyn tailscale up/down/revoke` SETs it
+ * on/off as the tailnet join changes, and the tray reads it to
+ * show the RELAY pill. */
 static struct value values[] = {
     { "battery", "unknown" },
     { "wifi", "unknown" },
     { "volume", "50" },
     { "ai.god_mode", "off" },
+    { "ai.relay", "off" },
 };
 #define NVALUES (sizeof(values) / sizeof(values[0]))
 

@@ -11,7 +11,11 @@ harness (m4.5-check) covers the guest end to end.
 §17 covers the relay 1a CLI (`sevyn tailscale status`, read-only)
 against a fake `tailscale` binary on PATH, plus the first_up_iface
 tailscale0 exclusion in a user namespace (no privilege needed).
-No Headscale, no tailnet, no network anywhere in this file.
+§18 covers the relay 1b CLI (`tailscale up/down/revoke`, the /data
+marker, the statusd ai.relay mark, the pending auth-URL file)
+against the same fake (extended with up/down/logout) and a fresh
+fake statusd. No Headscale, no tailnet, no network anywhere in
+this file.
 
 Run: python3 v2/ai/test-aid.py
 Exit 0 = all checks pass.
@@ -1468,25 +1472,65 @@ def main():
     fake_ts = fake_ts_dir / "tailscale"
     fake_ts.write_text(
         "#!/bin/sh\n"
-        "case \"$TAILSCALE_FAKE_SCENARIO\" in\n"
-        "  logged-out)\n"
-        "    echo \"Logged out.\"\n"
-        "    echo \"Log in at: https://login.tailscale.com/a/test\"\n"
-        "    exit 0;;\n"
-        "  running)\n"
-        "    echo \"# Health check:\"\n"
-        "    echo \"#     - warning example, skipped by the parser\"\n"
-        "    echo \"100.64.0.5 sevynos-gf65 kevon@ linux -\"\n"
-        "    echo \"100.64.0.6 muse kevon@ linux active; direct "
+        "# 1b: up/down/logout are driven by their own scenario vars\n"
+        "# (default: success). The interactive `up` prints the auth\n"
+        "# URL, then sleeps — the CLI streams it to the auth-URL\n"
+        "# file while the join waits, so the test can observe the\n"
+        "# file mid-join.\n"
+        "case \"$1\" in\n"
+        "  up)\n"
+        "    case \"$TAILSCALE_FAKE_UP\" in\n"
+        "      fail)\n"
+        "        echo \"error: login failed\" >&2\n"
+        "        exit 1;;\n"
+        "      auth-url)\n"
+        "        echo \"To authenticate, visit:\"\n"
+        "        echo \"\"\n"
+        "        echo \"        https://headscale.example.com/auth/TESTKEY123\"\n"
+        "        echo \"\"\n"
+        "        echo \"Success.\"\n"
+        "        sleep 2\n"
+        "        exit 0;;\n"
+        "      *)\n"
+        "        exit 0;;\n"
+        "    esac;;\n"
+        "  down)\n"
+        "    case \"$TAILSCALE_FAKE_DOWN\" in\n"
+        "      fail)\n"
+        "        echo \"error: no daemon\" >&2\n"
+        "        exit 1;;\n"
+        "      *)\n"
+        "        exit 0;;\n"
+        "    esac;;\n"
+        "  logout)\n"
+        "    case \"$TAILSCALE_FAKE_LOGOUT\" in\n"
+        "      fail)\n"
+        "        echo \"error: logout failed\" >&2\n"
+        "        exit 1;;\n"
+        "      *)\n"
+        "        exit 0;;\n"
+        "    esac;;\n"
+        "  status)\n"
+        "    case \"$TAILSCALE_FAKE_SCENARIO\" in\n"
+        "      logged-out)\n"
+        "        echo \"Logged out.\"\n"
+        "        echo \"Log in at: https://login.tailscale.com/a/test\"\n"
+        "        exit 0;;\n"
+        "      running)\n"
+        "        echo \"# Health check:\"\n"
+        "        echo \"#     - warning example, skipped by the parser\"\n"
+        "        echo \"100.64.0.5 sevynos-gf65 kevon@ linux -\"\n"
+        "        echo \"100.64.0.6 muse kevon@ linux active; direct "
         "10.0.2.2:41641, tx 123 rx 456\"\n"
-        "    echo \"100.64.0.7 phone kevon@ iOS idle\"\n"
-        "    exit 0;;\n"
-        "  stopped)\n"
-        "    echo \"Tailscale is stopped.\"\n"
-        "    exit 1;;\n"
-        "  garbage)\n"
-        "    echo \"hello world\"\n"
-        "    exit 0;;\n"
+        "        echo \"100.64.0.7 phone kevon@ iOS idle\"\n"
+        "        exit 0;;\n"
+        "      stopped)\n"
+        "        echo \"Tailscale is stopped.\"\n"
+        "        exit 1;;\n"
+        "      garbage)\n"
+        "        echo \"hello world\"\n"
+        "        exit 0;;\n"
+        "    esac;;\n"
         "esac\n"
         "echo \"unknown scenario\" >&2\n"
         "exit 2\n")
@@ -1541,7 +1585,7 @@ def main():
     bogus = subprocess.run(
         [str(sevyn_bin), "tailscale", "up"], capture_output=True,
         text=True, timeout=10)
-    check("sevyn tailscale up -> usage (1b, not in 1a)",
+    check("sevyn tailscale up (no --login-server) -> usage",
           bogus.returncode != 0)
 
     # 17b. first_up_iface skips tailscale* interfaces: in a user
@@ -1637,6 +1681,205 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+    # 18. Relay 1b: `sevyn tailscale up/down/revoke`, the /data
+    #     marker (R6), the statusd ai.relay mark, and the pending
+    #     auth-URL file. The fake statusd was closed before §17,
+    #     so §18 starts a fresh one on its own socket.
+    relay_status_sock = tmp / "relay-status.sock"
+    relay_statusd = FakeDaemon(str(relay_status_sock), statusd_handler)
+    relay_statusd.start()
+    relay_marker = tmp / "relay.json"
+    relay_auth_url = tmp / "relay-auth-url"
+
+    def relay_env(up=None, down=None, logout=None):
+        env = {**os.environ,
+               "PATH": f"{fake_ts_dir}:{os.environ['PATH']}",
+               "SEVYN_AI_RELAY_MARKER": str(relay_marker),
+               "SEVYN_AI_RELAY_AUTH_URL": str(relay_auth_url),
+               "SEVYN_STATUS_SOCK": str(relay_status_sock)}
+        if up is not None:
+            env["TAILSCALE_FAKE_UP"] = up
+        if down is not None:
+            env["TAILSCALE_FAKE_DOWN"] = down
+        if logout is not None:
+            env["TAILSCALE_FAKE_LOGOUT"] = logout
+        return env
+
+    def relay_run(args, env):
+        return subprocess.run(
+            [str(sevyn_bin), "tailscale"] + args,
+            capture_output=True, text=True, env=env, timeout=15)
+
+    login = "https://headscale.example.com"
+
+    # 18a. A bare `up` refuses (the two-step confirm): it prints
+    #      what joining exposes and exits 1, and no marker is
+    #      created.
+    out = relay_run(["up", "--login-server", login], relay_env())
+    check("bare `tailscale up` refuses (exit 1, exposure printed)",
+          out.returncode != 0 and
+          "any node the tailnet ACL allows" in out.stderr,
+          out.stdout + out.stderr)
+    check("bare `up` created no marker", not relay_marker.exists())
+
+    # 18b. `up` without a login server, and with a non-http(s)
+    #      server, are usage errors.
+    out = relay_run(["up", "--authkey", "hskey-test", "--confirm"],
+                    relay_env())
+    check("`up` without --login-server -> usage",
+          out.returncode != 0)
+    out = relay_run(["up", "--login-server", "headscale.example.com",
+                     "--authkey", "hskey-test", "--confirm"], relay_env())
+    check("`up` with a non-URL login server -> exit 1",
+          out.returncode != 0 and
+          "--login-server must be an http(s) URL" in out.stderr,
+          out.stdout + out.stderr)
+
+    # 18c. `up --authkey --confirm` joins: the marker is written
+    #      (login server + via), statusd is SET ai.relay on, and
+    #      `status` reports relay: enabled + the login server.
+    out = relay_run(["up", "--login-server", login,
+                     "--authkey", "hskey-test", "--confirm", "--via",
+                     "cli"], relay_env())
+    check("`up --authkey --confirm` succeeds",
+          out.returncode == 0 and "Joined the tailnet." in out.stdout,
+          out.stdout + out.stderr)
+    marker_json = (json.loads(relay_marker.read_text())
+                   if relay_marker.exists() else {})
+    check("relay marker written (login server + via cli)",
+          marker_json.get("relay") is True and
+          marker_json.get("login_server") == login and
+          marker_json.get("enabled_by") == "cli",
+          relay_marker.read_text() if relay_marker.exists()
+          else "(none)")
+    check("statusd was SET ai.relay on (the tray mark)",
+          wait_recorded(relay_statusd, "SET ai.relay on"))
+    out = relay_run(["status"], {**relay_env(),
+                                 "TAILSCALE_FAKE_SCENARIO": "running"})
+    check("status after join -> relay: enabled + login_server",
+          out.returncode == 0 and
+          "relay: enabled" in out.stdout and
+          f"login_server: {login}" in out.stdout,
+          out.stdout + out.stderr)
+    # The marker is the intent, not the live state: it survives a
+    # logged-out daemon.
+    out = relay_run(["status"], {**relay_env(),
+                                 "TAILSCALE_FAKE_SCENARIO": "logged-out"})
+    check("status (logged out, marker present) -> relay: enabled",
+          out.returncode == 0 and
+          "status: not logged in" in out.stdout and
+          "relay: enabled" in out.stdout,
+          out.stdout + out.stderr)
+
+    # 18d. `up` with a failing login: exit 1, no marker.
+    relay_marker.unlink()
+    out = relay_run(["up", "--login-server", login,
+                     "--authkey", "hskey-bad", "--confirm"],
+                    relay_env(up="fail"))
+    check("`up` with a failing login -> exit 1, no marker",
+          out.returncode != 0 and not relay_marker.exists(),
+          out.stdout + out.stderr)
+
+    # 18e. `up --file`: the key is read from the file (which the
+    #      CLI unlinks at once) and the join succeeds.
+    key_file = tmp / "relay-key.txt"
+    key_file.write_text("hskey-from-file\n")
+    out = relay_run(["up", "--login-server", login,
+                     "--file", str(key_file), "--confirm"],
+                    relay_env())
+    check("`up --file` succeeds and unlinks the key file",
+          out.returncode == 0 and not key_file.exists(),
+          out.stdout + out.stderr)
+    check("marker written after --file join", relay_marker.exists())
+
+    # 18f. Interactive login: `up` without an authkey prints the
+    #      auth URL and waits; the URL lands in the auth-URL file
+    #      while the join is still waiting, and the file is gone
+    #      once the join completes.
+    relay_marker.unlink()
+    proc = subprocess.Popen(
+        [str(sevyn_bin), "tailscale", "up", "--login-server", login,
+         "--confirm"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=relay_env(up="auth-url"))
+    try:
+        seen = wait_for("auth-URL file while joining",
+                        lambda: relay_auth_url.exists(), timeout=10)
+        check("auth-URL file appears mid-join",
+              seen and "https://headscale.example.com/auth/TESTKEY123"
+              in relay_auth_url.read_text(),
+              relay_auth_url.read_text() if relay_auth_url.exists()
+              else "(none)")
+        rc = proc.wait(timeout=15)
+        check("interactive `up` succeeds after approval",
+              rc == 0)
+        check("auth-URL file removed after the join",
+              not relay_auth_url.exists())
+        check("marker written after the interactive join",
+              relay_marker.exists())
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+    # 18g. `down` leaves: the marker is removed, statusd is SET
+    #      ai.relay off, and `status` reports relay: disabled.
+    out = relay_run(["down"], relay_env())
+    check("`down` succeeds",
+          out.returncode == 0 and "Left the tailnet." in out.stdout,
+          out.stdout + out.stderr)
+    check("marker removed by `down`", not relay_marker.exists())
+    check("statusd was SET ai.relay off",
+          wait_recorded(relay_statusd, "SET ai.relay off"))
+    out = relay_run(["status"], {**relay_env(),
+                                 "TAILSCALE_FAKE_SCENARIO": "logged-out"})
+    check("status after down -> relay: disabled",
+          out.returncode == 0 and
+          "relay: disabled" in out.stdout,
+          out.stdout + out.stderr)
+
+    # 18h. `down` with a dead daemon (the kill switch): the
+    #      disconnect fails, but the marker is still removed and
+    #      the verb succeeds — the device must not re-join at boot.
+    relay_marker.write_text(
+        '{"relay": true, "login_server": "%s", '
+        '"joined_at": "2026-11-25T00:00:00Z", '
+        '"enabled_by": "cli"}\n' % login)
+    out = relay_run(["down"], relay_env(down="fail"))
+    check("`down` with a dead daemon still removes the marker",
+          out.returncode == 0 and not relay_marker.exists(),
+          out.stdout + out.stderr)
+
+    # 18i. `revoke` needs --confirm; with it, the node is
+    #      forgotten, the marker is removed, and statusd is SET off.
+    relay_marker.write_text(
+        '{"relay": true, "login_server": "%s", '
+        '"joined_at": "2026-11-25T00:00:00Z", '
+        '"enabled_by": "cli"}\n' % login)
+    out = relay_run(["revoke"], relay_env())
+    check("bare `revoke` refuses (exit 1, marker kept)",
+          out.returncode != 0 and relay_marker.exists(),
+          out.stdout + out.stderr)
+    out = relay_run(["revoke", "--confirm"], relay_env())
+    check("`revoke --confirm` succeeds and removes the marker",
+          out.returncode == 0 and
+          "Tailnet revoked." in out.stdout and
+          not relay_marker.exists(),
+          out.stdout + out.stderr)
+
+    # 18j. `revoke --confirm` with a failing logout is strict:
+    #      exit 1, the marker stays (no half-forgotten node).
+    relay_marker.write_text(
+        '{"relay": true, "login_server": "%s", '
+        '"joined_at": "2026-11-25T00:00:00Z", '
+        '"enabled_by": "cli"}\n' % login)
+    out = relay_run(["revoke", "--confirm"], relay_env(logout="fail"))
+    check("`revoke --confirm` with a failing logout keeps the marker",
+          out.returncode != 0 and relay_marker.exists(),
+          out.stdout + out.stderr)
+
+    relay_statusd.close()
 
     print()
     if FAILURES:

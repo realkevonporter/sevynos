@@ -18,6 +18,12 @@
 //      `GENESIS first present`; a `GENESIS fps` sample; no
 //      `GENESIS unavailable|falling back to CPU painter`; the
 //      desktop paints (top bar + dock).
+//   1b. Relay join (gated on SEVYN_V2_HEADSCALE — the workflow
+//      always sets it; a local run without it keeps the 1a "not
+//      logged in" behaviour): the guest joins an in-job Headscale
+//      with a staged pre-auth key, the host node (muse) pings it
+//      at its 100.x address, DNS still resolves after the join,
+//      and the kill switch (`tailscale down`) leaves the tailnet.
 //   2. Embed up: `browser open` the local page, then `browser
 //      status` reports running=yes over CDP (running=yes is only
 //      printed after a successful CDP /json/version probe, so it
@@ -101,9 +107,20 @@
 //      SEVYN_V2_M13_INTERNET (1 = prove the public page, 0 = skip
 //      the internet steps; default 1. The sandbox has no guest
 //      internet, so local runs use 0 and CI is the gate),
+//      SEVYN_V2_HEADSCALE (1 = run the relay join section against
+//      an in-job Headscale; the workflow always sets it. Unset =
+//      the 1a "not logged in" behaviour. The pinned binaries are
+//      downloaded by the workflow into v2/image/build/headscale),
 //      SEVYN_V2_QEMU (default qemu-system-x86_64).
 import { spawn, execFile } from "node:child_process";
-import { createWriteStream, existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { dirname, join } from "node:path";
@@ -118,6 +135,24 @@ const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
 // box with real KVM.
 const ACCEL = process.env.SEVYN_V2_ACCEL || "tcg";
 const INTERNET = process.env.SEVYN_V2_M13_INTERNET !== "0";
+// Relay 1b: the in-job Headscale (the Tailscale control protocol
+// has no mock, so the job runs a real Headscale binary). The
+// workflow downloads the pinned binaries into OUT/headscale before
+// this check runs; SEVYN_V2_HEADSCALE=1 enables the join section
+// (the workflow always sets it; a local run without it keeps the
+// 1a "not logged in" behaviour). The guest's pre-auth key is staged
+// onto the data disk before boot (debugfs) — the host logs every
+// EXEC line, so a key typed on a Terminal command line would land
+// in the boot-log artifact.
+const HEADSCALE = !!process.env.SEVYN_V2_HEADSCALE;
+const HS_DIR = join(OUT, "headscale");
+const HS_STATE = join(OUT, "headscale-state");
+const HS_BIN = join(HS_DIR, "headscale");
+const TS_BIN = join(HS_DIR, "tailscale_1.104.7_amd64", "tailscale");
+const TS_DAEMON = join(HS_DIR, "tailscale_1.104.7_amd64", "tailscaled");
+const HS_PORT = 8080;
+const HS_URL = `http://127.0.0.1:${HS_PORT}`;
+const GUEST_HS_URL = `http://10.0.2.2:${HS_PORT}`;
 // The host test-page server binds an EPHEMERAL port (listen(0)):
 // m5 and m13 share the KVM box, and two concurrent jobs binding
 // the old fixed 18080 collided with EADDRINUSE (run 44803329836).
@@ -163,6 +198,293 @@ function logLines(path) {
 
 function logHas(path, pattern) {
   return logLines(path).some((l) => pattern.test(l));
+}
+
+// --- relay 1b: the in-job Headscale + host node (host-side only;
+// the guest join happens in main(), over the Terminal). The
+// Headscale config mirrors the live server's shape (plain HTTP,
+// public DERP map, DNS off) except the server_url (plain HTTP on
+// 127.0.0.1 — the embedded DERP needs HTTPS, so the in-job server
+// uses Tailscale's public relays; CI proves "joins and is
+// reachable via DERP", never direct NAT traversal) and the user
+// (ci, not kevon). The ACL is the shipped policy with the CI user
+// as tag owner: only the muse node may reach the device, on the
+// relay port (17893, provisional — Phase 2 confirms the real
+// port) and ICMP. A bare node hostname is NOT a valid ACL source
+// (Headscale: "host not defined in policy") — both nodes are
+// tagged, and the tagOwners values carry the `@` suffix the
+// validator requires.
+let relayProcs = [];
+function stopRelay() {
+  for (const p of relayProcs) {
+    try {
+      p.kill("SIGTERM");
+    } catch {}
+  }
+  relayProcs = [];
+}
+
+async function waitForFile(path, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true;
+    await sleep(200);
+  }
+  return existsSync(path);
+}
+
+async function relayHttpOk(url, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const code = await new Promise((resolve) => {
+      const req = http.get(url, (res) => resolve(res.statusCode));
+      req.on("error", () => resolve(0));
+      req.setTimeout(5000, () => {
+        req.destroy();
+        resolve(0);
+      });
+    });
+    if (code === 200) return true;
+    await sleep(1000);
+  }
+  return false;
+}
+
+async function hsCli(...args) {
+  return execAsync(HS_BIN, ["-c", join(HS_STATE, "config.yaml"), ...args]);
+}
+
+function hsConfig() {
+  return (
+    `server_url: ${HS_URL}\n` +
+    `listen_addr: 0.0.0.0:${HS_PORT}\n` +
+    "metrics_listen_addr: 127.0.0.1:9090\n" +
+    "grpc_listen_addr: 127.0.0.1:50443\n" +
+    "grpc_allow_insecure: false\n" +
+    "noise:\n" +
+    `  private_key_path: ${join(HS_STATE, "noise_private.key")}\n` +
+    "prefixes:\n" +
+    "  v4: 100.64.0.0/10\n" +
+    "  v6: fd7a:115c:a1e0::/48\n" +
+    "derp:\n" +
+    "  server:\n" +
+    "    enabled: false\n" +
+    "    region_id: 999\n" +
+    '    region_code: "headscale"\n' +
+    '    region_name: "Headscale Embedded DERP"\n' +
+    "    verify_clients: true\n" +
+    '    stun_listen_addr: "0.0.0.0:3478"\n' +
+    `    private_key_path: ${join(HS_STATE, "derp_server_private.key")}\n` +
+    "    automatically_add_embedded_derp_region: true\n" +
+    "  urls:\n" +
+    "    - https://controlplane.tailscale.com/derpmap/default\n" +
+    "  paths: []\n" +
+    "  auto_update_enabled: true\n" +
+    "  update_frequency: 24h\n" +
+    "database:\n" +
+    "  type: sqlite\n" +
+    "  sqlite:\n" +
+    `    path: ${join(HS_STATE, "db.sqlite")}\n` +
+    "log:\n" +
+    "  level: info\n" +
+    "  format: text\n" +
+    "policy:\n" +
+    "  mode: file\n" +
+    `  path: ${join(HS_STATE, "acl.yaml")}\n` +
+    "\ndns:\n" +
+    "  magic_dns: false\n" +
+    "  override_local_dns: false\n" +
+    "  base_domain: example.com\n" +
+    "  nameservers:\n" +
+    "    global: []\n" +
+    "    split: {}\n"
+  );
+}
+
+function hsAcl() {
+  return (
+    JSON.stringify(
+      {
+        groups: {},
+        tagOwners: {
+          "tag:sevynos-device": ["ci@"],
+          "tag:muse-agent": ["ci@"],
+        },
+        hosts: {},
+        acls: [
+          {
+            action: "accept",
+            src: ["tag:muse-agent"],
+            dst: ["tag:sevynos-device:17893"],
+          },
+          {
+            action: "accept",
+            src: ["tag:muse-agent"],
+            dst: ["tag:sevynos-device:*"],
+            proto: "icmp",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n"
+  );
+}
+
+// Start the in-job Headscale, mint the two tagged pre-auth keys,
+// and join the host node (muse). Returns { guestKey, hostSock,
+// hostIp } on success, null when the setup failed (the caller
+// fails fast — the join section is a required part of the check
+// when SEVYN_V2_HEADSCALE is set, so a setup failure is a check
+// failure, never a skip).
+async function relaySetup() {
+  const missing = [];
+  if (!existsSync(HS_BIN)) missing.push("headscale binary");
+  if (!existsSync(TS_BIN)) missing.push("tailscale CLI");
+  if (!existsSync(TS_DAEMON)) missing.push("tailscaled");
+  check(
+    "relay: Headscale + Tailscale binaries present (workflow downloads)",
+    missing.length === 0,
+    missing.join(", ") || "all present",
+  );
+  if (missing.length) return null;
+  rmSync(HS_STATE, { recursive: true, force: true });
+  mkdirSync(HS_STATE, { recursive: true });
+  writeFileSync(join(HS_STATE, "config.yaml"), hsConfig());
+  writeFileSync(join(HS_STATE, "acl.yaml"), hsAcl());
+  let cfgOk = false;
+  try {
+    await hsCli("configtest");
+    cfgOk = true;
+  } catch (e) {
+    cfgOk = false;
+  }
+  check("relay: Headscale config validates (configtest)", cfgOk);
+  if (!cfgOk) return null;
+  const hsLog = createWriteStream(join(HS_STATE, "headscale.log"), { flags: "w" });
+  const hs = spawn(HS_BIN, ["-c", join(HS_STATE, "config.yaml"), "serve"], {
+    stdio: ["ignore", hsLog, hsLog],
+  });
+  relayProcs.push(hs);
+  const up = await relayHttpOk(`${HS_URL}/`, 30000);
+  check("relay: in-job Headscale serves (HTTP 200)", up);
+  if (!up) return null;
+  let users = "";
+  try {
+    await hsCli("users", "create", "ci");
+    users = await hsCli("users", "list");
+  } catch (e) {
+    users = "";
+  }
+  check("relay: Headscale user ci created", users.includes("ci"));
+  if (!users.includes("ci")) return null;
+  let guestKey = "";
+  let museKey = "";
+  try {
+    guestKey = JSON.parse(
+      await hsCli(
+        "preauthkeys",
+        "create",
+        "--user",
+        "1",
+        "--tags",
+        "tag:sevynos-device",
+        "--expiration",
+        "1h",
+        "-o",
+        "json",
+      ),
+    ).key;
+    museKey = JSON.parse(
+      await hsCli(
+        "preauthkeys",
+        "create",
+        "--user",
+        "1",
+        "--tags",
+        "tag:muse-agent",
+        "--expiration",
+        "1h",
+        "-o",
+        "json",
+      ),
+    ).key;
+  } catch (e) {
+    guestKey = "";
+    museKey = "";
+  }
+  check("relay: pre-auth keys minted (device + muse)", !!guestKey && !!museKey);
+  if (!guestKey || !museKey) return null;
+  // Host node: tailscaled in userspace-networking mode (no TUN, no
+  // routes — the runner needs no privilege), then join as muse.
+  const hostState = join(HS_STATE, "host-node");
+  mkdirSync(hostState, { recursive: true });
+  const hostSock = join(HS_STATE, "host-node.sock");
+  const tsdLog = createWriteStream(join(HS_STATE, "host-tailscaled.log"), {
+    flags: "w",
+  });
+  const tsd = spawn(
+    TS_DAEMON,
+    ["--tun=userspace-networking", `--statedir=${hostState}`, `--socket=${hostSock}`],
+    { stdio: ["ignore", tsdLog, tsdLog] },
+  );
+  relayProcs.push(tsd);
+  const sockUp = await waitForFile(hostSock, 15000);
+  check("relay: host tailscaled socket appears", sockUp);
+  if (!sockUp) return null;
+  let hostJoined = false;
+  try {
+    await execAsync(TS_BIN, [
+      "--socket",
+      hostSock,
+      "up",
+      "--login-server",
+      HS_URL,
+      "--authkey",
+      museKey,
+      "--accept-dns=false",
+      "--hostname",
+      "muse",
+    ]);
+    hostJoined = true;
+  } catch (e) {
+    hostJoined = false;
+  }
+  check("relay: host node joined (muse)", hostJoined);
+  if (!hostJoined) return null;
+  let hostIp = "";
+  try {
+    const status = await execAsync(TS_BIN, ["--socket", hostSock, "status"]);
+    for (const line of status.split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      if (
+        parts.length >= 2 &&
+        parts[1] === "muse" &&
+        /^100\.\d+\.\d+\.\d+$/.test(parts[0])
+      ) {
+        hostIp = parts[0];
+        break;
+      }
+    }
+  } catch {}
+  check("relay: host node has a 100.x address", !!hostIp, hostIp || "(none)");
+  if (!hostIp) return null;
+  return { guestKey, hostSock, hostIp };
+}
+
+// Stage the guest's pre-auth key onto the data disk (debugfs) at
+// /ai/relay-authkey — the guest reads it with `sevyn tailscale up
+// --file` (which unlinks it at once). The disk is mounted at
+// /data in the guest, so the path is /data/ai/relay-authkey there.
+async function stageGuestKey(guestKey) {
+  const keyFile = join(HS_STATE, "guest-key");
+  writeFileSync(keyFile, guestKey + "\n");
+  try {
+    await execAsync("debugfs", ["-w", "-R", "mkdir /ai", DISK]);
+  } catch {
+    // /ai already exists — the mkdir is only needed on a fresh disk.
+  }
+  await execAsync("debugfs", ["-w", "-R", `write ${keyFile} /ai/relay-authkey`, DISK]);
 }
 
 async function waitForLog(path, pattern, timeoutMs, sinceLines = 0) {
@@ -1565,6 +1887,23 @@ async function main() {
   const version = readFileSync(join(OUT, "os-version"), "utf8").trim();
   let internetSkipped = false;
 
+  // Relay 1b (before boot): the in-job Headscale + host node are
+  // set up first, so the guest's pre-auth key can be staged onto
+  // the data disk (step 0) before the guest mounts it. When the
+  // var is unset (a local run) this is skipped entirely and the 1a
+  // "not logged in" behaviour is kept. A setup failure is a check
+  // failure, never a skip — the join section is a required part of
+  // the check when the var is set — so fail fast instead of
+  // burning a boot that cannot prove the join.
+  let relay = null;
+  if (HEADSCALE) {
+    relay = await relaySetup();
+    if (!relay) {
+      finish(false, { relay: "setup-failed" });
+      return;
+    }
+  }
+
   // 0. Setup: data disk (slot A = the built image) + the host
   // test-page server.
   await execAsync("python3", [
@@ -1579,6 +1918,27 @@ async function main() {
     DISK,
   ]);
   check("setup: data disk created (slot A = built image)", existsSync(DISK));
+  if (relay) {
+    // Stage the guest's pre-auth key onto the data disk, then read
+    // it back to prove the staging landed (the value itself is
+    // never printed — it is a secret, even a throwaway one).
+    let staged = false;
+    try {
+      await stageGuestKey(relay.guestKey);
+      const back = await execAsync("debugfs", ["-R", "cat /ai/relay-authkey", DISK]);
+      staged = back.trim().length > 0;
+    } catch {
+      staged = false;
+    }
+    check(
+      "setup: guest pre-auth key staged on the data disk (/ai/relay-authkey)",
+      staged,
+    );
+    if (!staged) {
+      finish(false, { relay: "stage-failed" });
+      return;
+    }
+  }
   const state0 = await readState();
   check(
     "setup: slot state starts at A/A/0",
@@ -2775,21 +3135,138 @@ async function main() {
     await sleep(300);
   }
 
-  // 1b. Relay 1a (Terminal): the daemon is alive but no tailnet
-  // is joined, so `sevyn tailscale status` must report "not logged
-  // in" — the 1a guest proof. And `sevyn net status` must still
-  // report the physical interface (eth0 in QEMU): the
-  // first_up_iface tailscale0 exclusion is host-proven in
-  // test-aid.py §17b, and this is the guest regression check that
-  // the exclusion did not break the normal path. No Headscale, no
-  // join, no tailnet here.
-  {
-    const { exec, hit } = await termCmd(
-      "tailscale status",
-      /TERMINAL tailscale-status logged_in=no/,
-    );
-    check("tailscale: `tailscale status` runs (EXEC 0)", !!exec, exec || "");
-    check("tailscale: daemon alive, no tailnet (`not logged in`)", !!hit, hit || "");
+  // 1b. Relay 1b (Terminal): the join + reachability proof against
+  // the in-job Headscale. When SEVYN_V2_HEADSCALE is set (the
+  // workflow), the guest joins with the staged pre-auth key, and
+  // the host node pings it at its 100.x address. When it is unset
+  // (a local run), the 1a behaviour is kept: the daemon is alive
+  // but no tailnet is joined, so `tailscale status` reports "not
+  // logged in". Either way, `net status` must still report the
+  // physical interface (eth0 in QEMU): the first_up_iface
+  // tailscale0 exclusion is host-proven in test-aid.py §17b, and
+  // this is the guest regression check that the exclusion did not
+  // break the normal path.
+  let relayGuestIp = null;
+  if (HEADSCALE) {
+    // Join (the key rides --file, never the command line — the
+    // host logs every EXEC line, so a typed key would land in the
+    // boot-log artifact). The join can take a few seconds (the
+    // guest's tailscaled must reach the control plane through
+    // slirp), so the EXEC wait is 180 s.
+    {
+      const { exec } = await termCmd(
+        `tailscale up --login-server ${GUEST_HS_URL} --file /data/ai/relay-authkey --confirm`,
+        null,
+        null,
+        180000,
+      );
+      check(
+        "relay: guest joins the in-job tailnet (`tailscale up` EXEC 0)",
+        !!exec,
+        exec || "",
+      );
+    }
+    // Status: the marker must report logged_in=yes + the guest's
+    // 100.x address + the muse peer. The netmap can lag the join
+    // by a few seconds, so the status is polled. The tailnet IP is
+    // parsed out of the marker for the ping below.
+    {
+      let hit = null;
+      let exec = null;
+      for (let i = 0; i < 4 && !hit; i++) {
+        const r = await termCmd(
+          "tailscale status",
+          /TERMINAL tailscale-status logged_in=yes tailnet=100\.\d+\.\d+\.\d+ peers=1/,
+        );
+        exec = r.exec;
+        hit = r.hit;
+        if (!hit) await sleep(5000);
+      }
+      check("relay: `tailscale status` runs after the join (EXEC 0)", !!exec, exec || "");
+      check("relay: guest joined (logged_in=yes, 100.x, 1 peer)", !!hit, hit || "");
+      if (hit) {
+        const m = hit.match(/tailnet=(100\.\d+\.\d+\.\d+)/);
+        relayGuestIp = m ? m[1] : null;
+      }
+    }
+    // Reachability: the host node (muse) pings the guest at its
+    // 100.x address. This is the proof the tailnet carries traffic
+    // — the join alone only proves registration. The WireGuard
+    // session (DERP) can take a few seconds to establish, so the
+    // ping is retried.
+    {
+      let pong = false;
+      let pongDetail = "";
+      for (let i = 0; i < 3 && relayGuestIp; i++) {
+        try {
+          const out = await execAsync(TS_BIN, [
+            "--socket",
+            relay.hostSock,
+            "ping",
+            "--c",
+            "3",
+            "--timeout",
+            "30s",
+            relayGuestIp,
+          ]);
+          pong = /pong/i.test(out);
+          pongDetail = out.trim().slice(0, 200);
+          if (pong) break;
+        } catch (e) {
+          pongDetail = String(e.message || e).slice(0, 200);
+        }
+        await sleep(5000);
+      }
+      check(
+        "relay: host node (muse) pings the guest at its 100.x address",
+        pong,
+        pongDetail,
+      );
+    }
+    // DNS survival: the join used --accept-dns=false, so
+    // /etc/resolv.conf must be untouched (still the slirp DNS) and
+    // resolution must still work. `net dns` resolves a public name
+    // through the guest's DNS.
+    {
+      const { exec, hit } = await termCmd(
+        "net dns example.com",
+        /TERMINAL net-dns host=example\.com ip=\d+\.\d+\.\d+\.\d+/,
+      );
+      check(
+        "relay: DNS still resolves after the join (`net dns` EXEC 0)",
+        !!exec,
+        exec || "",
+      );
+      check("relay: DNS resolves example.com after the join", !!hit, hit || "");
+    }
+    // Kill switch: `tailscale down` leaves, and `status` must
+    // report the relay as gone (`not logged in`). The guest is left
+    // unjoined at the end of the check, like the 1a state.
+    {
+      const { exec } = await termCmd("tailscale down");
+      check("relay: kill switch (`tailscale down` EXEC 0)", !!exec, exec || "");
+    }
+    {
+      const { exec, hit } = await termCmd(
+        "tailscale status",
+        /TERMINAL tailscale-status logged_in=no/,
+      );
+      check("relay: `tailscale status` runs after down (EXEC 0)", !!exec, exec || "");
+      check(
+        "relay: guest left the tailnet (`not logged in` after down)",
+        !!hit,
+        hit || "",
+      );
+    }
+  } else {
+    {
+      const { exec, hit } = await termCmd(
+        "tailscale status",
+        /TERMINAL tailscale-status logged_in=no/,
+      );
+      check("tailscale: `tailscale status` runs (EXEC 0)", !!exec, exec || "");
+      check("tailscale: daemon alive, no tailnet (`not logged in`)", !!hit, hit || "");
+    }
   }
   {
     const { exec, hit } = await termCmd(
@@ -3972,6 +4449,9 @@ function finish(ok, extra = {}) {
   writeFileSync(join(OUT, "m13-check.json"), JSON.stringify(result, null, 2));
   console.log(ok ? "M13 CHECK PASSED" : "M13 CHECK FAILED");
   try {
+    stopRelay();
+  } catch {}
+  try {
     if (currentBoot) closeBoot(currentBoot);
   } catch {}
   process.exit(ok ? 0 : 1);
@@ -3979,6 +4459,9 @@ function finish(ok, extra = {}) {
 
 main().catch((e) => {
   console.error("M13 check crashed:", e);
+  try {
+    stopRelay();
+  } catch {}
   try {
     if (currentBoot) closeBoot(currentBoot);
   } catch {}

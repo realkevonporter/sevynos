@@ -91,6 +91,50 @@ function readAi(): { selected: string; backends: string[]; godMode: boolean } {
   return { selected, backends: backends ? backends.split(",") : [], godMode };
 }
 
+type RelayState = {
+  status: string;
+  relay: boolean;
+  tailnet: string;
+  hostname: string;
+  loginServer: string;
+  authUrl: string;
+};
+
+// Relay 1b: the tailnet join state, read from `sevyn tailscale
+// status`. `status` is the daemon's live state (parseField would
+// only take the first word of "not logged in", so the line is
+// matched whole). `relay` is the R6 marker (the user joined and
+// wants to stay joined); `tailnet` is the 100.x address when the
+// daemon is running and joined; `loginServer` comes from the
+// marker (prefills the join form on a re-join); `authUrl` is the
+// pending interactive-login URL, while a Terminal-initiated `up`
+// waits for approval. The e2e handler does not cover `tailscale
+// status`, so it returns "0\n" there and the relay reads off.
+function readRelay(): RelayState {
+  const { code, out } = runCli("sevyn tailscale status");
+  const off: RelayState = {
+    status: "unknown",
+    relay: false,
+    tailnet: "",
+    hostname: "",
+    loginServer: "",
+    authUrl: "",
+  };
+  if (code !== 0) return off;
+  let status = "unknown";
+  if (out.includes("status: running")) status = "running";
+  else if (out.includes("status: not logged in")) status = "not logged in";
+  else if (out.includes("status: stopped")) status = "stopped";
+  return {
+    status,
+    relay: parseField(out, "relay") === "enabled",
+    tailnet: parseField(out, "tailnet") ?? "",
+    hostname: parseField(out, "hostname") ?? "",
+    loginServer: parseField(out, "login_server") ?? "",
+    authUrl: parseField(out, "auth_url") ?? "",
+  };
+}
+
 /* The last few audit log entries (P2, §2.5). Only real audit lines
  * are shown: a timestamped entry, or the CLI's own "No AI activity
  * yet." — anything else (e.g. the harness's empty "0") is not an
@@ -180,6 +224,15 @@ export function Settings(): React.ReactElement {
   // dialog; Confirm runs the enable. The dialog lists every power
   // in plain language — there is no one-tap enable.
   const [godConfirm, setGodConfirm] = React.useState<boolean>(false);
+  // Relay (1b, R1-R6): the tailnet join. The login server is
+  // prefilled from the marker when re-joining (it is empty on a
+  // first join); the auth-key input is cleared after a join so the
+  // single-use key does not sit in the field.
+  const [relay, setRelay] = React.useState<RelayState>(() => readRelay());
+  const [loginServer, setLoginServer] = React.useState<string>(relay.loginServer);
+  const [relayKey, setRelayKey] = React.useState<string>("");
+  const [relayConfirm, setRelayConfirm] = React.useState<boolean>(false);
+  const [relayMessage, setRelayMessage] = React.useState<string>("");
   const [auditLines, setAuditLines] = React.useState<string[]>(() => readAudit());
   // Muse API key (P0): the muse-ai backend reads it from
   // /data/ai/muse-key. It is typed here, written to a temp file, and
@@ -296,6 +349,57 @@ export function Settings(): React.ReactElement {
     setAuditLines(readAudit());
     setMessage(current.godMode ? "God mode is on." : "God mode is off.");
     Sevyn.log("SETTINGS god_mode=" + (current.godMode ? "on" : "off"));
+  }
+
+  // Relay (1b): join runs the two-step confirm — the caller (the
+  // dialog's Confirm button) already showed the exposure, and the
+  // CLI refuses a bare join anyway. The auth key travels through a
+  // temp file (`--file`, which unlinks it), like the Muse key.
+  // Leave is immediate (revoking access needs no confirm). After
+  // either, the state is re-read, so the banner and the pill follow
+  // the real state.
+  function joinRelay(): void {
+    if (loginServer.trim() === "" || relayKey.trim() === "") {
+      setRelayMessage("Enter a login server and an auth key first.");
+      return;
+    }
+    const { code } = runCli(
+      "sevyn files write /tmp/relay-authkey.tmp " + q(relayKey.trim()),
+    );
+    if (code !== 0) {
+      setRelayMessage("Could not join the tailnet.");
+      return;
+    }
+    const joined = runCli(
+      "sevyn tailscale up --login-server " +
+        q(loginServer.trim()) +
+        " --file /tmp/relay-authkey.tmp --confirm --via settings",
+    );
+    if (joined.code !== 0) {
+      setRelayMessage("Could not join the tailnet.");
+      return;
+    }
+    setRelayKey("");
+    const current = readRelay();
+    setRelay(current);
+    setRelayMessage(
+      current.tailnet !== ""
+        ? "Joined the tailnet at " + current.tailnet + "."
+        : "Joined the tailnet.",
+    );
+    Sevyn.log("SETTINGS relay=on tailnet=" + current.tailnet);
+  }
+
+  function leaveRelay(): void {
+    const { code } = runCli("sevyn tailscale down");
+    if (code !== 0) {
+      setRelayMessage("Could not leave the tailnet.");
+      return;
+    }
+    const current = readRelay();
+    setRelay(current);
+    setRelayMessage("Left the tailnet.");
+    Sevyn.log("SETTINGS relay=off");
   }
 
   // Wallpaper (port of #123): the choice is written to
@@ -1101,6 +1205,225 @@ export function Settings(): React.ReactElement {
                 </Pressable>
                 <Pressable
                   onPress={() => setGodConfirm(false)}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#e5e7eb",
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ fontSize: 15, color: "#111827", textAlign: "center" }}>
+                    Cancel
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+          {/* Relay (1b, R1-R6): the tailnet join. The join form is
+              only shown while the relay is off (login server, auth
+              key, Join — three focusables); the Leave button only
+              while it is on (one focusable). The dialog buttons exist
+              only while the dialog is open, so they never shift the
+              focus order. The Join button validates the fields before
+              opening the dialog. */}
+          <Text
+            style={{ fontSize: 16, fontWeight: "bold", color: "#111827", marginTop: 24 }}
+          >
+            AI relay
+          </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            Let the cloud agent reach this device over its own tailnet (Tailscale). The
+            device is addressable by its tailnet IP only; the tailnet's ACL decides which
+            nodes may reach it.
+          </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            Relay:{" "}
+            {relay.tailnet !== ""
+              ? "on — " +
+                relay.tailnet +
+                (relay.hostname ? " (" + relay.hostname + ")" : "")
+              : relay.relay
+                ? "on, reconnecting…"
+                : "off"}
+          </Text>
+          {relay.relay ? (
+            <View style={{ flexDirection: "row", marginTop: 12 }}>
+              <Pressable
+                onPress={() => void leaveRelay()}
+                style={{
+                  width: 180,
+                  height: 36,
+                  borderRadius: 8,
+                  backgroundColor: "#e5e7eb",
+                  justifyContent: "center",
+                  alignItems: "center",
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 15,
+                    fontWeight: "bold",
+                    color: "#111827",
+                    textAlign: "center",
+                  }}
+                >
+                  Leave tailnet
+                </Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View>
+              <TextInput
+                value={loginServer}
+                onChangeText={setLoginServer}
+                placeholder="https://headscale.sevynos.org"
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={{
+                  height: 36,
+                  backgroundColor: "#ffffff",
+                  borderRadius: 8,
+                  paddingLeft: 12,
+                  paddingRight: 12,
+                  marginTop: 8,
+                  fontSize: 15,
+                  color: "#111827",
+                }}
+              />
+              <TextInput
+                value={relayKey}
+                onChangeText={setRelayKey}
+                placeholder="Auth key (from the tailnet admin)"
+                secureTextEntry={true}
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={{
+                  height: 36,
+                  backgroundColor: "#ffffff",
+                  borderRadius: 8,
+                  paddingLeft: 12,
+                  paddingRight: 12,
+                  marginTop: 8,
+                  fontSize: 15,
+                  color: "#111827",
+                }}
+              />
+              <View style={{ flexDirection: "row", marginTop: 12 }}>
+                <Pressable
+                  onPress={() => {
+                    if (loginServer.trim() === "" || relayKey.trim() === "") {
+                      setRelayMessage("Enter a login server and an auth key first.");
+                      return;
+                    }
+                    setRelayConfirm(true);
+                  }}
+                  style={{
+                    width: 180,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#1e40af",
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 15,
+                      fontWeight: "bold",
+                      color: "#ffffff",
+                      textAlign: "center",
+                    }}
+                  >
+                    Join tailnet
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
+          {/* Persistent banner while the relay is on (R6): the mode
+              is never silent — the banner, the tray's RELAY pill,
+              and the boot re-join all say so. Blue, distinct from
+              god mode's amber. */}
+          {relay.tailnet !== "" ? (
+            <Text
+              style={{
+                fontSize: 14,
+                color: "#1e40af",
+                backgroundColor: "#dbeafe",
+                marginTop: 12,
+                padding: 12,
+                borderRadius: 8,
+              }}
+            >
+              Relay is ON — this device is reachable from the tailnet at {relay.tailnet}.
+              It stays joined across reboots.
+            </Text>
+          ) : null}
+          {/* Auth-URL row (1b): while a Terminal-initiated interactive
+              login waits, the URL to approve is shown here — approve
+              it on another device (your phone). */}
+          {relay.authUrl !== "" ? (
+            <Text style={{ fontSize: 14, color: "#374151", marginTop: 12 }}>
+              Approve the join on another device: {relay.authUrl}
+            </Text>
+          ) : null}
+          {relayMessage ? (
+            <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+              {relayMessage}
+            </Text>
+          ) : null}
+          {/* Two-step confirm (R1/R3): the dialog lists what joining
+              exposes, in plain language. Its buttons exist only
+              while it is open, so they never shift the focus order. */}
+          {relayConfirm ? (
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontSize: 14, color: "#374151" }}>
+                Joining a tailnet makes this device reachable from it:
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - any node the tailnet ACL allows can reach this device
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - this device can reach the tailnet's nodes (per the ACL)
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - the tailnet's control plane (the login server) sees this device's
+                tailnet address and connection state
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                The device stays joined across reboots until you leave.
+              </Text>
+              <View style={{ flexDirection: "row", marginTop: 12 }}>
+                <Pressable
+                  onPress={() => {
+                    setRelayConfirm(false);
+                    joinRelay();
+                  }}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#1e40af",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    marginRight: 12,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 15,
+                      fontWeight: "bold",
+                      color: "#ffffff",
+                      textAlign: "center",
+                    }}
+                  >
+                    Confirm
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setRelayConfirm(false)}
                   style={{
                     width: 120,
                     height: 36,
