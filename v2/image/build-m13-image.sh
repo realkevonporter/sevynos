@@ -210,7 +210,6 @@ SYSROOT="${SEVYN_V2_SYSROOT:-/}"
 OUT="${SEVYN_V2_BUILD_DIR:-$ROOT/image/build}"
 DEPS_DIR="${SEVYN_V2_DEPS_DIR:-$ROOT/rn/host/deps}"
 PREFIX="$DEPS_DIR/prefix"
-HERMES_BUILD="$DEPS_DIR/build/hermes"
 
 if [ "$SYSROOT" != "/" ]; then
   PATH="$SYSROOT/usr/bin:$SYSROOT/bin:$SYSROOT/usr/sbin:$SYSROOT/sbin:$PATH"
@@ -295,29 +294,12 @@ if [ ! -f "$DEPS_DIR/.sevyn-deps" ]; then
   echo "building native deps (Hermes + Yoga) — first run takes a while"
   sh "$ROOT/rn/host/build-deps.sh"
 fi
-HERMES_SRC="$(ls -d "$DEPS_DIR"/src/hermes-*/)"
 [ -x "$PREFIX/bin/hermesc" ] || { echo "error: $PREFIX/bin/hermesc missing" >&2; exit 1; }
 [ -f "$PREFIX/lib/libyogacore.a" ] || { echo "error: libyogacore.a missing" >&2; exit 1; }
 
 # --- compile the SevynOS programs -----------------------------------------
-wayland-scanner client-header \
-  "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
-  "$BUILD_TMP/xdg-shell-client-protocol.h"
-wayland-scanner client-header \
-  "$ROOT/rn/host/wlr-layer-shell-unstable-v1.xml" \
-  "$BUILD_TMP/wlr-layer-shell-unstable-v1-client-protocol.h"
-wayland-scanner private-code \
-  "$SYSROOT/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" \
-  "$BUILD_TMP/xdg-shell-protocol.c"
-wayland-scanner private-code \
-  "$ROOT/rn/host/wlr-layer-shell-unstable-v1.xml" \
-  "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.c"
-wayland-scanner client-header \
-  "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
-  "$BUILD_TMP/presentation-time-client-protocol.h"
-wayland-scanner private-code \
-  "$SYSROOT/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml" \
-  "$BUILD_TMP/presentation-time-protocol.c"
+# (The RN host's Wayland protocols + compile are in v2/rn/host/build-host.sh,
+# shared with the quality.yml host-compile gate — see below.)
 
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-statusd" "$ROOT/services/statusd.c"
 gcc -O2 -Wall -o "$BUILD_TMP/sevyn-status-client" "$ROOT/services/status-client.c"
@@ -393,57 +375,12 @@ else
   echo "update trust anchor: fresh TEST keypair (nightly-test); private key at $OUT/update-signing-key.json"
 fi
 
-# wayland-scanner's private-code output is C: its `const struct
-# wl_interface` definitions have external linkage in C, but in C++
-# namespace-scope const has INTERNAL linkage — so passing the .c to g++
-# makes every interface invisible to wayland.cc (undefined reference to
-# xdg_wm_base_interface, verified in CI run 42333389196). M1 compiles
-# the same file with gcc (build-m1-image.sh). Compile it as C here too
-# and link the object.
-gcc -O2 -c $(pkg-config --cflags wayland-client) \
-  -I"$BUILD_TMP" \
-  -o "$BUILD_TMP/xdg-shell-protocol.o" \
-  "$BUILD_TMP/xdg-shell-protocol.c"
-gcc -O2 -c $(pkg-config --cflags wayland-client) \
-  -I"$BUILD_TMP" \
-  -o "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.o" \
-  "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.c"
-
-# The RN host: Hermes embed + Yoga + Wayland + painter + status bridge.
-# Hermes's public headers (HermesExport.h, RuntimeConfig.h) are NOT
-# installed by cmake --install, so the source public/ dir is on the
-# include path too. Link: every Hermes build archive (except the lean
-# variants, which would duplicate libhermes's symbols) inside
-# --start-group/--end-group so order does not matter, plus yogacore.
-# ICU: Hermes's libhermesPlatformUnicode.a calls ICU (ucol_*/uloc_*/udat_*,
-# verified in CI run 42333389196) — link icui18n/icuuc/icudata. The host
-# binary is in the copy-closure list below, so the libicu*.so.74 runtime
-# closure is staged into the image with it.
-HERMES_LIBS="$(find "$HERMES_BUILD" -name '*.a' ! -name '*lean*' ! -path '*unittests*' ! -name '*Test*' | sort)"
-# shellcheck disable=SC2086
-# M12 Genesis: the GPU present path needs EGL + GLES2 + wayland-egl
-# headers. Fail loudly without them — a silent CPU-only M12 image is
-# not acceptable (the M12 check asserts the GPU path is live).
-# wayland-egl.h ships with libwayland-dev (already required above).
-if ! pkg-config --exists egl glesv2 wayland-egl; then
-  echo "error: EGL dev packages missing (install libegl-dev libgles-dev)" >&2
-  exit 1
-fi
-g++ -O2 -std=c++17 -Wall -Wextra -DSEVYN_HAVE_EGL=1 \
-  -I"$ROOT/rn/host" -I"$BUILD_TMP" \
-  -I"$PREFIX/include" -I"$HERMES_SRC/public" \
-  $(pkg-config --cflags wayland-client wayland-cursor freetype2 libpng egl glesv2 wayland-egl) \
-  -o "$BUILD_TMP/sevyn-rn-host" \
-  "$ROOT/rn/host/common.cc" "$ROOT/rn/host/painter.cc" \
-  "$ROOT/rn/host/genesis-presenter.cc" \
-  "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
-  "$ROOT/rn/host/appclient.cc" \
-  "$ROOT/rn/host/audiod-client.cc" \
-  "$ROOT/rn/host/yoga-bridge.cc" "$ROOT/rn/host/sevyn-rn-host.cc" \
-  "$BUILD_TMP/xdg-shell-protocol.o" \
-  "$BUILD_TMP/wlr-layer-shell-unstable-v1-protocol.o" \
-  -Wl,--start-group $HERMES_LIBS "$PREFIX/lib/libyogacore.a" -Wl,--end-group \
-  $(pkg-config --libs wayland-client wayland-cursor freetype2 libpng egl glesv2 wayland-egl) $(pkg-config --libs icu-uc icu-i18n) -lpthread -ldl
+# The RN host, built by the shared script (v2/rn/host/build-host.sh) —
+# the same script the quality.yml host-compile gate runs, so the gate
+# and the image can never drift apart (PR #158's `namespace` issue).
+sh "$ROOT/rn/host/build-host.sh" "$DEPS_DIR" \
+  "$SYSROOT/usr/share/wayland-protocols" \
+  "$BUILD_TMP/sevyn-rn-host" "$BUILD_TMP"
 
 # --- build the shell bundle ------------------------------------------------
 # npm ci (frozen lockfile) + esbuild bundle + hermesc bytecode. The
