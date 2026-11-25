@@ -21,7 +21,13 @@
 //   5. Backend B (plan-ai) via the Terminal, same boot, no rebuild:
 //      `ai ask list open files and set the volume to 55` plans the goal
 //      differently (allowed=3: LIST + LAUNCH + SET) and drives it.
-//   6. Clean poweroff.
+//   6. Backend C (muse-ai, P0) via the Terminal: a fake key is saved
+//      (`ai key --file`), muse-ai is selected, and `ai ask launch
+//      files` drives the mock Muse API on loopback (sevyn.mockmuse=1)
+//      — the mock logs the request, the backend returns the tool
+//      call, the daemon allows it (allowed=1) and appd launches
+//      Files. Without a key the backend fails closed (allowed=0).
+//   7. Clean poweroff.
 //
 // Input is driven with QMP input-send-event (usb-tablet for absolute
 // pointer, PS/2 keyboard). Screendumps use QMP screendump in PPM
@@ -77,7 +83,15 @@ function readLog(path) {
 }
 
 function logLines(path) {
-  return readLog(path).split("\n");
+  // Drop the phantom empty element split() leaves when the file ends
+  // with a newline; without this, every `before = logLines().length`
+  // offset is one too large and the first line appended after the
+  // offset is skipped. That hid the single (non-duplicated)
+  // MUSE-MOCK POST line from the muse-ai check while the duplicated
+  // APPD lines beside it were still found by their second copy.
+  const lines = readLog(path).split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines;
 }
 
 async function waitForLog(path, pattern, timeoutMs, sinceLines = 0) {
@@ -296,7 +310,10 @@ async function boot(tag) {
       "-initrd",
       initrd,
       "-append",
-      `console=ttyS0 sevyn.slot=${bootSlot}`,
+      // sevyn.mockmuse=1 starts the mock Muse API on loopback
+      // (127.0.0.1:7071) for the muse-ai section below — a test
+      // double, never a system service.
+      `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockmuse=1`,
       "-display",
       "none",
       "-vga",
@@ -463,7 +480,7 @@ async function waitReady(b, version) {
   if (!ready45) return null;
   const aidReady = await waitForLog(
     b.logPath,
-    /AID ready .*backends=echo-ai,plan-ai selected=echo-ai/,
+    /AID ready .*backends=echo-ai,muse-ai,plan-ai selected=echo-ai/,
     30000,
   );
   const ready = await waitForLog(b.logPath, /SEVYNOS_M4_READY/, 30000);
@@ -922,11 +939,14 @@ async function main() {
   // M9: the Wi-Fi section comes first in Settings, so its Scan button
   // is focusable before the channel buttons — the focus order is now
   // [—, ▢, X, Scan, Nightly, Stable, Sync Now, Timezone, Apply,
-  // echo-ai, plan-ai] (#134's Date & Time section sits after the
-  // channel buttons, adding Sync Now, the timezone input, and Apply
-  // there). Tab x11 -> plan-ai. (The wallpaper PR's Appearance
-  // section appends 4 style buttons AFTER plan-ai, so x11 still
-  // holds — anything after plan-ai is unaffected.)
+  // echo-ai, muse-ai, plan-ai] (#134's Date & Time section sits after
+  // the channel buttons, adding Sync Now, the timezone input, and
+  // Apply there). Tab x12 -> plan-ai. (P0 added the muse-ai button
+  // between echo-ai and plan-ai; its key input + Save + Clear sit
+  // AFTER plan-ai, so they do not move the count. The wallpaper PR's
+  // Appearance section appends 4 style buttons AFTER plan-ai, so x12
+  // still holds — anything after plan-ai is unaffected.)
+  await key("tab");
   await key("tab");
   await key("tab");
   await key("tab");
@@ -946,7 +966,7 @@ async function main() {
     const st = await aidCmd(
       b,
       "STATUS",
-      /AID STATUS selected=plan-ai backends=echo-ai,plan-ai/,
+      /AID STATUS selected=plan-ai backends=echo-ai,muse-ai,plan-ai/,
     );
     check("settings: aid reads the new selection back (STATUS)", !!st, st || "");
   }
@@ -1015,6 +1035,96 @@ async function main() {
   {
     const closed = await appdCmd(b, "CLOSE files", /APPD CLOSE OK files/);
     check("ai-b: CLOSE files accepted", !!closed, closed || "");
+  }
+
+  // 6. Backend C (muse-ai, P0) via the Terminal: the real backend
+  //    against the mock Muse API on loopback (sevyn.mockmuse=1).
+  //    The mock returns one tool call (LAUNCH files); the check
+  //    proves the backend really called the API (the mock logs the
+  //    request on the console) and the daemon really executed the
+  //    action it returned (allowed=1, Files window on screen). The
+  //    key is a fake one — the mock never validates it; without any
+  //    key the backend fails closed (no actions), which is the point.
+  const shotTerm3 = await shot(b.qmp, join(OUT, "m4.5-shot-terminal-3.ppm"));
+  const termHeader3 = findWindowHeader(shotTerm3, 17, 24, 39);
+  check("muse-ai: Terminal window still up", !!termHeader3);
+  if (termHeader3) {
+    // Re-focus the Terminal input (Files was on top).
+    await moveTo(
+      termHeader3.left + 200,
+      termHeader3.top + 482,
+      shotTerm3.width,
+      shotTerm3.height,
+    );
+    await sleep(300);
+    await click();
+    await sleep(300);
+  }
+  {
+    // The mock starts at boot (gated by sevyn.mockmuse=1) and logs
+    // its listen line to the console.
+    const mockUp = await waitForLog(
+      b.logPath,
+      /MUSE-MOCK listening on 127\.0\.0\.1:7071/,
+      15000,
+    );
+    check("muse-ai: mock Muse API is listening", !!mockUp, mockUp || "");
+    // A key must exist or muse-ai fails closed (no key -> no API
+    // call -> allowed=0). The mock never validates it.
+    const { exec: wExec } = await termCmd("files write /tmp/muse-key.tmp guest-test-key");
+    check("muse-ai: fake key written to a temp file", !!wExec, wExec || "");
+    const { exec: kExec } = await termCmd("ai key --file /tmp/muse-key.tmp");
+    check("muse-ai: `ai key --file` saves the key (EXEC 0)", !!kExec, kExec || "");
+  }
+  {
+    const { exec } = await termCmd("ai select muse-ai");
+    check("muse-ai: `ai select muse-ai` runs (EXEC 0)", !!exec, exec || "");
+    const { exec: stExec, hit } = await termCmd(
+      "ai status",
+      /TERMINAL ai-status selected=muse-ai/,
+    );
+    check("muse-ai: `ai status` runs (EXEC 0)", !!stExec, stExec || "");
+    check("muse-ai: muse-ai is the selected backend", !!hit, hit || "");
+  }
+  {
+    const beforeLaunch = logLines(b.logPath).length;
+    const { exec, hit } = await termCmd(
+      "ai ask launch files",
+      /TERMINAL ai-ask allowed=1 denied=0/,
+    );
+    check("muse-ai: `ai ask launch files` runs (EXEC 0)", !!exec, exec || "");
+    check("muse-ai: muse-ai allowed the LAUNCH (allowed=1 denied=0)", !!hit, hit || "");
+    const launched = await waitForLog(
+      b.logPath,
+      /APPD launched files \(pid \d+\)/,
+      15000,
+      beforeLaunch,
+    );
+    check("muse-ai: appd launched files for the AI", !!launched, launched || "");
+    const appReady = await waitForLog(
+      b.logPath,
+      /HOST app running \(SEVYNOS_M3_APP_READY\) files/,
+      30000,
+      beforeLaunch,
+    );
+    check("muse-ai: Files host ready in its own runtime", !!appReady);
+    // The mock proves the backend really called the API (not a stub
+    // or a fallback): it logs every request to the console.
+    const mockHit = await waitForLog(
+      b.logPath,
+      /MUSE-MOCK POST \/v1\/chat\/completions model=muse-spark-1.3/,
+      15000,
+      beforeLaunch,
+    );
+    check("muse-ai: mock Muse API was called", !!mockHit, mockHit || "");
+  }
+  await sleep(800);
+  const shotFilesC = await shot(b.qmp, join(OUT, "m4.5-shot-files-c.ppm"));
+  const filesHeaderC = findWindowHeader(shotFilesC, 59, 130, 246);
+  check("muse-ai: Files window on screen after muse-ai's launch", !!filesHeaderC);
+  {
+    const closed = await appdCmd(b, "CLOSE files", /APPD CLOSE OK files/);
+    check("muse-ai: CLOSE files accepted", !!closed, closed || "");
   }
 
   // Final frame + clean poweroff.

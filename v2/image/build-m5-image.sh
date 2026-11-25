@@ -154,6 +154,15 @@ gcc -O2 -Wall -Wextra -o "$BUILD_TMP/ed25519-sign" \
 gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/sevyn-aid" \
   "$ROOT/ai/sevyn-aid.c" "$ROOT/loader/json.c"
 
+# The muse-ai backend (P0): the local bridge to the Muse API. C, so
+# it can do TLS (OpenSSL) + JSON + the agent loop. Links -lssl
+# -lcrypto; the copy-closure below stages libssl.so.3 + libcrypto.so.3
+# (muse-ai is the first binary to need libssl — libcrypto was already
+# staged via sevyn-loader/sevyn-updated). No API key is ever in the
+# image: the key lives in /data/ai/muse-key, entered per device.
+gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/muse-ai" \
+  "$ROOT/ai/muse-ai.c" "$ROOT/loader/json.c" -lssl -lcrypto
+
 # The update daemon + CLI (M8): sevyn-updated owns the A/B slots and
 # the feed check/download/apply flow; `sevyn` is the CLI (M4: update
 # + shell + files + code verbs, REPL mode). The daemon links OpenSSL
@@ -368,6 +377,7 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$BUILD_TMP/sevyn-loader:/usr/local/bin/sevyn-loader" \
   "$BUILD_TMP/sevyn-appd:/usr/local/bin/sevyn-appd" \
   "$BUILD_TMP/sevyn-aid:/usr/local/bin/sevyn-aid" \
+  "$BUILD_TMP/muse-ai:/usr/share/sevyn/ai/backends/muse-ai" \
   "$BUILD_TMP/sevyn-updated:/usr/local/bin/sevyn-updated" \
   "$BUILD_TMP/sevyn:/usr/local/bin/sevyn" \
   "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
@@ -386,6 +396,14 @@ cp "$OUT/os-version" "$STAGE/usr/share/sevyn/os-version"
 # (cp -a keeps the +x bit the daemon's scan requires.)
 cp -a "$ROOT/ai/backends/"* "$STAGE/usr/share/sevyn/ai/backends/"
 cp "$ROOT/ai/grant.json" "$STAGE/usr/share/sevyn/ai/grant.json"
+
+# Mock Muse API (P0, test double): staged for the m4.5 check (which
+# also runs against the m5 image), started only when sevyn.mockmuse=1
+# is on the kernel cmdline (see the init snippet below). The CA bundle
+# is already staged above for Chromium, so muse-ai's TLS verification
+# has what it needs.
+mkdir -p "$STAGE/usr/share/sevyn/muse-mock"
+cp "$ROOT/image/mock-muse.js" "$STAGE/usr/share/sevyn/muse-mock/mock-muse.js"
 
 # Sevyn Code: the extracted code-server tree, plus the terminal
 # default (the integrated terminal spawns `sevyn` with no args, so
@@ -569,6 +587,20 @@ echo "M5 init: $WIFI"
 # owns /run/sevyn-apps.sock. The shell connects to it for its dock
 # list and launches; the harness drives it over /dev/ttyS2.
 /usr/local/bin/sevyn-appd &
+# Mock Muse API (P0): a test double, never a system service — it
+# starts ONLY when the kernel cmdline carries sevyn.mockmuse=1 (the
+# m4.5 check boots with it). It serves a canned Chat Completions
+# reply on 127.0.0.1:7071 from the code-server node binary, logging
+# every request to the console so the harness can grep the serial
+# log for the wire. When it starts, the daemon's MUSE_API_BASE
+# points at it, so muse-ai calls the mock instead of the real
+# Model API (no key, no network in the check).
+for a in $(cat /proc/cmdline); do case "$a" in sevyn.mockmuse=*) MOCKMUSE=${a#sevyn.mockmuse=};; esac; done
+if [ "${MOCKMUSE:-0}" = "1" ]; then
+  export MUSE_API_BASE=http://127.0.0.1:7071/v1
+  /usr/share/sevyn/code-server/lib/node /usr/share/sevyn/muse-mock/mock-muse.js >/dev/console 2>&1 &
+  echo "M4.5 init: mock Muse API started (sevyn.mockmuse=1)"
+fi
 # AI daemon (M4.5): owns /run/sevyn-ai.sock. Starts after appd +
 # statusd so its first ASK can reach both. The harness drives it over
 # /dev/ttyS4; the Terminal and Settings drive it through `sevyn ai`.

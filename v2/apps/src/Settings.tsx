@@ -153,6 +153,12 @@ export function Settings(): React.ReactElement {
   const [ai, setAi] = React.useState<{ selected: string; backends: string[] }>(() =>
     readAi(),
   );
+  // Muse API key (P0): the muse-ai backend reads it from
+  // /data/ai/muse-key. It is typed here, written to a temp file, and
+  // handed to `sevyn ai key --file` (which unlinks the temp file) —
+  // the key itself never appears in a log or on screen.
+  const [museKey, setMuseKey] = React.useState<string>("");
+  const [museKeyMessage, setMuseKeyMessage] = React.useState<string>("");
   const [codeInfo, setCodeInfo] = React.useState<string>(() =>
     runCli("sevyn code status").out.trim(),
   );
@@ -206,6 +212,41 @@ export function Settings(): React.ReactElement {
         : "AI is " + current.selected + ".",
     );
     Sevyn.log("SETTINGS ai=" + current.selected);
+  }
+
+  // Save the Muse API key (P0): write it to a temp file, then let
+  // `sevyn ai key --file` move it into /data/ai/muse-key (0600) and
+  // unlink the temp file. The input is cleared on success so the
+  // key does not sit in the field.
+  function saveMuseKey(): void {
+    if (museKey.trim() === "") {
+      setMuseKeyMessage("Enter a Muse API key first.");
+      return;
+    }
+    const { code } = runCli("sevyn files write /tmp/muse-key.tmp " + q(museKey.trim()));
+    if (code !== 0) {
+      setMuseKeyMessage("Could not save the key.");
+      return;
+    }
+    const saved = runCli("sevyn ai key --file /tmp/muse-key.tmp");
+    if (saved.code !== 0) {
+      setMuseKeyMessage("Could not save the key.");
+      return;
+    }
+    setMuseKey("");
+    setMuseKeyMessage("Muse API key saved.");
+    Sevyn.log("SETTINGS muse-key=saved");
+  }
+
+  function clearMuseKey(): void {
+    const { code } = runCli("sevyn ai key --clear");
+    if (code !== 0) {
+      setMuseKeyMessage("Could not clear the key.");
+      return;
+    }
+    setMuseKey("");
+    setMuseKeyMessage("Muse API key cleared.");
+    Sevyn.log("SETTINGS muse-key=cleared");
   }
 
   // Wallpaper (port of #123): the choice is written to
@@ -840,6 +881,73 @@ export function Settings(): React.ReactElement {
           <View style={{ flexDirection: "row", marginTop: 12 }}>
             {ai.backends.map((id) => aiButton(id, id))}
           </View>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 16 }}>
+            Muse API key — the muse-ai backend needs a Model API key (dev.meta.ai). It is
+            stored on this device only.
+          </Text>
+          <TextInput
+            value={museKey}
+            onChangeText={setMuseKey}
+            placeholder="Muse API key"
+            secureTextEntry={true}
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={{
+              height: 36,
+              backgroundColor: "#ffffff",
+              borderRadius: 8,
+              paddingLeft: 12,
+              paddingRight: 12,
+              marginTop: 8,
+              fontSize: 15,
+              color: "#111827",
+            }}
+          />
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            <Pressable
+              onPress={() => void saveMuseKey()}
+              style={{
+                width: 120,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: "#111827",
+                justifyContent: "center",
+                alignItems: "center",
+                marginRight: 12,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 15,
+                  fontWeight: "bold",
+                  color: "#ffffff",
+                  textAlign: "center",
+                }}
+              >
+                Save key
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => void clearMuseKey()}
+              style={{
+                width: 120,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+              }}
+            >
+              <Text style={{ fontSize: 15, color: "#111827", textAlign: "center" }}>
+                Clear key
+              </Text>
+            </Pressable>
+          </View>
+          {museKeyMessage ? (
+            <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+              {museKeyMessage}
+            </Text>
+          ) : null}
           <Text
             style={{ fontSize: 16, fontWeight: "bold", color: "#111827", marginTop: 24 }}
           >

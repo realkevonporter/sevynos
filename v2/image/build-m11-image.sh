@@ -277,6 +277,15 @@ gcc -O2 -Wall -Wextra -o "$BUILD_TMP/ed25519-sign" \
 gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/sevyn-aid" \
   "$ROOT/ai/sevyn-aid.c" "$ROOT/loader/json.c"
 
+# The muse-ai backend (P0): the local bridge to the Muse API. C, so
+# it can do TLS (OpenSSL) + JSON + the agent loop. Links -lssl
+# -lcrypto; the copy-closure below stages libssl.so.3 + libcrypto.so.3
+# (muse-ai is the first binary to need libssl — libcrypto was already
+# staged via sevyn-loader/sevyn-updated). No API key is ever in the
+# image: the key lives in /data/ai/muse-key, entered per device.
+gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/muse-ai" \
+  "$ROOT/ai/muse-ai.c" "$ROOT/loader/json.c" -lssl -lcrypto
+
 # The update daemon + CLI (M8): sevyn-updated owns the A/B slots and
 # the feed check/download/apply flow; `sevyn` is the CLI (M4: update
 # + shell + files + code verbs, REPL mode). The daemon links OpenSSL
@@ -521,6 +530,7 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$BUILD_TMP/sevyn-loader:/usr/local/bin/sevyn-loader" \
   "$BUILD_TMP/sevyn-appd:/usr/local/bin/sevyn-appd" \
   "$BUILD_TMP/sevyn-aid:/usr/local/bin/sevyn-aid" \
+  "$BUILD_TMP/muse-ai:/usr/share/sevyn/ai/backends/muse-ai" \
   "$BUILD_TMP/sevyn-updated:/usr/local/bin/sevyn-updated" \
   "$BUILD_TMP/sevyn:/usr/local/bin/sevyn" \
   "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
