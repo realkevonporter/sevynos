@@ -8,6 +8,11 @@ plan-ai) copied from the repo, plus a slow backend (timeout) and a
 chatty one (garbage lines, no END). No QEMU, no Hermes — the CI
 harness (m4.5-check) covers the guest end to end.
 
+§17 covers the relay 1a CLI (`sevyn tailscale status`, read-only)
+against a fake `tailscale` binary on PATH, plus the first_up_iface
+tailscale0 exclusion in a user namespace (no privilege needed).
+No Headscale, no tailnet, no network anywhere in this file.
+
 Run: python3 v2/ai/test-aid.py
 Exit 0 = all checks pass.
 """
@@ -1452,6 +1457,186 @@ def main():
     fake_appd.close()
     fake_statusd.close()
     fake_api.stop()
+
+    # 17. Relay 1a: `sevyn tailscale status` (read-only) + the
+    #     first_up_iface tailscale0 exclusion. The CLI shells out
+    #     to the staged `tailscale` binary, so the test fakes that
+    #     binary on PATH (canned output per scenario) and drives
+    #     the real `sevyn` build.
+    fake_ts_dir = tmp / "fake-tailscale"
+    fake_ts_dir.mkdir()
+    fake_ts = fake_ts_dir / "tailscale"
+    fake_ts.write_text(
+        "#!/bin/sh\n"
+        "case \"$TAILSCALE_FAKE_SCENARIO\" in\n"
+        "  logged-out)\n"
+        "    echo \"Logged out.\"\n"
+        "    echo \"Log in at: https://login.tailscale.com/a/test\"\n"
+        "    exit 0;;\n"
+        "  running)\n"
+        "    echo \"# Health check:\"\n"
+        "    echo \"#     - warning example, skipped by the parser\"\n"
+        "    echo \"100.64.0.5 sevynos-gf65 kevon@ linux -\"\n"
+        "    echo \"100.64.0.6 muse kevon@ linux active; direct "
+        "10.0.2.2:41641, tx 123 rx 456\"\n"
+        "    echo \"100.64.0.7 phone kevon@ iOS idle\"\n"
+        "    exit 0;;\n"
+        "  stopped)\n"
+        "    echo \"Tailscale is stopped.\"\n"
+        "    exit 1;;\n"
+        "  garbage)\n"
+        "    echo \"hello world\"\n"
+        "    exit 0;;\n"
+        "esac\n"
+        "echo \"unknown scenario\" >&2\n"
+        "exit 2\n")
+    fake_ts.chmod(0o755)
+    empty_path = tmp / "empty-path"
+    empty_path.mkdir()
+
+    def tailscale_status(scenario=None, with_fake=True):
+        env = {**os.environ}
+        if with_fake:
+            env["PATH"] = f"{fake_ts_dir}:{os.environ['PATH']}"
+        else:
+            # No `tailscale` anywhere on PATH (an empty dir, not
+            # a scrubbed system PATH — a system install must not
+            # leak in): the verb must report "not installed".
+            env["PATH"] = str(empty_path)
+        if scenario is not None:
+            env["TAILSCALE_FAKE_SCENARIO"] = scenario
+        return subprocess.run(
+            [str(sevyn_bin), "tailscale", "status"],
+            capture_output=True, text=True, env=env, timeout=10)
+
+    out = tailscale_status("logged-out")
+    check("tailscale status (logged out) -> 'not logged in', exit 0",
+          out.returncode == 0 and
+          "status: not logged in" in out.stdout, out.stdout + out.stderr)
+    out = tailscale_status("running")
+    check("tailscale status (running) -> tailnet + peers + dns",
+          out.returncode == 0 and
+          "status: running" in out.stdout and
+          "tailnet: 100.64.0.5" in out.stdout and
+          "hostname: sevynos-gf65" in out.stdout and
+          "peers: 2" in out.stdout and
+          "peer: 100.64.0.6 muse" in out.stdout and
+          "peer: 100.64.0.7 phone" in out.stdout and
+          "dns: " in out.stdout,
+          out.stdout + out.stderr)
+    out = tailscale_status("stopped")
+    check("tailscale status (stopped) -> 'stopped', exit 0",
+          out.returncode == 0 and
+          "status: stopped" in out.stdout, out.stdout + out.stderr)
+    out = tailscale_status("garbage")
+    check("tailscale status (garbage output) -> exit 1",
+          out.returncode != 0 and
+          "unexpected tailscale status output" in out.stderr,
+          out.stdout + out.stderr)
+    out = tailscale_status(with_fake=False)
+    check("tailscale status (binary missing) -> exit 1, 'not installed'",
+          out.returncode != 0 and
+          "tailscale not installed" in out.stderr,
+          out.stdout + out.stderr)
+    bogus = subprocess.run(
+        [str(sevyn_bin), "tailscale", "up"], capture_output=True,
+        text=True, timeout=10)
+    check("sevyn tailscale up -> usage (1b, not in 1a)",
+          bogus.returncode != 0)
+
+    # 17b. first_up_iface skips tailscale* interfaces: in a user
+    #      namespace (no privilege needed — unshare -rn), create a
+    #      tailscale0 veth FIRST (lowest ifindex, so getifaddrs
+    #      returns it first) with a 100.x address, then eth0 with
+    #      a 10.x address, both up. The namespace's interfaces are
+    #      invisible to the host's /sys, so operstate comes from a
+    #      fake tree via SEVYN_SYS_CLASS_NET (the test hook in
+    #      first_up_iface). `net status` must still report eth0 —
+    #      and with tailscale0 as the only up interface, "none".
+    #      Skips (never fails) when unshare/ip is unavailable or
+    #      the namespace setup itself fails.
+    if shutil.which("unshare") and shutil.which("ip"):
+        fake_sys = tmp / "fakesys"
+        (fake_sys / "tailscale0").mkdir(parents=True)
+        (fake_sys / "eth0").mkdir(parents=True)
+        (fake_sys / "tailscale0" / "operstate").write_text("up\n")
+        (fake_sys / "eth0" / "operstate").write_text("up\n")
+
+        def ns_script(name, ifaces):
+            p = tmp / name
+            lines = ["#!/bin/sh"]
+            for iface, peer, addr in ifaces:
+                lines.append(
+                    f"ip link add {iface} type veth peer name {peer} "
+                    "|| exit 1")
+                lines.append(f"ip link set {peer} up || exit 1")
+                lines.append(f"ip addr add {addr} dev {iface} || exit 1")
+                lines.append(f"ip link set {iface} up || exit 1")
+            lines.append(
+                f"SEVYN_SYS_CLASS_NET={fake_sys} {sevyn_bin} net status")
+            p.write_text("\n".join(lines) + "\n")
+            p.chmod(0o755)
+            return p
+
+        both = subprocess.run(
+            ["unshare", "-rn", str(ns_script(
+                "ns-both.sh",
+                [("tailscale0", "tspeer", "100.64.0.99/32"),
+                 ("eth0", "ethpeer", "10.0.2.15/24")]))],
+            capture_output=True, text=True, timeout=15)
+        if both.returncode != 0 or "interface:" not in both.stdout:
+            print("  skip: first_up_iface namespace probe "
+                  "(unshare/ip unavailable here)")
+            print(f"        rc={both.returncode} out={both.stdout!r} "
+                  f"err={both.stderr!r}")
+        else:
+            check("net status skips tailscale0, reports eth0",
+                  "interface: eth0" in both.stdout and
+                  "address: 10.0.2.15" in both.stdout, both.stdout)
+            only = subprocess.run(
+                ["unshare", "-rn", str(ns_script(
+                    "ns-only.sh",
+                    [("tailscale0", "tspeer", "100.64.0.99/32")]))],
+                capture_output=True, text=True, timeout=15)
+            check("net status with only tailscale0 up -> interface: none",
+                  "interface: none" in only.stdout, only.stdout)
+    else:
+        print("  skip: first_up_iface namespace probe (no unshare/ip)")
+
+    # 17c. Host-side tailscaled smoke (optional): if a real
+    #      tailscaled binary is on PATH, prove it starts in
+    #      userspace-networking mode (no TUN, no routes, no
+    #      resolv.conf changes — no hardware, no network) and its
+    #      socket appears. Absent in the sandbox and in CI, so
+    #      this skips there; the guest check is the real proof.
+    tsd = shutil.which("tailscaled")
+    if tsd is None:
+        print("  skip: tailscaled userspace smoke (no tailscaled on PATH)")
+    else:
+        ts_state = tmp / "ts-state"
+        ts_state.mkdir()
+        ts_sock = tmp / "ts.sock"
+        proc = subprocess.Popen(
+            [tsd, "--tun=userspace-networking",
+             f"--statedir={ts_state}", f"--socket={ts_sock}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            up = wait_for("tailscaled socket",
+                          lambda: ts_sock.exists(), timeout=10)
+            check("tailscaled userspace-networking starts (socket appears)",
+                  up)
+            ver = subprocess.run([tsd, "--version"], capture_output=True,
+                                 text=True, timeout=10)
+            check("tailscaled --version runs",
+                  ver.returncode == 0 and ver.stdout.strip() != "",
+                  ver.stdout + ver.stderr)
+        finally:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
     print()
     if FAILURES:

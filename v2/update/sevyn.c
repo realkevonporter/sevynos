@@ -46,6 +46,8 @@
  *   sevyn net dns <host>        resolve a name through the guest DNS
  *   sevyn net announce          announce the link state to statusd
  *                               (wifi on/off; init calls this at boot)
+ *   sevyn tailscale status      tailnet address, peers, DNS (read-only;
+ *                               AI relay 1a — the join flow is 1b)
  *   sevyn time status           clock, last sync, timezone, RTC state
  *   sevyn time sync [--host <h>] [--port <p>]
  *                               NTP-sync now through the status daemon
@@ -273,6 +275,9 @@ static void print_usage(FILE *f)
             "                              open); saves it for later\n"
             "  sevyn net wifi disconnect   drop the association\n"
             "  sevyn net wifi forget <ssid> remove a saved network\n"
+            "  sevyn tailscale status      tailnet address, peers, DNS\n"
+            "                              (read-only: reports the daemon's\n"
+            "                              state; joining a tailnet is 1b)\n"
             "  sevyn time status         clock, last sync, timezone,\n"
             "                              RTC state\n"
             "  sevyn time sync [--host <h>] [--port <p>]\n"
@@ -3801,13 +3806,30 @@ static int first_up_iface(char *name, size_t name_cap, char *addr,
             continue;
         if (strcmp(p->ifa_name, "lo") == 0)
             continue;
+        /* Relay 1a: the tailnet is not the physical link. Once
+         * tailscale0 is up with a 100.x address, getifaddrs
+         * returns it first and `net status` would report the
+         * tailnet instead of the physical interface — and `net
+         * announce` would SET wifi off the tailnet's liveness
+         * rather than the physical link's. Any tailscale*
+         * interface is skipped, so both keep reporting the
+         * physical interface once the tailnet is up. */
+        if (strncmp(p->ifa_name, "tailscale", 9) == 0)
+            continue;
         if (p->ifa_addr->sa_family != AF_INET)
             continue;
         if (!(p->ifa_flags & IFF_UP))
             continue;
         char state_path[256];
+        /* Test hook (same pattern as the SEVYN_*_SOCK overrides):
+         * the host test points this at a fake tree so
+         * first_up_iface can be driven in a user namespace,
+         * where the namespace's interfaces are invisible to the
+         * host's /sys. Unset in the image. */
         snprintf(state_path, sizeof(state_path),
-                 "/sys/class/net/%s/operstate", p->ifa_name);
+                 "%s/%s/operstate",
+                 env_or("SEVYN_SYS_CLASS_NET", "/sys/class/net"),
+                 p->ifa_name);
         char *state = read_file_cap(state_path, 32);
         if (!state || (strcmp(state, "up") != 0 &&
                        strcmp(state, "unknown") != 0)) {
@@ -4890,6 +4912,148 @@ static int cmd_net_wifi(int argc, char **argv)
         if (argc != 5)
             return usage();
         return cmd_net_wifi_forget(argv[4]);
+    }
+    return usage();
+}
+
+/* ------------------------------------------------------------------ */
+/* tailscale status — read-only (AI relay 1a).                         */
+/*                                                                      */
+/* `sevyn tailscale status` shells out to the staged `tailscale`       */
+/* binary (argv, never a shell — the run_capture helper) and reports   */
+/* what the daemon says:                                                */
+/*   status: not logged in   — daemon alive, no tailnet joined yet      */
+/*   status: stopped         — daemon present but stopped               */
+/*   status: running                                                    */
+/*   tailnet: <100.x>        — this device's tailnet address            */
+/*   hostname: <name>                                                   */
+/*   peers: <n>              — other tailnet nodes, one `peer:` line    */
+/*                           each                                      */
+/*   dns: <first NS>         — first nameserver from /etc/resolv.conf  */
+/*                           (100.100.100.100 = MagicDNS in effect)    */
+/* Exit 0 whenever the CLI ran and produced a readable report —        */
+/* "not logged in" is a state, not an error. Exit 1 when the binary    */
+/* is missing, the daemon is unreachable, or the output is in no       */
+/* shape this parser knows. The parser is written against the          */
+/* documented text format — one peer per line, `<IP> <host> <owner>    */
+/* <os> <state>`, the local node first; `#` and `Warning:` lines       */
+/* skipped. The GF65 on-device proof must confirm the real binary's    */
+/* output matches (see the 1a PR body). No join, no state change, no   */
+/* network traffic of its own: `tailscale up/down` is 1b.              */
+/* ------------------------------------------------------------------ */
+
+/* One `tailscale status` peer line: first two whitespace-separated
+ * fields are the tailnet IPv4 address and the hostname. Returns 1
+ * when the line is a peer line, 0 otherwise. */
+static int tailscale_parse_peer(const char *line, char *ip, size_t ip_cap,
+                                char *host, size_t host_cap)
+{
+    char a[64], b[64];
+    if (sscanf(line, "%63s %63s", a, b) != 2)
+        return 0;
+    struct in_addr v4;
+    if (inet_pton(AF_INET, a, &v4) != 1)
+        return 0;
+    snprintf(ip, ip_cap, "%s", a);
+    snprintf(host, host_cap, "%s", b);
+    return 1;
+}
+
+static int cmd_tailscale_status(void)
+{
+    char *const targv[] = { (char *)"tailscale", (char *)"status", NULL };
+    char *out = NULL;
+    int rc = run_capture(targv, &out);
+    if (!out) {
+        fprintf(stderr, "error: cannot run tailscale\n");
+        return 1;
+    }
+    /* The two not-running states are plain sentences in the CLI's
+     * output — check them before the exit code, because the
+     * stopped state exits non-zero. */
+    if (strstr(out, "Logged out.") != NULL) {
+        printf("status: not logged in\n");
+        free(out);
+        return 0;
+    }
+    if (strstr(out, "Tailscale is stopped.") != NULL) {
+        printf("status: stopped\n");
+        free(out);
+        return 0;
+    }
+    if (rc == 127) {
+        /* execvp failed: no `tailscale` on PATH (the image stages
+         * it at /usr/local/bin/tailscale; the host test fakes it). */
+        fprintf(stderr, "error: tailscale not installed\n");
+        free(out);
+        return 1;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "error: tailscale daemon not reachable\n");
+        free(out);
+        return 1;
+    }
+    /* Running: one peer per line, the local node first. Peer lines
+     * are listed (capped at 64 — tailnets in scope are tiny); the
+     * count is exact even past the cap. */
+    char self_ip[64] = "", self_host[64] = "";
+    char peer_ip[64][64], peer_host[64][64];
+    int npeers = 0, listed = 0;
+    char *save = NULL;
+    char *line = strtok_r(out, "\n", &save);
+    while (line) {
+        while (*line == ' ' || *line == '\t')
+            line++;
+        if (*line && *line != '#' &&
+            strncmp(line, "Warning:", 8) != 0) {
+            char ip[64], host[64];
+            if (tailscale_parse_peer(line, ip, sizeof(ip), host,
+                                     sizeof(host))) {
+                if (!self_ip[0]) {
+                    snprintf(self_ip, sizeof(self_ip), "%s", ip);
+                    snprintf(self_host, sizeof(self_host), "%s", host);
+                } else {
+                    npeers++;
+                    if (listed < 64) {
+                        snprintf(peer_ip[listed],
+                                 sizeof(peer_ip[listed]), "%s", ip);
+                        snprintf(peer_host[listed],
+                                 sizeof(peer_host[listed]), "%s", host);
+                        listed++;
+                    }
+                }
+            }
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    if (!self_ip[0]) {
+        fprintf(stderr, "error: unexpected tailscale status output\n");
+        free(out);
+        return 1;
+    }
+    char dns[128] = "";
+    first_nameserver(dns, sizeof(dns));
+    printf("status: running\n");
+    printf("tailnet: %s\n", self_ip);
+    printf("hostname: %s\n", self_host);
+    printf("peers: %d\n", npeers);
+    for (int i = 0; i < listed; i++)
+        printf("peer: %s %s\n", peer_ip[i], peer_host[i]);
+    printf("dns: %s\n", dns[0] ? dns : "none");
+    free(out);
+    return 0;
+}
+
+static int cmd_tailscale(int argc, char **argv)
+{
+    if (argc < 3)
+        return usage();
+    /* 1a is read-only: only `status`. `up` / `down` / `revoke`
+     * are 1b (join UX, two-step confirm, /data marker). */
+    if (strcmp(argv[2], "status") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_tailscale_status();
     }
     return usage();
 }
@@ -8132,6 +8296,8 @@ static int dispatch(int argc, char **argv)
         return cmd_music(argc, argv);
     if (strcmp(argv[1], "net") == 0)
         return cmd_net(argc, argv);
+    if (strcmp(argv[1], "tailscale") == 0)
+        return cmd_tailscale(argc, argv);
     if (strcmp(argv[1], "time") == 0)
         return cmd_time(argc, argv);
     if (strcmp(argv[1], "tokrah") == 0)

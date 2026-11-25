@@ -502,6 +502,55 @@ find "$CHROMIUM_DIR/locales" -type f ! -name 'en-US.pak' ! -name 'en-US.pak.info
 rm -rf "$CHROMIUM_DIR/MEIPreload"
 echo "Chromium $CHROMIUM_VERSION staged ($(du -sh "$CHROMIUM_DIR" | cut -f1))"
 
+# --- Tailscale (AI relay 1a) ----------------------------------------------
+# Prebuilt official static release (Kevon, 2026-11-25: prebuilt pinned
+# + sha256-verified, Chromium/code-server precedent; build from
+# source is a follow-up, NOT now — no Go toolchain is added, and
+# apt's Go 1.22 cannot build current Tailscale anyway, it needs
+# Go 1.27). The tarball holds the `tailscale` CLI + the `tailscaled`
+# daemon + a systemd/ dir the image does not use (no systemd).
+# Static Go binaries have no .so closure, so copy-closure.py buys
+# nothing — they are staged below by plain `cp`.
+# Version + hash verified 2026-11-25: 1.104.7 is the current stable
+# (GitHub release v1.104.7, tagged Latest, 12 Nov 2026; Tailscale
+# changelog; includes the Tailworm fixes, >= 1.104.4, and Go 1.27.4).
+# The amd64 tarball sha256 is LibreELEC.tv's pin for the same file
+# (commit 3fdac14283, "tailscale: update to 1.104.7 and addon (15)",
+# merged PR #12024: PKG_SHA256 for x86_64/amd64 =
+# e56693ff74a64f2591b7e819c280635a100aae1ddfb0ef058fcd052b7cd8d16c).
+# The per-arch case statement there (amd64/arm/arm64, one hash each)
+# is what identifies the hashed artifact as the static tarball
+# tailscale_1.104.7_amd64.tgz — a source tarball would have one
+# hash, not one per arch. The sandbox could not fetch
+# pkgs.tailscale.com directly (403), so the sha256sum check below
+# is the final verification: a mismatch fails this build loudly,
+# before anything ships. TAILSCALE_TARBALL points at a local copy
+# instead (same pattern as Chromium / code-server).
+TAILSCALE_VERSION="1.104.7"
+TAILSCALE_SHA256="e56693ff74a64f2591b7e819c280635a100aae1ddfb0ef058fcd052b7cd8d16c"
+TAILSCALE_TARBALL="${TAILSCALE_TARBALL:-}"
+if [ -z "$TAILSCALE_TARBALL" ]; then
+  TAILSCALE_TARBALL="$BUILD_TMP/tailscale.tar.gz"
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$TAILSCALE_TARBALL" \
+    "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" \
+    || { echo "error: Tailscale download failed" >&2; exit 1; }
+fi
+[ -f "$TAILSCALE_TARBALL" ] || { echo "error: Tailscale tarball not found: $TAILSCALE_TARBALL" >&2; exit 1; }
+echo "$TAILSCALE_SHA256  $TAILSCALE_TARBALL" | sha256sum -c - \
+  || { echo "error: Tailscale tarball sha256 mismatch" >&2; exit 1; }
+mkdir -p "$BUILD_TMP/tailscale"
+tar xzf "$TAILSCALE_TARBALL" -C "$BUILD_TMP/tailscale"
+TAILSCALE_DIR="$BUILD_TMP/tailscale/tailscale_${TAILSCALE_VERSION}_amd64"
+[ -x "$TAILSCALE_DIR/tailscaled" ] || { echo "error: Tailscale tarball has no tailscaled" >&2; exit 1; }
+[ -x "$TAILSCALE_DIR/tailscale" ] || { echo "error: Tailscale tarball has no tailscale CLI" >&2; exit 1; }
+# Strip if the release ships debug symbols, then prove the binaries
+# still run — a strip that breaks `tailscaled --version` fails the
+# build here, not silently on the device.
+strip --strip-all "$TAILSCALE_DIR/tailscaled" "$TAILSCALE_DIR/tailscale" 2>/dev/null || true
+"$TAILSCALE_DIR/tailscaled" --version >/dev/null 2>&1 \
+  || { echo "error: stripped tailscaled does not run --version" >&2; exit 1; }
+echo "Tailscale $TAILSCALE_VERSION staged ($(du -sh "$TAILSCALE_DIR" | cut -f1))"
+
 # --- stage the rootfs ------------------------------------------------------
 mkdir -p "$STAGE/bin" "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/run" \
          "$STAGE/tmp" "$STAGE/data" "$STAGE/root/.local/share/code-server/User" \
@@ -687,6 +736,14 @@ cp "$OUT/os-version" "$STAGE/usr/share/sevyn/os-version"
 # backends are plain executables; their ids are their filenames.
 # (cp -a keeps the +x bit the daemon's scan requires.)
 cp -a "$ROOT/ai/backends/"* "$STAGE/usr/share/sevyn/ai/backends/"
+
+# Tailscale (AI relay 1a): the daemon + the CLI, by plain `cp` —
+# static Go binaries, no .so closure for copy-closure.py to
+# resolve. /usr/local/bin is on init's PATH, so `sevyn tailscale
+# status` finds the CLI by bare name. (The tarball's systemd/ dir
+# is not staged: the image has no systemd.)
+cp "$TAILSCALE_DIR/tailscaled" "$STAGE/usr/local/bin/tailscaled"
+cp "$TAILSCALE_DIR/tailscale" "$STAGE/usr/local/bin/tailscale"
 cp "$ROOT/ai/grant.json" "$STAGE/usr/share/sevyn/ai/grant.json"
 cp "$ROOT/ai/grant-god.json" "$STAGE/usr/share/sevyn/ai/grant-god.json"
 
@@ -929,6 +986,13 @@ fi
 # unprovable in QEMU and unusable on real hardware. xhci-hcd is
 # built into the kernel; xhci-pci was already staged. The dep
 # closure (scsi_mod) resolves via modinfo.
+# AI relay 1a: wireguard — the in-kernel WireGuard module the
+# Tailscale mesh runs on. It lives in the BASE linux-modules
+# package (not -extra), CONFIG_WIREGUARD=m, so no new apt install
+# is needed to obtain it; the dep closure (libcurve25519-generic,
+# udp_tunnel, ip6_udp_tunnel, libchacha20poly1305,
+# curve25519-x86_64) resolves via modinfo. The build fails loudly
+# if the module is absent — that is the verification.
 python3 "$ROOT/image/stage-modules.py" "$SYSROOT" "$kernel_version" "$STAGE" \
   virtio-gpu usbhid hid-generic xhci-pci virtio-blk virtio-net ext4 \
   i915 iwlwifi iwlmvm mac80211 cfg80211 nvme alx \
@@ -936,7 +1000,8 @@ python3 "$ROOT/image/stage-modules.py" "$SYSROOT" "$kernel_version" "$STAGE" \
   uvcvideo videodev videobuf2-common videobuf2-memops videobuf2-v4l2 \
   i2c-hid-acpi i2c-hid hid-multitouch intel-lpss-pci \
   nls_iso8859-1 nls_utf8 \
-  usb-storage uas sd_mod
+  usb-storage uas sd_mod \
+  wireguard
 
 # M7: firmware for the real hardware (stage-firmware.py decompresses
 # the sysroot's .zst firmware into the stage). iwlwifi firmware is
@@ -1232,6 +1297,34 @@ fi
 # commsd block above creates it.)
 /usr/local/bin/sevyn-audiod >/data/logs/audiod.log 2>&1 &
 echo "audiod started @ $(cut -d" " -f1 /proc/uptime)s"
+# tailscaled (AI relay 1a): the Tailscale daemon for the mesh the
+# cloud agent reaches the device over. Starts after DHCP (it needs
+# the network to reach the control plane) and after sevyn-updated /
+# sevyn-statusd, in the same style as commsd/camd/audiod.
+# --statedir /data/tailscale: state MUST live on /data — the node
+# key + control-plane state must survive a reboot (R6), and
+# tailscaled's default /var/lib/tailscale sits in the initramfs
+# root, which does not persist. The socket stays on /run (tmpfs,
+# recreated at boot). Log to /data/logs/tailscaled.log, same as
+# the other daemons. No join happens here: 1a only proves the
+# daemon runs; `tailscale up` (the join) is 1b, and until then
+# `tailscale status` reports "Logged out.".
+# NO RESTART (known gap): init has no supervisor — if tailscaled
+# dies it stays dead until reboot. A watchdog is a follow-up; the
+# daemon's death is at least visible in its log + the missing
+# socket, and `sevyn tailscale status` reports it as unreachable.
+# DNS note: tailscaled with DNS acceptance on would rewrite
+# /etc/resolv.conf to its MagicDNS resolver and fight udhcpc's
+# rewrites on every DHCP renewal — there is no DNS manager in the
+# image to arbitrate. The 1b join therefore defaults to
+# `tailscale up --accept-dns=false` (keep DHCP DNS, address the
+# device by its 100.x tailnet IP, give up MagicDNS names). 1a
+# starts no tailnet, so nothing rewrites resolv.conf yet.
+mkdir -p /data/tailscale /data/logs
+TAILSCALED_VERSION=$(/usr/local/bin/tailscaled --version 2>/dev/null | head -n 1)
+echo "TAILSCALE tailscaled ${TAILSCALED_VERSION:-unknown}"
+/usr/local/bin/tailscaled --statedir /data/tailscale >/data/logs/tailscaled.log 2>&1 &
+echo "tailscaled started @ $(cut -d" " -f1 /proc/uptime)s"
 # Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
 # (localhost only — the browser that paints it arrives in M5). It
 # needs HOME for its user-data dir (the staged settings file lives
