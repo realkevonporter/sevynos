@@ -83,7 +83,15 @@ function readLog(path) {
 }
 
 function logLines(path) {
-  return readLog(path).split("\n");
+  // Drop the phantom empty element split() leaves when the file ends
+  // with a newline; without this, every `before = logLines().length`
+  // offset is one too large and the first line appended after the
+  // offset is skipped. That hid the single (non-duplicated)
+  // MUSE-MOCK POST line from the muse-ai check while the duplicated
+  // APPD lines beside it were still found by their second copy.
+  const lines = readLog(path).split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines;
 }
 
 async function waitForLog(path, pattern, timeoutMs, sinceLines = 0) {
@@ -472,7 +480,7 @@ async function waitReady(b, version) {
   if (!ready45) return null;
   const aidReady = await waitForLog(
     b.logPath,
-    /AID ready .*backends=echo-ai,plan-ai selected=echo-ai/,
+    /AID ready .*backends=echo-ai,muse-ai,plan-ai selected=echo-ai/,
     30000,
   );
   const ready = await waitForLog(b.logPath, /SEVYNOS_M4_READY/, 30000);
@@ -931,11 +939,14 @@ async function main() {
   // M9: the Wi-Fi section comes first in Settings, so its Scan button
   // is focusable before the channel buttons — the focus order is now
   // [—, ▢, X, Scan, Nightly, Stable, Sync Now, Timezone, Apply,
-  // echo-ai, plan-ai] (#134's Date & Time section sits after the
-  // channel buttons, adding Sync Now, the timezone input, and Apply
-  // there). Tab x11 -> plan-ai. (The wallpaper PR's Appearance
-  // section appends 4 style buttons AFTER plan-ai, so x11 still
-  // holds — anything after plan-ai is unaffected.)
+  // echo-ai, muse-ai, plan-ai] (#134's Date & Time section sits after
+  // the channel buttons, adding Sync Now, the timezone input, and
+  // Apply there). Tab x12 -> plan-ai. (P0 added the muse-ai button
+  // between echo-ai and plan-ai; its key input + Save + Clear sit
+  // AFTER plan-ai, so they do not move the count. The wallpaper PR's
+  // Appearance section appends 4 style buttons AFTER plan-ai, so x12
+  // still holds — anything after plan-ai is unaffected.)
+  await key("tab");
   await key("tab");
   await key("tab");
   await key("tab");
@@ -955,7 +966,7 @@ async function main() {
     const st = await aidCmd(
       b,
       "STATUS",
-      /AID STATUS selected=plan-ai backends=echo-ai,plan-ai/,
+      /AID STATUS selected=plan-ai backends=echo-ai,muse-ai,plan-ai/,
     );
     check("settings: aid reads the new selection back (STATUS)", !!st, st || "");
   }

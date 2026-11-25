@@ -485,6 +485,18 @@ const Sevyn = {
     logs.push("CLOSEAPP");
     return true;
   },
+  minimizeApp() {
+    logs.push("MINIMIZEAPP");
+    return true;
+  },
+  maximizeApp() {
+    logs.push("MAXIMIZEAPP");
+    return true;
+  },
+  unmaximizeApp() {
+    logs.push("UNMAXIMIZEAPP");
+    return true;
+  },
   // One-shot `sevyn` CLI run (M4). Records the call; tests answer
   // through _execHandler (a function of cmdline -> "code\noutput"),
   // defaulting to a bare success so template tests never see it.

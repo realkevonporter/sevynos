@@ -551,6 +551,12 @@ check("settings: channel switch applies and logs", () => {
   // Shut Down, Restart, Default, Solid, Cosmic, Minimal] — the
   // Appearance section sits after Power, so it appends four
   // focusables at the end (eight more swatches when Solid is picked).
+  // P0's Muse API key section adds three focusables in the AI
+  // section, after plan-ai and before Shut Down (the key input,
+  // Save key, Clear key), so the full order is [—, ▢, X, Scan,
+  // Nightly, Stable, Sync Now, Timezone, Apply, echo-ai, plan-ai,
+  // key input, Save key, Clear key, Shut Down, Restart, Default,
+  // Solid, Cosmic, Minimal, macOS, macOS Light] — 22 focusables.
   pressTab(6); // —, ▢, X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
@@ -564,11 +570,14 @@ check("settings: channel switch applies and logs", () => {
     "confirmation shown",
   );
   // Focus order is now [—, ▢, X, Scan, Nightly, Stable, Sync Now,
-  // Timezone, Apply, echo-ai, plan-ai, Shut Down, Restart, Default,
-  // Solid, Cosmic, Minimal, macOS, macOS Light]: Stable -> Sync Now -> Timezone -> Apply
-  // -> echo-ai -> plan-ai -> Shut Down -> Restart -> Default ->
-  // Solid -> Cosmic -> Minimal -> macOS -> macOS Light -> — -> ▢ -> X -> Scan -> Nightly.
-  pressTab(18);
+  // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
+  // Shut Down, Restart, Default, Solid, Cosmic, Minimal, macOS,
+  // macOS Light]: Stable -> Sync Now -> Timezone -> Apply
+  // -> echo-ai -> plan-ai -> key input -> Save key -> Clear key
+  // -> Shut Down -> Restart -> Default -> Solid -> Cosmic -> Minimal
+  // -> macOS -> macOS Light -> — -> ▢ -> X -> Scan -> Nightly.
+  // Stable is 6th, Nightly 5th, so 21 Tabs wrap back to Nightly.
+  pressTab(21);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> Sync Now -> Timezone -> Apply -> echo-ai ->
@@ -638,9 +647,10 @@ check("settings: wallpaper style + color apply and log", () => {
     "no-custom-image note shown for a gradient style",
   );
   // Focus order is [—, ▢, X, Scan, Nightly, Stable, Sync Now,
-  // Timezone, Apply, echo-ai, plan-ai, Shut Down, Restart, Default,
-  // Solid, Cosmic, Minimal, macOS, macOS Light]: Default is the 14th focusable.
-  pressTab(14);
+  // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
+  // Shut Down, Restart, Default, Solid, Cosmic, Minimal, macOS,
+  // macOS Light]: Default is the 17th focusable.
+  pressTab(17);
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS wallpaperStyle=default"),
