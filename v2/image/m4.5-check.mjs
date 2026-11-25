@@ -1156,6 +1156,23 @@ async function main() {
     }
   }
   {
+    // /data/settings.json does not exist on a fresh system (the
+    // shell falls back to defaults when it is missing), so the
+    // session's READs would fail instead of being allowed — the
+    // first round failed exactly this way (allowed=0 denied=1
+    // failed=2). Create it first with known content; the session
+    // then reads it, is denied the write, and re-reads it
+    // unchanged.
+    const { exec: writeExec } = await termCmd(
+      "sevyn files write /data/settings.json volume=42",
+    );
+    check(
+      "muse-ai session: settings file created for the session",
+      !!writeExec,
+      writeExec || "",
+    );
+  }
+  {
     const beforeSession = logLines(b.logPath).length;
     const { exec, hit } = await termCmd(
       "ai session session fix the settings",
