@@ -1136,6 +1136,26 @@ async function main() {
   //    WRITE) and the settings file is untouched. The mock logs each
   //    of the session's API calls on the console.
   {
+    // Re-focus the Terminal input first: CLOSE files (via appd,
+    // above) shifts focus away from the Terminal, and without this
+    // the typed command goes nowhere — the session never starts
+    // (M4.5 failed on the first round for exactly this).
+    const shotTerm4 = await shot(b.qmp, join(OUT, "m4.5-shot-terminal-4.ppm"));
+    const termHeader4 = findWindowHeader(shotTerm4, 17, 24, 39);
+    check("muse-ai session: Terminal window still up", !!termHeader4);
+    if (termHeader4) {
+      await moveTo(
+        termHeader4.left + 200,
+        termHeader4.top + 482,
+        shotTerm4.width,
+        shotTerm4.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
+    }
+  }
+  {
     const beforeSession = logLines(b.logPath).length;
     const { exec, hit } = await termCmd(
       "ai session session fix the settings",
