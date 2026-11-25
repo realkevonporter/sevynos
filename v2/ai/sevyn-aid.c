@@ -24,6 +24,23 @@
  *   RELOAD            -> OK grant reloaded / ERR (old grant kept)
  *   ASK <task...>     -> OK backend=<id> allowed=<n> denied=<m>
  *                        failed=<k>
+ *   SESSION <task...> -> the session protocol (P1, phase 2, §1.4.1):
+ *                        the backend emits ONE action, the daemon
+ *                        executes it (grant-checked) and returns the
+ *                        result to the backend, which decides the
+ *                        next action. The daemon writes "SESSION"
+ *                        then the task line to the backend's stdin;
+ *                        after each action it writes back
+ *                        "RESULT OK|DENIED|FAILED <detail>".
+ *                        The backend ends with END. The per-action
+ *                        budget (D8) replaces the single-shot
+ *                        timeout: each action gets the backend's
+ *                        full timeout from its .limits file
+ *                        (muse-ai 300 s, others 5 s), and the total
+ *                        actions are capped by its max_actions
+ *                        (muse-ai 64, others 32). A timeout with
+ *                        partial progress replies OK with the counts
+ *                        so far; a timeout with no progress is ERR.
  * The harness control serial (/dev/ttyS4) takes the same verbs; its
  * replies go to the console as AID log lines (like appd's ttyS2).
  * SIGHUP also reloads the grant. A failed reload keeps the old
@@ -38,6 +55,21 @@
  *                                    needed: reads change nothing)
  *   EXEC <verb...>    cli.exec     -> runs `sevyn` CLI verbs only,
  *                                    never a shell (D5)
+ *   WRITE <path> <content> file.write -> bounded write (P1, §1.4.3):
+ *                                    only under /data/ or
+ *                                    /var/lib/sevyn/, never the
+ *                                    pristine bundles; the previous
+ *                                    copy is kept as <path>.sevyn-bak;
+ *                                    content uses \n escapes (one
+ *                                    action line). Grant-checked.
+ *   UPDATE [apply]    system.update -> check/apply via the existing
+ *                                    updater (P1): UPDATE runs
+ *                                    `sevyn update check`; UPDATE
+ *                                    apply requests the apply (the
+ *                                    device reboots when it lands).
+ *                                    God-mode-only by grant (the
+ *                                    standard grant has no
+ *                                    system.update).
  *   UNINSTALL <id>    app.uninstall (NOT in the grant — refused)
  *   INSTALL <path>    app.install   (NOT in the grant — refused)
  *   REBOOT            system.reboot (NOT in the grant — refused)
@@ -64,7 +96,8 @@
  * SEVYN_AI_APPD_SOCK, SEVYN_AI_STATUS_SOCK, SEVYN_AI_CLI (the
  * `sevyn` binary EXEC runs; default /usr/local/bin/sevyn),
  * SEVYN_AI_READ_ROOT (test-only: the one directory READ may touch,
- * replacing /data/ + /var/lib/sevyn/).
+ * replacing /data/ + /var/lib/sevyn/), SEVYN_AI_WRITE_ROOT
+ * (test-only: the one directory WRITE may touch, same replacement).
  *
  * Build: gcc, libc only (+ the M3 JSON parser for the grant).
  */
@@ -122,6 +155,21 @@
 /* EXEC executor (P0): runs `sevyn` CLI verbs only, never a shell
  * (D5). The CLI path has a host-test override. */
 #define DEFAULT_CLI "/usr/local/bin/sevyn"
+/* WRITE executor (P1, §1.4.3): a file the AI replaces must be one
+ * it could have fully read, so the existing file is capped at the
+ * READ cap — replacing a larger file would destroy content the
+ * backend never saw. The wire content is bounded by the action line
+ * (LINE_CAP); newlines ride as \n escapes. */
+#define WRITE_EXISTING_CAP READ_CAP
+/* UPDATE executor (P1): the check waits like an EXEC (30 s); the
+ * apply is requested, not awaited — the CLI child downloads and the
+ * device reboots when it lands, so the daemon only waits long
+ * enough to catch an immediate failure. */
+#define UPDATE_CHECK_TIMEOUT_S 30
+#define UPDATE_APPLY_WAIT_S 5
+/* Pristine stock bundles: the offline reinstall source, never
+ * writable by the AI in any mode (design §3.5). */
+#define PRISTINE_PREFIX "/usr/share/sevyn/pristine/"
 
 static const char *g_sock_path;
 static const char *g_ctl_path;
@@ -135,6 +183,11 @@ static const char *g_cli_path;
  * touch paths under it (the host test cannot write /data). Unset in
  * production, where the /data/ + /var/lib/sevyn/ roots apply. */
 static const char *g_read_root;
+/* Test-only write root (SEVYN_AI_WRITE_ROOT): when set, WRITE may
+ * only touch paths under it (the host test cannot write /data).
+ * Unset in production, where the /data/ + /var/lib/sevyn/ roots
+ * apply. The pristine exclusion holds either way. */
+static const char *g_write_root;
 static int g_console_fd = -1;
 static volatile sig_atomic_t g_stop = 0;
 /* Set by the SIGHUP handler; the main loop reloads the grant when
@@ -717,6 +770,15 @@ static const char *perm_for_verb(const char *verb)
         return "state.read";
     if (strcmp(verb, "EXEC") == 0)
         return "cli.exec";
+    /* P1: WRITE replaces a file (bounded, §1.4.3) and UPDATE
+     * checks/applies a system update. Both are grant-checked; the
+     * standard grant names neither, so under it both are refused —
+     * they only run when a grant names them (god mode, P2, names
+     * both). No grant is invented here. */
+    if (strcmp(verb, "WRITE") == 0)
+        return "file.write";
+    if (strcmp(verb, "UPDATE") == 0)
+        return "system.update";
     return NULL;
 }
 
@@ -765,6 +827,29 @@ static int parse_action(const char *line, struct action *a)
         n != 1)
         return -1;
     if (strcmp(verb, "EXEC") == 0 && a->rest[0] == '\0')
+        return -1;
+    /* P1: WRITE takes a path plus content (the rest of the line
+     * after the path, with \n escapes). The path token must fit
+     * arg1 whole (127 chars) and the content must be non-empty —
+     * a WRITE with no content is not an action. */
+    if (strcmp(verb, "WRITE") == 0) {
+        if (n < 2)
+            return -1;
+        const char *p = a->rest;
+        size_t plen = 0;
+        while (p[plen] && p[plen] != ' ' && p[plen] != '\t')
+            plen++;
+        if (plen == 0 || plen >= sizeof(a->arg1))
+            return -1;
+        p += plen;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0')
+            return -1;
+    }
+    /* P1: UPDATE takes no argument (check) or exactly "apply". */
+    if (strcmp(verb, "UPDATE") == 0 &&
+        !(n == 1 || (n == 2 && strcmp(arg1, "apply") == 0)))
         return -1;
     return 0;
 }
@@ -841,12 +926,345 @@ static int exec_read(const struct action *a, char *err, size_t errcap)
     return 0;
 }
 
+/* WRITE executor (P1, §1.4.3): replaces a file's content. Bounds:
+ * absolute path only, under /data/ or /var/lib/sevyn/ (or the
+ * test-only SEVYN_AI_WRITE_ROOT), never under the pristine stock
+ * bundles, no ".." traversal. The previous copy is kept as
+ * <path>.sevyn-bak so a bad AI write is one rename from undo, and
+ * the file's mode is preserved (a 0600 file must not come back
+ * 0644). A file the backend could not have fully read is not
+ * replaced: the existing file must fit the READ cap. Content rides
+ * the action line with \n escapes (one line); the wire content is
+ * therefore bounded by LINE_CAP. Every write is logged with the
+ * full path. */
+static int write_path_allowed(const char *path)
+{
+    if (!path || path[0] != '/')
+        return 0;
+    if (strstr(path, "..") != NULL)
+        return 0;
+    /* Pristine first: it holds even if the roots below are ever
+     * widened (design §3.5). */
+    if (strncmp(path, PRISTINE_PREFIX,
+                sizeof(PRISTINE_PREFIX) - 1) == 0)
+        return 0;
+    if (g_write_root) {
+        size_t n = strlen(g_write_root);
+        return strncmp(path, g_write_root, n) == 0 && path[n] == '/';
+    }
+    if (strncmp(path, "/data/", 6) != 0 &&
+        strncmp(path, "/var/lib/sevyn/", 15) != 0)
+        return 0;
+    return 1;
+}
+
+/* Decode the wire content: \n -> newline, \t -> tab, \\ ->
+ * backslash; any other \x stays literal (backslash + char).
+ * Returns malloc'd text. */
+static char *unescape_write_content(const char *wire)
+{
+    size_t n = strlen(wire);
+    char *out = malloc(n + 1);
+    if (!out)
+        return NULL;
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (wire[i] == '\\' && i + 1 < n) {
+            char c = wire[i + 1];
+            if (c == 'n') {
+                out[w++] = '\n';
+                i++;
+            } else if (c == 't') {
+                out[w++] = '\t';
+                i++;
+            } else if (c == '\\') {
+                out[w++] = '\\';
+                i++;
+            } else {
+                out[w++] = wire[i];
+            }
+        } else {
+            out[w++] = wire[i];
+        }
+    }
+    out[w] = '\0';
+    return out;
+}
+
+/* Copy a file byte-exact (the .sevyn-bak must be a true copy, even
+ * for a binary file — write_file_atomic is a C-string writer and
+ * would stop at the first NUL). tmp + rename, like the atomic
+ * writer. Returns 0 on success, -1 on failure. */
+static int copy_file_exact(const char *src, const char *dst)
+{
+    /* The tmp name is built by hand, not snprintf: dst is an
+     * unbounded pointer to the compiler, and a "%s.tmp" snprintf
+     * would warn (and could truncate a long path). The length
+     * check makes the copy provably safe. */
+    char tmp[4096];
+    size_t dlen = strlen(dst);
+    if (dlen + 5 > sizeof(tmp))
+        return -1;
+    memcpy(tmp, dst, dlen);
+    memcpy(tmp + dlen, ".tmp", 5);
+    FILE *in = fopen(src, "rb");
+    if (!in)
+        return -1;
+    FILE *out = fopen(tmp, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    char buf[8192];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = -1;
+            break;
+        }
+    }
+    if (ferror(in))
+        rc = -1;
+    if (fclose(out) != 0)
+        rc = -1;
+    fclose(in);
+    if (rc != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, dst) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+static int exec_write(const struct action *a, char *err, size_t errcap)
+{
+    const char *path = a->arg1;
+    if (!write_path_allowed(path)) {
+        snprintf(err, errcap, "WRITE path not allowed: %s", path);
+        return -1;
+    }
+    /* Content is the rest of the line after the path token. */
+    const char *p = a->rest;
+    while (*p && *p != ' ' && *p != '\t')
+        p++;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    char *content = unescape_write_content(p);
+    if (!content) {
+        snprintf(err, errcap, "out of memory");
+        return -1;
+    }
+    struct stat st;
+    int exists = (stat(path, &st) == 0);
+    mode_t old_mode = 0;
+    if (exists) {
+        if (!S_ISREG(st.st_mode)) {
+            free(content);
+            snprintf(err, errcap, "WRITE not a regular file: %s",
+                     path);
+            return -1;
+        }
+        /* Refuse to replace a file the backend could not have
+         * fully read — replacing it would destroy content the
+         * model never saw. */
+        if (st.st_size > (off_t)WRITE_EXISTING_CAP) {
+            free(content);
+            snprintf(err, errcap,
+                     "WRITE file over the 64 KiB cap: %s", path);
+            return -1;
+        }
+        old_mode = st.st_mode & 07777;
+        /* Keep the previous copy next to the file, so a bad write
+         * is one rename from undo (§1.4.3 — a requirement, not a
+         * nice-to-have). The path is an action token (127 chars),
+         * so the .sevyn-bak name fits in 160 with room. */
+        char bak[160];
+        snprintf(bak, sizeof(bak), "%s.sevyn-bak", path);
+        if (copy_file_exact(path, bak) != 0) {
+            free(content);
+            snprintf(err, errcap, "WRITE cannot back up %s: %s",
+                     path, strerror(errno));
+            return -1;
+        }
+    } else {
+        /* A new file: the parent directory must already exist.
+         * The path is an action token (127 chars), so the parent
+         * fits in 128. */
+        char parent[128];
+        snprintf(parent, sizeof(parent), "%s", path);
+        char *slash = strrchr(parent, '/');
+        if (!slash || slash == parent) {
+            free(content);
+            snprintf(err, errcap, "WRITE bad parent for %s", path);
+            return -1;
+        }
+        *slash = '\0';
+        struct stat pst;
+        if (stat(parent, &pst) != 0 || !S_ISDIR(pst.st_mode)) {
+            free(content);
+            snprintf(err, errcap,
+                     "WRITE parent directory missing: %s", parent);
+            return -1;
+        }
+    }
+    if (write_file_atomic(path, content) != 0) {
+        free(content);
+        snprintf(err, errcap, "WRITE cannot write %s: %s", path,
+                 strerror(errno));
+        return -1;
+    }
+    /* Preserve the mode a sensitive file had (0600 stays 0600). */
+    if (exists)
+        (void)!chmod(path, old_mode);
+    size_t nbytes = strlen(content);
+    free(content);
+    if (exists)
+        log_line("AID WRITE %s (%zu bytes, backup %s.sevyn-bak)",
+                 path, nbytes, path);
+    else
+        log_line("AID WRITE %s (%zu bytes, new file)", path, nbytes);
+    snprintf(err, errcap, "%zu bytes written", nbytes);
+    return 0;
+}
+
 /* EXEC executor (P0): runs `sevyn` CLI verbs only, never a bare
  * shell (D5). The args are split on whitespace (no quote handling
  * — the backend emits simple verb tokens) and exec'd directly.
  * The child's output is discarded; only its exit code matters. A
  * 30 s deadline bounds a hung CLI verb so one EXEC cannot stall the
  * daemon. */
+/* Run a `sevyn` CLI argv: fork, execv, wait up to timeout_s. When
+ * out is non-NULL, the child's stdout is captured into it (up to
+ * out_cap-1 bytes, NUL-terminated, first line kept whole); otherwise
+ * stdout goes to /dev/null. Returns 0 on exit 0, -1 with reason in
+ * err. A timeout kills the child and is a failure — except the
+ * UPDATE apply path, which does not use this helper (it requests
+ * the apply and detaches). Shared by EXEC and UPDATE check. */
+static int run_cli_argv(char *const argv[], int timeout_s, char *out,
+                        size_t out_cap, char *err, size_t errcap)
+{
+    int out_pipe[2] = { -1, -1 };
+    if (out && pipe(out_pipe) != 0) {
+        snprintf(err, errcap, "cannot create pipe: %s",
+                 strerror(errno));
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (out) {
+            close(out_pipe[0]);
+            close(out_pipe[1]);
+        }
+        snprintf(err, errcap, "fork failed: %s", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        if (out) {
+            /* UPDATE check: stdout is captured; stderr stays on
+             * the daemon's stderr so a failing check is visible
+             * in the log. */
+            close(out_pipe[0]);
+            dup2(out_pipe[1], STDOUT_FILENO);
+            close(out_pipe[1]);
+        } else {
+            /* EXEC: stdout and stderr are both discarded. */
+            int nullfd = open("/dev/null", O_RDWR);
+            if (nullfd >= 0) {
+                dup2(nullfd, STDOUT_FILENO);
+                dup2(nullfd, STDERR_FILENO);
+            }
+        }
+        execv(g_cli_path, argv);
+        _exit(127);
+    }
+    if (out)
+        close(out_pipe[1]);
+    /* Bounded wait: a CLI verb that does not finish in timeout_s
+     * is killed, so one action cannot stall the daemon. */
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_s;
+    int status = 0;
+    size_t olen = 0;
+    if (out)
+        out[0] = '\0';
+    for (;;) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid)
+            break;
+        if (w < 0 && errno != EINTR) {
+            snprintf(err, errcap, "waitpid failed: %s",
+                     strerror(errno));
+            if (out)
+                close(out_pipe[0]);
+            return -1;
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec &&
+             now.tv_nsec >= deadline.tv_nsec)) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            if (out)
+                close(out_pipe[0]);
+            snprintf(err, errcap, "CLI verb timed out");
+            return -1;
+        }
+        /* Drain captured stdout while waiting, so a chatty child
+         * cannot block on a full pipe. */
+        if (out) {
+            struct pollfd pfd = { .fd = out_pipe[0], .events = POLLIN };
+            if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+                char tmp[1024];
+                ssize_t r = read(out_pipe[0], tmp, sizeof(tmp));
+                if (r > 0 && olen + 1 < out_cap) {
+                    size_t take = (size_t)r;
+                    if (olen + take >= out_cap)
+                        take = out_cap - olen - 1;
+                    memcpy(out + olen, tmp, take);
+                    olen += take;
+                    out[olen] = '\0';
+                }
+            }
+        }
+        struct timespec nap = { .tv_sec = 0, .tv_nsec = 50 * 1000000 };
+        nanosleep(&nap, NULL);
+    }
+    /* Drain whatever is left after exit (the child is done, so
+     * this cannot block: the pipe is empty or at EOF). */
+    if (out) {
+        for (;;) {
+            char tmp[1024];
+            ssize_t r = read(out_pipe[0], tmp, sizeof(tmp));
+            if (r <= 0)
+                break;
+            if (olen + 1 < out_cap) {
+                size_t take = (size_t)r;
+                if (olen + take >= out_cap)
+                    take = out_cap - olen - 1;
+                memcpy(out + olen, tmp, take);
+                olen += take;
+                out[olen] = '\0';
+            }
+        }
+        close(out_pipe[0]);
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+    if (WIFEXITED(status)) {
+        snprintf(err, errcap, "sevyn exited %d", WEXITSTATUS(status));
+        return -1;
+    }
+    snprintf(err, errcap, "sevyn did not exit cleanly");
+    return -1;
+}
+
 static int exec_cli(const struct action *a, char *err, size_t errcap)
 {
     char *argv[34];
@@ -863,6 +1281,50 @@ static int exec_cli(const struct action *a, char *err, size_t errcap)
         snprintf(err, errcap, "EXEC needs a CLI verb");
         return -1;
     }
+    return run_cli_argv(argv, 30, NULL, 0, err, errcap);
+}
+
+/* UPDATE executor (P1): check/apply via the existing updater
+ * (`sevyn update check` / `apply`), never a new ad-hoc path. The
+ * apply still verifies signatures against the existing trust
+ * anchors (the updater's job, not this executor's).
+ *
+ * UPDATE (check) runs the check and reports the result — the
+ * captured output is the detail, so a session backend learns
+ * whether an update is available.
+ *
+ * UPDATE apply requests the apply and detaches: the CLI child
+ * downloads and the device reboots when it lands, so the daemon
+ * only waits long enough to catch an immediate failure (a missing
+ * update, a bad CLI path). A child still running after that window
+ * is a requested apply, not a failure — killing it would be worse
+ * than letting the updater finish, and the reboot reaps it. */
+static int exec_update(const struct action *a, char *err, size_t errcap)
+{
+    if (a->arg1[0] == '\0') {
+        char *argv[] = { (char *)g_cli_path, "update", "check", NULL };
+        char out[512];
+        if (run_cli_argv(argv, UPDATE_CHECK_TIMEOUT_S, out,
+                         sizeof(out), err, errcap) != 0)
+            return -1;
+        /* The check's output is the result the backend acts on:
+         * keep the first line, trimmed, as the detail. */
+        char *nl = strchr(out, '\n');
+        if (nl)
+            *nl = '\0';
+        size_t n = strlen(out);
+        while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\r' ||
+                         out[n - 1] == '\t'))
+            out[--n] = '\0';
+        if (out[0] == '\0')
+            snprintf(err, errcap, "update check ok");
+        else
+            snprintf(err, errcap, "%s", out);
+        log_line("AID UPDATE check: %s", err);
+        return 0;
+    }
+    /* apply */
+    char *argv[] = { (char *)g_cli_path, "update", "apply", NULL };
     pid_t pid = fork();
     if (pid < 0) {
         snprintf(err, errcap, "fork failed: %s", strerror(errno));
@@ -877,16 +1339,29 @@ static int exec_cli(const struct action *a, char *err, size_t errcap)
         execv(g_cli_path, argv);
         _exit(127);
     }
-    /* Bounded wait: a CLI verb that does not finish in 30 s is
-     * killed, so one EXEC cannot stall the daemon. */
+    /* Brief window: catch an immediate failure (bad CLI path, no
+     * update available — the CLI exits fast). A child still running
+     * after it is genuinely applying; detach and report requested. */
     struct timespec deadline;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
-    deadline.tv_sec += 30;
-    int status = 0;
+    deadline.tv_sec += UPDATE_APPLY_WAIT_S;
     for (;;) {
+        int status = 0;
         pid_t w = waitpid(pid, &status, WNOHANG);
-        if (w == pid)
-            break;
+        if (w == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                snprintf(err, errcap, "update applied");
+                log_line("AID UPDATE apply: finished (exit 0)");
+                return 0;
+            }
+            if (WIFEXITED(status)) {
+                snprintf(err, errcap, "sevyn exited %d",
+                         WEXITSTATUS(status));
+                return -1;
+            }
+            snprintf(err, errcap, "sevyn did not exit cleanly");
+            return -1;
+        }
         if (w < 0 && errno != EINTR) {
             snprintf(err, errcap, "waitpid failed: %s",
                      strerror(errno));
@@ -897,23 +1372,16 @@ static int exec_cli(const struct action *a, char *err, size_t errcap)
         if (now.tv_sec > deadline.tv_sec ||
             (now.tv_sec == deadline.tv_sec &&
              now.tv_nsec >= deadline.tv_nsec)) {
-            kill(pid, SIGKILL);
-            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-            }
-            snprintf(err, errcap, "EXEC timed out");
-            return -1;
+            /* Still running: the apply is proceeding. Detach —
+             * the device reboots when it lands, which reaps the
+             * child; the daemon must not kill it mid-download. */
+            log_line("AID UPDATE apply requested");
+            snprintf(err, errcap, "update apply requested");
+            return 0;
         }
         struct timespec nap = { .tv_sec = 0, .tv_nsec = 50 * 1000000 };
         nanosleep(&nap, NULL);
     }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-        return 0;
-    if (WIFEXITED(status)) {
-        snprintf(err, errcap, "sevyn exited %d", WEXITSTATUS(status));
-        return -1;
-    }
-    snprintf(err, errcap, "sevyn did not exit cleanly");
-    return -1;
 }
 
 /* Execute one granted action. Returns 0 on success, -1 with reason
@@ -944,7 +1412,59 @@ static int execute_action(const struct action *a, char *err,
         return exec_read(a, err, errcap);
     if (strcmp(a->verb, "EXEC") == 0)
         return exec_cli(a, err, errcap);
+    /* P1: WRITE replaces a file (bounded, §1.4.3) and UPDATE
+     * checks/applies a system update via the existing updater. */
+    if (strcmp(a->verb, "WRITE") == 0)
+        return exec_write(a, err, errcap);
+    if (strcmp(a->verb, "UPDATE") == 0)
+        return exec_update(a, err, errcap);
     snprintf(err, errcap, "no executor for %s", a->verb);
+    return -1;
+}
+
+/* Run one action: the permission boundary lives here and nowhere
+ * else — a grant-check and an executor call, with the log. Returns
+ * 1 when the action ran (allowed), 0 when it was refused by the
+ * grant (denied), -1 when the executor failed. The detail (the
+ * executor's result, or the refusal reason) lands in `detail` so
+ * a session backend can see what happened and re-plan. READ is the
+ * exception: reads change nothing, so they need no grant (§1.4.1)
+ * — the executor still bounds and logs the read. The ASK loop and
+ * the SESSION loop both call this, so a grant decision is made in
+ * exactly one place. */
+static int run_one_action(const struct action *a, char *detail,
+                          size_t detail_cap)
+{
+    char action_line[LINE_CAP];
+    if (strcmp(a->verb, "EXEC") == 0)
+        /* The rest is bounded by the action line (2048); the
+         * precision keeps the log line inside it. */
+        snprintf(action_line, sizeof(action_line), "EXEC %.2042s",
+                 a->rest);
+    else if (a->arg2[0])
+        snprintf(action_line, sizeof(action_line), "%s %s %s", a->verb,
+                 a->arg1, a->arg2);
+    else if (a->arg1[0])
+        snprintf(action_line, sizeof(action_line), "%s %s", a->verb,
+                 a->arg1);
+    else
+        snprintf(action_line, sizeof(action_line), "%s", a->verb);
+    if (strcmp(a->verb, "READ") != 0 &&
+        (!a->perm || !grant_has(a->perm))) {
+        log_line("AID DENIED %s %s (%s)", g_selected, action_line,
+                 a->perm ? a->perm : "unknown action");
+        snprintf(detail, detail_cap, "%s",
+                 a->perm ? a->perm : "unknown action");
+        return 0;
+    }
+    char xerr[256];
+    if (execute_action(a, xerr, sizeof(xerr)) == 0) {
+        log_line("AID ALLOW %s %s", g_selected, action_line);
+        snprintf(detail, detail_cap, "%s", xerr);
+        return 1;
+    }
+    log_line("AID EXEC FAIL %s %s: %s", g_selected, action_line, xerr);
+    snprintf(detail, detail_cap, "%s", xerr);
     return -1;
 }
 
@@ -1084,6 +1604,243 @@ static int run_backend(const char *backend_path, const char *task,
          * visible in the log. */
         log_line("AID backend ended without END (%zu actions kept)",
                  *n_actions);
+    }
+    return rc;
+}
+
+/* Read one line from fd with a deadline (timeout_s from now).
+ * Returns 1 with the line (NUL-terminated, newline stripped), 0 on
+ * EOF, -1 on timeout, -2 on a read error. A line longer than the
+ * buffer is truncated, not fatal — the rest is discarded up to the
+ * newline, matching run_backend. */
+static int read_line_deadline(int fd, char *line, size_t cap,
+                              int timeout_s)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_s;
+    size_t llen = 0;
+    for (;;) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long remain_ms = (deadline.tv_sec - now.tv_sec) * 1000 +
+                         (deadline.tv_nsec - now.tv_nsec) / 1000000;
+        if (remain_ms <= 0)
+            return -1;
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&pfd, 1, (int)remain_ms);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            return -2;
+        }
+        if (pr == 0)
+            return -1;
+        char c;
+        ssize_t r = read(fd, &c, 1);
+        if (r == 0)
+            return 0;
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            return -2;
+        }
+        if (c == '\n') {
+            line[llen] = '\0';
+            return 1;
+        }
+        if (llen + 1 < cap)
+            line[llen++] = c;
+    }
+}
+
+/* Write the whole buffer, ignoring a dead pipe (a batch backend
+ * that already exited). Returns 0 on success, -1 when the pipe is
+ * gone — the caller treats that as "the backend left" and reads
+ * on to EOF. */
+static int write_all_quiet(int fd, const char *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, buf + off, len - off);
+        if (w <= 0)
+            return -1;
+        off += (size_t)w;
+    }
+    return 0;
+}
+
+/* Session protocol (P1, §1.4.1, phase 2): the daemon and the
+ * backend talk action-by-action, so the agent loop can run
+ * read -> fix -> re-check in one session instead of one shot.
+ *
+ * The daemon writes "SESSION\n" then the task line to the
+ * backend's stdin (the marker tells the backend it is in session
+ * mode; a backend run via ASK sees the task directly, no marker).
+ * After each action the daemon writes "RESULT OK <detail>" /
+ * "RESULT DENIED <perm>" / "RESULT FAILED <reason>" back to the
+ * backend's stdin, so the backend learns what happened and can
+ * re-plan. The backend ends the session by printing END.
+ *
+ * Per-action budget (D8): each action read gets a fresh deadline
+ * of the backend's own timeout (muse-ai 300 s, others 5 s) — the
+ * single-shot timeout is replaced, not removed. Total actions are
+ * capped by max_actions (muse-ai 64, others 32). A batch backend
+ * that prints all its actions then END still works: the RESULT
+ * writes to a dead pipe fail silently and the actions run in
+ * order.
+ *
+ * Returns 0 with the counts filled in, -1 with reason in err when
+ * the session cannot start or nothing ran (a timeout with partial
+ * progress is a 0 with the counts so far — the work already done
+ * is real and the reply says so). */
+static int run_session(const char *backend_path, const char *task,
+                       int timeout_s, size_t max_actions, int *allowed,
+                       int *denied, int *failed, char *err,
+                       size_t errcap)
+{
+    *allowed = *denied = *failed = 0;
+    int in_pipe[2], out_pipe[2];
+    if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
+        snprintf(err, errcap, "cannot create pipes");
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        snprintf(err, errcap, "fork failed: %s", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        dup2(in_pipe[0], STDIN_FILENO);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0)
+            dup2(nullfd, STDERR_FILENO);
+        execl(backend_path, backend_path, (char *)NULL);
+        _exit(127);
+    }
+    close(in_pipe[0]);
+    close(out_pipe[1]);
+
+    /* Session marker, then the task line. The backend reads the
+     * marker first; a backend that does not understand sessions
+     * would read "SESSION" as its task — but every shipped backend
+     * is P1-aware, and ASK still sends the task directly. */
+    char task_line[TASK_CAP + 2];
+    snprintf(task_line, sizeof(task_line), "SESSION\n%s\n", task);
+    if (write_all_quiet(in_pipe[1], task_line, strlen(task_line)) != 0) {
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        snprintf(err, errcap, "backend closed stdin");
+        return -1;
+    }
+
+    int rc = 0;
+    char line[LINE_CAP];
+    for (;;) {
+        int done = *allowed + *denied + *failed;
+        if (done >= (int)max_actions) {
+            /* Cap reached: the session ends normally with the
+             * counts so far — the backend proposed more than its
+             * budget allows, and the work already done is real. */
+            log_line("AID session action cap reached (%zu)",
+                     max_actions);
+            break;
+        }
+        int lr = read_line_deadline(out_pipe[0], line, sizeof(line),
+                                    timeout_s);
+        if (lr == 0)
+            break; /* EOF: the backend left */
+        if (lr == -1) {
+            /* Per-action budget spent. With partial progress the
+             * session is a success with the counts so far; with
+             * nothing done it is a failure, like ASK. */
+            if (done == 0) {
+                snprintf(err, errcap, "backend timed out");
+                rc = -1;
+            } else {
+                log_line("AID session timed out after %d actions",
+                         done);
+            }
+            break;
+        }
+        if (lr == -2) {
+            snprintf(err, errcap, "read failed: %s", strerror(errno));
+            rc = -1;
+            break;
+        }
+        if (strcmp(line, "END") == 0)
+            break;
+        if (line[0] == '\0')
+            continue;
+        struct action a;
+        if (parse_action(line, &a) != 0)
+            continue; /* chatter, not an action */
+        char detail[256];
+        int outcome = run_one_action(&a, detail, sizeof(detail));
+        if (outcome == 1)
+            (*allowed)++;
+        else if (outcome == 0)
+            (*denied)++;
+        else
+            (*failed)++;
+        /* The RESULT must be one line: an executor detail never
+         * carries a newline, but strip one anyway so a future
+         * detail cannot split the protocol. */
+        for (char *p = detail; *p; p++) {
+            if (*p == '\n' || *p == '\r')
+                *p = ' ';
+        }
+        char result[512];
+        snprintf(result, sizeof(result), "RESULT %s %s\n",
+                 outcome == 1 ? "OK" : outcome == 0 ? "DENIED"
+                                                     : "FAILED",
+                 detail);
+        /* A dead pipe (batch backend) is not an error: the actions
+         * still ran, and the next read returns EOF. */
+        (void)!write_all_quiet(in_pipe[1], result, strlen(result));
+    }
+    close(in_pipe[1]);
+    close(out_pipe[0]);
+    /* Bounded reap: a backend that printed END exits on its own;
+     * one that is still waiting on stdin gets EOF and should exit
+     * too. A hung backend is killed after 2 s — the daemon must
+     * not block on it. */
+    int status = 0;
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += 2;
+    int reaped = 0;
+    for (;;) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            reaped = 1;
+            break;
+        }
+        if (w < 0 && errno != EINTR)
+            break;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec &&
+             now.tv_nsec >= deadline.tv_nsec))
+            break;
+        struct timespec nap = { .tv_sec = 0, .tv_nsec = 50 * 1000000 };
+        nanosleep(&nap, NULL);
+    }
+    if (!reaped) {
+        kill(pid, SIGKILL);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
     }
     return rc;
 }
@@ -1257,42 +2014,15 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         }
         int allowed = 0, denied = 0, failed = 0;
         for (size_t i = 0; i < n_actions; i++) {
-            struct action *a = &actions[i];
-            char action_line[LINE_CAP];
-            if (strcmp(a->verb, "EXEC") == 0)
-                snprintf(action_line, sizeof(action_line), "EXEC %s",
-                         a->rest);
-            else if (a->arg2[0])
-                snprintf(action_line, sizeof(action_line), "%s %s %s",
-                         a->verb, a->arg1, a->arg2);
-            else if (a->arg1[0])
-                snprintf(action_line, sizeof(action_line), "%s %s",
-                         a->verb, a->arg1);
-            else
-                snprintf(action_line, sizeof(action_line), "%s",
-                         a->verb);
-            /* The permission boundary: anything without a permission
-             * or outside the grant is refused here and never runs.
-             * READ is the exception: reads change nothing, so they
-             * need no grant (§1.4.1) — the executor still bounds
-             * and logs the read. */
-            if (strcmp(a->verb, "READ") != 0 &&
-                (!a->perm || !grant_has(a->perm))) {
-                denied++;
-                log_line("AID DENIED %s %s (%s)", g_selected,
-                         action_line,
-                         a->perm ? a->perm : "unknown action");
-                continue;
-            }
-            char xerr[256];
-            if (execute_action(a, xerr, sizeof(xerr)) == 0) {
+            char detail[256];
+            int rc = run_one_action(&actions[i], detail,
+                                    sizeof(detail));
+            if (rc == 1)
                 allowed++;
-                log_line("AID ALLOW %s %s", g_selected, action_line);
-            } else {
+            else if (rc == 0)
+                denied++;
+            else
                 failed++;
-                log_line("AID EXEC FAIL %s %s: %s", g_selected,
-                         action_line, xerr);
-            }
         }
         free(actions);
         log_line("AID ASK backend=%s task=\"%s\" allowed=%d denied=%d "
@@ -1300,6 +2030,67 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
                  g_selected, arg, allowed, denied, failed);
         if (from_ctl)
             log_line("AID ASK OK backend=%s allowed=%d denied=%d "
+                     "failed=%d",
+                     g_selected, allowed, denied, failed);
+        else if (reply) {
+            snprintf(out, sizeof(out),
+                     "OK backend=%s allowed=%d denied=%d failed=%d\n",
+                     g_selected, allowed, denied, failed);
+            reply(ctx, out);
+        }
+        return;
+    }
+    /* SESSION (P1, §1.4.1, phase 2): an interactive agent loop —
+     * the backend proposes one action, the daemon runs it and
+     * reports the result, the backend re-plans (read -> fix ->
+     * re-check). Same per-backend limits as ASK (D8: the timeout
+     * becomes a per-action budget, not a whole-run deadline), same
+     * grant checks at every step (run_one_action). Works on the
+     * control serial too. */
+    if (strcmp(line, "SESSION") == 0) {
+        if (!arg) {
+            if (from_ctl)
+                log_line("AID SESSION FAIL usage");
+            else if (reply)
+                reply(ctx, "ERR usage: SESSION <task>\n");
+            return;
+        }
+        scan_backends();
+        int bi = backend_index(g_selected);
+        if (bi < 0) {
+            if (from_ctl)
+                log_line("AID SESSION FAIL no backend selected");
+            else if (reply)
+                reply(ctx, "ERR no backend selected\n");
+            return;
+        }
+        char backend_path[4096];
+        snprintf(backend_path, sizeof(backend_path), "%s/%s",
+                 g_backends_dir, g_backends[bi]);
+        int timeout_s = BACKEND_TIMEOUT_S;
+        size_t max_actions = MAX_ACTIONS;
+        read_backend_limits(g_selected, &timeout_s, &max_actions);
+        int allowed = 0, denied = 0, failed = 0;
+        char err[256];
+        if (run_session(backend_path, arg, timeout_s, max_actions,
+                        &allowed, &denied, &failed, err,
+                        sizeof(err)) != 0) {
+            if (from_ctl)
+                log_line("AID SESSION FAIL backend %s: %s", g_selected,
+                         err);
+            else if (reply) {
+                snprintf(out, sizeof(out),
+                         "ERR backend %s failed: %s\n", g_selected,
+                         err);
+                reply(ctx, out);
+            }
+            return;
+        }
+        log_line("AID SESSION backend=%s task=\"%s\" allowed=%d "
+                 "denied=%d failed=%d",
+                 g_selected, arg, allowed, denied, failed);
+        if (from_ctl)
+            log_line("AID SESSION OK backend=%s allowed=%d denied=%d "
                      "failed=%d",
                      g_selected, allowed, denied, failed);
         else if (reply) {
@@ -1380,6 +2171,8 @@ int main(void)
     g_cli_path = env_or("SEVYN_AI_CLI", DEFAULT_CLI);
     const char *read_root = getenv("SEVYN_AI_READ_ROOT");
     g_read_root = (read_root && *read_root) ? read_root : NULL;
+    const char *write_root = getenv("SEVYN_AI_WRITE_ROOT");
+    g_write_root = (write_root && *write_root) ? write_root : NULL;
 
     signal(SIGTERM, on_signal);
     signal(SIGINT, on_signal);

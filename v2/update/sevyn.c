@@ -194,6 +194,8 @@ static void print_usage(FILE *f)
             "  sevyn ai select <id>        plug in a different AI\n"
             "  sevyn ai status             show the selected AI + grant\n"
             "  sevyn ai ask <task...>      ask the AI to do something\n"
+            "  sevyn ai session <task...>  ask the AI in a session "
+            "(read -> fix -> re-check)\n"
             "  sevyn ai key [--file <path>|--clear]\n"
             "                              set/clear the Muse API key\n"
             "  sevyn ai reload             re-read the grant file\n"
@@ -1819,11 +1821,12 @@ static int cmd_ai(int argc, char **argv)
 
     if (strcmp(verb, "list") != 0 && strcmp(verb, "select") != 0 &&
         strcmp(verb, "status") != 0 && strcmp(verb, "ask") != 0 &&
-        strcmp(verb, "reload") != 0)
+        strcmp(verb, "session") != 0 && strcmp(verb, "reload") != 0)
         return usage();
     if (strcmp(verb, "select") == 0 && argc != 4)
         return usage();
-    if (strcmp(verb, "ask") == 0 && argc < 4)
+    if ((strcmp(verb, "ask") == 0 || strcmp(verb, "session") == 0) &&
+        argc < 4)
         return usage();
     if ((strcmp(verb, "list") == 0 || strcmp(verb, "status") == 0 ||
          strcmp(verb, "reload") == 0) &&
@@ -1836,13 +1839,20 @@ static int cmd_ai(int argc, char **argv)
         return 1;
     }
 
-    /* 16 KiB: the ASK task line grows to TASK_CAP (P0). */
+    /* 16 KiB: the ASK task line grows to TASK_CAP (P0). SESSION
+     * (P1) carries the same task line, under the SESSION verb. */
     char cmd[16384];
     if (strcmp(verb, "select") == 0)
         snprintf(cmd, sizeof(cmd), "SELECT %s", argv[3]);
     else if (strcmp(verb, "ask") == 0) {
         size_t n = 0;
         n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, "ASK");
+        for (int i = 3; i < argc && n < sizeof(cmd) - 1; i++)
+            n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " %s",
+                                  argv[i]);
+    } else if (strcmp(verb, "session") == 0) {
+        size_t n = 0;
+        n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, "SESSION");
         for (int i = 3; i < argc && n < sizeof(cmd) - 1; i++)
             n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " %s",
                                   argv[i]);

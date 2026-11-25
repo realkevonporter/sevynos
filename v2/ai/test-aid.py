@@ -302,6 +302,20 @@ def main():
     shutil.copy(HERE / "backends" / "muse-ai.limits",
                 backends / "muse-ai.limits")
 
+    # sevyn CLI (P1 §15): build the real CLI so the test can drive
+    # `ai session` / `ai status` against the test daemon.
+    sevyn_bin = tmp / "sevyn"
+    sevyn_build = subprocess.run(
+        ["gcc", "-O2", "-Wall", "-Wextra",
+         "-o", str(sevyn_bin), str(HERE.parent / "update" / "sevyn.c")],
+        capture_output=True, text=True)
+    if sevyn_build.returncode != 0:
+        print("FAIL: build of sevyn failed")
+        print(sevyn_build.stdout)
+        print(sevyn_build.stderr)
+        return 1
+    print("  ok: sevyn builds clean (-Wall -Wextra)")
+
     # §14 fixtures: a read root (the backend + daemon only read under
     # SEVYN_AI_READ_ROOT in the host test), a small file + an over-cap
     # file, a fake `sevyn` CLI (the EXEC target), a god-mode grant
@@ -316,7 +330,10 @@ def main():
     fake_cli = tmp / "sevyn-fake"
     cli_calls = tmp / "cli-calls.log"
     fake_cli.write_text(
-        f"#!/bin/sh\necho \"$@\" >> {cli_calls}\nexit 0\n")
+        f"#!/bin/sh\necho \"$@\" >> {cli_calls}\n"
+        "if [ \"$1\" = \"update\" ] && [ \"$2\" = \"check\" ]; then "
+        "echo \"update available: 1.2.3\"; fi\n"
+        "exit 0\n")
     fake_cli.chmod(0o755)
     god_grant = tmp / "grant-god.json"
     god_grant.write_text(json.dumps({"permissions": [
@@ -327,6 +344,93 @@ def main():
     key_file.chmod(0o600)
     fake_api = FakeMuseAPI()
     fake_api.start()
+
+    # §15 fixtures (P1): the write root is the same directory as
+    # the read root, so a file the backend reads it may also fix.
+    # target.txt (ASK WRITE), mode.txt (mode preservation, 0600),
+    # session-target.txt (session WRITE), muse-target.txt (muse-ai
+    # session read -> fix -> re-check). one-action.txt holds the
+    # single action line one-action-ai emits (the test rewrites it
+    # per check).
+    (read_root / "target.txt").write_text("broken=false\n")
+    mode_file = read_root / "mode.txt"
+    mode_file.write_text("secret\n")
+    mode_file.chmod(0o600)
+    (read_root / "session-target.txt").write_text("old\n")
+    (read_root / "muse-target.txt").write_text("broken=false\n")
+    one_action_file = tmp / "one-action.txt"
+    one_action_file.write_text("LIST\n")
+    session_results = tmp / "session-results.log"
+
+    def write_backend(name, code):
+        p = backends / name
+        p.write_text(code)
+        p.chmod(0o755)
+        return p
+
+    # one-action-ai: emits the single action line stored in
+    # one-action.txt, then END (ASK mode). The test rewrites the
+    # file per check, so one backend covers every single-action
+    # WRITE / UPDATE case.
+    write_backend("one-action-ai",
+                  "#!/usr/bin/env python3\n"
+                  "import sys\n"
+                  "sys.stdin.readline()\n"
+                  f"print(open({str(one_action_file)!r}).read().strip())\n"
+                  "print('END')\n")
+    # session-ai: reads SESSION + task, then READ, WRITE, LIST —
+    # one per round, reading the RESULT after each — and records
+    # the RESULTs. The WRITE content carries a \\n escape, so the
+    # file must gain a real newline.
+    write_backend("session-ai",
+                  "#!/usr/bin/env python3\n"
+                  "import sys\n"
+                  f"RESULTS = {str(session_results)!r}\n"
+                  f"READ_PATH = {str(read_root / 'settings.json')!r}\n"
+                  f"WRITE_PATH = {str(read_root / 'session-target.txt')!r}\n"
+                  "first = sys.stdin.readline().strip()\n"
+                  "task = sys.stdin.readline().strip()\n"
+                  "if first != 'SESSION':\n"
+                  "    print('END')\n"
+                  "    sys.exit(0)\n"
+                  "results = []\n"
+                  "print(f'READ {READ_PATH}', flush=True)\n"
+                  "results.append(sys.stdin.readline().strip())\n"
+                  "print(f'WRITE {WRITE_PATH} fixed=true\\\\nmode=on',\n"
+                  "      flush=True)\n"
+                  "results.append(sys.stdin.readline().strip())\n"
+                  "print('LIST', flush=True)\n"
+                  "results.append(sys.stdin.readline().strip())\n"
+                  "print('END', flush=True)\n"
+                  "open(RESULTS, 'w').write('\\n'.join(results) + '\\n')\n")
+    # slow-session-ai: emits one action, reads the RESULT, then
+    # sleeps far past its 2 s per-action budget. The daemon must
+    # reply OK with the partial progress, not hang.
+    write_backend("slow-session-ai",
+                  "#!/usr/bin/env python3\n"
+                  "import sys, time\n"
+                  "sys.stdin.readline()\n"
+                  "sys.stdin.readline()\n"
+                  "print('LIST', flush=True)\n"
+                  "sys.stdin.readline()\n"
+                  "time.sleep(30)\n"
+                  "print('END', flush=True)\n")
+    (backends / "slow-session-ai.limits").write_text(
+        "timeout=2\nmax_actions=32\n")
+    # greedy-session-ai: emits LIST forever. Its 3-action cap must
+    # end the session normally (OK, allowed=3).
+    write_backend("greedy-session-ai",
+                  "#!/usr/bin/env python3\n"
+                  "import sys\n"
+                  "sys.stdin.readline()\n"
+                  "sys.stdin.readline()\n"
+                  "for _ in range(20):\n"
+                  "    print('LIST', flush=True)\n"
+                  "    if not sys.stdin.readline():\n"
+                  "        break\n"
+                  "print('END', flush=True)\n")
+    (backends / "greedy-session-ai.limits").write_text(
+        "timeout=5\nmax_actions=3\n")
 
     grant = tmp / "grant.json"
     shutil.copy(HERE / "grant.json", grant)
@@ -356,6 +460,7 @@ def main():
         "SEVYN_AI_KEY_FILE": str(key_file),
         "MUSE_API_BASE": fake_api.url,
         "SEVYN_AI_READ_ROOT": str(read_root),
+        "SEVYN_AI_WRITE_ROOT": str(read_root),
         "SEVYN_AI_CLI": str(fake_cli),
         "SEVYN_AI_SETTINGS": str(read_root / "settings.json"),
         "SEVYN_AI_REGISTRY": str(read_root / "registry.json"),
@@ -377,7 +482,7 @@ def main():
               "AID grant loaded (4 permissions)" in log_text())
         check("ready line names backends + selected",
               wait_for("ready line",
-                       lambda: "backends=chatty-ai,echo-ai,muse-ai,plan-ai,slow-ai "
+                       lambda: "backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
                        "selected=echo-ai" in log_text()))
 
         c = SockClient(str(sock_path))
@@ -388,11 +493,11 @@ def main():
         c.send("LIST")
         check("LIST -> selected + backends",
               c.readline() ==
-              "OK selected=echo-ai backends=chatty-ai,echo-ai,muse-ai,plan-ai,slow-ai")
+              "OK selected=echo-ai backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai")
         c.send("STATUS")
         check("STATUS -> grant csv",
               c.readline() ==
-              "OK selected=echo-ai backends=chatty-ai,echo-ai,muse-ai,plan-ai,slow-ai "
+              "OK selected=echo-ai backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
               "grant=app.launch,app.close,app.list,status.set")
 
         # 3. SELECT: valid, unknown, usage.
@@ -719,6 +824,316 @@ def main():
         check("SIGHUP restores the standard grant", wait_for(
             "sighup reload back",
             lambda: reloads(4) > before))
+
+        # 15. P1: WRITE (+ .sevyn-bak undo), UPDATE, session
+        #     protocol. The widened grant names file.write +
+        #     system.update; the standard grant names neither.
+        p1_grant = tmp / "grant-p1.json"
+        p1_grant.write_text(json.dumps({"permissions": [
+            "app.launch", "app.close", "app.list", "status.set",
+            "cli.exec", "file.write", "system.update"]}))
+
+        def set_grant(path):
+            shutil.copy(path, grant)
+            c.send("RELOAD")
+            return c.readline().startswith("OK grant reloaded")
+
+        def ask_one(action_line):
+            """Run one-action-ai with the given action line (ASK)."""
+            one_action_file.write_text(action_line + "\n")
+            c.send("SELECT one-action-ai")
+            c.readline()
+            c.send("ASK do it")
+            return c.readline()
+
+        # 15a. WRITE allowed (widened grant): the file gains the new
+        #      content (the \\n escape becomes a real newline), the
+        #      previous copy is kept as .sevyn-bak, and the write is
+        #      logged with the full path.
+        check("RELOAD to the P1 grant", set_grant(p1_grant))
+        target = read_root / "target.txt"
+        reply = ask_one(
+            f"WRITE {target} line1\\nline2")
+        check("ASK WRITE (grant allows) -> allowed=1",
+              reply == "OK backend=one-action-ai allowed=1 denied=0 "
+              "failed=0", reply)
+        check("WRITE replaced the content (escape decoded)",
+              target.read_text() == "line1\nline2")
+        check("WRITE kept the previous copy as .sevyn-bak",
+              (read_root / "target.txt.sevyn-bak").read_text() ==
+              "broken=false\n")
+        check("WRITE logged with the full path",
+              f"AID WRITE {target} (11 bytes, backup "
+              f"{target}.sevyn-bak)" in log_text())
+
+        # 15a2. WRITE preserves the file's mode (a 0600 file stays
+        #      0600) and backs it up.
+        mode_file = read_root / "mode.txt"
+        reply = ask_one(f"WRITE {mode_file} newsecret")
+        check("ASK WRITE mode file -> allowed=1",
+              reply == "OK backend=one-action-ai allowed=1 denied=0 "
+              "failed=0", reply)
+        check("WRITE preserved mode 0600",
+              oct(mode_file.stat().st_mode & 0o777) == "0o600")
+        check("WRITE backed up the mode file",
+              (read_root / "mode.txt.sevyn-bak").read_text() ==
+              "secret\n")
+
+        # 15b. WRITE denied under the standard grant: the file is
+        #      untouched and the grant refusal is logged.
+        check("RELOAD to the standard grant", set_grant(
+            HERE / "grant.json"))
+        reply = ask_one(f"WRITE {target} hacked")
+        check("ASK WRITE (standard grant) -> denied=1",
+              reply == "OK backend=one-action-ai allowed=0 denied=1 "
+              "failed=0", reply)
+        check("denied WRITE left the file untouched",
+              target.read_text() == "line1\nline2")
+        check("WRITE denial logged",
+              "AID DENIED one-action-ai WRITE " in log_text() and
+              "(file.write)" in log_text())
+        check("RELOAD to the P1 grant (again)", set_grant(p1_grant))
+
+        # 15c. WRITE over the cap: a file the backend could not have
+        #      fully read is refused (failed, not denied — the grant
+        #      allows it, the executor refuses it).
+        reply = ask_one(f"WRITE {read_root / 'big.bin'} small")
+        check("ASK WRITE over-cap file -> failed=1",
+              reply == "OK backend=one-action-ai allowed=0 denied=0 "
+              "failed=1", reply)
+        check("over-cap file untouched",
+              (read_root / "big.bin").stat().st_size == 100 * 1024)
+
+        # 15d. WRITE to the pristine stock bundles is refused.
+        reply = ask_one(
+            "WRITE /usr/share/sevyn/pristine/x.txt hi")
+        check("ASK WRITE pristine -> failed=1",
+              reply == "OK backend=one-action-ai allowed=0 denied=0 "
+              "failed=1", reply)
+        check("pristine write never created a file",
+              not (Path("/usr/share/sevyn/pristine/x.txt").exists()))
+
+        # 15e. WRITE a new file: created, and no .sevyn-bak (there
+        #      was nothing to back up).
+        new_file = read_root / "new.txt"
+        reply = ask_one(f"WRITE {new_file} fresh")
+        check("ASK WRITE new file -> allowed=1",
+              reply == "OK backend=one-action-ai allowed=1 denied=0 "
+              "failed=0", reply)
+        check("new file created with the content",
+              new_file.read_text() == "fresh")
+        check("new file has no .sevyn-bak",
+              not (read_root / "new.txt.sevyn-bak").exists())
+
+        # 15f. WRITE with .. traversal is refused.
+        reply = ask_one(f"WRITE {read_root}/../evil.txt hi")
+        check("ASK WRITE .. traversal -> failed=1",
+              reply == "OK backend=one-action-ai allowed=0 denied=0 "
+              "failed=1", reply)
+        check("traversal wrote nothing outside the root",
+              not (tmp / "evil.txt").exists())
+
+        # 15g. WRITE with a missing parent directory is refused.
+        reply = ask_one(f"WRITE {read_root}/nodir/x.txt hi")
+        check("ASK WRITE missing parent -> failed=1",
+              reply == "OK backend=one-action-ai allowed=0 denied=0 "
+              "failed=1", reply)
+
+        # 15h. UPDATE (check): the fake CLI saw "update check" and
+        #      its output is the result.
+        if cli_calls.exists():
+            cli_calls.unlink()
+        reply = ask_one("UPDATE")
+        check("ASK UPDATE check -> allowed=1",
+              reply == "OK backend=one-action-ai allowed=1 denied=0 "
+              "failed=0", reply)
+        check("UPDATE check reached the fake sevyn CLI",
+              cli_calls.exists() and
+              "update check" in cli_calls.read_text())
+        check("UPDATE check result logged",
+              "AID UPDATE check: update available: 1.2.3" in log_text())
+
+        # 15i. UPDATE apply: requested, the fake CLI saw it.
+        if cli_calls.exists():
+            cli_calls.unlink()
+        reply = ask_one("UPDATE apply")
+        check("ASK UPDATE apply -> allowed=1",
+              reply == "OK backend=one-action-ai allowed=1 denied=0 "
+              "failed=0", reply)
+        check("UPDATE apply reached the fake sevyn CLI",
+              cli_calls.exists() and
+              "update apply" in cli_calls.read_text())
+
+        # 15j. UPDATE denied under the standard grant: the CLI is
+        #      never called.
+        check("RELOAD to the standard grant (UPDATE)",
+              set_grant(HERE / "grant.json"))
+        if cli_calls.exists():
+            cli_calls.unlink()
+        reply = ask_one("UPDATE")
+        check("ASK UPDATE (standard grant) -> denied=1",
+              reply == "OK backend=one-action-ai allowed=0 denied=1 "
+              "failed=0", reply)
+        check("denied UPDATE never reached the fake CLI",
+              not cli_calls.exists() or cli_calls.read_text() == "")
+        check("RELOAD to the P1 grant (session)", set_grant(p1_grant))
+
+        # 15k. SESSION: read -> fix (write) -> list, one action per
+        #      round, the daemon reporting each RESULT. The backend
+        #      records the RESULTs it saw.
+        if session_results.exists():
+            session_results.unlink()
+        c.send("SELECT session-ai")
+        check("SELECT session-ai ok",
+              c.readline() == "OK selected session-ai")
+        c.send("SESSION fix the session target")
+        reply = c.readline()
+        check("SESSION -> allowed=3 denied=0 failed=0",
+              reply == "OK backend=session-ai allowed=3 denied=0 "
+              "failed=0", reply)
+        check("session backend saw three RESULT OK lines",
+              session_results.exists() and
+              session_results.read_text().count("RESULT OK") == 3,
+              session_results.read_text() if session_results.exists()
+              else "(no results file)")
+        check("session WRITE replaced the content",
+              (read_root / "session-target.txt").read_text() ==
+              "fixed=true\nmode=on")
+        check("session WRITE kept the .sevyn-bak",
+              (read_root / "session-target.txt.sevyn-bak").read_text()
+              == "old\n")
+        check("SESSION logged",
+              "AID SESSION backend=session-ai" in log_text() and
+              "allowed=3 denied=0 failed=0" in log_text())
+
+        # 15l. SESSION per-action budget: the backend stalls after
+        #      one action; the daemon replies OK with the partial
+        #      progress after ~2 s (not 30) and still answers PING.
+        c.send("SELECT slow-session-ai")
+        check("SELECT slow-session-ai ok",
+              c.readline() == "OK selected slow-session-ai")
+        t0 = time.time()
+        c.send("SESSION hello")
+        reply = c.readline()
+        elapsed = time.time() - t0
+        check("SESSION slow backend -> OK with partial progress",
+              reply == "OK backend=slow-session-ai allowed=1 denied=0 "
+              "failed=0", reply)
+        check("session timeout took ~2-4 s, not 30",
+              1.5 <= elapsed < 10.0, f"elapsed={elapsed:.1f}s")
+        c.send("PING")
+        check("daemon still answers PING after session timeout",
+              c.readline() == "OK pong")
+
+        # 15m. SESSION action cap: the backend never stops, but the
+        #      3-action cap ends the session normally.
+        c.send("SELECT greedy-session-ai")
+        check("SELECT greedy-session-ai ok",
+              c.readline() == "OK selected greedy-session-ai")
+        c.send("SESSION hello")
+        reply = c.readline()
+        check("SESSION greedy backend -> OK allowed=3 (capped)",
+              reply == "OK backend=greedy-session-ai allowed=3 "
+              "denied=0 failed=0", reply)
+        c.send("PING")
+        check("daemon still answers PING after capped session",
+              c.readline() == "OK pong")
+
+        # 15n. muse-ai in a session: read -> fix -> re-check. The
+        #      fake API scripts the model: read the target, write the
+        #      fix, read it again to check, then stop. The re-check
+        #      (round 4's request) must carry the NEW content.
+        c.send("SELECT muse-ai")
+        check("SELECT muse-ai ok (session)",
+              c.readline() == "OK selected muse-ai")
+        muse_target = read_root / "muse-target.txt"
+        fake_api.set_scenario([
+            resp_tool_calls([("call_1", "read",
+                              {"path": str(muse_target)})]),
+            resp_tool_calls([("call_2", "write",
+                              {"path": str(muse_target),
+                               "content": "fixed=true\n"})]),
+            resp_tool_calls([("call_3", "read",
+                              {"path": str(muse_target)})]),
+            resp_no_tools(),
+        ])
+        c.send("SESSION fix the muse target file")
+        reply = c.readline()
+        check("SESSION muse-ai read+write+read -> allowed=3",
+              reply == "OK backend=muse-ai allowed=3 denied=0 "
+              "failed=0", reply)
+        check("muse-ai session made 4 API calls",
+              len(fake_api.requests) == 4,
+              f"requests={len(fake_api.requests)}")
+        check("round 2 saw the old content (broken)",
+              len(fake_api.requests) >= 2 and
+              "broken=false" in json.dumps(fake_api.requests[1]))
+        check("round 4 saw the new content (re-check)",
+              len(fake_api.requests) == 4 and
+              "fixed=true" in json.dumps(fake_api.requests[3]))
+        check("muse-ai session wrote the fix to the file",
+              muse_target.read_text() == "fixed=true\n")
+        check("muse-ai session kept the .sevyn-bak",
+              (read_root / "muse-target.txt.sevyn-bak").read_text() ==
+              "broken=false\n")
+
+        # 15o. SESSION grant-checked at every step: under the
+        #      standard grant the WRITE is denied, the READ and LIST
+        #      still run, and the backend is told DENIED.
+        check("RELOAD to the standard grant (session deny)",
+              set_grant(HERE / "grant.json"))
+        if session_results.exists():
+            session_results.unlink()
+        c.send("SELECT session-ai")
+        check("SELECT session-ai ok (deny)",
+              c.readline() == "OK selected session-ai")
+        c.send("SESSION fix the session target")
+        reply = c.readline()
+        check("SESSION standard grant -> allowed=2 denied=1",
+              reply == "OK backend=session-ai allowed=2 denied=1 "
+              "failed=0", reply)
+        check("session backend saw the DENIED result",
+              session_results.exists() and
+              "RESULT DENIED file.write" in session_results.read_text(),
+              session_results.read_text() if session_results.exists()
+              else "(no results file)")
+        check("denied session WRITE left the file untouched",
+              (read_root / "session-target.txt").read_text() ==
+              "fixed=true\nmode=on")
+
+        # 15p. SESSION on the control serial: the same verb works
+        #      there, and the daemon logs the outcome.
+        ctl_w.write("SESSION fix the session target\n")
+        ctl_w.flush()
+        check("ctl SESSION logged", wait_for(
+            "ctl SESSION",
+            lambda: "AID SESSION OK backend=session-ai allowed=2 "
+            "denied=1 failed=0" in log_text()))
+
+        # 15q. The sevyn CLI (P1): `ai session` + `ai status` work
+        #      against the daemon, and an unknown verb is usage.
+        cli_env = {**os.environ, "SEVYN_AI_SOCK": str(sock_path)}
+        cli_status = subprocess.run(
+            [str(sevyn_bin), "ai", "status"], capture_output=True,
+            text=True, env=cli_env, timeout=10)
+        check("sevyn ai status runs (exit 0)",
+              cli_status.returncode == 0 and
+              "selected=session-ai" in cli_status.stdout,
+              cli_status.stdout)
+        cli_session = subprocess.run(
+            [str(sevyn_bin), "ai", "session", "fix", "the",
+             "session", "target"],
+            capture_output=True, text=True, env=cli_env, timeout=30)
+        check("sevyn ai session runs (exit 0, allowed=2 denied=1)",
+              cli_session.returncode == 0 and
+              "backend=session-ai allowed=2 denied=1 failed=0"
+              in cli_session.stdout,
+              cli_session.stdout)
+        cli_bogus = subprocess.run(
+            [str(sevyn_bin), "ai", "bogus"], capture_output=True,
+            text=True, env=cli_env, timeout=10)
+        check("sevyn ai bogus -> usage (non-zero exit)",
+              cli_bogus.returncode != 0)
 
         # Leave the selection where §11/§12 expect it (echo-ai): §14
         # selected muse-ai, and the restart test confirms the

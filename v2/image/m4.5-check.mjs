@@ -1127,6 +1127,46 @@ async function main() {
     check("muse-ai: CLOSE files accepted", !!closed, closed || "");
   }
 
+  // 7. Session protocol (P1, §1.4.1) via the Terminal: the mock
+  //    scripts the model for a "session fix" task — read the
+  //    settings, try to write a fix, read again to re-check, then
+  //    stop. The write is DENIED under the standard grant (no
+  //    file.write), so the session proves the loop ran grant-checked
+  //    at every step (allowed=2 for the two READs, denied=1 for the
+  //    WRITE) and the settings file is untouched. The mock logs each
+  //    of the session's API calls on the console.
+  {
+    const beforeSession = logLines(b.logPath).length;
+    const { exec, hit } = await termCmd(
+      "ai session session fix the settings",
+      /TERMINAL ai-session allowed=2 denied=1/,
+    );
+    check("muse-ai session: `ai session ...` runs (EXEC 0)", !!exec, exec || "");
+    check(
+      "muse-ai session: read -> denied write -> re-read (allowed=2 denied=1)",
+      !!hit,
+      hit || "",
+    );
+    const denied = await waitForLog(
+      b.logPath,
+      /AID DENIED muse-ai WRITE \/data\/settings\.json .*\(file\.write\)/,
+      15000,
+      beforeSession,
+    );
+    check("muse-ai session: WRITE denial logged", !!denied, denied || "");
+    const sessionOk = await waitForLog(
+      b.logPath,
+      /AID SESSION backend=muse-ai .*allowed=2 denied=1 failed=0/,
+      15000,
+      beforeSession,
+    );
+    check(
+      "muse-ai session: daemon logged the session outcome",
+      !!sessionOk,
+      sessionOk || "",
+    );
+  }
+
   // Final frame + clean poweroff.
   const shotFinal = join(OUT, "m4.5-shot-final.ppm");
   const imgFinal = await shot(b.qmp, shotFinal);
