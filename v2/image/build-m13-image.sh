@@ -219,7 +219,13 @@ fi
 if [ -n "${SEVYN_V2_KERNEL:-}" ]; then
   kernel="$SEVYN_V2_KERNEL"
 else
-  kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -readable ! -name 'vmlinuz-*-azure' 2>/dev/null | sort -V | tail -n 1 || true)"
+  # Pick the newest *-generic kernel explicitly: the workflow installs
+  # linux-modules-extra only for the generic kernel, and cloud kernels
+  # (azure, aws, ...) omit the desktop drivers stage-modules.py needs
+  # (snd-hda-intel). An exclusion list keeps growing — a generic-only
+  # match cannot pick a cloud kernel. (The nightly failed 2026-11-24
+  # on an AWS kernel the old azure-only exclusion let through.)
+  kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*-generic' -readable 2>/dev/null | sort -V | tail -n 1 || true)"
 fi
 if [ -z "$kernel" ]; then
   echo "error: no readable kernel found in /boot (install linux-image-generic; sudo may be needed to read it)" >&2
