@@ -401,7 +401,7 @@ check("terminal: help on mount, typing runs sevyn commands", () => {
     if (cmd === "sevyn files cat /root/.local/share/code-server/User/settings.json")
       return "0\n" + SETTINGS_JSON;
     if (cmd === "sevyn ai status")
-      return "0\nselected=echo-ai backends=echo-ai,plan-ai\n";
+      return "0\nselected=echo-ai backends=echo-ai,plan-ai god_mode=off\n";
     if (cmd === "sevyn ai ask launch files")
       return "0\nbackend=echo-ai allowed=1 denied=0 failed=0\n";
     return "0\n";
@@ -454,7 +454,7 @@ check("terminal: help on mount, typing runs sevyn commands", () => {
   type("ai status");
   pressEnter();
   assert.ok(
-    Sevyn._logs.includes("TERMINAL ai-status selected=echo-ai"),
+    Sevyn._logs.includes("TERMINAL ai-status selected=echo-ai god_mode=off"),
     "ai-status marker logged",
   );
   type("ai ask launch files");
@@ -463,6 +463,11 @@ check("terminal: help on mount, typing runs sevyn commands", () => {
     Sevyn._logs.includes("TERMINAL ai-ask allowed=1 denied=0"),
     "ai-ask marker logged",
   );
+  // P2: the audit marker — the harness has no audit log, so the
+  // count is 0, but the marker path is proven.
+  type("ai audit");
+  pressEnter();
+  assert.ok(Sevyn._logs.includes("TERMINAL ai-audit lines=0"), "ai-audit marker logged");
 });
 
 check("terminal: without cli.exec the command is refused", () => {
@@ -557,6 +562,11 @@ check("settings: channel switch applies and logs", () => {
   // Nightly, Stable, Sync Now, Timezone, Apply, echo-ai, plan-ai,
   // key input, Save key, Clear key, Shut Down, Restart, Default,
   // Solid, Cosmic, Minimal, macOS, macOS Light] — 22 focusables.
+  // P2's god-mode toggle adds one more in the AI section, after
+  // Clear key and before Shut Down, so the order is [—, ▢, X, Scan,
+  // Nightly, Stable, Sync Now, Timezone, Apply, echo-ai, plan-ai,
+  // key input, Save key, Clear key, God toggle, Shut Down, Restart,
+  // Default, Solid, Cosmic, Minimal, macOS, macOS Light] — 23.
   pressTab(6); // —, ▢, X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
@@ -571,13 +581,14 @@ check("settings: channel switch applies and logs", () => {
   );
   // Focus order is now [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
-  // Shut Down, Restart, Default, Solid, Cosmic, Minimal, macOS,
-  // macOS Light]: Stable -> Sync Now -> Timezone -> Apply
+  // God toggle, Shut Down, Restart, Default, Solid, Cosmic, Minimal,
+  // macOS, macOS Light]: Stable -> Sync Now -> Timezone -> Apply
   // -> echo-ai -> plan-ai -> key input -> Save key -> Clear key
-  // -> Shut Down -> Restart -> Default -> Solid -> Cosmic -> Minimal
-  // -> macOS -> macOS Light -> — -> ▢ -> X -> Scan -> Nightly.
-  // Stable is 6th, Nightly 5th, so 21 Tabs wrap back to Nightly.
-  pressTab(21);
+  // -> God toggle -> Shut Down -> Restart -> Default -> Solid
+  // -> Cosmic -> Minimal -> macOS -> macOS Light -> — -> ▢ -> X
+  // -> Scan -> Nightly. Stable is 6th, Nightly 5th, so 22 Tabs wrap
+  // back to Nightly.
+  pressTab(22);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> Sync Now -> Timezone -> Apply -> echo-ai ->
@@ -648,9 +659,9 @@ check("settings: wallpaper style + color apply and log", () => {
   );
   // Focus order is [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
-  // Shut Down, Restart, Default, Solid, Cosmic, Minimal, macOS,
-  // macOS Light]: Default is the 17th focusable.
-  pressTab(17);
+  // God toggle, Shut Down, Restart, Default, Solid, Cosmic, Minimal,
+  // macOS, macOS Light]: Default is the 18th focusable.
+  pressTab(18);
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS wallpaperStyle=default"),

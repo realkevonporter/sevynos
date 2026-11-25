@@ -79,11 +79,32 @@ function readChannel(): string {
   return parseField(out, "channel") ?? "unknown";
 }
 
-function readAi(): { selected: string; backends: string[] } {
+function readAi(): { selected: string; backends: string[]; godMode: boolean } {
   const { out } = runCli("sevyn ai list");
   const selected = parseField(out, "selected") ?? "unknown";
   const backends = parseField(out, "backends");
-  return { selected, backends: backends ? backends.split(",") : [] };
+  // P2: god mode is live state, read from the daemon's STATUS (the
+  // e2e handler does not cover `ai status`, so it returns "0\n"
+  // there and godMode reads false — god mode is off in the harness).
+  const status = runCli("sevyn ai status");
+  const godMode = parseField(status.out, "god_mode") === "on";
+  return { selected, backends: backends ? backends.split(",") : [], godMode };
+}
+
+/* The last few audit log entries (P2, §2.5). Only real audit lines
+ * are shown: a timestamped entry, or the CLI's own "No AI activity
+ * yet." — anything else (e.g. the harness's empty "0") is not an
+ * audit line and is dropped. */
+function readAudit(): string[] {
+  const { out } = runCli("sevyn ai audit 5");
+  return out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(
+      (l) =>
+        l !== "" &&
+        ((l.startsWith("20") && l.includes(" -> ")) || l === "No AI activity yet."),
+    );
 }
 
 type WifiState = {
@@ -150,9 +171,16 @@ export function Settings(): React.ReactElement {
   // Lazy initializers: the reads run once, synchronously, on mount
   // (this renderer is sync; there is no effect flush to wait for).
   const [channel, setChannel] = React.useState<string>(() => readChannel());
-  const [ai, setAi] = React.useState<{ selected: string; backends: string[] }>(() =>
-    readAi(),
-  );
+  const [ai, setAi] = React.useState<{
+    selected: string;
+    backends: string[];
+    godMode: boolean;
+  }>(() => readAi());
+  // God mode (P2, D1): the two-step confirm. The toggle opens the
+  // dialog; Confirm runs the enable. The dialog lists every power
+  // in plain language — there is no one-tap enable.
+  const [godConfirm, setGodConfirm] = React.useState<boolean>(false);
+  const [auditLines, setAuditLines] = React.useState<string[]>(() => readAudit());
   // Muse API key (P0): the muse-ai backend reads it from
   // /data/ai/muse-key. It is typed here, written to a temp file, and
   // handed to `sevyn ai key --file` (which unlinks the temp file) —
@@ -247,6 +275,27 @@ export function Settings(): React.ReactElement {
     setMuseKey("");
     setMuseKeyMessage("Muse API key cleared.");
     Sevyn.log("SETTINGS muse-key=cleared");
+  }
+
+  // God mode (P2, D1-D2): enable runs the two-step confirm — the
+  // caller (the dialog's Confirm button) already showed the powers,
+  // and the CLI refuses a bare enable anyway. Disable is immediate
+  // (revoking access needs no confirm). After either, the state is
+  // re-read from the daemon and the audit view refreshed, so the
+  // enable/disable event shows up below.
+  function setGodMode(on: boolean): void {
+    const { code } = runCli(
+      on ? "sevyn ai god on --confirm --via settings" : "sevyn ai god off",
+    );
+    if (code !== 0) {
+      setMessage(on ? "Could not turn god mode on." : "Could not turn god mode off.");
+      return;
+    }
+    const current = readAi();
+    setAi(current);
+    setAuditLines(readAudit());
+    setMessage(current.godMode ? "God mode is on." : "God mode is off.");
+    Sevyn.log("SETTINGS god_mode=" + (current.godMode ? "on" : "off"));
   }
 
   // Wallpaper (port of #123): the choice is written to
@@ -948,6 +997,142 @@ export function Settings(): React.ReactElement {
               {museKeyMessage}
             </Text>
           ) : null}
+          {/* God mode (P2, D1): the toggle. Pressing it while off
+              opens the confirm dialog below (which lists every
+              power); pressing it while on turns god mode off
+              immediately. One focusable, after Clear key. */}
+          <View style={{ flexDirection: "row", marginTop: 16 }}>
+            <Pressable
+              onPress={() => {
+                if (ai.godMode) setGodMode(false);
+                else setGodConfirm(true);
+              }}
+              style={{
+                width: 180,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: ai.godMode ? "#b45309" : "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 15,
+                  fontWeight: "bold",
+                  color: ai.godMode ? "#ffffff" : "#111827",
+                  textAlign: "center",
+                }}
+              >
+                {ai.godMode ? "Turn god mode off" : "Turn god mode on"}
+              </Text>
+            </Pressable>
+          </View>
+          {/* Persistent banner while god mode is on (D1): the mode
+              is never silent — the banner, the tray's GOD pill, and
+              the boot log line all say so. */}
+          {ai.godMode ? (
+            <Text
+              style={{
+                fontSize: 14,
+                color: "#92400e",
+                backgroundColor: "#fef3c7",
+                marginTop: 12,
+                padding: 12,
+                borderRadius: 8,
+              }}
+            >
+              God mode is ON — the AI has full access to this device. Every action is
+              logged.
+            </Text>
+          ) : null}
+          {/* Two-step confirm (D1): the dialog lists every power in
+              plain language. Its buttons exist only while it is
+              open, so they never shift the focus order. */}
+          {godConfirm ? (
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontSize: 14, color: "#374151" }}>
+                God mode gives the AI full access to this device:
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - install and uninstall apps
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - reboot the device
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - apply system updates
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - read and write your files
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - run any sevyn command
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                Every action is logged to the AI audit log.
+              </Text>
+              <View style={{ flexDirection: "row", marginTop: 12 }}>
+                <Pressable
+                  onPress={() => {
+                    setGodConfirm(false);
+                    setGodMode(true);
+                  }}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#b45309",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    marginRight: 12,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 15,
+                      fontWeight: "bold",
+                      color: "#ffffff",
+                      textAlign: "center",
+                    }}
+                  >
+                    Confirm
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setGodConfirm(false)}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#e5e7eb",
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ fontSize: 15, color: "#111827", textAlign: "center" }}>
+                    Cancel
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+          {/* AI activity (P2, §2.5): the last few audit log entries.
+              Text lines, not focusable. */}
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 16 }}>
+            AI activity
+          </Text>
+          {auditLines.length > 0 ? (
+            auditLines.map((line, i) => (
+              <Text key={i} style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+                {line}
+              </Text>
+            ))
+          ) : (
+            <Text style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+              No AI activity yet.
+            </Text>
+          )}
           <Text
             style={{ fontSize: 16, fontWeight: "bold", color: "#111827", marginTop: 24 }}
           >

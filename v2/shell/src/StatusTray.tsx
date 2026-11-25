@@ -22,6 +22,10 @@ export interface StatusSnapshot {
   battery?: string;
   wifi?: string;
   volume?: string;
+  // P2 (God Mode): statusd owns this key (default "off"); the AI
+  // daemon SETs it on/off as the mode changes. The tray shows the
+  // amber GOD pill while it is on — the status-bar mark (D1).
+  "ai.god_mode"?: string;
 }
 
 function batteryLabel(v?: string): string {
@@ -108,6 +112,25 @@ export function StatusTray(props: StatusTrayProps): React.ReactElement {
         <Image source={symbolPath("volume")} style={{ width: 20, height: 16 }} />
         <Text style={labelStyle}>{volumeLabel(status.volume)}</Text>
       </View>
+      {/* GOD pill (P2, D1): the status-bar mark while god mode is
+          on. Renders only when on, so a god-mode-off system (CI,
+          fresh boot) sees no change at all. Not a pressable — it
+          is a mark, not a control; the toggle lives in Settings. */}
+      {status["ai.god_mode"] === "on" ? (
+        <View
+          style={{
+            height: 36,
+            marginLeft: 16,
+            paddingHorizontal: 10,
+            borderRadius: 6,
+            backgroundColor: "#b45309",
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <Text style={{ fontSize: 13, color: "#fef3c7", fontWeight: "bold" }}>GOD</Text>
+        </View>
+      ) : null}
       {/* Power button: the tray's only pressable. A text label, not a
           symbol — the tray font (DejaVu Sans) has no power glyph
           (U+23FB), so a symbol would render as tofu. Fixed 64px wide

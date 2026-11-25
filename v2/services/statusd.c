@@ -132,10 +132,16 @@ struct value {
     char current[64];
 };
 
+/* The keys this daemon owns. Every other key is ignored on SET
+ * (log + drop) — a writer that asks for a key it does not own is a
+ * bug, not a crash. `ai.god_mode` is the God Mode mark (P2): the AI
+ * daemon SETs it on/off as the mode changes, and the shell tray
+ * reads it from the snapshot to show the GOD pill. */
 static struct value values[] = {
     { "battery", "unknown" },
     { "wifi", "unknown" },
     { "volume", "50" },
+    { "ai.god_mode", "off" },
 };
 #define NVALUES (sizeof(values) / sizeof(values[0]))
 

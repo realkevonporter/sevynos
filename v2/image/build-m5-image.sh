@@ -396,6 +396,7 @@ cp "$OUT/os-version" "$STAGE/usr/share/sevyn/os-version"
 # (cp -a keeps the +x bit the daemon's scan requires.)
 cp -a "$ROOT/ai/backends/"* "$STAGE/usr/share/sevyn/ai/backends/"
 cp "$ROOT/ai/grant.json" "$STAGE/usr/share/sevyn/ai/grant.json"
+cp "$ROOT/ai/grant-god.json" "$STAGE/usr/share/sevyn/ai/grant-god.json"
 
 # Mock Muse API (P0, test double): staged for the m4.5 check (which
 # also runs against the m5 image), started only when sevyn.mockmuse=1
