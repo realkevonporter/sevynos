@@ -664,9 +664,7 @@ async function boot(tag) {
       "-initrd",
       initrd,
       "-append",
-      // sevyn.mockapi=1, as m12 does: the guest's mock API server
-      // answers the shell's API calls without a network round-trip.
-      `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockapi=1`,
+      `console=ttyS0 sevyn.slot=${bootSlot}`,
       "-display",
       "none",
       "-vga",

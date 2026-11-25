@@ -17,7 +17,7 @@
 //   1. Regression boot (-kernel/-initrd + the data disk, now
 //      LABEL=SEVYN_DATA) at 1920x1080 with sevyn.mockcomms=1: the M9
 //      polish still intact (full-screen shell at 1920x1080, the M7
-//      init proofs, the M6 mock API up) — the full M9 suite runs as
+//      init proofs) — the full M9 suite runs as
 //      its own workflow on the same PR, so this boot spot-checks
 //      rather than repeating it — and the M10 stack proved in-guest:
 //      commsd + the mocks start at boot, `sevyn comms` reaches the
@@ -296,8 +296,7 @@ async function dumpSlot(slot, tag) {
 // data disk's active slot, virtio data disk). No UEFI boot here:
 // M10 touches nothing in the updater/ESP/disk layout, and the
 // m7/m8/m9 workflows cover the UEFI path on the same PR. The
-// cmdline carries sevyn.mockapi=1 (the M6 mock API, kept as a boot
-// health signal) and sevyn.mockcomms=1 (the M10 mocks: mock Matrix
+// cmdline carries sevyn.mockcomms=1 (the M10 mocks: mock Matrix
 // homeserver + mock ACS/IMS + the second commsd for bob).
 let currentBoot = null;
 
@@ -345,7 +344,7 @@ async function boot(tag) {
     "-initrd",
     initrd,
     "-append",
-    `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockapi=1 sevyn.mockcomms=1`,
+    `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockcomms=1`,
   );
   args.push(
     "-display",
@@ -639,11 +638,11 @@ async function termCmd(b, cmd, timeoutMs = 180000) {
   // (the C/D input files) would then never match and time out. The
   // prefix identifies the command; `-> 0` confirms it ran. A dropped
   // character inside the input file is caught downstream instead —
-  // the run's outcome checks (POST /v1/live, ENDED) fail if a
-  // coordinate was mangled. 80 chars, not 40: `tokrah run` commands
-  // share their first 40 chars and only diverge at `--seconds` /
-  // `--input`, so a 40-char prefix matched a stale earlier run
-  // (check 45: the C run "completed" on the probe run's EXEC line).
+  // the run's outcome checks fail if a coordinate was mangled.
+  // 80 chars, not 40: the longest commands share their first 40
+  // chars and only diverge later, so a 40-char prefix matched a
+  // stale earlier run (check 45: the C run "completed" on the probe
+  // run's EXEC line).
   const esc = cmd.slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // Search the whole log, not just lines after `before`: the 40-char
   // prefix includes the target filename, which is unique per command
@@ -702,14 +701,6 @@ function latestOps(b, sinceLines = 0) {
 function textCenter(ops, text) {
   const t = (ops?.texts || []).find((t) => t.t === text);
   if (!t) return null;
-  return { x: t.x + t.w / 2, y: t.y + t.h / 2 };
-}
-// The LOWEST text with this string (the login screen has two
-// "Sign In" texts; the button is the lower one).
-function textCenterLowest(ops, text) {
-  const ts = (ops?.texts || []).filter((t) => t.t === text);
-  if (!ts.length) return null;
-  const t = ts.reduce((a, b) => (b.y > a.y ? b : a));
   return { x: t.x + t.w / 2, y: t.y + t.h / 2 };
 }
 // Centre of the pressable rect containing a point (a button's
@@ -935,20 +926,13 @@ async function main() {
   check("boot: SEVYNOS_M5_READY", !!ready);
   const ready45 = await waitForLog(b.logPath, /SEVYNOS_M4_5_READY/, 30000);
   check("boot: SEVYNOS_M4_5_READY (M4.5 stack intact)", !!ready45);
-  const mockUp = await waitForLog(
-    b.logPath,
-    /MOCK mock API listening on 127\.0\.0\.1:7070/,
-    60000,
-  );
-  check("boot: mock Tokrah API listening in-guest (sevyn.mockapi=1)", !!mockUp);
   const ping = await appdCmd(b, "PING", /APPD PONG/);
   check("appd: PING -> PONG", !!ping);
 
-  // M7: the init changes, proved on the regression boot before the
-  // Tokrah flow runs (a failure here is an M7 regression, not a
-  // Tokrah failure). The lease line carries the address: `sevyn net
-  // status` prints it to the Terminal window, not the serial log,
-  // so the init echoes it in the lease line.
+  // M7: the init changes, proved on the regression boot. The lease
+  // line carries the address: `sevyn net status` prints it to the
+  // Terminal window, not the serial log, so the init echoes it in
+  // the lease line.
   const dhcp = await waitForLog(
     b.logPath,
     /M7 init: DHCP lease on eth0 \(10\.0\.2\.15\)/,

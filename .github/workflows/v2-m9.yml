@@ -9,14 +9,14 @@
 # loader + app daemon + update daemon + CLI + AI daemon, and the M9
 # image (the M7 image plus the polish + the ESP-sync updater), then
 # runs the m9-check harness:
-#   0. the Node harness gate on the host (the M6 Tokrah live-flow gate,
-#      unchanged — the Tokrah bundle still builds and drives live
-#      against the mock API);
+#   0. (Removed while Tokrah is out of the build — Kevon,
+#      2026-11-25: the Node harness gate built the Tokrah bundle
+#      and ran the live flow against the mock API. It comes back
+#      with Tokrah; v2/tokrah/ stays in the tree, dormant.)
 #   1. the regression boot: -kernel/-initrd + the M6 data disk (now
 #      LABEL=SEVYN_DATA) at 1920x1080 — proves the polish (full-screen
 #      shell, move/resize drags, Settings wifi UI, real calculator /
-#      calendar / store screens) did not break the QEMU path, and the
-#      full Tokrah live flow still works in-guest;
+#      calendar / store screens) did not break the QEMU path;
 #   2. the UEFI boots: OVMF (Secure Boot variant) + the GPT disk image
 #      on a QEMU NVMe device — the boot path the GF65 will use. The
 #      first UEFI boot drives a test-signed update over the slirp
@@ -29,12 +29,10 @@
 # as artifacts. sevynos.img itself is NOT uploaded here (1.5 GiB) —
 # the nightly (public-build.yml) publishes it on merge.
 #
-# Tokrah is a PRIVATE repo — CI clones it with the TOKRAH_READ_TOKEN
-# secret (a read-only repo-scoped PAT; Kevon's one-time action). If
-# the secret is absent the job fails loudly with instructions instead
-# of silently skipping the Tokrah proof. The built Tokrah bundle is
-# NEVER committed to this repo (it would publish Tokrah's proprietary
-# JS); it is built fresh in the job and lives only in the build dir.
+# Tokrah is TEMPORARILY OUT of the build (Kevon, 2026-11-25) — this
+# job no longer clones the private Tokrah repo and no longer needs
+# the TOKRAH_READ_TOKEN secret. v2/tokrah/ stays in the tree,
+# dormant; re-inclusion restores the clone step and the bundle.
 name: SevynOS v2 M9
 
 on:
@@ -152,23 +150,6 @@ jobs:
           done
           [ "$apt_ok" = 1 ]
 
-      - name: Clone Tokrah (private — read-only PAT)
-        run: |
-          if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
-            echo "::error::TOKRAH_READ_TOKEN is not set. Add a read-only repo-scoped PAT as the TOKRAH_READ_TOKEN secret on realkevonporter/sevynos (Kevon's one-time action) — the M9 check cannot clone the private Tokrah repo without it, and the Tokrah proof must not be skipped silently."
-            exit 1
-          fi
-          git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
-
-      - name: Install yarn (Tokrah's pinned 1.22.22)
-        run: |
-          # Install yarn globally with npm, then run every yarn
-          # command from the Tokrah consumer app dir, whose
-          # package.json pins yarn@1.22.22.
-          npm install -g yarn@1.22.22
-          cd "$GITHUB_WORKSPACE/tokrah/tokrah"
-          yarn config set registry https://registry.npmjs.org
-
       - name: Cache native deps (Hermes + Yoga)
         uses: actions/cache@v4
         with:
@@ -195,29 +176,12 @@ jobs:
           python3 v2/update/test-browser.py
 
       - name: Build the M9 image
-        env:
-          TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
           # The harness boots the built image as version m9-test-1,
           # so the image and the check agree on the version string.
-          sudo env SEVYN_V2_VERSION=m9-test-1 TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m9-image.sh
-
-      - name: Install Tokrah API deps (mock server needs socket.io)
-        run: |
-          # The host-side harness gate (m9-check step 0) runs
-          # drive-live.js against mock-api.js, which falls back to
-          # TOKRAH_SRC/api/node_modules/socket.io — the same server
-          # version the real API runs. Only the consumer app got a
-          # yarn install (inside the image build), so the fallback
-          # is missing in CI. Install the API deps here; the api
-          # package pins yarn@1.22.22 and has a yarn.lock. Run
-          # yarn from the api dir, never the sevynos checkout
-          cd "$GITHUB_WORKSPACE/tokrah/api"
-          yarn install --frozen-lockfile --non-interactive
+          sudo env SEVYN_V2_VERSION=m9-test-1 sh v2/image/build-m9-image.sh
 
       - name: Run the M9 check in QEMU
-        env:
-          TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
           # The build step runs under sudo, so v2/image/build/ is
           # root-owned; hand it back to the runner first, or the check
@@ -236,5 +200,4 @@ jobs:
             v2/image/build/m9-check.json
             v2/image/build/m9-shot-*.ppm
             v2/image/build/m9-data.img
-            v2/image/build/m9-tokrah.bundle.js
           if-no-files-found: warn

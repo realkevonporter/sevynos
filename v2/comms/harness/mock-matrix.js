@@ -8,8 +8,8 @@
 // are negotiated by the clients themselves through /keys/* and
 // /sendToDevice, exactly as against a real homeserver.
 //
-// Started ONLY with sevyn.mockcomms=1 on the kernel cmdline (same
-// pattern as sevyn.mockapi=1). Listens on loopback only. Every request
+// Started ONLY with sevyn.mockcomms=1 on the kernel cmdline.
+// Listens on loopback only. Every request
 // is logged as a `MOCK {...}` line so the m10-check harness can grep
 // the serial log for the wire (POST /send, m.call.invite, ...).
 //

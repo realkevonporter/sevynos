@@ -52,12 +52,10 @@
 # and real firmware boot-order behaviour are Kevon's GF65
 # verification after merge — the PR body says so.
 #
-# Tokrah is a PRIVATE repo — CI clones it with the TOKRAH_READ_TOKEN
-# secret (a read-only repo-scoped PAT; Kevon's one-time action), because
-# the image build bundles Tokrah (as M9's did). If the secret is absent
-# the job fails loudly with instructions instead of silently skipping
-# it. The built Tokrah bundle is NEVER committed to this repo; it is
-# built fresh in the job and lives only in the build dir.
+# Tokrah is TEMPORARILY OUT of the build (Kevon, 2026-11-25) — this
+# job no longer clones the private Tokrah repo and no longer needs
+# the TOKRAH_READ_TOKEN secret. v2/tokrah/ stays in the tree,
+# dormant; re-inclusion restores the clone step and the bundle.
 name: SevynOS v2 M11
 
 on:
@@ -177,23 +175,6 @@ jobs:
           done
           [ "$apt_ok" = 1 ]
 
-      - name: Clone Tokrah (private — read-only PAT)
-        run: |
-          if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
-            echo "::error::TOKRAH_READ_TOKEN is not set. Add a read-only repo-scoped PAT as the TOKRAH_READ_TOKEN secret on realkevonporter/sevynos (Kevon's one-time action) — the M11 image build cannot bundle Tokrah without it, and the Tokrah proof must not be skipped silently."
-            exit 1
-          fi
-          git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
-
-      - name: Install yarn (Tokrah's pinned 1.22.22)
-        run: |
-          # Install yarn globally with npm, then run every yarn
-          # command from the Tokrah consumer app dir, whose
-          # package.json pins yarn@1.22.22.
-          npm install -g yarn@1.22.22
-          cd "$GITHUB_WORKSPACE/tokrah/tokrah"
-          yarn config set registry https://registry.npmjs.org
-
       - name: Cache native deps (Hermes + Yoga)
         uses: actions/cache@v4
         with:
@@ -220,12 +201,10 @@ jobs:
           python3 v2/update/test-browser.py
 
       - name: Build the M11 image
-        env:
-          TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
           # The harness boots the built image as version m11-test-1,
           # so the image and the check agree on the version string.
-          sudo env SEVYN_V2_VERSION=m11-test-1 TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m11-image.sh
+          sudo env SEVYN_V2_VERSION=m11-test-1 sh v2/image/build-m11-image.sh
 
       - name: Run the M11 check in QEMU
         run: |

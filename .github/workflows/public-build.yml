@@ -73,21 +73,6 @@ jobs:
           # build-m13-image.sh picks.
           KVER="$(basename "$(ls /boot/vmlinuz-*-generic | sort -V | tail -n 1)" | sed 's/^vmlinuz-//')"
           sudo apt-get install -y -qq "linux-modules-extra-${KVER}"
-      - name: Clone Tokrah (private — read-only PAT)
-        run: |
-          if [ -z "${{ secrets.TOKRAH_READ_TOKEN }}" ]; then
-            echo "::error::TOKRAH_READ_TOKEN is not set. Add a read-only repo-scoped PAT as the TOKRAH_READ_TOKEN secret on realkevonporter/sevynos (Kevon's one-time action) — the nightly M7 image includes Tokrah and cannot build without it."
-            exit 1
-          fi
-          git clone --depth 1 "https://x-access-token:${{ secrets.TOKRAH_READ_TOKEN }}@github.com/realkevonporter/tokrah.git" "$GITHUB_WORKSPACE/tokrah"
-      - name: Install yarn (Tokrah's pinned 1.22.22)
-        run: |
-          # Install yarn globally with npm, then run every yarn
-          # command from the Tokrah consumer app dir, whose
-          # package.json pins yarn@1.22.22.
-          npm install -g yarn@1.22.22
-          cd "$GITHUB_WORKSPACE/tokrah/tokrah"
-          yarn config set registry https://registry.npmjs.org
       - name: Cache v2 native deps (Hermes + Yoga)
         uses: actions/cache@v4
         with:
@@ -98,15 +83,13 @@ jobs:
       - name: Build v2 native deps
         run: sh v2/rn/host/build-deps.sh
       - name: Build v2 (M13 browser embed) image
-        env:
-          TOKRAH_SRC: ${{ github.workspace }}/tokrah
         run: |
-          sudo env TOKRAH_SRC="$TOKRAH_SRC" sh v2/image/build-m13-image.sh
+          sudo sh v2/image/build-m13-image.sh
           sudo chown -R "$USER" v2/image/build
       - name: Guard v2 shell icons in initramfs
         run: |
           zcat v2/image/build/initramfs.cpio.gz | cpio -t 2>/dev/null > /tmp/initramfs-list.txt
-          for f in files terminal browser settings music photos calendar notes calculator camera messages store video-calls voice-calls installer tokrah; do
+          for f in files terminal browser settings music photos calendar notes calculator camera messages store video-calls voice-calls installer; do
             grep -qx "usr/share/sevyn/shell/icons/$f.png" /tmp/initramfs-list.txt || { echo "error: missing icon usr/share/sevyn/shell/icons/$f.png in initramfs" >&2; exit 1; }
           done
       - name: Guard v2 commsd + mock comms servers in initramfs
@@ -154,8 +137,6 @@ jobs:
           `sevyn browser open <url>` from the Terminal does the same.
           Sevyn Code finally paints in a window: open it from the
           Browser at http://127.0.0.1:8080/.
-          Tokrah runs as a third-party app: `sevyn tokrah run` in the
-          Terminal, or from the dock.
           M7: the image boots on real hardware — Intel i915 graphics,
           Intel wifi (iwlwifi), NVMe storage, wired LAN, HDA audio —
           and the network now comes from DHCP instead of a hardcoded
@@ -283,7 +264,7 @@ jobs:
             AI is baked in through the connector: `sevyn ai` plugs an
             AI in (echo-ai and plan-ai ship as stubs) and drives the
             system through permissions; pick the AI in Settings.
-            Tokrah runs as a third-party app. M7: the image boots on
+            M7: the image boots on
             real hardware — sevynos.img is a GPT USB-boot disk image
             (UEFI, Secure Boot) for the MSI GF65 Thin 9SD and friends.
             M9: full-screen desktop, wifi in Settings, movable and
