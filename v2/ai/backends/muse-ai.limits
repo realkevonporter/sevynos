@@ -1,0 +1,9 @@
+# Per-backend limits for muse-ai (P0).
+# The Muse API is a network round-trip with a plan -> act -> observe
+# loop, so it gets far longer than the 5 s / 32 actions every other
+# backend keeps. The daemon reads this file (v2/ai/sevyn-aid.c,
+# read_backend_limits); a missing or malformed file falls back to
+# the defaults, so a bad limits file cannot remove the timeout or
+# the action cap.
+timeout=300
+max_actions=64

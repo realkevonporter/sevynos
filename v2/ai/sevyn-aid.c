@@ -21,20 +21,32 @@
  *   LIST              -> OK selected=<id> backends=<csv>
  *   SELECT <id>       -> OK selected <id> / ERR unknown backend <id>
  *   STATUS            -> OK selected=<id> backends=<csv> grant=<csv>
+ *   RELOAD            -> OK grant reloaded / ERR (old grant kept)
  *   ASK <task...>     -> OK backend=<id> allowed=<n> denied=<m>
  *                        failed=<k>
  * The harness control serial (/dev/ttyS4) takes the same verbs; its
  * replies go to the console as AID log lines (like appd's ttyS2).
+ * SIGHUP also reloads the grant. A failed reload keeps the old
+ * grant — reload never fails open.
  *
  * Backend action lines (one per line, then END):
  *   LAUNCH <id>       app.launch   -> appd LAUNCH
  *   CLOSE <id>        app.close    -> appd CLOSE
  *   LIST              app.list     -> appd LIST (count logged)
  *   SET <key> <value> status.set   -> statusd SET
+ *   READ <path>       state.read   -> bounded read, logged (no grant
+ *                                    needed: reads change nothing)
+ *   EXEC <verb...>    cli.exec     -> runs `sevyn` CLI verbs only,
+ *                                    never a shell (D5)
  *   UNINSTALL <id>    app.uninstall (NOT in the grant — refused)
  *   INSTALL <path>    app.install   (NOT in the grant — refused)
  *   REBOOT            system.reboot (NOT in the grant — refused)
  * Unknown verbs are refused as unknown.
+ *
+ * Per-backend limits (P0): a backend may ship a `<id>.limits` file
+ * next to itself (timeout=<s>, max_actions=<n>); muse-ai ships
+ * 300 s / 64. Every other backend keeps 5 s / 32. The ASK task line
+ * is 16 KiB; backend action lines stay 2,048 bytes.
  *
  * Grant (/usr/share/sevyn/ai/grant.json):
  *   {"permissions": ["app.launch", "app.close", "app.list",
@@ -49,7 +61,10 @@
  *
  * Env overrides (host tests): SEVYN_AI_SOCK, SEVYN_AI_CTL,
  * SEVYN_AI_BACKENDS_DIR, SEVYN_AI_GRANT, SEVYN_AI_SELECTED,
- * SEVYN_AI_APPD_SOCK, SEVYN_AI_STATUS_SOCK.
+ * SEVYN_AI_APPD_SOCK, SEVYN_AI_STATUS_SOCK, SEVYN_AI_CLI (the
+ * `sevyn` binary EXEC runs; default /usr/local/bin/sevyn),
+ * SEVYN_AI_READ_ROOT (test-only: the one directory READ may touch,
+ * replacing /data/ + /var/lib/sevyn/).
  *
  * Build: gcc, libc only (+ the M3 JSON parser for the grant).
  */
@@ -85,10 +100,28 @@
 #define DEFAULT_STATUS_SOCK "/run/sevyn-status.sock"
 
 #define LINE_CAP 2048
+/* The ASK task line (P0): a real agent task plus attached context
+ * does not fit in 2,048 bytes. Backend action lines stay LINE_CAP
+ * (actions are short by construction); only the task-carrying
+ * buffers grow to TASK_CAP. */
+#define TASK_CAP 16384
 #define MAX_CLIENTS 16
 #define MAX_BACKENDS 32
 #define MAX_ACTIONS 32
 #define BACKEND_TIMEOUT_S 5
+/* Per-backend limits (P0): the defaults above are right for keyword
+ * stubs and wrong for a model round-trip. A backend may ship a
+ * `<id>.limits` file next to itself (timeout=<s>, max_actions=<n>);
+ * the daemon reads it when the backend runs. Clamped to sane
+ * bounds, so a bad limits file cannot remove the timeout. */
+#define LIMITS_TIMEOUT_MAX_S 3600
+#define LIMITS_ACTIONS_MAX 256
+/* READ executor (P0): one read is capped, so a backend cannot pull
+ * an unbounded file into the audit trail. */
+#define READ_CAP 65536
+/* EXEC executor (P0): runs `sevyn` CLI verbs only, never a shell
+ * (D5). The CLI path has a host-test override. */
+#define DEFAULT_CLI "/usr/local/bin/sevyn"
 
 static const char *g_sock_path;
 static const char *g_ctl_path;
@@ -97,13 +130,27 @@ static const char *g_grant_path;
 static const char *g_selected_path;
 static const char *g_appd_sock;
 static const char *g_status_sock;
+static const char *g_cli_path;
+/* Test-only read root (SEVYN_AI_READ_ROOT): when set, READ may only
+ * touch paths under it (the host test cannot write /data). Unset in
+ * production, where the /data/ + /var/lib/sevyn/ roots apply. */
+static const char *g_read_root;
 static int g_console_fd = -1;
 static volatile sig_atomic_t g_stop = 0;
+/* Set by the SIGHUP handler; the main loop reloads the grant when
+ * it sees this (P0 grant reload). */
+static volatile sig_atomic_t g_reload = 0;
 
 static void on_signal(int sig)
 {
     (void)sig;
     g_stop = 1;
+}
+
+static void on_sighup(int sig)
+{
+    (void)sig;
+    g_reload = 1;
 }
 
 static const char *env_or(const char *name, const char *dflt)
@@ -208,53 +255,119 @@ static int grant_has(const char *perm)
     return 0;
 }
 
-/* Load the grant JSON: {"permissions": [...]}. Fatal on any failure
- * (missing file, bad JSON, wrong shape) — fail closed. */
-static int load_grant(void)
+/* Parse a grant file into a fresh permissions array (the caller
+ * owns it). Returns 0 on success, -1 with a one-line reason in err.
+ * The live grant is never touched by this helper, so a failed reload
+ * cannot clobber it — reload never fails open. */
+static int parse_grant_file(const char *path, char ***out,
+                            size_t *nout, char *err, size_t errcap)
 {
-    char *text = read_file_cap(g_grant_path, 65536);
+    char *text = read_file_cap(path, 65536);
     if (!text) {
-        log_line("AID fatal: cannot read grant %s: %s", g_grant_path,
+        snprintf(err, errcap, "cannot read grant %s: %s", path,
                  strerror(errno));
         return -1;
     }
-    char err[256];
-    jval_t *root = json_parse(text, err, sizeof(err));
+    char jerr[256];
+    jval_t *root = json_parse(text, jerr, sizeof(jerr));
     if (!root) {
-        log_line("AID fatal: grant %s is not valid JSON: %s",
-                 g_grant_path, err);
+        snprintf(err, errcap, "grant %s is not valid JSON: %s", path,
+                 jerr);
         free(text);
         return -1;
     }
     const jval_t *perms = json_obj_get(root, "permissions");
     if (!perms || perms->type != J_ARR) {
-        log_line("AID fatal: grant %s has no permissions array",
-                 g_grant_path);
+        snprintf(err, errcap, "grant %s has no permissions array",
+                 path);
         json_free(root);
         free(text);
         return -1;
     }
     size_t n = json_arr_len(perms);
-    g_grant = calloc(n ? n : 1, sizeof(char *));
-    if (!g_grant) {
+    char **grant = calloc(n ? n : 1, sizeof(char *));
+    if (!grant) {
+        snprintf(err, errcap, "out of memory");
         json_free(root);
         free(text);
         return -1;
     }
+    size_t count = 0;
     for (size_t i = 0; i < n; i++) {
         const char *s = json_str(json_arr_get(perms, i));
         if (!s) {
-            log_line("AID fatal: grant %s has a non-string permission",
-                     g_grant_path);
+            snprintf(err, errcap,
+                     "grant %s has a non-string permission", path);
+            for (size_t j = 0; j < count; j++)
+                free(grant[j]);
+            free(grant);
             json_free(root);
             free(text);
             return -1;
         }
-        g_grant[g_ngrant++] = strdup(s);
+        grant[count] = strdup(s);
+        if (!grant[count]) {
+            snprintf(err, errcap, "out of memory");
+            for (size_t j = 0; j < count; j++)
+                free(grant[j]);
+            free(grant);
+            json_free(root);
+            free(text);
+            return -1;
+        }
+        count++;
     }
     json_free(root);
     free(text);
+    *out = grant;
+    *nout = count;
+    return 0;
+}
+
+static void free_grant(char **grant, size_t n)
+{
+    if (!grant)
+        return;
+    for (size_t i = 0; i < n; i++)
+        free(grant[i]);
+    free(grant);
+}
+
+/* Load the grant JSON: {"permissions": [...]}. Fatal on any failure
+ * (missing file, bad JSON, wrong shape) — fail closed. */
+static int load_grant(void)
+{
+    char err[256];
+    char **grant = NULL;
+    size_t n = 0;
+    if (parse_grant_file(g_grant_path, &grant, &n, err, sizeof(err)) != 0) {
+        log_line("AID fatal: %s", err);
+        return -1;
+    }
+    g_grant = grant;
+    g_ngrant = n;
     log_line("AID grant loaded (%zu permissions)", g_ngrant);
+    return 0;
+}
+
+/* Re-read the grant file and swap it in, so god mode can switch on
+ * and off without a daemon restart (P0). A failed reload keeps the
+ * old grant and logs it — reload never fails open. Returns 0 when
+ * the new grant is live, -1 when the old one was kept. */
+static int reload_grant(void)
+{
+    char err[256];
+    char **grant = NULL;
+    size_t n = 0;
+    if (parse_grant_file(g_grant_path, &grant, &n, err, sizeof(err)) != 0) {
+        log_line("AID grant reload failed: %s (keeping old grant)",
+                 err);
+        return -1;
+    }
+    free_grant(g_grant, g_ngrant);
+    g_grant = grant;
+    g_ngrant = n;
+    log_line("AID grant reloaded (%zu permissions)", g_ngrant);
     return 0;
 }
 
@@ -335,6 +448,39 @@ static void backends_csv(char *out, size_t cap)
             break;
         n += (size_t)w;
     }
+}
+
+/* Per-backend limits (P0): a backend may ship a `<id>.limits` file
+ * next to itself with `timeout=<seconds>` and `max_actions=<n>`,
+ * one per line. Missing file, bad lines, and out-of-range values
+ * all fall back to the defaults — a bad limits file cannot remove
+ * the timeout or the action cap. */
+static void read_backend_limits(const char *id, int *timeout_s,
+                                size_t *max_actions)
+{
+    *timeout_s = BACKEND_TIMEOUT_S;
+    *max_actions = MAX_ACTIONS;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/%s.limits", g_backends_dir, id);
+    char *text = read_file_cap(path, 4096);
+    if (!text)
+        return;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t')
+            line++;
+        if (strncmp(line, "timeout=", 8) == 0) {
+            long v = strtol(line + 8, NULL, 10);
+            if (v >= 1 && v <= LIMITS_TIMEOUT_MAX_S)
+                *timeout_s = (int)v;
+        } else if (strncmp(line, "max_actions=", 12) == 0) {
+            long v = strtol(line + 12, NULL, 10);
+            if (v >= 1 && v <= (long)LIMITS_ACTIONS_MAX)
+                *max_actions = (size_t)v;
+        }
+    }
+    free(text);
 }
 
 /* ------------------------------------------------------------------ */
@@ -534,11 +680,14 @@ static int status_set(const char *key, const char *val, char *err,
 /* ------------------------------------------------------------------ */
 
 /* One backend-proposed action. verb is the raw verb; perm is the
- * permission it needs (NULL = unknown verb, always refused). */
+ * permission it needs (NULL = unknown verb, always refused). rest is
+ * everything after the verb on the line (EXEC's full CLI args — a
+ * CLI verb has more than two tokens, and arg1/arg2 cannot hold it). */
 struct action {
     char verb[32];
     char arg1[128];
     char arg2[128];
+    char rest[LINE_CAP];
     const char *perm;
 };
 
@@ -558,6 +707,16 @@ static const char *perm_for_verb(const char *verb)
         return "app.install";
     if (strcmp(verb, "REBOOT") == 0)
         return "system.reboot";
+    /* P0: READ is a read-only action (its executor only ever reads,
+     * and the ASK loop lets it through without a grant — §1.4.1,
+     * "reads need no grant"). EXEC runs `sevyn` CLI verbs only
+     * (D5, no raw shell); it is grant-checked like the rest, so
+     * under the standard grant (which has no cli.exec) it is
+     * refused, and it only runs when a grant names it. */
+    if (strcmp(verb, "READ") == 0)
+        return "state.read";
+    if (strcmp(verb, "EXEC") == 0)
+        return "cli.exec";
     return NULL;
 }
 
@@ -575,6 +734,14 @@ static int parse_action(const char *line, struct action *a)
         snprintf(a->arg1, sizeof(a->arg1), "%s", arg1);
     if (n >= 3)
         snprintf(a->arg2, sizeof(a->arg2), "%s", arg2);
+    /* The remainder after the verb (EXEC's full CLI args). Skip the
+     * verb token, then the whitespace that follows it. */
+    const char *p = line;
+    while (*p && *p != ' ' && *p != '\t')
+        p++;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    snprintf(a->rest, sizeof(a->rest), "%s", p);
     a->perm = perm_for_verb(verb);
     /* A line that is not a known verb is backend chatter, not an
      * action: ignore it (a backend may print debug output). Only
@@ -582,12 +749,14 @@ static int parse_action(const char *line, struct action *a)
      * grant are DENIED, never executed. */
     if (!a->perm)
         return -1;
-    /* Arity: LAUNCH/CLOSE/UNINSTALL/INSTALL take one arg; SET takes
-     * two; LIST/REBOOT take none. A malformed action is not an
+    /* Arity: LAUNCH/CLOSE/UNINSTALL/INSTALL/READ take one arg; SET
+     * takes two; LIST/REBOOT take none; EXEC takes the rest of the
+     * line (at least one token). A malformed action is not an
      * action. */
     if ((strcmp(verb, "LAUNCH") == 0 || strcmp(verb, "CLOSE") == 0 ||
          strcmp(verb, "UNINSTALL") == 0 ||
-         strcmp(verb, "INSTALL") == 0) &&
+         strcmp(verb, "INSTALL") == 0 ||
+         strcmp(verb, "READ") == 0) &&
         n != 2)
         return -1;
     if (strcmp(verb, "SET") == 0 && n != 3)
@@ -595,7 +764,156 @@ static int parse_action(const char *line, struct action *a)
     if ((strcmp(verb, "LIST") == 0 || strcmp(verb, "REBOOT") == 0) &&
         n != 1)
         return -1;
+    if (strcmp(verb, "EXEC") == 0 && a->rest[0] == '\0')
+        return -1;
     return 0;
+}
+
+/* READ executor (P0): a read-only action. The backend reads the
+ * file itself for its own planning (phase 1 has no return channel
+ * from the daemon to the backend); this executor validates the read
+ * is inside the bounds and puts it in the audit trail, so every
+ * fetch the AI makes is logged. The content is NOT returned to the
+ * backend here — the backend already has it.
+ *
+ * Bounds: absolute path only, under /data/ or /var/lib/sevyn/ (the
+ * settings, logs, and app registry), never under the pristine stock
+ * bundles, no ".." traversal, regular file only, capped at
+ * READ_CAP. Anything outside is refused, never read. */
+static int read_path_allowed(const char *path)
+{
+    if (!path || path[0] != '/')
+        return 0;
+    if (strstr(path, "..") != NULL)
+        return 0;
+    if (g_read_root) {
+        size_t n = strlen(g_read_root);
+        return strncmp(path, g_read_root, n) == 0 && path[n] == '/';
+    }
+    if (strncmp(path, "/data/", 6) != 0 &&
+        strncmp(path, "/var/lib/sevyn/", 15) != 0)
+        return 0;
+    return 1;
+}
+
+static int exec_read(const struct action *a, char *err, size_t errcap)
+{
+    if (!read_path_allowed(a->arg1)) {
+        snprintf(err, errcap, "READ path not allowed: %s", a->arg1);
+        return -1;
+    }
+    struct stat st;
+    if (stat(a->arg1, &st) != 0) {
+        snprintf(err, errcap, "READ cannot stat %s: %s", a->arg1,
+                 strerror(errno));
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        snprintf(err, errcap, "READ not a regular file: %s", a->arg1);
+        return -1;
+    }
+    /* Over the per-read cap: refuse, don't truncate (the backend
+     * refuses the same way — a truncated prefix would mislead the
+     * model into thinking it read the whole file). */
+    if (st.st_size > (off_t)READ_CAP) {
+        snprintf(err, errcap, "READ file over the 64 KiB cap: %s",
+                 a->arg1);
+        return -1;
+    }
+    /* Read (and discard) up to READ_CAP, so the read is real and
+     * bounded — a backend cannot claim a read of an unbounded file. */
+    FILE *f = fopen(a->arg1, "r");
+    if (!f) {
+        snprintf(err, errcap, "READ cannot open %s: %s", a->arg1,
+                 strerror(errno));
+        return -1;
+    }
+    char *buf = malloc(READ_CAP);
+    if (!buf) {
+        fclose(f);
+        snprintf(err, errcap, "out of memory");
+        return -1;
+    }
+    size_t n = fread(buf, 1, READ_CAP, f);
+    free(buf);
+    fclose(f);
+    snprintf(err, errcap, "%zu bytes", n);
+    return 0;
+}
+
+/* EXEC executor (P0): runs `sevyn` CLI verbs only, never a bare
+ * shell (D5). The args are split on whitespace (no quote handling
+ * — the backend emits simple verb tokens) and exec'd directly.
+ * The child's output is discarded; only its exit code matters. A
+ * 30 s deadline bounds a hung CLI verb so one EXEC cannot stall the
+ * daemon. */
+static int exec_cli(const struct action *a, char *err, size_t errcap)
+{
+    char *argv[34];
+    char args[LINE_CAP];
+    snprintf(args, sizeof(args), "%s", a->rest);
+    int nargs = 0;
+    argv[nargs++] = (char *)g_cli_path;
+    char *save = NULL;
+    for (char *tok = strtok_r(args, " \t", &save); tok && nargs < 33;
+         tok = strtok_r(NULL, " \t", &save))
+        argv[nargs++] = tok;
+    argv[nargs] = NULL;
+    if (nargs < 2) {
+        snprintf(err, errcap, "EXEC needs a CLI verb");
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        snprintf(err, errcap, "fork failed: %s", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        int nullfd = open("/dev/null", O_RDWR);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDOUT_FILENO);
+            dup2(nullfd, STDERR_FILENO);
+        }
+        execv(g_cli_path, argv);
+        _exit(127);
+    }
+    /* Bounded wait: a CLI verb that does not finish in 30 s is
+     * killed, so one EXEC cannot stall the daemon. */
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += 30;
+    int status = 0;
+    for (;;) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid)
+            break;
+        if (w < 0 && errno != EINTR) {
+            snprintf(err, errcap, "waitpid failed: %s",
+                     strerror(errno));
+            return -1;
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec &&
+             now.tv_nsec >= deadline.tv_nsec)) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            snprintf(err, errcap, "EXEC timed out");
+            return -1;
+        }
+        struct timespec nap = { .tv_sec = 0, .tv_nsec = 50 * 1000000 };
+        nanosleep(&nap, NULL);
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+    if (WIFEXITED(status)) {
+        snprintf(err, errcap, "sevyn exited %d", WEXITSTATUS(status));
+        return -1;
+    }
+    snprintf(err, errcap, "sevyn did not exit cleanly");
+    return -1;
 }
 
 /* Execute one granted action. Returns 0 on success, -1 with reason
@@ -622,6 +940,10 @@ static int execute_action(const struct action *a, char *err,
     }
     if (strcmp(a->verb, "SET") == 0)
         return status_set(a->arg1, a->arg2, err, errcap);
+    if (strcmp(a->verb, "READ") == 0)
+        return exec_read(a, err, errcap);
+    if (strcmp(a->verb, "EXEC") == 0)
+        return exec_cli(a, err, errcap);
     snprintf(err, errcap, "no executor for %s", a->verb);
     return -1;
 }
@@ -631,9 +953,14 @@ static int execute_action(const struct action *a, char *err,
 /* ------------------------------------------------------------------ */
 
 /* Run one backend on a task: write the task line to its stdin, read
- * action lines from its stdout until END / EOF / timeout. Returns 0
- * with the parsed actions, -1 with reason in err. */
+ * action lines from its stdout until END / EOF / timeout. timeout_s
+ * and max_actions are the backend's own limits (P0: read from its
+ * .limits file, defaults 5 s / 32); a runaway backend is still
+ * killed — the timeout grows, it does not disappear. The task line
+ * may be TASK_CAP (16 KiB); backend action lines stay LINE_CAP.
+ * Returns 0 with the parsed actions, -1 with reason in err. */
 static int run_backend(const char *backend_path, const char *task,
+                       int timeout_s, size_t max_actions,
                        struct action *actions, size_t *n_actions,
                        char *err, size_t errcap)
 {
@@ -667,7 +994,7 @@ static int run_backend(const char *backend_path, const char *task,
     close(out_pipe[1]);
 
     /* Feed the task, then close stdin (the backend reads one line). */
-    char task_line[LINE_CAP];
+    char task_line[TASK_CAP + 2];
     snprintf(task_line, sizeof(task_line), "%s\n", task);
     size_t off = 0, total = strlen(task_line);
     while (off < total) {
@@ -685,7 +1012,7 @@ static int run_backend(const char *backend_path, const char *task,
     int saw_end = 0;
     struct timespec deadline;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
-    deadline.tv_sec += BACKEND_TIMEOUT_S;
+    deadline.tv_sec += timeout_s;
     for (;;) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -733,7 +1060,7 @@ static int run_backend(const char *backend_path, const char *task,
             }
             if (line[0] == '\0')
                 continue;
-            if (*n_actions >= MAX_ACTIONS) {
+            if (*n_actions >= max_actions) {
                 snprintf(err, errcap, "backend proposed too many actions");
                 rc = -1;
                 break;
@@ -773,7 +1100,9 @@ typedef void (*reply_fn)(void *ctx, const char *line);
 static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
                      int from_ctl)
 {
-    char line[LINE_CAP];
+    /* TASK_CAP: the verb line may carry a 16 KiB ASK task. Replies
+     * stay short (out is LINE_CAP). */
+    char line[TASK_CAP];
     snprintf(line, sizeof(line), "%s", verb_line);
     char *sp = strchr(line, ' ');
     char *arg = NULL;
@@ -855,6 +1184,28 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         }
         return;
     }
+    /* RELOAD (P0): re-read the grant file so god mode can switch on
+     * and off without a daemon restart. A failed reload keeps the
+     * old grant — reload never fails open. */
+    if (strcmp(line, "RELOAD") == 0) {
+        if (reload_grant() == 0) {
+            grant_csv(grant, sizeof(grant));
+            if (from_ctl)
+                log_line("AID RELOAD OK grant=%s", grant);
+            else if (reply) {
+                snprintf(out, sizeof(out),
+                         "OK grant reloaded grant=%s\n", grant);
+                reply(ctx, out);
+            }
+        } else {
+            if (from_ctl)
+                log_line("AID RELOAD FAIL keeping old grant");
+            else if (reply)
+                reply(ctx,
+                      "ERR grant reload failed, keeping old grant\n");
+        }
+        return;
+    }
     if (strcmp(line, "ASK") == 0) {
         if (!arg) {
             if (from_ctl)
@@ -875,11 +1226,25 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         char backend_path[4096];
         snprintf(backend_path, sizeof(backend_path), "%s/%s",
                  g_backends_dir, g_backends[bi]);
-        struct action actions[MAX_ACTIONS];
+        /* Per-backend limits (P0): muse-ai gets 300 s / 64 actions
+         * from its .limits file; every other backend keeps 5 s / 32. */
+        int timeout_s = BACKEND_TIMEOUT_S;
+        size_t max_actions = MAX_ACTIONS;
+        read_backend_limits(g_selected, &timeout_s, &max_actions);
+        struct action *actions =
+            calloc(max_actions, sizeof(struct action));
+        if (!actions) {
+            if (from_ctl)
+                log_line("AID ASK FAIL out of memory");
+            else if (reply)
+                reply(ctx, "ERR out of memory\n");
+            return;
+        }
         size_t n_actions = 0;
         char err[256];
-        if (run_backend(backend_path, arg, actions, &n_actions, err,
-                        sizeof(err)) != 0) {
+        if (run_backend(backend_path, arg, timeout_s, max_actions,
+                        actions, &n_actions, err, sizeof(err)) != 0) {
+            free(actions);
             if (from_ctl)
                 log_line("AID ASK FAIL backend %s: %s", g_selected,
                          err);
@@ -894,7 +1259,10 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         for (size_t i = 0; i < n_actions; i++) {
             struct action *a = &actions[i];
             char action_line[LINE_CAP];
-            if (a->arg2[0])
+            if (strcmp(a->verb, "EXEC") == 0)
+                snprintf(action_line, sizeof(action_line), "EXEC %s",
+                         a->rest);
+            else if (a->arg2[0])
                 snprintf(action_line, sizeof(action_line), "%s %s %s",
                          a->verb, a->arg1, a->arg2);
             else if (a->arg1[0])
@@ -904,8 +1272,12 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
                 snprintf(action_line, sizeof(action_line), "%s",
                          a->verb);
             /* The permission boundary: anything without a permission
-             * or outside the grant is refused here and never runs. */
-            if (!a->perm || !grant_has(a->perm)) {
+             * or outside the grant is refused here and never runs.
+             * READ is the exception: reads change nothing, so they
+             * need no grant (§1.4.1) — the executor still bounds
+             * and logs the read. */
+            if (strcmp(a->verb, "READ") != 0 &&
+                (!a->perm || !grant_has(a->perm))) {
                 denied++;
                 log_line("AID DENIED %s %s (%s)", g_selected,
                          action_line,
@@ -922,6 +1294,7 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
                          action_line, xerr);
             }
         }
+        free(actions);
         log_line("AID ASK backend=%s task=\"%s\" allowed=%d denied=%d "
                  "failed=%d",
                  g_selected, arg, allowed, denied, failed);
@@ -950,7 +1323,8 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
 struct client {
     int fd;
     int dead;
-    char in[LINE_CAP];
+    /* TASK_CAP: a client may send a 16 KiB ASK task line. */
+    char in[TASK_CAP];
     size_t in_len;
 };
 
@@ -1003,9 +1377,13 @@ int main(void)
     g_selected_path = env_or("SEVYN_AI_SELECTED", DEFAULT_SELECTED);
     g_appd_sock = env_or("SEVYN_AI_APPD_SOCK", DEFAULT_APPD_SOCK);
     g_status_sock = env_or("SEVYN_AI_STATUS_SOCK", DEFAULT_STATUS_SOCK);
+    g_cli_path = env_or("SEVYN_AI_CLI", DEFAULT_CLI);
+    const char *read_root = getenv("SEVYN_AI_READ_ROOT");
+    g_read_root = (read_root && *read_root) ? read_root : NULL;
 
     signal(SIGTERM, on_signal);
     signal(SIGINT, on_signal);
+    signal(SIGHUP, on_sighup);
     signal(SIGPIPE, SIG_IGN);
 
     g_console_fd = open("/dev/console", O_WRONLY | O_NONBLOCK);
@@ -1072,10 +1450,18 @@ int main(void)
              g_sock_path, ctl_fd >= 0 ? g_ctl_path : "(none)",
              backends, g_selected);
 
-    char ctl_buf[LINE_CAP];
+    char ctl_buf[TASK_CAP];
     size_t ctl_len = 0;
 
     while (!g_stop) {
+        /* SIGHUP asked for a grant reload (P0): re-read the grant
+         * file. A failed reload keeps the old grant (reload_grant
+         * logs it). Checked here, in the loop, because the signal
+         * handler only sets the flag. */
+        if (g_reload) {
+            g_reload = 0;
+            reload_grant();
+        }
         struct pollfd pfds[2 + MAX_CLIENTS];
         int nfds = 0;
         pfds[nfds].fd = listen_fd;

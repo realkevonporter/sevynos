@@ -194,6 +194,9 @@ static void print_usage(FILE *f)
             "  sevyn ai select <id>        plug in a different AI\n"
             "  sevyn ai status             show the selected AI + grant\n"
             "  sevyn ai ask <task...>      ask the AI to do something\n"
+            "  sevyn ai key [--file <path>|--clear]\n"
+            "                              set/clear the Muse API key\n"
+            "  sevyn ai reload             re-read the grant file\n"
             "  sevyn code status           Sevyn Code: running, serving,\n"
             "                              version, terminal shell\n"
             "  sevyn browser open [url]    open a URL (launches Chromium\n"
@@ -381,11 +384,13 @@ static int connect_ai(void)
     return connect_sock("SEVYN_AI_SOCK", AI_SOCK);
 }
 
-/* Send one line (with trailing newline). Returns 0 on success. */
+/* Send one line (with trailing newline). Returns 0 on success. The
+ * buffer is 16 KiB: `sevyn ai ask` carries a task line up to
+ * TASK_CAP, and this is the shared send helper. */
 static int send_line(int fd, const char *line)
 {
     size_t n = strlen(line);
-    char buf[2048];
+    char buf[16384];
     if (n + 1 >= sizeof(buf))
         return -1;
     memcpy(buf, line, n);
@@ -1675,20 +1680,153 @@ static int cmd_code(int argc, char **argv)
 /* Talk to sevyn-aid (the AI daemon). list/select/status/ask map
  * straight onto the daemon's socket verbs; ask joins the task words
  * with spaces (no quoting — same rule as the exec bridge). */
+/* The Muse API key file (P0): /data/ai/muse-key, mode 0600,
+ * root-only. Env override SEVYN_AI_KEY_FILE for the host tests.
+ * The key is never printed, never logged, never in the image. */
+#define AI_KEY_FILE "/data/ai/muse-key"
+#define AI_KEY_MAX 512
+
+/* Defined in the comms section below: read a file and unlink it
+ * right after (the file must not linger). */
+static int read_password_file(const char *path, char *out, size_t cap);
+
+static const char *ai_key_path(void)
+{
+    return env_or("SEVYN_AI_KEY_FILE", AI_KEY_FILE);
+}
+
+/* Write the key atomically (tmp file in the same directory +
+ * rename), mode 0600. Creates the key directory if needed. The
+ * temp file is unlinked on any failure, so a half-written key never
+ * lands. Returns 0 on success. */
+static int write_key_file(const char *key)
+{
+    const char *path = ai_key_path();
+    /* The directory is everything before the last '/'. It is capped
+     * well below the temp-path buffer so the temp path below can
+     * never truncate. */
+    char dir[4000];
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash == path) {
+        snprintf(dir, sizeof(dir), "/");
+    } else {
+        size_t n = (size_t)(slash - path);
+        if (n >= sizeof(dir))
+            return -1;
+        memcpy(dir, path, n);
+        dir[n] = '\0';
+    }
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+        return -1;
+    char tmp[4096];
+    snprintf(tmp, sizeof(tmp), "%s/.muse-key.tmp.%d", dir, getpid());
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return -1;
+    if (fputs(key, f) == EOF || fputc('\n', f) == EOF) {
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fclose(f) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (chmod(tmp, 0600) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* `sevyn ai key`: set or clear the Muse API key (P0). A local file
+ * operation — it does NOT go through the daemon socket, and no
+ * daemon restart is needed: the backend is spawned per ASK and
+ * reads the key fresh each time.
+ *   sevyn ai key                 read the key from stdin
+ *   sevyn ai key --file <path>   read the key from a file (the file
+ *                                is unlinked right after, like the
+ *                                comms password file)
+ *   sevyn ai key --clear         revoke the key (delete the file)
+ * The key is never printed. */
+static int cmd_ai_key(int argc, char **argv)
+{
+    if (argc == 4 && strcmp(argv[3], "--clear") == 0) {
+        const char *path = ai_key_path();
+        if (unlink(path) != 0 && errno != ENOENT) {
+            fprintf(stderr, "error: cannot clear the Muse API key: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+        printf("Muse API key cleared\n");
+        return 0;
+    }
+    char key[AI_KEY_MAX + 1];
+    if (argc == 5 && strcmp(argv[3], "--file") == 0) {
+        if (read_password_file(argv[4], key, sizeof(key)) != 0) {
+            fprintf(stderr,
+                    "error: cannot read the Muse API key from %s\n",
+                    argv[4]);
+            return 1;
+        }
+    } else if (argc == 3) {
+        if (isatty(STDIN_FILENO)) {
+            fprintf(stderr,
+                    "error: pass the key via stdin or --file <path>\n");
+            return 1;
+        }
+        size_t n = fread(key, 1, sizeof(key) - 1, stdin);
+        key[n] = '\0';
+        while (n > 0 && (key[n - 1] == '\n' || key[n - 1] == '\r' ||
+                         key[n - 1] == ' ' || key[n - 1] == '\t'))
+            key[--n] = '\0';
+        char *p = key;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (p != key)
+            memmove(key, p, strlen(p) + 1);
+        if (key[0] == '\0') {
+            fprintf(stderr, "error: empty Muse API key\n");
+            return 1;
+        }
+    } else {
+        return usage();
+    }
+    if (write_key_file(key) != 0) {
+        fprintf(stderr, "error: cannot save the Muse API key: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    /* Scrub the key from this process's memory before returning. */
+    memset(key, 0, sizeof(key));
+    printf("Muse API key saved\n");
+    return 0;
+}
+
 static int cmd_ai(int argc, char **argv)
 {
     if (argc < 3)
         return usage();
     const char *verb = argv[2];
 
+    /* `key` is a local file operation, not a daemon verb. */
+    if (strcmp(verb, "key") == 0)
+        return cmd_ai_key(argc, argv);
+
     if (strcmp(verb, "list") != 0 && strcmp(verb, "select") != 0 &&
-        strcmp(verb, "status") != 0 && strcmp(verb, "ask") != 0)
+        strcmp(verb, "status") != 0 && strcmp(verb, "ask") != 0 &&
+        strcmp(verb, "reload") != 0)
         return usage();
     if (strcmp(verb, "select") == 0 && argc != 4)
         return usage();
     if (strcmp(verb, "ask") == 0 && argc < 4)
         return usage();
-    if ((strcmp(verb, "list") == 0 || strcmp(verb, "status") == 0) &&
+    if ((strcmp(verb, "list") == 0 || strcmp(verb, "status") == 0 ||
+         strcmp(verb, "reload") == 0) &&
         argc != 3)
         return usage();
 
@@ -1698,7 +1836,8 @@ static int cmd_ai(int argc, char **argv)
         return 1;
     }
 
-    char cmd[2048];
+    /* 16 KiB: the ASK task line grows to TASK_CAP (P0). */
+    char cmd[16384];
     if (strcmp(verb, "select") == 0)
         snprintf(cmd, sizeof(cmd), "SELECT %s", argv[3]);
     else if (strcmp(verb, "ask") == 0) {
@@ -1709,6 +1848,8 @@ static int cmd_ai(int argc, char **argv)
                                   argv[i]);
     } else if (strcmp(verb, "list") == 0)
         snprintf(cmd, sizeof(cmd), "LIST");
+    else if (strcmp(verb, "reload") == 0)
+        snprintf(cmd, sizeof(cmd), "RELOAD");
     else
         snprintf(cmd, sizeof(cmd), "STATUS");
     if (send_line(fd, cmd) != 0) {
