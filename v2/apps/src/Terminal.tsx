@@ -174,6 +174,20 @@ function logMarkers(cmd: string, out: string): void {
     Sevyn.log(
       "TERMINAL net-dns host=" + (bits[0] ?? "unknown") + " ip=" + (bits[1] ?? "unknown"),
     );
+  } else if (cmd === "tailscale status" || cmd.startsWith("tailscale status ")) {
+    // Relay 1a: the guest check asserts on this marker — the CLI
+    // prints "status: not logged in" (words) when no tailnet is
+    // joined, so logged_in is a string check, not parseField
+    // (which only takes the first token). tailnet/peers are
+    // single tokens, so parseField reads them.
+    Sevyn.log(
+      "TERMINAL tailscale-status logged_in=" +
+        (out.includes("not logged in") ? "no" : "yes") +
+        " tailnet=" +
+        (parseField(out, "tailnet") ?? "none") +
+        " peers=" +
+        (parseField(out, "peers") ?? "none"),
+    );
   }
 }
 

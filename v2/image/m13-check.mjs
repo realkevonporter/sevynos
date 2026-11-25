@@ -256,6 +256,9 @@ function terminalEchoRe(cmd) {
     if (verb === "status") return /JS TERMINAL net-status/;
     if (verb === "dns") return /JS TERMINAL net-dns/;
   }
+  if (app === "tailscale") {
+    if (verb === "status") return /JS TERMINAL tailscale-status/;
+  }
   return null;
 }
 
@@ -1656,6 +1659,21 @@ async function main() {
     check("boot: aid answers PING on its control serial", !!pong);
   }
 
+  // Relay 1a (boot log, no Terminal needed): the WireGuard module
+  // must be in the loaded set, and the staged tailscaled must run
+  // --version. Both lines are printed by init itself — the module
+  // line is the M7 "loaded modules" echo (/proc/modules lists
+  // loadable modules only), the version line is init running the
+  // staged binary before starting the daemon.
+  check(
+    "tailscale: wireguard module loaded (M7 loaded-modules line)",
+    logHas(b.logPath, /M7 init: loaded modules:.*\bwireguard\b/),
+  );
+  check(
+    "tailscale: tailscaled 1.104.7 runs (--version echoed by init)",
+    logHas(b.logPath, /TAILSCALE tailscaled 1\.104\.7/),
+  );
+
   // Input helpers (QMP input-send-event, as m3-check).
   const toAbs = (px, size) => Math.round((px / size) * 32767);
   const moveTo = async (x, y, w, h) => {
@@ -2755,6 +2773,35 @@ async function main() {
     await sleep(300);
     await click();
     await sleep(300);
+  }
+
+  // 1b. Relay 1a (Terminal): the daemon is alive but no tailnet
+  // is joined, so `sevyn tailscale status` must report "not logged
+  // in" — the 1a guest proof. And `sevyn net status` must still
+  // report the physical interface (eth0 in QEMU): the
+  // first_up_iface tailscale0 exclusion is host-proven in
+  // test-aid.py §17b, and this is the guest regression check that
+  // the exclusion did not break the normal path. No Headscale, no
+  // join, no tailnet here.
+  {
+    const { exec, hit } = await termCmd(
+      "tailscale status",
+      /TERMINAL tailscale-status logged_in=no/,
+    );
+    check("tailscale: `tailscale status` runs (EXEC 0)", !!exec, exec || "");
+    check("tailscale: daemon alive, no tailnet (`not logged in`)", !!hit, hit || "");
+  }
+  {
+    const { exec, hit } = await termCmd(
+      "net status",
+      /TERMINAL net-status interface=eth0/,
+    );
+    check("net: `net status` runs (EXEC 0)", !!exec, exec || "");
+    check(
+      "net: still reports the physical interface (eth0, not a tailnet)",
+      !!hit,
+      hit || "",
+    );
   }
 
   // 2. Embed up: `browser open` the local page launches Chromium;
