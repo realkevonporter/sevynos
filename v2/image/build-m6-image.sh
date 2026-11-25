@@ -1,24 +1,15 @@
 #!/bin/sh
-# Build the SevynOS v2 M6 image: everything in the M5 image, plus
-# Tokrah running as a third-party app.
+# Build the SevynOS v2 M6 image: everything in the M5 image.
+# (Tokrah, the M6 third-party bring-up, is TEMPORARILY OUT of the
+# build — Kevon, 2026-11-25. The M6 check is skipped until it comes
+# back; see the note below.)
 #
-# Tokrah (M6): the 100% React Native Tokrah app, bundled by Metro
-# against the SevynOS compat shim (v2/tokrah/), compiled to Hermes
-# bytecode, packaged as an unsigned third-party .sevyn bundle
-# (tokrah.sevyn, cli.exec permission) into pristine, with the raw hbc
-# staged at /usr/share/sevyn/tokrah/tokrah.hbc (what `sevyn tokrah
-# run` falls back to). The mock API server (v2/tokrah/harness/
-# mock-api.js + socket.io) is staged at /usr/share/sevyn/tokrah-mock/
-# for the check; init starts it ONLY when the kernel cmdline carries
-# sevyn.mockapi=1 (a test double, never a system service).
-#
-# Tokrah source: TOKRAH_SRC (a local checkout of realkevonporter/
-# tokrah) or, in CI, a clone authenticated with TOKRAH_READ_TOKEN (a
-# read-only repo-scoped PAT — Sevyn cannot create repo secrets). If
-# NEITHER is set the build FAILS LOUDLY: an M6 image without Tokrah
-# is not an M6 image. The built bundle is never committed to this
-# public repo (Tokrah's proprietary JS; Hermes bytecode is
-# decompilable).
+# Tokrah is TEMPORARILY OUT of the build (Kevon, 2026-11-25 — to cut
+# CI time while SevynOS and Tokrah move in parallel; it comes back
+# when Hermes + Yoga are fine-tuned and the RN libraries are built).
+# v2/tokrah/ stays in the tree, dormant; re-inclusion restores the
+# Metro bundle + Hermes compile + pristine staging + mock API staging
+# (the "Tokrah (M6)" section below) and the check steps that drive it.
 #
 # Structure mirrors build-m5-image.sh; the M5 image is untouched.
 # Networking: the guest uses QEMU user networking (virtio-net,
@@ -52,8 +43,6 @@
 # into the image at /usr/share/sevyn/os-version (what the updater
 # compares the feed version against).
 #
-# Requirements (on top of the M5 list): yarn (Tokrah installs with its
-# pinned yarn 1.22.22).
 # Outputs (SEVYN_V2_BUILD_DIR, default v2/image/build/):
 #   vmlinuz, initramfs.cpio.gz, kernel-version.txt, os-version,
 #   update-signing-key.json (test mode only)
@@ -286,54 +275,9 @@ python3 "$APPS_DIR/make-bundles.py" \
   --trusted-keys-dir "$BUILD_TMP/trusted-keys" \
   --test-bundles-dir "$BUILD_TMP/test-bundles"
 
-# --- Tokrah (M6) ------------------------------------------------------------
-# Bundle Tokrah from a pinned source, compile to Hermes bytecode, and
-# package it as an unsigned third-party .sevyn bundle into pristine.
-# Source: TOKRAH_SRC, or a TOKRAH_READ_TOKEN clone in CI. If NEITHER
-# is set the build FAILS LOUDLY — an M6 image without Tokrah is not
-# an M6 image (see the header; the token is Kevon's one-time action).
-if [ -n "${TOKRAH_SRC:-}" ]; then
-  echo "Tokrah source: TOKRAH_SRC=$TOKRAH_SRC"
-elif [ -n "${TOKRAH_READ_TOKEN:-}" ]; then
-  TOKRAH_SRC="$BUILD_TMP/tokrah-src"
-  echo "Tokrah source: cloning realkevonporter/tokrah (read-only token)"
-  git clone --depth 1 "https://x-access-token:${TOKRAH_READ_TOKEN}@github.com/realkevonporter/tokrah.git" "$TOKRAH_SRC" \
-    || { echo "error: Tokrah clone failed (check TOKRAH_READ_TOKEN)" >&2; exit 1; }
-else
-  echo "error: M6 needs Tokrah source — set TOKRAH_SRC (local checkout) or TOKRAH_READ_TOKEN (CI: a read-only repo-scoped PAT on realkevonporter/tokrah; add it under Settings > Secrets and variables > Actions). Sevyn cannot create repo secrets." >&2
-  exit 1
-fi
-[ -d "$TOKRAH_SRC/tokrah" ] || { echo "error: TOKRAH_SRC has no tokrah/ dir: $TOKRAH_SRC" >&2; exit 1; }
-TOKRAH_VERSION="$(node -e "console.log(require('$TOKRAH_SRC/tokrah/package.json').version)")"
-echo "Tokrah version: $TOKRAH_VERSION"
-# Tokrah installs with its pinned yarn (packageManager yarn@1.22.22);
-# the app's node_modules are its own — nothing is hoisted into this
-# repo (the dogfooding rule).
-command -v yarn >/dev/null 2>&1 || { echo "error: yarn not found (Tokrah installs with yarn 1.22.22)" >&2; exit 1; }
-if [ ! -d "$TOKRAH_SRC/tokrah/node_modules" ]; then
-  (cd "$TOKRAH_SRC/tokrah" && yarn install --frozen-lockfile --non-interactive) \
-    || { echo "error: Tokrah yarn install failed" >&2; exit 1; }
-fi
-EXPO_PUBLIC_API_URL=http://127.0.0.1:7070 TOKRAH_SRC="$TOKRAH_SRC" \
-  node "$ROOT/tokrah/build-tokrah.mjs" "$ROOT/tokrah/entry-tokrah.js" \
-  "$BUILD_TMP/tokrah.bundle.js" ios \
-  || { echo "error: Tokrah Metro bundle failed" >&2; exit 1; }
-[ -f "$BUILD_TMP/tokrah.bundle.js" ] || { echo "error: tokrah.bundle.js not built" >&2; exit 1; }
-"$PREFIX/bin/hermesc" -emit-binary -out "$BUILD_TMP/tokrah.hbc" "$BUILD_TMP/tokrah.bundle.js" \
-  || { echo "error: tokrah.hbc compile failed" >&2; exit 1; }
-python3 "$ROOT/tokrah/make-tokrah-bundle.py" \
-  --hbc "$BUILD_TMP/tokrah.hbc" --version "$TOKRAH_VERSION" \
-  --out "$BUILD_TMP/pristine" \
-  --staged-hbc "$BUILD_TMP/tokrah-staged.hbc" \
-  || { echo "error: tokrah.sevyn packaging failed" >&2; exit 1; }
-# The mock API server for the check: the harness mock-api.js plus a
-# socket.io install next to it (mock-api.js prefers a sibling
-# node_modules/socket.io, so no Tokrah API install is needed here).
-mkdir -p "$BUILD_TMP/tokrah-mock/node_modules"
-cp "$ROOT/tokrah/harness/mock-api.js" "$BUILD_TMP/tokrah-mock/mock-api.js"
-(cd "$BUILD_TMP/tokrah-mock" && npm install --no-audit --no-fund socket.io@4.8.3) \
-  || { echo "error: mock server socket.io install failed" >&2; exit 1; }
-
+# Tokrah staging lived here (Metro bundle + Hermes compile + pristine
+# .sevyn packaging + mock API staging). Removed while Tokrah is out of
+# the build (Kevon, 2026-11-25); v2/tokrah/ stays in the tree, dormant.
 # --- Sevyn Code (code-server) ---------------------------------------------
 # code-server 4.105.0, linux-amd64. CI downloads the release tarball;
 # CODE_SERVER_TARBALL points at a local copy instead (used for local
@@ -401,7 +345,6 @@ mkdir -p "$STAGE/bin" "$STAGE/proc" "$STAGE/sys" "$STAGE/dev" "$STAGE/run" \
          "$STAGE/usr/share/sevyn/chromium" \
          "$STAGE/usr/share/sevyn/ai/backends" \
          "$STAGE/usr/share/sevyn/test-bundles" \
-         "$STAGE/usr/share/sevyn/tokrah" "$STAGE/usr/share/sevyn/tokrah-mock" \
          "$STAGE/usr/share/sevyn/trusted-keys" "$STAGE/var/lib/sevyn/apps"
 
 if [ -x "$SYSROOT/bin/busybox" ]; then
@@ -447,12 +390,6 @@ cp "$BUILD_TMP/test-bundles/"*.sevyn "$STAGE/usr/share/sevyn/test-bundles/"
 cp "$BUILD_TMP/trusted-keys/"*.pub "$STAGE/usr/share/sevyn/trusted-keys/"
 cp "$BUILD_TMP/trusted-update-keys/trusted-update-keys.json" "$STAGE/usr/share/sevyn/trusted-update-keys.json"
 cp "$OUT/os-version" "$STAGE/usr/share/sevyn/os-version"
-# Tokrah (M6): the raw hbc (what `sevyn tokrah run` falls back to) and
-# the mock API server for the check (started by init only with
-# sevyn.mockapi=1 on the kernel cmdline).
-cp "$BUILD_TMP/tokrah-staged.hbc" "$STAGE/usr/share/sevyn/tokrah/tokrah.hbc"
-cp "$BUILD_TMP/tokrah-mock/mock-api.js" "$STAGE/usr/share/sevyn/tokrah-mock/mock-api.js"
-cp -r "$BUILD_TMP/tokrah-mock/node_modules" "$STAGE/usr/share/sevyn/tokrah-mock/node_modules"
 
 # The AI connector (M4.5): the grant + the stub backends. The
 # backends are plain executables; their ids are their filenames.
@@ -641,17 +578,6 @@ echo "M5 init: $WIFI"
 # App daemon next: seeds the registry from pristine on first boot and
 # owns /run/sevyn-apps.sock. The shell connects to it for its dock
 # list and launches; the harness drives it over /dev/ttyS2.
-# Tokrah mock API (M6): a test double, never a system service — it
-# starts ONLY when the kernel cmdline carries sevyn.mockapi=1 (the
-# M6 check boots with it). It serves the M6 mock Tokrah API on
-# 127.0.0.1:7070 from the code-server node binary, logging every
-# request/socket event to the console (MOCK_LOG=1) so the harness can
-# grep the serial log for the wire.
-for a in $(cat /proc/cmdline); do case "$a" in sevyn.mockapi=*) MOCKAPI=${a#sevyn.mockapi=};; esac; done
-if [ "${MOCKAPI:-0}" = "1" ]; then
-  MOCK_LOG=1 /usr/share/sevyn/code-server/lib/node /usr/share/sevyn/tokrah-mock/mock-api.js >/dev/console 2>&1 &
-  echo "M6 init: tokrah mock API started (sevyn.mockapi=1)"
-fi
 /usr/local/bin/sevyn-appd &
 # AI daemon (M4.5): owns /run/sevyn-ai.sock. Starts after appd +
 # statusd so its first ASK can reach both. The harness drives it over

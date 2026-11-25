@@ -4,11 +4,10 @@
 // plus the installer (in-place updates on bare metal via the ESP
 // sync).
 //
-//   0. Node harness gate (on the CI host, before QEMU): build the
-//      Tokrah bundle from v2/tokrah and run drive-live.js — login →
-//      home feed → go-live → start live → socket live:join → host
-//      screen → end live — against the mock API. Exit 0 = full pass.
-//      This is the live-session proof with Tokrah's real client code.
+//   0. (Removed while Tokrah is out of the build — Kevon,
+//      2026-11-25: the Node harness gate built the Tokrah bundle
+//      and ran drive-live.js against the mock API. It comes back
+//      with Tokrah; v2/tokrah/ stays in the tree, dormant.)
 //   1. Regression boot (-kernel/-initrd + the data disk, now
 //      LABEL=SEVYN_DATA) at 1920x1080: the M6 stack still intact
 //      (SEVYNOS_M5_READY etc.), the M7 init changes proved — DHCP
@@ -16,9 +15,10 @@
 //      (/dev/vda fallback), the real-hardware modules loaded (i915,
 //      iwlwifi, nvme) — the M9 polish proved (full-screen shell at
 //      1920x1080, move/resize drags, Settings wifi UI + app screens
-//      via `sevyn app run --headless`, wifi no-hardware state) — and
-//      the full Tokrah live flow still works in-guest (phases A–D +
-//      interactive dock launch, as M6).
+//      via `sevyn app run --headless`, wifi no-hardware state).
+//      (The full Tokrah live flow in-guest — phases A–D +
+//      interactive dock launch — is removed with it until Tokrah
+//      comes back.)
 //   2. UEFI boot — ESP-sync apply (OVMF Secure Boot firmware + the
 //      GPT disk image sevynos.img on a QEMU NVMe device — the boot
 //      path the GF65 will use): a test-signed feed (version
@@ -77,9 +77,7 @@
 // Usage: node v2/image/m9-check.mjs
 // Env: SEVYN_V2_BUILD_DIR (default v2/image/build),
 //      SEVYN_V2_M9_TIMEOUT (seconds, default 10800 — five boots
-//      under TCG plus the Tokrah flow),
-//      TOKRAH_SRC (Tokrah repo root — required for step 0;
-//      the workflow clones with TOKRAH_READ_TOKEN),
+//      under TCG),
 //      SEVYN_V2_SYSROOT (default / — the OVMF files live under
 //      $SYSROOT/usr/share/OVMF),
 //      SEVYN_V2_OVMF_CODE / SEVYN_V2_OVMF_VARS (OVMF firmware paths;
@@ -114,7 +112,6 @@ const QEMU = process.env.SEVYN_V2_QEMU || "qemu-system-x86_64";
 // so the go-live taps are spaced 17s apart: a second tap is a fresh
 // navigate, never a mid-flush re-entry.
 const ACCEL = process.env.SEVYN_V2_ACCEL || "tcg";
-const TOKRAH_SRC = process.env.TOKRAH_SRC || "";
 const ANCHOR_FILE = join(ROOT, "update", "trusted-update-keys.json");
 const GEN_KEY = join(ROOT, "..", "tools", "update-signing", "generate-key.mjs");
 // Anchor mode: a real trust anchor is committed, so the image trusts
@@ -338,13 +335,12 @@ async function dumpSlot(slot, tag) {
 
 // --- one QEMU boot ---
 // mode "kernel": the M6-style boot — -kernel/-initrd from the data
-// disk's active slot, mock API on the cmdline, virtio data disk.
+// disk's active slot, virtio data disk.
 // mode "uefi": the M7 boot — OVMF (Secure Boot firmware) + the GPT
 // disk image on a QEMU NVMe device; the bootloader (shim +
 // GRUB on the ESP) loads the kernel, so there is no
 // -kernel/-initrd/-append and no separate data disk. The GRUB
-// menuentry carries console=tty0 console=ttyS0 sevyn.slot=A (no mockapi
-// — the real flow).
+// menuentry carries console=tty0 console=ttyS0 sevyn.slot=A.
 let currentBoot = null;
 
 async function boot(tag, mode = "kernel") {
@@ -425,7 +421,7 @@ async function boot(tag, mode = "kernel") {
       "-initrd",
       initrd,
       "-append",
-      `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockapi=1`,
+      `console=ttyS0 sevyn.slot=${bootSlot}`,
     );
   }
   args.push(
@@ -716,11 +712,11 @@ async function termCmd(b, cmd, timeoutMs = 180000) {
   // (the C/D input files) would then never match and time out. The
   // prefix identifies the command; `-> 0` confirms it ran. A dropped
   // character inside the input file is caught downstream instead —
-  // the run's outcome checks (POST /v1/live, ENDED) fail if a
-  // coordinate was mangled. 80 chars, not 40: `tokrah run` commands
-  // share their first 40 chars and only diverge at `--seconds` /
-  // `--input`, so a 40-char prefix matched a stale earlier run
-  // (check 45: the C run "completed" on the probe run's EXEC line).
+  // the run's outcome checks fail if a coordinate was mangled.
+  // 80 chars, not 40: the longest commands share their first 40
+  // chars and only diverge later, so a 40-char prefix matched a
+  // stale earlier run (check 45: the C run "completed" on the probe
+  // run's EXEC line).
   const esc = cmd.slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // Search the whole log, not just lines after `before`: the 40-char
   // prefix includes the target filename, which is unique per command
@@ -735,32 +731,12 @@ async function termCmd(b, cmd, timeoutMs = 180000) {
   );
   return hit;
 }
-// Write an input file and verify it is readable: termCmd's
-// EXEC-prefix match is a false negative when QMP drops a character
-// in the typed command, so confirm the file is actually on disk via
-// `files cat`. The cat's exit code (0) is the verification — its
-// OUTPUT is not in the boot log, so waiting for the file's content
-// (the login email) to appear in the log can never succeed: the
-// email only shows up later, when the headless run types it into
-// the login form. (That is why the old waitForLog read-back timed
-// out on every probe even though the file was written and the
-// downstream login/live flows all passed.) The content itself is
-// proven downstream: a mistyped file makes the login POST / live
-// start fail, and those checks gate the run.
-async function writeInputFile(b, path, content) {
-  await termCmd(b, `files write ${path} ${content}`);
-  await termCmd(b, `files cat ${path}`);
-  return true;
-}
-
 // --- compact ops log parsing ---
 // The headless host logs one `HOST headless ops {json}` line per
 // screen (texts + pressable rects). Return the latest one.
 // sinceLines scopes the scan to lines after a run started: without
 // it a caller reads the PREVIOUS probe's ops (the Notes screen's 4
-// texts) and mistakes them for the current run's — the M9 Phase A
-// failure mode (the ops wait below matched a stale line instantly
-// and the check killed the guest before the Tokrah run could beat).
+// texts) and mistakes them for the current run's.
 function latestOps(b, sinceLines = 0) {
   const lines = logLines(b.logPath).slice(sinceLines);
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -778,36 +754,10 @@ function latestOps(b, sinceLines = 0) {
   }
   return null;
 }
-// Wait until the log holds a COMPLETE, parseable ops line after
-// sinceLines. A bare waitForLog on /HOST headless ops/ matches a
-// line caught mid-flush (the guest is still draining the ~6 KB JSON
-// through the serial), so it can return at once while latestOps
-// finds nothing parseable — the 381c4ef7 M9 failure (present-ok and
-// FAIL 2 ms apart, "no ops line"), the same signature as the
-// d4cee753 M6 failure that got waitForOps in m6-check.mjs.
-// Polling latestOps itself retries past the partial line until the
-// flush completes.
-async function waitForOps(b, timeoutMs, sinceLines = 0) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const ops = latestOps(b, sinceLines);
-    if (ops) return ops;
-    await sleep(500);
-  }
-  return null;
-}
 // Centre of a text rect (exact match, or first of several).
 function textCenter(ops, text) {
   const t = (ops?.texts || []).find((t) => t.t === text);
   if (!t) return null;
-  return { x: t.x + t.w / 2, y: t.y + t.h / 2 };
-}
-// The LOWEST text with this string (the login screen has two
-// "Sign In" texts; the button is the lower one).
-function textCenterLowest(ops, text) {
-  const ts = (ops?.texts || []).filter((t) => t.t === text);
-  if (!ts.length) return null;
-  const t = ts.reduce((a, b) => (b.y > a.y ? b : a));
   return { x: t.x + t.w / 2, y: t.y + t.h / 2 };
 }
 // Centre of the pressable rect containing a point (a button's
@@ -841,44 +791,6 @@ function pressableFor(ops, x, y) {
 // label's height. Returns null when no such strip verifies, so the
 // caller can fall back to the other go-live entry instead of tapping
 // the wrong button.
-function exposedTapPoint(ops, text) {
-  const t = (ops?.texts || []).find((t) => t.t === text);
-  if (!t) return null;
-  const tc = { x: t.x + t.w / 2, y: t.y + t.h / 2 };
-  const press = ops?.press || [];
-  const contains = (p, x, y) => x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h;
-  const overlap = (p) => {
-    const x0 = Math.max(p.x, t.x);
-    const x1 = Math.min(p.x + p.w, t.x + t.w);
-    const y0 = Math.max(p.y, t.y);
-    const y1 = Math.min(p.y + p.h, t.y + t.h);
-    return Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
-  };
-  const containing = press.filter((p) => contains(p, tc.x, tc.y));
-  if (!containing.length) return { x: tc.x, y: tc.y };
-  const target = containing.reduce((a, b) => (overlap(b) > overlap(a) ? b : a));
-  // Covered x-intervals of the target's row at the label's height.
-  const covered = press
-    .filter((p) => p !== target && tc.y >= p.y && tc.y <= p.y + p.h)
-    .map((p) => [Math.max(p.x, target.x), Math.min(p.x + p.w, target.x + target.w)])
-    .filter(([a, b]) => b > a)
-    .sort((a, b) => a[0] - b[0]);
-  let best = null;
-  let cursor = target.x;
-  for (const [a, b] of [...covered, [target.x + target.w, target.x + target.w]]) {
-    if (a > cursor && (!best || a - cursor > best.w)) {
-      best = { x: (cursor + a) / 2, w: a - cursor };
-    }
-    cursor = Math.max(cursor, b);
-  }
-  if (!best) return null;
-  const pt = { x: best.x, y: tc.y };
-  // Verify the point hits the target and nothing else.
-  const hits = press.filter((p) => contains(p, pt.x, pt.y));
-  if (hits.length !== 1 || hits[0] !== target) return null;
-  return pt;
-}
-
 // --- M9 helpers: pointer drags, colour boxes, ESP + feed ---
 // Type a command and wait for a specific exit code (termCmd only
 // matches -> 0; the wifi no-hardware state exits 1 by design).
@@ -1314,47 +1226,6 @@ async function buildTestFeed() {
   };
 }
 
-// --- Node harness gate (step 0) ---
-// Build the Tokrah bundle from v2/tokrah and run the mock-harness
-// driver end to end on the CI host. This is the live-session proof
-// with Tokrah's real client code; the QEMU steps then prove the same
-// flow runs in the real Hermes host in-guest.
-async function nodeHarnessGate() {
-  if (!TOKRAH_SRC) {
-    throw new Error(
-      "TOKRAH_SRC is not set — the Tokrah source tree is required. " +
-        "Locally: TOKRAH_SRC=/path/to/tokrah. CI: clone with TOKRAH_READ_TOKEN.",
-    );
-  }
-  const tokrahDir = join(ROOT, "tokrah");
-  const bundle = join(OUT, "m9-tokrah.bundle.js");
-  console.log("m9 step 0: building the Tokrah bundle (Node harness gate)...");
-  await execAsync(
-    "node",
-    [
-      join(tokrahDir, "build-tokrah.mjs"),
-      join(tokrahDir, "entry-tokrah.js"),
-      bundle,
-      "ios",
-    ],
-    {
-      // The bundle must point at the in-guest mock API, not prod:
-      // endpoints.ts inlines EXPO_PUBLIC_API_URL at transform time,
-      // and Metro's transform cache does NOT key on env — a warm
-      // cache from an image build once masked a missing var here.
-      env: {
-        ...process.env,
-        TOKRAH_SRC,
-        EXPO_PUBLIC_API_URL: "http://127.0.0.1:7070",
-      },
-    },
-  );
-  console.log("m9 step 0: running drive-live.js against the mock API...");
-  await execAsync("node", [join(tokrahDir, "harness", "drive-live.js"), bundle], {
-    env: { ...process.env, TOKRAH_SRC },
-  });
-}
-
 async function main() {
   const t0 = Date.now();
   const timeout = setTimeout(() => {
@@ -1362,20 +1233,6 @@ async function main() {
     process.exit(2);
   }, TIMEOUT_S * 1000);
   timeout.unref();
-
-  // Step 0: the Node harness gate, before any QEMU work.
-  try {
-    await nodeHarnessGate();
-    check("harness: bundle builds + drive-live.js passes 9/9 (mock API)", true);
-  } catch (e) {
-    check(
-      "harness: bundle builds + drive-live.js passes 9/9 (mock API)",
-      false,
-      e.message,
-    );
-    finish(false, { harness_error: String(e) });
-    return;
-  }
 
   // Setup: data disk (slot A = the built image) + the GPT disk image.
   for (const f of ["vmlinuz", "initramfs.cpio.gz", "os-version", "sevynos.img"]) {
@@ -1427,23 +1284,16 @@ async function main() {
   const b = await boot("main");
   await connectSockets(b);
 
-  // Boot: the M5 stack still intact + the mock API listening.
+  // Boot: the M5 stack still intact.
   const ready = await waitForLog(b.logPath, /SEVYNOS_M5_READY/, 300000);
   check("boot: SEVYNOS_M5_READY", !!ready);
   const ready45 = await waitForLog(b.logPath, /SEVYNOS_M4_5_READY/, 30000);
   check("boot: SEVYNOS_M4_5_READY (M4.5 stack intact)", !!ready45);
-  const mockUp = await waitForLog(
-    b.logPath,
-    /MOCK mock API listening on 127\.0\.0\.1:7070/,
-    60000,
-  );
-  check("boot: mock Tokrah API listening in-guest (sevyn.mockapi=1)", !!mockUp);
   const ping = await appdCmd(b, "PING", /APPD PONG/);
   check("appd: PING -> PONG", !!ping);
 
-  // M7: the init changes, proved on the regression boot before the
-  // Tokrah flow runs (a failure here is an M7 regression, not a
-  // Tokrah failure). The lease line carries the address: `sevyn net
+  // M7: the init changes, proved on the regression boot. The lease
+  // line carries the address: `sevyn net
   // status` prints it to the Terminal window, not the serial log,
   // so the init echoes it in the lease line.
   const dhcp = await waitForLog(
@@ -1497,7 +1347,7 @@ async function main() {
   // Diagnostic for the dock: ask appd for its LIST over the control
   // serial and count the apps it reports. The icons check below
   // proves what the DOCK shows; this proves what appd KNOWS — if
-  // appd lists 16 incl. messages but the dock shows 15, the gap is
+  // appd lists 15 incl. messages but the dock shows fewer, the gap is
   // between appd and the dock (host/renderer/shell), not the
   // registry. The serial log duplicates lines, so ids are deduped.
   const listBefore = logLines(b.logPath).length;
@@ -1510,8 +1360,8 @@ async function main() {
     listIds.add(l.slice(idx + 10).split("|")[0]);
   }
   check(
-    "appd LIST returns 16 apps incl. messages",
-    !!listOk && listIds.size === 16 && listIds.has("messages"),
+    "appd LIST returns 15 apps incl. messages",
+    !!listOk && listIds.size === 15 && listIds.has("messages"),
     `${listIds.size} apps: ${[...listIds].sort().join(",")}`,
   );
 
@@ -1525,8 +1375,9 @@ async function main() {
   // seed_from_pristine qsorts the *.sevyn names), NOT the apps.ts
   // fallback order. The icons check below finds each tile by its
   // gradient top colour, so it does not depend on positions at all —
-  // the dock holds 16 apps (14 stock + installer + tokrah), and any
-  // app missing from the dock fails its own entry, not its neighbour.
+  // the dock holds 15 apps (14 stock + installer — tokrah is out
+  // of the build for now), and any app missing from the dock fails
+  // its own entry, not its neighbour.
   const ICON_APPS = [
     ["browser", "#0ea5e9"],
     ["calculator", "#8b5cf6"],
@@ -1541,7 +1392,6 @@ async function main() {
     ["settings", "#6b7280"],
     ["store", "#f97316"],
     ["terminal", "#111827"],
-    ["tokrah", "#E52B42"],
     ["video-calls", "#7c3aed"],
     ["voice-calls", "#0d9488"],
   ];
@@ -1572,12 +1422,12 @@ async function main() {
   // can cover the TOP of the dock (its bottom edge lands mid-tile),
   // hiding the top rows — the bottom rows stay visible. Returns
   // {x, yTop} (tile centre x, tile top row) or null. Both colours
-  // are pairwise distinct at tol 8 across all 16 apps, so the
+  // are pairwise distinct at tol 8 across all 15 apps, so the
   // lookup is unambiguous — but the find itself uses at most tol 8:
   // in a gradient's middle rows a neighbour's top colour can come
-  // within 14 (tokrah's top is within 14 of calendar's
-  // mid-gradient), while a true tile still matches >=6 rows at
-  // tol 8 and the closest cross-app approach in the scan band is 9+.
+  // within 14 of another's mid-gradient, while a true tile still
+  // matches >=6 rows at tol 8 and the closest cross-app approach
+  // in the scan band is 9+.
   const findDockTile = (img, r, g, bl, tol = 14) => {
     const ftol = Math.min(tol, 8);
     const { width: W, height: H, pixels } = img;
@@ -1711,10 +1561,10 @@ async function main() {
     for (const l of snapLines.slice(-4)) console.log(`  guest: ${l.trim()}`);
   }
   // Dock redesign: the dock is a floating glass pill (macOS 27 style),
-  // not a full-width bar. 16 apps at 64px tiles: pill 1160 wide, ring
-  // 1162, pill x380..1540, tiles y989..1053. First tile Browser at
-  // x388..452 (centre 420), last tile Voice Calls at x1468..1532
-  // (centre 1500), Calculator at x460..524 (centre 492).
+  // not a full-width bar. 15 apps at 64px tiles: pill 1088 wide, ring
+  // 1090, pill x416..1504, tiles y989..1053. First tile Browser at
+  // x424..488 (centre 456), last tile Voice Calls at x1432..1496
+  // (centre 1464), Calculator at x496..560 (centre 528).
   //
   // The tiles are gradient icons (#102), so the old solid base-colour
   // counts read 0 for every tile — a finder on the base colour returns
@@ -1746,7 +1596,7 @@ async function main() {
     const first = foundTiles["browser"];
     check(
       "dock: first tile fully visible (Browser gradient)",
-      !!first && first.x >= 388 && first.x <= 452 && Math.abs(first.yTop - 990) <= 4,
+      !!first && first.x >= 424 && first.x <= 488 && Math.abs(first.yTop - 990) <= 4,
       first
         ? `browser tile centre x=${first.x} yTop=${first.yTop}`
         : "browser tile not found",
@@ -1754,14 +1604,14 @@ async function main() {
     const last = foundTiles["voice-calls"];
     check(
       "dock: last tile fully visible (Voice Calls gradient)",
-      !!last && last.x >= 1468 && last.x <= 1532 && Math.abs(last.yTop - 990) <= 4,
+      !!last && last.x >= 1432 && last.x <= 1496 && Math.abs(last.yTop - 990) <= 4,
       last
         ? `voice-calls tile centre x=${last.x} yTop=${last.yTop}`
         : "voice-calls tile not found",
     );
     const chevron =
-      countColor(settled, 31, 41, 55, 10, { x0: 380, y0: 982, x1: 388, y1: 1072 }) +
-      countColor(settled, 31, 41, 55, 10, { x0: 1532, y0: 982, x1: 1540, y1: 1072 });
+      countColor(settled, 31, 41, 55, 10, { x0: 416, y0: 982, x1: 424, y1: 1072 }) +
+      countColor(settled, 31, 41, 55, 10, { x0: 1496, y0: 982, x1: 1504, y1: 1072 });
     check(
       "dock: no scroll chevron in the dock band",
       chevron < 100,
@@ -1792,11 +1642,11 @@ async function main() {
   // the tile's top ~11 rows match the top colour at rest
   // (~400-500px), so hovered must stay near the resting count.
   {
-    const hoverRegion = { x0: 420, y0: 940, x1: 580, y1: 1080 };
+    const hoverRegion = { x0: 456, y0: 940, x1: 616, y1: 1080 };
     const calcTop = (img) => countColor(img, 165, 128, 248, 12, hoverRegion);
     const baseImg = await shot(b.qmp, join(OUT, "m9-shot-dock-base.ppm"));
     const before = calcTop(baseImg);
-    await pointerMove(b.qmp, 1920, 1080, 492, 1021);
+    await pointerMove(b.qmp, 1920, 1080, 528, 1021);
     await sleep(800);
     const hoverImg = await shot(b.qmp, join(OUT, "m9-shot-dock-hover.ppm"));
     const hovered = calcTop(hoverImg);
@@ -1958,13 +1808,13 @@ async function main() {
       `2000 tap ${Math.round(calcKeys[2].x)} ${Math.round(calcKeys[2].y)}`,
       `2500 tap ${Math.round(calcKeys[3].x)} ${Math.round(calcKeys[3].y)}`,
     ].join(";");
-    // writeInputFile's read-back waits for the login email, which
-    // this file does not contain. The write itself is proven by
-    // termCmd (EXEC ... -> 0); the file's content is proven by the
-    // display-5 check below — the second run reads this file and
-    // taps 2 + 3 = 5 only if every line landed. (`files cat`
-    // prints into the Terminal window, never to the serial log, so
-    // a log read-back of the content can never match.)
+    // The file's content is not verified by a log read-back:
+    // `files cat` prints into the Terminal window, never to the
+    // serial log, so a log read-back of the content can never match.
+    // The write itself is proven by termCmd (EXEC ... -> 0); the
+    // content is proven by the display-5 check below — the second
+    // run reads this file and taps 2 + 3 = 5 only if every line
+    // landed.
     await termCmd(b, `files write /tmp/m9-in-calc.txt ${inCalc}`);
     const calcOps = await appRun(
       "calculator",
@@ -2198,12 +2048,12 @@ async function main() {
     if (!t) return null;
     return { x: t.x, y: img.height - 48 };
   };
-  // Flat-dock tile centres (appd alphabetical seed order, 16 apps at
-  // 64px, pitch 72, first centre x=420, y=height-48). Tiles never
+  // Flat-dock tile centres (appd alphabetical seed order, 15 apps at
+  // 64px, pitch 72, first centre x=456, y=height-48). Tiles never
   // grow — the dock has no magnification — so the flat geometric
   // centre is always the true centre; the finder stays only as a
   // presence check. The geometry is anchored by the dock section
-  // above (Browser 420, Voice Calls 1500, pitch 72).
+  // above (Browser 456, Voice Calls 1464, pitch 72).
   const DOCK_ORDER = [
     "browser",
     "calculator",
@@ -2218,12 +2068,11 @@ async function main() {
     "settings",
     "store",
     "terminal",
-    "tokrah",
     "video-calls",
     "voice-calls",
   ];
   const flatTileCentre = (id) => ({
-    x: 420 + DOCK_ORDER.indexOf(id) * 72,
+    x: 456 + DOCK_ORDER.indexOf(id) * 72,
     y: 1032,
   });
   // Click a point on the shell desktop (not covered by any window in
@@ -2533,10 +2382,8 @@ async function main() {
   await appdCmd(b, "CLOSE settings", /APPD CLOSE OK settings/);
   await sleep(2000);
   // Focus settles back onto the Terminal a beat after the close —
-  // typing at once lost the first keys ("tokrah" arrived as "krah").
-  // Wait for the refocus, and retry the Phase A command once if the
-  // first attempt still mistypes (the bad command already submitted,
-  // so the line is clear for a fresh type).
+  // typing at once lost the first keys. Wait for the refocus before
+  // the dock click below.
   await sleep(3000);
 
   // Keyboard focus: the Terminal is multi-instance, so a dock click
@@ -2604,566 +2451,8 @@ async function main() {
     );
   }
 
-  // --- Phase A: headless mount, no input — the login screen. ---
-  // Scope both waits to lines after this run started: the log
-  // already holds "first present" / "ops" lines from the Settings,
-  // Calculator, Calendar, Store and Notes probes, and an unscoped
-  // wait matches the first of those instantly — the check then reads
-  // the Notes screen's stale 4-text ops, fails, and kills the guest
-  // before the Tokrah run can beat or log its own ops (the M9
-  // "headless hang": the loop never stalled, the harness never
-  // waited). appRun scopes the same way; Phase B/C already do.
-  const beforeA = logLines(b.logPath).length;
-  let runA = await termCmd(
-    b,
-    "tokrah run --width 800 --height 1200 --seconds 8 --out /tmp/m9-ops-a.json",
-  );
-  if (!runA) {
-    await sleep(2000);
-    runA = await termCmd(
-      b,
-      "tokrah run --width 800 --height 1200 --seconds 8 --out /tmp/m9-ops-a.json",
-    );
-  }
-  check("headless A: sevyn tokrah run completes (8s, no input)", !!runA);
-  const presentA = await waitForLog(
-    b.logPath,
-    /HOST headless first present/,
-    30000,
-    beforeA,
-  );
-  check("headless A: bundle presents (mount + first present)", !!presentA);
-  // The run is detached (the CLI returns at once), so the ops line
-  // lands after the first present — wait for it before reading.
-  // (Guest time runs ~0.5x wall under TCG, so waits are generous.)
-  // Wait for a COMPLETE ops line, not just the pattern: a bare
-  // waitForLog matches a line caught mid-flush and returns at once
-  // while latestOps finds nothing parseable (381c4ef7 M9 failure).
-  const opsA = await waitForOps(b, 60000, beforeA);
-  check(
-    "headless A: login screen ops logged (TOKRAH + Sign In)",
-    !!opsA &&
-      opsA.texts.some((t) => t.t === "TOKRAH") &&
-      opsA.texts.some((t) => t.t === "Sign In"),
-    opsA ? `${opsA.texts.length} texts` : "no ops line",
-  );
-  if (!opsA) {
-    finish(false, { phase: "A" });
-    return;
-  }
-
-  // --- Phase B: login, driven by the ops log's coordinates. ---
-  const emailC = textCenter(opsA, "you@example.com");
-  const passC = textCenter(opsA, "Enter your password");
-  const signInC = textCenterLowest(opsA, "Sign In");
-  check(
-    "headless B: login controls found in ops log",
-    !!(emailC && passC && signInC),
-    `email=${JSON.stringify(emailC)} pass=${JSON.stringify(passC)} signin=${JSON.stringify(signInC)}`,
-  );
-  if (!emailC || !passC || !signInC) {
-    finish(false, { phase: "B" });
-    return;
-  }
-  const eBtn = pressableFor(opsA, emailC.x, emailC.y);
-  const pBtn = pressableFor(opsA, passC.x, passC.y);
-  const sBtn = pressableFor(opsA, signInC.x, signInC.y);
-  const inB = [
-    `8000 tap ${Math.round(eBtn.x)} ${Math.round(eBtn.y)}`,
-    `8500 type m7@sevynos.test`,
-    `10000 tap ${Math.round(pBtn.x)} ${Math.round(pBtn.y)}`,
-    `10500 type M7pass123!`,
-    `12000 tap ${Math.round(sBtn.x)} ${Math.round(sBtn.y)}`,
-    // The (tabs) pager sometimes lands on the live tab after login
-    // (check 46: live tab active, home feed stuck on "Loading").
-    // Tap the Feed tab (first tab-bar button, y=1154 h=46) to force
-    // the home feed active; harmless if already there.
-    `20000 tap 80 1177`,
-  ].join(";");
-  const beforeB = logLines(b.logPath).length;
-  const wroteB = await writeInputFile(b, "/tmp/m9-in-b.txt", inB);
-  note("headless B: input file written", !!wroteB);
-  const runB = await termCmd(
-    b,
-    "tokrah run --width 800 --height 1200 --seconds 30 --input /tmp/m9-in-b.txt --out /tmp/m9-ops-b.json",
-    240000,
-  );
-  check("headless B: sevyn tokrah run completes (login input)", !!runB);
-  const loginPost = await waitForLog(
-    b.logPath,
-    /MOCK \{"kind":"http","method":"POST","path":"\/v1\/auth\/login"/,
-    120000,
-  );
-  check("headless B: mock API saw POST /v1/auth/login", !!loginPost);
-  // The app lands on the Live tab after login (page 0 of the
-  // swipeable pager; the feed mounts behind it). The feed's old red
-  // go-live button (#e52b42) no longer exists — the go-live entries
-  // now live on the Live screen: the "Start a Live Stream"
-  // empty-state button and the "Go Live" pill in the header. Wait
-  // for the button text, then read both entries' coordinates the
-  // same way phase A reads the login controls: text centre ->
-  // smallest containing pressable.
-  await waitForLog(b.logPath, /Start a Live Stream/, 120000, beforeB);
-  const opsB = latestOps(b);
-  const goLiveC = opsB ? textCenter(opsB, "Start a Live Stream") : null;
-  // The header "Go Live" pill (ActiveLivesScreen) is the FIRST
-  // go-live entry Phase C taps: it navigates to the same
-  // /(app)/live/go-live route as the empty-state button, and its
-  // point is unambiguous — no other pressable contains it. The
-  // empty-state button is the SECOND entry, tapped at an exposed
-  // strip (exposedTapPoint): pressableFor's smallest-containing
-  // centre lands on the Feed page's "Create Post" button instead
-  // (same layout origin, drawn on top), which opened the post
-  // editor and blanked the app on head3. The button tap is
-  // best-effort: when no covered-free strip verifies, Phase C runs
-  // on the pill alone.
-  const pillC = opsB ? textCenter(opsB, "Go Live") : null;
-  const goLivePill = pillC ? pressableFor(opsB, pillC.x, pillC.y) : null;
-  const goLive = opsB ? exposedTapPoint(opsB, "Start a Live Stream") : null;
-  check(
-    "headless B: live tab paints (Start a Live Stream + Go Live pill)",
-    !!(goLiveC && goLivePill),
-    opsB
-      ? `${opsB.texts.length} texts; button tap ${
-          goLive ? "aimed" : "skipped (no exposed strip)"
-        }`
-      : "no ops line",
-  );
-  if (!opsB || !goLiveC || !goLivePill) {
-    finish(false, { phase: "B" });
-    return;
-  }
-
-  // --- Phase C: go-live + start live. ---
-  // Every headless run starts a FRESH app (SecureStore is in-memory
-  // per launch), so every run logs in first, then taps go-live.
-  // The go-live screen's title field placeholder is "What's
-  // happening?" — read its coordinates from the ops log after the
-  // go-live click, in a short probe run, then run the full start.
-  const loginSeqC1 = [
-    `8000 tap ${Math.round(eBtn.x)} ${Math.round(eBtn.y)}`,
-    `8500 type m7@sevynos.test`,
-    `10000 tap ${Math.round(pBtn.x)} ${Math.round(pBtn.y)}`,
-    `10500 type M7pass123!`,
-    `12000 tap ${Math.round(sBtn.x)} ${Math.round(sBtn.y)}`,
-  ];
-  const inC1 = [
-    ...loginSeqC1,
-    // Go-live at 28000, not 20000: the login navigation is still
-    // settling at 20000 (home feed appears ~21000ms under TCG).
-    // TWO taps, 17s apart, on DIFFERENT entries — the header pill
-    // first, then the empty-state button at its exposed strip.
-    // The pill's point is unambiguous; the button's centre is
-    // not (it hits the Feed page's "Create Post" — head3). By
-    // +17s tap 1's mount flush (727-956ms under TCG) has long
-    // completed, so tap 2 is a fresh navigate, not a mid-flush
-    // re-entry. If tap 1 navigated, tap 2 lands on the go-live
-    // screen's camera preview (no tap handler there; Start sits
-    // below the fold, y > 1200) — harmless. If tap 1 missed,
-    // tap 2 still opens go-live from the button.
-    `28000 tap ${Math.round(goLivePill.x)} ${Math.round(goLivePill.y)}`,
-    ...(goLive ? [`45000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`] : []),
-  ].join(";");
-  const wroteC1 = await writeInputFile(b, "/tmp/m9-in-c1.txt", inC1);
-  note("headless C: probe input written", !!wroteC1);
-  // Retry the probe once on a fresh host process: a fresh process
-  // almost always gets through when the first run's navigation
-  // misses. The retry uses distinct filenames so termCmd's 80-char
-  // prefix can't match the first run's stale EXEC line.
-  let opsC1 = null;
-  let titleT = null;
-  let ageT = null;
-  let startT = null;
-  for (let attempt = 0; attempt < 2 && !(titleT && ageT && startT); attempt++) {
-    if (attempt > 0) {
-      await writeInputFile(b, "/tmp/m9-in-c1-retry.txt", inC1);
-    }
-    const beforeC1 = logLines(b.logPath).length;
-    const runC1 = await termCmd(
-      b,
-      attempt === 0
-        ? "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-c1.txt --out /tmp/m9-ops-c1.json"
-        : "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-c1-retry.txt --out /tmp/m9-ops-c1-retry.json",
-      240000,
-    );
-    check(
-      `headless C: probe run completes (go-live click${attempt > 0 ? ", retry" : ""})`,
-      !!runC1,
-    );
-    const loginPostC = await waitForLog(
-      b.logPath,
-      /MOCK \{"kind":"http","method":"POST","path":"\/v1\/auth\/login"/,
-      120000,
-      beforeC1,
-    );
-    check("headless C: login replayed in probe run", !!loginPostC);
-    // Log the wait's own outcome: a timeout here is "screen didn't
-    // appear in 120s", not "screen absent".
-    const goLiveSeen = await waitForLog(
-      b.logPath,
-      /What’s happening\?/,
-      120000,
-      beforeC1,
-    );
-    note("headless C: go-live screen text seen in log", !!goLiveSeen);
-    // The host logs every tap's hit-test result ("HOST pointer down
-    // (x,y) -> nodeId N") — the only evidence a tap landed where it
-    // aimed. Note the probe run's taps so a still-failing phase C
-    // shows whether the go-live tap hit its button, hit something
-    // else, or hit nothing (nodeId -1).
-    const downs = logLines(b.logPath)
-      .slice(beforeC1)
-      .filter((l) => l.includes("HOST pointer down"));
-    note(
-      `headless C: pointer downs (attempt ${attempt})`,
-      true,
-      downs.length ? downs.join(" | ") : "none",
-    );
-    opsC1 = latestOps(b);
-    titleT = opsC1 ? textCenter(opsC1, "What’s happening?") : null;
-    ageT = opsC1 ? textCenter(opsC1, "I confirm I’m at least 18 years old.") : null;
-    startT = opsC1 ? textCenter(opsC1, "Start Live") : null;
-  }
-  check(
-    "headless C: go-live screen found (title + age + Start)",
-    !!(titleT && ageT && startT),
-    `title=${JSON.stringify(titleT)} age=${JSON.stringify(ageT)} start=${JSON.stringify(startT)}`,
-  );
-  if (!titleT || !ageT || !startT) {
-    finish(false, { phase: "C" });
-    return;
-  }
-  const titleBtn = pressableFor(opsC1, titleT.x, titleT.y);
-  const ageBtn = pressableFor(opsC1, ageT.x, ageT.y);
-  const startBtn = pressableFor(opsC1, startT.x, startT.y);
-  // The Go Live screen flexes its preview with the viewport, so the
-  // age checkbox and Start button sit below the fold (y > 1200).
-  // Scroll first, then tap them at their scrolled positions. The
-  // scroll clamps at the content edge, so the applied scroll is
-  // min(requested, maxScroll); dy is the scrollY delta (positive =
-  // content moves up, revealing below).
-  const contentBottom = Math.max(
-    ...opsC1.texts.map((t) => t.y + t.h),
-    ...(opsC1.press || []).map((p) => p.y + p.h),
-    ...(opsC1.rects || []).map((r) => r.y + r.h),
-  );
-  const maxScroll = Math.max(0, contentBottom - 1200);
-  const scrollDy = Math.min(Math.max(0, startT.y - 1100), maxScroll);
-  const startLiveSeq = [
-    // Same two-tap pattern as the probe, pill first: if the pill
-    // tap missed, the button tap at its exposed strip still opens
-    // go-live; if the pill tap landed, the button tap hits the
-    // go-live preview area (no tap handler; Start is below the
-    // fold). The form taps shift +17s to match — their relative
-    // gaps (2s after the age tap before Start) are unchanged.
-    `28000 tap ${Math.round(goLivePill.x)} ${Math.round(goLivePill.y)}`,
-    ...(goLive ? [`45000 tap ${Math.round(goLive.x)} ${Math.round(goLive.y)}`] : []),
-    `51000 tap ${Math.round(titleBtn.x)} ${Math.round(titleBtn.y)}`,
-    `51500 type M7 test live`,
-    // Scroll AT the title: the point must be inside the Go Live form's
-    // own ScrollView. (400,600) is inside the feed's ScrollView, which
-    // stays mounted under the go-live overlay — scrolling there moves
-    // the feed, not the form, and the form's Start stays below the fold.
-    `53500 scroll ${Math.round(titleBtn.x)} ${Math.round(titleBtn.y)} 0 ${Math.round(scrollDy)}`,
-    // 2s gaps after the age tap: the age checkbox's state update must
-    // flush before Start, or canStart is still false and begin()
-    // bails (check 45: Start fired 500ms after age, no POST /v1/live).
-    `54500 tap ${Math.round(ageBtn.x)} ${Math.round(ageBtn.y - scrollDy)}`,
-    `56500 tap ${Math.round(startBtn.x)} ${Math.round(startBtn.y - scrollDy)}`,
-  ];
-  const inC = [...loginSeqC1, ...startLiveSeq].join(";");
-  const wroteC = await writeInputFile(b, "/tmp/m9-in-c.txt", inC);
-  note("headless C: start-live input written", !!wroteC);
-  const beforeC = logLines(b.logPath).length;
-  const runC = await termCmd(
-    b,
-    "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-c.txt --out /tmp/m9-ops-c.json",
-    240000,
-  );
-  check("headless C: sevyn tokrah run completes (start-live input)", !!runC);
-  const livePost = await waitForLog(
-    b.logPath,
-    /MOCK \{"kind":"http","method":"POST","path":"\/v1\/live"/,
-    120000,
-    beforeC,
-  );
-  check("headless C: mock API saw POST /v1/live (startLive)", !!livePost);
-  const liveJoin = await waitForLog(
-    b.logPath,
-    /MOCK \{"kind":"socket","event":"live:join"/,
-    120000,
-    beforeC,
-  );
-  check("headless C: mock API saw socket live:join", !!liveJoin);
-  // The host screen paints after the join: wait for its End button
-  // in the ops log before reading coordinates. 240s: the [id] route's
-  // effect can re-run on a param change, dropping the single-use
-  // remembered credentials and falling back to the joinLive network
-  // call, which is slow under TCG (check 41).
-  const endSeen = await waitForLog(b.logPath, /"t":"End"/, 240000, beforeC);
-  note("headless C: End button text seen in log", !!endSeen);
-  const opsC = latestOps(b);
-  const endT = opsC ? textCenter(opsC, "End") : null;
-  check(
-    "headless C: host screen paints (End button)",
-    !!endT,
-    opsC ? `${opsC.texts.length} texts` : "no ops line",
-  );
-  if (!endT) {
-    finish(false, { phase: "C" });
-    return;
-  }
-
-  // Reset the mock's live state before phase D: phase C's live is
-  // still LIVE, and the next run's home feed would show the "Resume
-  // your live" banner and auto-land on the live tab, shifting every
-  // coordinate the check derived from the probe (check 40).
-  const beforeReset = logLines(b.logPath).length;
-  const resetOk = await termCmd(
-    b,
-    "net fetch --method POST http://127.0.0.1:7070/v1/live/reset",
-  );
-  check("headless C: mock live state reset", !!resetOk);
-  // Capture the wait: if the reset never landed, phase D's home
-  // feed shows "Resume your live" and the title tap joins the old
-  // live instead of starting a new one (run 53).
-  const resetSeen = await waitForLog(
-    b.logPath,
-    /MOCK \{"kind":"http","method":"POST","path":"\/v1\/live\/reset"/,
-    60000,
-    beforeReset,
-  );
-  note("headless C: mock reset confirmed in log", !!resetSeen);
-
-  // --- Phase D: end the live. ---
-  // The End confirm modal's "End live" button: its coordinates are
-  // unknown until the modal paints. Phase D first taps End and reads
-  // the modal's ops log; a second run then taps "End live".
-  // The End tap MUST be scheduled after the Start tap (56500): the
-  // host sorts headless input events by timestamp (sevyn-rn-host.cc
-  // loadHeadlessInput), so the old 55000 End fired BEFORE Start,
-  // landed on the go-live screen where it missed (head4 M9: End at
-  // (768,629) hit nodeId -1 at 55s), no modal ever opened, and the
-  // confirm tap then hit the like overlay instead. End at 62000
-  // (host screen paints ~1.4s after Start) and confirm at 68000
-  // (modal paints within ~60ms of a hit End tap).
-  const endBtn = pressableFor(opsC, endT.x, endT.y);
-  const inD = [
-    ...loginSeqC1,
-    ...startLiveSeq,
-    `62000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
-  ].join(";");
-  const wroteD = await writeInputFile(b, "/tmp/m9-in-d.txt", inD);
-  note("headless D: end-live input written", !!wroteD);
-  const runD = await termCmd(
-    b,
-    "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-d.txt --out /tmp/m9-ops-d.json",
-    240000,
-  );
-  check("headless D: sevyn tokrah run completes (end tap)", !!runD);
-  // The confirm modal paints after the End tap: wait for its
-  // "End live" text in the ops log before reading coordinates.
-  // Retry the whole D run once if the modal never paints: a fresh
-  // host process can clear a slow mount under TCG. The retry replays
-  // the same input file, so it re-does login + start + End from
-  // scratch. (The head4 M9 retry only "worked" because the mock's
-  // live session persisted from the first run and the app resumed
-  // the host screen — a state leak, not the intended flow.)
-  let endLiveT = null;
-  let opsD = null;
-  for (let attempt = 0; attempt < 2 && !endLiveT; attempt++) {
-    if (attempt > 0) {
-      // The retry must use a DIFFERENT input filename: termCmd
-      // matches the first 80 chars of the command, and an identical
-      // command would "complete" on the first run's stale EXEC line
-      // (check 47: the retry never actually ran).
-      await writeInputFile(b, "/tmp/m9-in-d-retry.txt", inD);
-      const runD2try = await termCmd(
-        b,
-        "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-d-retry.txt --out /tmp/m9-ops-d-retry.json",
-        240000,
-      );
-      check("headless D: sevyn tokrah run completes (end tap, retry)", !!runD2try);
-    }
-    await waitForLog(b.logPath, /"End live"/, 120000);
-    opsD = latestOps(b);
-    endLiveT = opsD ? textCenter(opsD, "End live") : null;
-  }
-  check(
-    "headless D: confirm modal paints (End live)",
-    !!endLiveT,
-    opsD ? `${opsD.texts.length} texts` : "no ops line",
-  );
-  if (!endLiveT) {
-    finish(false, { phase: "D" });
-    return;
-  }
-  const endLiveBtn = pressableFor(opsD, endLiveT.x, endLiveT.y);
-  // Reset again before the confirm run: the D run's live is still
-  // LIVE, and D2 replays the full start flow from a clean state.
-  const beforeReset2 = logLines(b.logPath).length;
-  const reset2Ok = await termCmd(
-    b,
-    "net fetch --method POST http://127.0.0.1:7070/v1/live/reset",
-  );
-  check("headless D: mock live state reset (before confirm)", !!reset2Ok);
-  await waitForLog(
-    b.logPath,
-    /MOCK \{"kind":"http","method":"POST","path":"\/v1\/live\/reset"/,
-    60000,
-    beforeReset2,
-  );
-  const inD2 = [
-    ...loginSeqC1,
-    ...startLiveSeq,
-    `62000 tap ${Math.round(endBtn.x)} ${Math.round(endBtn.y)}`,
-    `68000 tap ${Math.round(endLiveBtn.x)} ${Math.round(endLiveBtn.y)}`,
-  ].join(";");
-  const wroteD2 = await writeInputFile(b, "/tmp/m9-in-d2.txt", inD2);
-  note("headless D: confirm input written", !!wroteD2);
-  const beforeD2 = logLines(b.logPath).length;
-  const runD2 = await termCmd(
-    b,
-    "tokrah run --width 800 --height 1200 --seconds 75 --input /tmp/m9-in-d2.txt --out /tmp/m9-ops-d2.json",
-    240000,
-  );
-  check("headless D: sevyn tokrah run completes (confirm tap)", !!runD2);
-  const endPost = await waitForLog(
-    b.logPath,
-    /MOCK \{"kind":"http","method":"POST","path":"\/v1\/live\/[^"]+\/end"/,
-    120000,
-    beforeD2,
-  );
-  check("headless D: mock API saw POST /v1/live/:id/end", !!endPost);
-  const ended = await waitForLog(
-    b.logPath,
-    /MOCK \{"kind":"live","status":"ENDED"/,
-    120000,
-    beforeD2,
-  );
-  check("headless D: mock live session ENDED", !!ended);
-
-  // --- Scroll gate: the desktop host must bind the pointer at
-  // version 5+, or Weston never sends frame events and axis deltas
-  // accumulate forever (GF65: trackpad AND mouse wheel both dead,
-  // zero SCROLL lines). The host logs the bound version at startup;
-  // assert the gate is open before the synthetic scroll phases run.
-  const pointerVersion = await waitForLog(
-    b.logPath,
-    /WAYLAND pointer version [5-9]/,
-    30000,
-  );
-  check(
-    "m9: pointer bound at version 5+ (frame events arrive)",
-    !!pointerVersion,
-    pointerVersion || "no pointer version line in host log",
-  );
-
-  // --- Headless S: stock-app ScrollViews scroll (GF65 fix). ---
-  // The Store list (12+ apps) is taller than its 800x500 window, so
-  // it only reaches its tail after a scroll — this proves the
-  // App.tsx ScrollView wrap end-to-end in-guest. The scroll input
-  // line drives the synthetic headless path (dispatchScroll ->
-  // scrollAt); a real Wayland axis event cannot be injected through
-  // QEMU 8.2's QMP input-send-event (pointer moves only, no wheel
-  // event exists), so the axis -> dispatchScroll hop is proven by
-  // inspection + the renderer unit test, and the GF65 is the final
-  // gate for real wheel/trackpad scrolling.
-  await termCmd(b, `files write /tmp/m9-in-scroll.txt 5000 scroll 400 250 0 200`);
-  const beforeS = logLines(b.logPath).length;
-  const runS = await termCmd(
-    b,
-    "app run store --name Store --color #f97316 --glyph S --seconds 15 --input /tmp/m9-in-scroll.txt --out /tmp/m9-ops-scroll.json",
-    240000,
-  );
-  check("headless S: sevyn app run store completes (scroll input)", !!runS);
-  const scrollLine = await waitForLog(
-    b.logPath,
-    /SCROLL \(400,250\) by \(0,200\) -> scrollY 0 -> 200/,
-    60000,
-    beforeS,
-  );
-  check(
-    "headless S: Store scrolls to scrollY 200 (ScrollView under the point)",
-    !!scrollLine,
-    scrollLine || "no SCROLL line — without the App.tsx wrap scrollAt finds no scroller",
-  );
-
-  // --- Headless T: Terminal scrollback scrolls (GF65 fix). ---
-  // Two `sevyn help` runs overflow the ~420px scrollback viewport;
-  // the app autoscrolls to the bottom after each command, so a
-  // wheel-UP input must move scrollY back down. This proves the
-  // Terminal's ScrollView wrap (full scrollback, not the old
-  // last-21 slice) and the autoscroll in one run. Terminal needs
-  // cli.exec to run commands. (No --glyph: `>` is not typeable
-  // through QMP; the header shows the app name, not the glyph.)
-  const inTerm = [
-    "1000 type sevyn help",
-    "2000 key 28 down 0",
-    "2100 key 28 up 0",
-    "5000 type sevyn help",
-    "6000 key 28 down 0",
-    "6100 key 28 up 0",
-    "10000 scroll 400 250 0 -200",
-  ].join(";");
-  await termCmd(b, `files write /tmp/m9-in-term.txt ${inTerm}`);
-  const beforeT = logLines(b.logPath).length;
-  const runT = await termCmd(
-    b,
-    "app run terminal --name Terminal --color #111827 --permissions cli.exec --seconds 15 --input /tmp/m9-in-term.txt --out /tmp/m9-ops-term.json",
-    240000,
-  );
-  check("headless T: sevyn app run terminal completes (scroll input)", !!runT);
-  const termScroll = await waitForLog(
-    b.logPath,
-    /SCROLL \(400,250\) by \(0,-200\) -> scrollY [0-9]+ -> [0-9]+/,
-    60000,
-    beforeT,
-  );
-  let termScrolled = false;
-  if (termScroll) {
-    const m = termScroll.match(/scrollY ([0-9]+) -> ([0-9]+)/);
-    termScrolled = !!m && Number(m[1]) > Number(m[2]) && Number(m[1]) > 0;
-  }
-  check(
-    "headless T: Terminal scrolls up from the autoscrolled bottom (scrollY drops)",
-    termScrolled,
-    termScroll || "no SCROLL line — without the Terminal wrap scrollAt finds no scroller",
-  );
-
-  // --- Interactive: launch Tokrah from the dock. ---
-  const launch = await appdCmd(b, "LAUNCH tokrah", /APPD LAUNCH OK tokrah/);
-  check("interactive: appd LAUNCH tokrah", !!launch);
-  const hostRun = await waitForLog(b.logPath, /HOST app running .* tokrah/, 60000);
-  check("interactive: host runs Tokrah as a windowed app", !!hostRun);
-  // No "first present" log for windowed apps — the screendump poll
-  // below is the proof the window paints. The window's title bar is
-  // drawn by the Wayland compositor, NOT the app, so its colour is
-  // the compositor's (check 48: no Tokrah-red header exists at all).
-  // The proof is the login screen's #f9fafb background painting
-  // inside the window: count it over the screen below the shell's
-  // top bar (y<48). A painting login screen is ~97k px; a blank
-  // window is ~0.
-  let bg = 0;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await sleep(3000);
-    try {
-      const winImg = await shot(b.qmp, join(OUT, "m9-shot-tokrah.ppm"));
-      bg = countColor(winImg, 249, 250, 251, 10, {
-        x0: 0,
-        y0: 48,
-        x1: winImg.width,
-        y1: winImg.height,
-      });
-      if (bg > 50000) break;
-    } catch {}
-  }
-  check("interactive: login screen paints (#f9fafb background)", bg > 50000, `bg=${bg}`);
-  const close = await appdCmd(b, "CLOSE tokrah", /APPD CLOSE OK tokrah/);
-  check("interactive: appd CLOSE tokrah", !!close);
-
   // --- Shutdown/restart: the power verbs + clean teardown. ---
-  // The Terminal lost focus to the Tokrah window above, and a
+  // The Terminal may have lost focus to the app windows above, and a
   // re-LAUNCH of a running app is a no-op (no focus restore yet —
   // the window fix), so close it and launch it fresh: a fresh
   // launch is focused, and the typed commands land in it.

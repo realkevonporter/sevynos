@@ -291,7 +291,7 @@ async function boot(tag, extraAppend = "") {
     "-initrd",
     initrd,
     "-append",
-    `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockapi=1${extraAppend}`,
+    `console=ttyS0 sevyn.slot=${bootSlot}${extraAppend}`,
     "-display",
     "none",
     "-vga",
