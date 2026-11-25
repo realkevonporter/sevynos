@@ -114,9 +114,11 @@
 //      SEVYN_V2_QEMU (default qemu-system-x86_64).
 import { spawn, execFile } from "node:child_process";
 import {
+  closeSync,
   createWriteStream,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -215,6 +217,10 @@ function logHas(path, pattern) {
 // tagged, and the tagOwners values carry the `@` suffix the
 // validator requires.
 let relayProcs = [];
+// The relay daemons' log fds (opened synchronously — a
+// createWriteStream has fd null until it opens, and spawn rejects
+// a not-yet-open stream as stdio with ERR_INVALID_ARG_VALUE).
+let relayLogFds = [];
 function stopRelay() {
   for (const p of relayProcs) {
     try {
@@ -222,6 +228,12 @@ function stopRelay() {
     } catch {}
   }
   relayProcs = [];
+  for (const fd of relayLogFds) {
+    try {
+      closeSync(fd);
+    } catch {}
+  }
+  relayLogFds = [];
 }
 
 async function waitForFile(path, timeoutMs) {
@@ -361,9 +373,10 @@ async function relaySetup() {
   }
   check("relay: Headscale config validates (configtest)", cfgOk);
   if (!cfgOk) return null;
-  const hsLog = createWriteStream(join(HS_STATE, "headscale.log"), { flags: "w" });
+  const hsLogFd = openSync(join(HS_STATE, "headscale.log"), "w");
+  relayLogFds.push(hsLogFd);
   const hs = spawn(HS_BIN, ["-c", join(HS_STATE, "config.yaml"), "serve"], {
-    stdio: ["ignore", hsLog, hsLog],
+    stdio: ["ignore", hsLogFd, hsLogFd],
   });
   relayProcs.push(hs);
   const up = await relayHttpOk(`${HS_URL}/`, 30000);
@@ -420,13 +433,12 @@ async function relaySetup() {
   const hostState = join(HS_STATE, "host-node");
   mkdirSync(hostState, { recursive: true });
   const hostSock = join(HS_STATE, "host-node.sock");
-  const tsdLog = createWriteStream(join(HS_STATE, "host-tailscaled.log"), {
-    flags: "w",
-  });
+  const tsdLogFd = openSync(join(HS_STATE, "host-tailscaled.log"), "w");
+  relayLogFds.push(tsdLogFd);
   const tsd = spawn(
     TS_DAEMON,
     ["--tun=userspace-networking", `--statedir=${hostState}`, `--socket=${hostSock}`],
-    { stdio: ["ignore", tsdLog, tsdLog] },
+    { stdio: ["ignore", tsdLogFd, tsdLogFd] },
   );
   relayProcs.push(tsd);
   const sockUp = await waitForFile(hostSock, 15000);
