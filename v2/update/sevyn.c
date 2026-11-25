@@ -199,6 +199,11 @@ static void print_usage(FILE *f)
             "  sevyn ai key [--file <path>|--clear]\n"
             "                              set/clear the Muse API key\n"
             "  sevyn ai reload             re-read the grant file\n"
+            "  sevyn ai god on|off|status  god mode: full access for the\n"
+            "                              AI (default off; `on` needs\n"
+            "                              --confirm)\n"
+            "  sevyn ai audit [n]          show the last n AI audit log\n"
+            "                              entries (default 50)\n"
             "  sevyn code status           Sevyn Code: running, serving,\n"
             "                              version, terminal shell\n"
             "  sevyn browser open [url]    open a URL (launches Chromium\n"
@@ -1809,15 +1814,387 @@ static int cmd_ai_key(int argc, char **argv)
     return 0;
 }
 
+/* God mode paths (P2, design §2.4). The god grant template ships
+ * in the image (/usr/share/sevyn/ai/grant-god.json); the runtime god
+ * grant + marker live on /data. Env overrides for the host tests. */
+#define AI_GOD_GRANT_FILE "/data/ai/grant-god.json"
+#define AI_GOD_MARKER_FILE "/data/ai/god-mode.json"
+#define AI_GOD_TEMPLATE_FILE "/usr/share/sevyn/ai/grant-god.json"
+#define AI_AUDIT_FILE "/data/logs/ai-audit.log"
+
+static const char *ai_god_grant_path(void)
+{
+    return env_or("SEVYN_AI_GOD_GRANT", AI_GOD_GRANT_FILE);
+}
+
+static const char *ai_god_marker_path(void)
+{
+    return env_or("SEVYN_AI_GOD_MARKER", AI_GOD_MARKER_FILE);
+}
+
+static const char *ai_god_template_path(void)
+{
+    return env_or("SEVYN_AI_GOD_GRANT_TEMPLATE", AI_GOD_TEMPLATE_FILE);
+}
+
+static const char *ai_audit_path(void)
+{
+    return env_or("SEVYN_AI_AUDIT_LOG", AI_AUDIT_FILE);
+}
+
+/* UTC ISO-8601 timestamp for the marker. */
+static void ai_iso_now(char *out, size_t cap)
+{
+    time_t now = time(NULL);
+    struct tm tmv;
+    if (gmtime_r(&now, &tmv) == NULL) {
+        snprintf(out, cap, "1970-01-01T00:00:00Z");
+        return;
+    }
+    strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+}
+
+/* Copy a small file byte-exact (the template -> the runtime god
+ * grant). tmp + rename, like the atomic writers. */
+static int copy_file_atomic(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "rb");
+    if (!in)
+        return -1;
+    char tmp[4096];
+    size_t dlen = strlen(dst);
+    if (dlen + 5 > sizeof(tmp)) {
+        fclose(in);
+        return -1;
+    }
+    memcpy(tmp, dst, dlen);
+    memcpy(tmp + dlen, ".tmp", 5);
+    FILE *out = fopen(tmp, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    char buf[8192];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = -1;
+            break;
+        }
+    }
+    if (ferror(in))
+        rc = -1;
+    if (fclose(out) != 0)
+        rc = -1;
+    fclose(in);
+    if (rc != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, dst) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* mkdir -p one directory path. */
+static int ai_mkdir_p(const char *dir)
+{
+    char buf[4000];
+    size_t n = strlen(dir);
+    if (n == 0 || n >= sizeof(buf))
+        return -1;
+    memcpy(buf, dir, n + 1);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+                return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+        return -1;
+    return 0;
+}
+
+/* The directory part of a path (everything before the last '/'). */
+static int ai_dirname(const char *path, char *out, size_t cap)
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash == path) {
+        snprintf(out, cap, "/");
+        return 0;
+    }
+    size_t n = (size_t)(slash - path);
+    if (n >= cap)
+        return -1;
+    memcpy(out, path, n);
+    out[n] = '\0';
+    return 0;
+}
+
+/* The powers god mode grants, in plain language (D1: the confirm
+ * dialog in Settings lists these; the CLI prints them when a bare
+ * `god on` refuses). */
+static void print_god_powers(FILE *f)
+{
+    fprintf(f,
+            "God mode gives the AI full access to this device:\n"
+            "  - install and uninstall apps\n"
+            "  - reboot the device\n"
+            "  - apply system updates\n"
+            "  - read and write your files\n"
+            "  - run any sevyn command\n"
+            "Every action is logged to the AI audit log.\n");
+}
+
+/* Ask the daemon to re-read its grants (RELOAD). Returns 0 when the
+ * daemon reloaded, -1 when it could not be reached or refused. */
+static int ai_reload_daemon(void)
+{
+    int fd = connect_ai();
+    if (fd < 0)
+        return -1;
+    if (send_line(fd, "RELOAD") != 0) {
+        close(fd);
+        return -1;
+    }
+    char line[2048];
+    int n = read_line(fd, line, sizeof(line));
+    close(fd);
+    if (n <= 0)
+        return -1;
+    return strncmp(line, "OK ", 3) == 0 ? 0 : -1;
+}
+
+/* `sevyn ai god on|off|status` (P2, design §2.3-2.4). Enabling is a
+ * two-step confirm (D1): a bare `god on` prints the powers and
+ * refuses — only `god on --confirm` writes the marker. The marker
+ * is the persistent intent; the daemon is the live authority, so
+ * every enable/disable ends with a RELOAD. The god grant file is
+ * copied from the image template on enable; the marker is deleted
+ * on disable (the god grant file is left in place, inert). */
+static int cmd_ai_god(int argc, char **argv)
+{
+    if (argc < 4)
+        return usage();
+    const char *action = argv[3];
+    if (strcmp(action, "status") == 0) {
+        if (argc != 4)
+            return usage();
+        /* Live state comes from the daemon (STATUS carries
+         * god_mode=on|off). */
+        int fd = connect_ai();
+        if (fd < 0) {
+            fprintf(stderr, "error: cannot reach the AI daemon\n");
+            return 1;
+        }
+        if (send_line(fd, "STATUS") != 0) {
+            fprintf(stderr, "error: cannot talk to the AI daemon\n");
+            close(fd);
+            return 1;
+        }
+        char line[2048];
+        int n = read_line(fd, line, sizeof(line));
+        close(fd);
+        if (n <= 0) {
+            fprintf(stderr, "error: no reply from the AI daemon\n");
+            return 1;
+        }
+        return print_reply(line);
+    }
+    if (strcmp(action, "off") == 0) {
+        if (argc != 4)
+            return usage();
+        const char *marker = ai_god_marker_path();
+        if (unlink(marker) != 0 && errno != ENOENT) {
+            fprintf(stderr, "error: cannot turn god mode off: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+        if (ai_reload_daemon() != 0) {
+            fprintf(stderr,
+                    "warning: god mode marker removed, but the AI "
+                    "daemon did not reload — it takes effect when the "
+                    "daemon next starts\n");
+            return 1;
+        }
+        printf("God mode off.\n");
+        return 0;
+    }
+    if (strcmp(action, "on") != 0)
+        return usage();
+    /* `god on [--confirm] [--via <source>]`. */
+    int confirm = 0;
+    const char *via = "cli";
+    for (int i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "--confirm") == 0) {
+            confirm = 1;
+        } else if (strcmp(argv[i], "--via") == 0 && i + 1 < argc &&
+                   (strcmp(argv[i + 1], "cli") == 0 ||
+                    strcmp(argv[i + 1], "settings") == 0)) {
+            via = argv[++i];
+        } else {
+            return usage();
+        }
+    }
+    if (!confirm) {
+        /* Step one of the two-step confirm: show the powers and
+         * refuse. A bare non-interactive enable never turns god
+         * mode on (D1). */
+        print_god_powers(stderr);
+        fprintf(stderr,
+                "To enable god mode, run: sevyn ai god on --confirm\n");
+        return 1;
+    }
+    /* Step two: copy the template to the runtime god grant, write
+     * the marker, reload the daemon. */
+    const char *grant = ai_god_grant_path();
+    const char *marker = ai_god_marker_path();
+    const char *templ = ai_god_template_path();
+    char dir[4000];
+    if (ai_dirname(grant, dir, sizeof(dir)) != 0 ||
+        ai_mkdir_p(dir) != 0) {
+        fprintf(stderr, "error: cannot create the god-mode directory\n");
+        return 1;
+    }
+    if (copy_file_atomic(templ, grant) != 0) {
+        fprintf(stderr,
+                "error: cannot install the god-mode grant from %s: %s\n",
+                templ, strerror(errno));
+        return 1;
+    }
+    char now[32];
+    ai_iso_now(now, sizeof(now));
+    char marker_json[512];
+    snprintf(marker_json, sizeof(marker_json),
+             "{\"god_mode\": true, \"enabled_at\": \"%s\", "
+             "\"enabled_by\": \"%s\"}\n",
+             now, via);
+    /* Atomic marker write (tmp + rename). The marker is state, not
+     * a secret (the tray shows it), so 0644 is fine. */
+    if (strlen(marker) + 16 > 4096) {
+        fprintf(stderr, "error: god-mode marker path too long\n");
+        return 1;
+    }
+    char mtmp[4096];
+    snprintf(mtmp, sizeof(mtmp), "%s.tmp.%d", marker, getpid());
+    FILE *f = fopen(mtmp, "w");
+    if (!f) {
+        fprintf(stderr, "error: cannot write the god-mode marker: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int wrc = 0;
+    if (fputs(marker_json, f) == EOF)
+        wrc = -1;
+    if (fclose(f) != 0)
+        wrc = -1;
+    if (wrc != 0) {
+        unlink(mtmp);
+        fprintf(stderr, "error: cannot write the god-mode marker: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    if (rename(mtmp, marker) != 0) {
+        unlink(mtmp);
+        fprintf(stderr, "error: cannot write the god-mode marker: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    if (ai_reload_daemon() != 0) {
+        fprintf(stderr,
+                "warning: god mode is set, but the AI daemon did not "
+                "reload — it takes effect when the daemon next starts\n");
+        return 1;
+    }
+    printf("God mode on — the AI now has full access to this device. "
+           "Every action is logged.\n");
+    return 0;
+}
+
+/* `sevyn ai audit [n]` (P2, design §2.5): print the last n entries
+ * of the audit log (default 50). A local file read — the daemon
+ * owns the log, but the CLI (root, like the daemon) may read it;
+ * there is no verb that writes to it. */
+static int cmd_ai_audit(int argc, char **argv)
+{
+    long n = 50;
+    if (argc == 4) {
+        char *end = NULL;
+        n = strtol(argv[3], &end, 10);
+        if (end == argv[3] || *end != '\0' || n < 0)
+            return usage();
+    } else if (argc != 3) {
+        return usage();
+    }
+    if (n == 0)
+        return 0;
+    const char *path = ai_audit_path();
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        if (errno == ENOENT) {
+            printf("No AI activity yet.\n");
+            return 0;
+        }
+        fprintf(stderr, "error: cannot read the audit log: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    /* Keep the last n lines in a ring; the log rotates at 1 MB, so
+     * the line count is bounded in practice. */
+    size_t cap = (size_t)n;
+    char **lines = calloc(cap, sizeof(char *));
+    if (!lines) {
+        fclose(f);
+        fprintf(stderr, "error: out of memory\n");
+        return 1;
+    }
+    char buf[2048];
+    size_t idx = 0, total = 0;
+    while (fgets(buf, sizeof(buf), f)) {
+        free(lines[idx]);
+        lines[idx] = strdup(buf);
+        idx = (idx + 1) % cap;
+        total++;
+    }
+    fclose(f);
+    if (total == 0) {
+        free(lines);
+        printf("No AI activity yet.\n");
+        return 0;
+    }
+    size_t count = total < cap ? total : cap;
+    size_t start = total < cap ? 0 : idx;
+    for (size_t i = 0; i < count; i++) {
+        char *line = lines[(start + i) % cap];
+        if (line) {
+            fputs(line, stdout);
+            free(line);
+        }
+    }
+    free(lines);
+    return 0;
+}
+
 static int cmd_ai(int argc, char **argv)
 {
     if (argc < 3)
         return usage();
     const char *verb = argv[2];
 
-    /* `key` is a local file operation, not a daemon verb. */
+    /* `key`, `god`, and `audit` are local file operations, not
+     * daemon verbs (god writes the marker + grant and then asks the
+     * daemon to RELOAD; audit reads the daemon's log). */
     if (strcmp(verb, "key") == 0)
         return cmd_ai_key(argc, argv);
+    if (strcmp(verb, "god") == 0)
+        return cmd_ai_god(argc, argv);
+    if (strcmp(verb, "audit") == 0)
+        return cmd_ai_audit(argc, argv);
 
     if (strcmp(verb, "list") != 0 && strcmp(verb, "select") != 0 &&
         strcmp(verb, "status") != 0 && strcmp(verb, "ask") != 0 &&

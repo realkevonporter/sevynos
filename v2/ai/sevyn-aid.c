@@ -21,6 +21,7 @@
  *   LIST              -> OK selected=<id> backends=<csv>
  *   SELECT <id>       -> OK selected <id> / ERR unknown backend <id>
  *   STATUS            -> OK selected=<id> backends=<csv> grant=<csv>
+ *                        god_mode=<on|off>
  *   RELOAD            -> OK grant reloaded / ERR (old grant kept)
  *   ASK <task...>     -> OK backend=<id> allowed=<n> denied=<m>
  *                        failed=<k>
@@ -70,10 +71,38 @@
  *                                    God-mode-only by grant (the
  *                                    standard grant has no
  *                                    system.update).
- *   UNINSTALL <id>    app.uninstall (NOT in the grant — refused)
- *   INSTALL <path>    app.install   (NOT in the grant — refused)
- *   REBOOT            system.reboot (NOT in the grant — refused)
+ *   UNINSTALL <id>    app.uninstall (P2, god mode only) -> the
+ *                                    registry removal path, with the
+ *                                    protected-apps guard (shell +
+ *                                    terminal refuse, in any mode)
+ *   INSTALL <path>    app.install   (P2, god mode only) -> the
+ *                                    .sevyn bundle install path
+ *   REBOOT            system.reboot (P2, god mode only) -> the
+ *                                    existing `sevyn reboot` path
+ *                                    (statusd asks init; the device
+ *                                    goes down a second later)
  * Unknown verbs are refused as unknown.
+ *
+ * God mode (P2, design §2): the standard grant plus every
+ * permission the standard grant refuses, as a SEPARATE grant file
+ * (/data/ai/grant-god.json) plus a marker (/data/ai/god-mode.json),
+ * both on the persistent data disk, default OFF, opt-in only. The
+ * daemon loads the god grant only when the marker says god_mode is
+ * true AND the god grant parses; a missing or unparseable god grant
+ * falls back to the standard grant and logs
+ * "AID god grant invalid, standard grant in force". The marker
+ * survives a reboot (D2): at startup the daemon logs
+ * "AID god mode active" when it is on, never silently. The AI
+ * cannot enable god mode — there is no GOD verb and no backend
+ * action reaches it; only `sevyn ai god` (CLI) and the Settings
+ * toggle, both human-operated, write the marker. Every action the
+ * AI takes — allowed, denied, failed — is appended to the audit
+ * log (/data/logs/ai-audit.log), one line per action, plus the
+ * god-mode enable/disable transitions. An action is refused when
+ * the audit log cannot be written (fail-closed); the log rotates
+ * at 1 MB to ai-audit.log.1. The daemon also SETs the statusd key
+ * ai.god_mode (on/off) on every transition, so the shell's status
+ * tray can show the mode mark.
  *
  * Per-backend limits (P0): a backend may ship a `<id>.limits` file
  * next to itself (timeout=<s>, max_actions=<n>); muse-ai ships
@@ -85,6 +114,11 @@
  *                    "status.set"]}
  * A missing or unparseable grant is fatal: the daemon refuses to
  * start rather than run an AI with an unknown grant (fail-closed).
+ * God mode (P2) is a second grant, /data/ai/grant-god.json, plus
+ * the marker /data/ai/god-mode.json — see the god-mode section
+ * above. A broken god grant degrades to the standard grant, never
+ * to "no grant"; a broken standard grant still refuses to start,
+ * god mode or not.
  *
  * Selection is persisted to /data/ai-selected.json (falling back to
  * /run/ai-selected.json when there is no data disk) so the user's
@@ -97,7 +131,9 @@
  * `sevyn` binary EXEC runs; default /usr/local/bin/sevyn),
  * SEVYN_AI_READ_ROOT (test-only: the one directory READ may touch,
  * replacing /data/ + /var/lib/sevyn/), SEVYN_AI_WRITE_ROOT
- * (test-only: the one directory WRITE may touch, same replacement).
+ * (test-only: the one directory WRITE may touch, same replacement),
+ * SEVYN_AI_GOD_GRANT, SEVYN_AI_GOD_MARKER, SEVYN_AI_AUDIT_LOG
+ * (test-only: the god-mode grant, marker, and audit log paths).
  *
  * Build: gcc, libc only (+ the M3 JSON parser for the grant).
  */
@@ -170,6 +206,20 @@
 /* Pristine stock bundles: the offline reinstall source, never
  * writable by the AI in any mode (design §3.5). */
 #define PRISTINE_PREFIX "/usr/share/sevyn/pristine/"
+/* God mode (P2, design §2.4): the god grant + marker live on the
+ * persistent data disk, never in the image. The audit log is the
+ * dedicated, append-only trail (§2.5); it rotates at 1 MB. */
+#define DEFAULT_GOD_GRANT "/data/ai/grant-god.json"
+#define DEFAULT_GOD_MARKER "/data/ai/god-mode.json"
+#define DEFAULT_AUDIT_LOG "/data/logs/ai-audit.log"
+#define AUDIT_ROTATE_BYTES (1024 * 1024)
+/* The statusd key the daemon SETs on every god-mode transition, so
+ * the shell's status tray can show the mode mark (D1). */
+#define GOD_MODE_STATUS_KEY "ai.god_mode"
+/* REBOOT executor (P2): `sevyn reboot` asks statusd and exits 0
+ * once the request is sent; the 30 s bound is the same as EXEC, so
+ * a wedged CLI cannot stall the daemon. */
+#define REBOOT_TIMEOUT_S 30
 
 static const char *g_sock_path;
 static const char *g_ctl_path;
@@ -179,6 +229,19 @@ static const char *g_selected_path;
 static const char *g_appd_sock;
 static const char *g_status_sock;
 static const char *g_cli_path;
+/* God mode (P2): the runtime god grant, the marker, and the audit
+ * log. Env-overridable for the host tests; the production defaults
+ * are the /data paths above. */
+static const char *g_god_grant_path;
+static const char *g_god_marker_path;
+static const char *g_audit_path;
+/* 1 while the god grant is the live grant, 0 while the standard
+ * grant governs. Set only by eval_god_mode(), never by a backend. */
+static int g_god_mode = 0;
+
+/* Forward: defined after status_set() (it SETs the statusd key on
+ * transitions); reload_grant() calls it, so it is declared here. */
+static int eval_god_mode(void);
 /* Test-only read root (SEVYN_AI_READ_ROOT): when set, READ may only
  * touch paths under it (the host test cannot write /data). Unset in
  * production, where the /data/ + /var/lib/sevyn/ roots apply. */
@@ -289,6 +352,123 @@ static int write_file_atomic(const char *path, const char *data)
         return -1;
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* audit log (P2, design §2.5)                                         */
+/* ------------------------------------------------------------------ */
+
+/* The dedicated, append-only audit trail: one line per action the
+ * AI takes (allowed, denied, failed) plus the god-mode
+ * enable/disable transitions. The daemon owns the file and appends
+ * to it; no backend verb reaches it. An action is refused when the
+ * log cannot be written (fail-closed) — see audit_probe() in
+ * run_one_action. The log rotates at 1 MB to <path>.1. */
+
+/* UTC ISO-8601 timestamp, "2026-11-25T16:30:00Z". */
+static void audit_timestamp(char *out, size_t cap)
+{
+    time_t now = time(NULL);
+    struct tm tmv;
+    if (gmtime_r(&now, &tmv) == NULL) {
+        snprintf(out, cap, "1970-01-01T00:00:00Z");
+        return;
+    }
+    strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+}
+
+/* Create the audit log's parent directory (best-effort: the probe
+ * below is what decides writability). */
+static void audit_mkdir_parent(void)
+{
+    char dir[4000];
+    const char *slash = strrchr(g_audit_path, '/');
+    if (!slash || slash == g_audit_path)
+        return;
+    size_t n = (size_t)(slash - g_audit_path);
+    if (n >= sizeof(dir))
+        return;
+    memcpy(dir, g_audit_path, n);
+    dir[n] = '\0';
+    /* mkdir -p by hand: the parent of /data/logs is /data, which
+     * exists on a real device; the loop covers a host-test tmp dir
+     * whose parents may not. */
+    for (char *p = dir + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(dir, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(dir, 0755);
+}
+
+/* Rotate the log when it passes the cap: <path> becomes <path>.1
+ * (the previous .1 is dropped). Best-effort — a failed rotation
+ * never fails the action; the append below still runs. */
+static void audit_rotate_if_needed(void)
+{
+    struct stat st;
+    if (stat(g_audit_path, &st) != 0)
+        return;
+    if (!S_ISREG(st.st_mode) || st.st_size <= (off_t)AUDIT_ROTATE_BYTES)
+        return;
+    char old[4096];
+    size_t n = strlen(g_audit_path);
+    if (n + 3 > sizeof(old))
+        return;
+    memcpy(old, g_audit_path, n);
+    memcpy(old + n, ".1", 3);
+    unlink(old);
+    rename(g_audit_path, old);
+}
+
+/* Prove the audit log is writable without writing a line: open it
+ * in append mode (creating it and its parent first) and close it.
+ * Returns 0 when writable, -1 when not. run_one_action calls this
+ * BEFORE executing anything, so a broken log refuses the action
+ * instead of letting it run unlogged (fail-closed). */
+static int audit_probe(void)
+{
+    audit_mkdir_parent();
+    audit_rotate_if_needed();
+    int fd = open(g_audit_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0)
+        return -1;
+    close(fd);
+    return 0;
+}
+
+/* Append one audit line. Returns 0 on success, -1 when the line
+ * could not be written. The caller has already probed, so a failure
+ * here is a race (disk full mid-action) — it is logged to the
+ * console, but the action's outcome stands (it already ran). */
+static int audit_append(const char *actor, const char *action_line,
+                        const char *result, const char *detail)
+{
+    char ts[32];
+    audit_timestamp(ts, sizeof(ts));
+    char line[2048];
+    int n = snprintf(line, sizeof(line), "%s %s god_mode=%s %s %s %s\n",
+                     ts, actor, g_god_mode ? "on" : "off", action_line,
+                     result, detail ? detail : "");
+    if (n < 0)
+        return -1;
+    if ((size_t)n >= sizeof(line))
+        n = (int)sizeof(line) - 1;
+    audit_rotate_if_needed();
+    int fd = open(g_audit_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0)
+        return -1;
+    size_t off = 0;
+    while (off < (size_t)n) {
+        ssize_t w = write(fd, line + off, (size_t)n - off);
+        if (w <= 0)
+            break;
+        off += (size_t)w;
+    }
+    close(fd);
+    return off == (size_t)n ? 0 : -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -406,7 +586,10 @@ static int load_grant(void)
 /* Re-read the grant file and swap it in, so god mode can switch on
  * and off without a daemon restart (P0). A failed reload keeps the
  * old grant and logs it — reload never fails open. Returns 0 when
- * the new grant is live, -1 when the old one was kept. */
+ * the new grant is live, -1 when the old one was kept. The standard
+ * grant is always re-read first (it is the fallback); eval_god_mode
+ * then decides whether the live grant is the standard or the god
+ * one, from the marker. */
 static int reload_grant(void)
 {
     char err[256];
@@ -421,6 +604,9 @@ static int reload_grant(void)
     g_grant = grant;
     g_ngrant = n;
     log_line("AID grant reloaded (%zu permissions)", g_ngrant);
+    /* The live grant may be the god one (or fall back to this
+     * standard one) — the marker decides, not the reload. */
+    eval_god_mode();
     return 0;
 }
 
@@ -726,6 +912,112 @@ static int status_set(const char *key, const char *val, char *err,
         snprintf(err, errcap, "cannot talk to statusd");
     close(fd);
     return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* god mode (P2, design §2.4)                                          */
+/* ------------------------------------------------------------------ */
+
+/* Read the god-mode marker: {"god_mode": true,
+ * "enabled_at": "<iso>", "enabled_by": "cli"|"settings"}. Returns 1
+ * when the marker says god mode is on (and copies enabled_by out),
+ * 0 otherwise — a missing marker, an unparseable one, or god_mode
+ * false all mean OFF. A corrupt marker is never an enable: it logs
+ * and falls back to standard, the same fail-closed rule as a bad
+ * god grant. */
+static int read_god_marker(char *enabled_by, size_t cap)
+{
+    if (enabled_by && cap > 0)
+        enabled_by[0] = '\0';
+    char *text = read_file_cap(g_god_marker_path, 4096);
+    if (!text)
+        return 0;
+    char jerr[256];
+    jval_t *root = json_parse(text, jerr, sizeof(jerr));
+    if (!root) {
+        log_line("AID god marker invalid, standard grant in force: %s",
+                 jerr);
+        free(text);
+        return 0;
+    }
+    int on = json_bool(json_obj_get(root, "god_mode"), 0);
+    const char *by = json_str(json_obj_get(root, "enabled_by"));
+    if (on && by && enabled_by)
+        snprintf(enabled_by, cap, "%s", by);
+    json_free(root);
+    free(text);
+    return on;
+}
+
+/* Decide the live grant from the marker. Called at startup (after
+ * load_grant) and on every RELOAD/SIGHUP. The standard grant is
+ * always the fallback: it was just (re-)read from disk by the
+ * caller, so this function only ever swaps the god grant IN, never
+ * invents a grant. Returns 1 when god mode is in force, 0 when the
+ * standard grant governs. Transitions (off->on, on->off) log the
+ * boot line, append the audit event, and SET the statusd key, so
+ * god mode is never silent or invisible. */
+static int eval_god_mode(void)
+{
+    char enabled_by[32];
+    int marker_on = read_god_marker(enabled_by, sizeof(enabled_by));
+    if (!marker_on) {
+        if (g_god_mode) {
+            g_god_mode = 0;
+            log_line("AID god mode off");
+            if (audit_append("daemon", "GOD_MODE OFF", "OK",
+                             "marker removed") != 0)
+                log_line("AID AUDIT FAIL god-mode off event not logged");
+            char serr[128];
+            if (status_set(GOD_MODE_STATUS_KEY, "off", serr,
+                           sizeof(serr)) != 0)
+                log_line("AID god mode status key not set: %s", serr);
+        }
+        return 0;
+    }
+    char err[256];
+    char **god = NULL;
+    size_t ngod = 0;
+    if (parse_grant_file(g_god_grant_path, &god, &ngod, err,
+                         sizeof(err)) != 0) {
+        /* A broken god grant degrades to standard, never to "no
+         * grant" and never to "everything allowed" (§2.4). */
+        log_line("AID god grant invalid, standard grant in force: %s",
+                 err);
+        if (g_god_mode) {
+            g_god_mode = 0;
+            if (audit_append("daemon", "GOD_MODE OFF", "OK",
+                             "god grant invalid") != 0)
+                log_line("AID AUDIT FAIL god-mode off event not logged");
+            char serr[128];
+            if (status_set(GOD_MODE_STATUS_KEY, "off", serr,
+                           sizeof(serr)) != 0)
+                log_line("AID god mode status key not set: %s", serr);
+        }
+        return 0;
+    }
+    int was_on = g_god_mode;
+    free_grant(g_grant, g_ngrant);
+    g_grant = god;
+    g_ngrant = ngod;
+    g_god_mode = 1;
+    if (!was_on) {
+        /* The D2 boot line (and the reload line): god mode is never
+         * silent. */
+        log_line("AID god mode active");
+        char detail[64];
+        snprintf(detail, sizeof(detail), "via=%s",
+                 enabled_by[0] ? enabled_by : "unknown");
+        if (audit_append("daemon", "GOD_MODE ON", "OK", detail) != 0)
+            log_line("AID AUDIT FAIL god-mode on event not logged");
+        char serr[128];
+        if (status_set(GOD_MODE_STATUS_KEY, "on", serr,
+                       sizeof(serr)) != 0)
+            log_line("AID god mode status key not set: %s", serr);
+    } else {
+        log_line("AID god grant loaded (%zu permissions)", ngod);
+    }
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1384,9 +1676,74 @@ static int exec_update(const struct action *a, char *err, size_t errcap)
     }
 }
 
+/* INSTALL executor (P2, §2.2): the existing .sevyn bundle install
+ * path — appd runs the loader's install on the bundle path. A
+ * bundle that would replace or become a system app still needs its
+ * signature (the loader's job, not this executor's); god mode does
+ * not waive it. The path is an action token (127 chars). */
+static int exec_install(const struct action *a, char *err, size_t errcap)
+{
+    char verb_line[LINE_CAP];
+    snprintf(verb_line, sizeof(verb_line), "INSTALL %s", a->arg1);
+    int rc = appd_call(verb_line, err, errcap);
+    if (rc == 0)
+        log_line("AID INSTALL %s", a->arg1);
+    return rc;
+}
+
+/* Protected apps (design §3.3): shell + terminal can never be
+ * uninstalled, in god mode or any other mode — the Terminal is the
+ * recovery path. The guard lives HERE, in the executor, not in the
+ * grant, so no grant file can waive it. (The loader refuses them
+ * too, from the registry's protected flag; this is the daemon's own
+ * guard, and the one the harness asserts on.) */
+static int app_is_protected(const char *id)
+{
+    return strcmp(id, "shell") == 0 || strcmp(id, "terminal") == 0;
+}
+
+/* UNINSTALL executor (P2, §2.2): the existing registry removal
+ * path through appd. Returns -2 (policy refusal) for a protected
+ * app — run_one_action counts that as a denial with a distinct
+ * "protected app" log line, not an executor failure. */
+static int exec_uninstall(const struct action *a, char *err,
+                          size_t errcap)
+{
+    if (app_is_protected(a->arg1)) {
+        snprintf(err, errcap, "protected app");
+        return -2;
+    }
+    char verb_line[LINE_CAP];
+    snprintf(verb_line, sizeof(verb_line), "UNINSTALL %s", a->arg1);
+    int rc = appd_call(verb_line, err, errcap);
+    if (rc == 0)
+        log_line("AID UNINSTALL %s", a->arg1);
+    return rc;
+}
+
+/* REBOOT executor (P2, §2.2): the existing safe reboot path —
+ * `sevyn reboot` asks statusd, which signals init for the clean
+ * teardown. The CLI prints "reboot requested" and exits 0 once the
+ * request is sent; the device goes down a second later, so the
+ * daemon's reply (OK, allowed=1) lands before the reboot. Never a
+ * raw reboot() call from the daemon, never a new mechanism. */
+static int exec_reboot(const struct action *a, char *err, size_t errcap)
+{
+    (void)a;
+    char *argv[] = { (char *)g_cli_path, "reboot", NULL };
+    if (run_cli_argv(argv, REBOOT_TIMEOUT_S, NULL, 0, err, errcap) != 0)
+        return -1;
+    log_line("AID REBOOT requested");
+    snprintf(err, errcap, "reboot requested");
+    return 0;
+}
+
 /* Execute one granted action. Returns 0 on success, -1 with reason
- * in err. UNINSTALL/INSTALL/REBOOT have no executor here: the shipped
- * grant never includes them, and the daemon must not invent one. */
+ * in err, -2 when the action is refused by a policy guard that lives
+ * in the executor (the protected-apps guard below) — run_one_action
+ * counts -2 as a denial with a distinct log line, not a failure.
+ * INSTALL/UNINSTALL/REBOOT (P2) run only when a grant names them
+ * (god mode); under the standard grant they never reach here. */
 static int execute_action(const struct action *a, char *err,
                           size_t errcap)
 {
@@ -1418,6 +1775,17 @@ static int execute_action(const struct action *a, char *err,
         return exec_write(a, err, errcap);
     if (strcmp(a->verb, "UPDATE") == 0)
         return exec_update(a, err, errcap);
+    /* P2: INSTALL / UNINSTALL / REBOOT — the god-mode executors
+     * (§2.2). Each is wired to an existing system path, never a new
+     * ad-hoc one: INSTALL/UNINSTALL go through appd (which runs
+     * the loader's install/uninstall), REBOOT runs `sevyn reboot`
+     * (statusd asks init; the device goes down a second later). */
+    if (strcmp(a->verb, "INSTALL") == 0)
+        return exec_install(a, err, errcap);
+    if (strcmp(a->verb, "UNINSTALL") == 0)
+        return exec_uninstall(a, err, errcap);
+    if (strcmp(a->verb, "REBOOT") == 0)
+        return exec_reboot(a, err, errcap);
     snprintf(err, errcap, "no executor for %s", a->verb);
     return -1;
 }
@@ -1431,7 +1799,11 @@ static int execute_action(const struct action *a, char *err,
  * exception: reads change nothing, so they need no grant (§1.4.1)
  * — the executor still bounds and logs the read. The ASK loop and
  * the SESSION loop both call this, so a grant decision is made in
- * exactly one place. */
+ * exactly one place. Every outcome is appended to the audit log
+ * (§2.5); the log is probed BEFORE anything runs, so a broken log
+ * refuses the action instead of letting it run unlogged
+ * (fail-closed). An executor policy refusal (-2, the protected-apps
+ * guard) counts as a denial with its own log line, not a failure. */
 static int run_one_action(const struct action *a, char *detail,
                           size_t detail_cap)
 {
@@ -1449,21 +1821,55 @@ static int run_one_action(const struct action *a, char *detail,
                  a->arg1);
     else
         snprintf(action_line, sizeof(action_line), "%s", a->verb);
+    /* Fail-closed audit (§2.5): the action does not run — and a
+     * denial is not even decided — unless the audit log is
+     * writable. The probe opens (and creates) the log without
+     * writing a line; the appends below record the outcome. */
+    if (audit_probe() != 0) {
+        log_line("AID AUDIT FAIL %s %s: audit log unavailable",
+                 g_selected, action_line);
+        snprintf(detail, detail_cap, "audit log unavailable");
+        return -1;
+    }
     if (strcmp(a->verb, "READ") != 0 &&
         (!a->perm || !grant_has(a->perm))) {
         log_line("AID DENIED %s %s (%s)", g_selected, action_line,
                  a->perm ? a->perm : "unknown action");
+        if (audit_append(g_selected, action_line, "DENIED",
+                         a->perm ? a->perm : "unknown action") != 0)
+            log_line("AID AUDIT FAIL %s %s: denial not logged",
+                     g_selected, action_line);
         snprintf(detail, detail_cap, "%s",
                  a->perm ? a->perm : "unknown action");
         return 0;
     }
     char xerr[256];
-    if (execute_action(a, xerr, sizeof(xerr)) == 0) {
+    int xrc = execute_action(a, xerr, sizeof(xerr));
+    if (xrc == 0) {
         log_line("AID ALLOW %s %s", g_selected, action_line);
+        if (audit_append(g_selected, action_line, "OK", xerr) != 0)
+            log_line("AID AUDIT FAIL %s %s: action not logged",
+                     g_selected, action_line);
         snprintf(detail, detail_cap, "%s", xerr);
         return 1;
     }
+    if (xrc == -2) {
+        /* Policy refusal from the executor (the protected-apps
+         * guard): a denial, not a failure — the design's distinct
+         * "AID DENIED … protected app" line (§2.6 check 3). */
+        log_line("AID DENIED %s %s (protected app)", g_selected,
+                 action_line);
+        if (audit_append(g_selected, action_line, "DENIED",
+                         "protected app") != 0)
+            log_line("AID AUDIT FAIL %s %s: denial not logged",
+                     g_selected, action_line);
+        snprintf(detail, detail_cap, "protected app");
+        return 0;
+    }
     log_line("AID EXEC FAIL %s %s: %s", g_selected, action_line, xerr);
+    if (audit_append(g_selected, action_line, "FAILED", xerr) != 0)
+        log_line("AID AUDIT FAIL %s %s: failure not logged",
+                 g_selected, action_line);
     snprintf(detail, detail_cap, "%s", xerr);
     return -1;
 }
@@ -1931,12 +2337,15 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         scan_backends();
         backends_csv(backends, sizeof(backends));
         if (from_ctl)
-            log_line("AID STATUS selected=%s backends=%s grant=%s",
-                     g_selected, backends, grant);
+            log_line("AID STATUS selected=%s backends=%s grant=%s "
+                     "god_mode=%s",
+                     g_selected, backends, grant,
+                     g_god_mode ? "on" : "off");
         else if (reply) {
             snprintf(out, sizeof(out),
-                     "OK selected=%s backends=%s grant=%s\n",
-                     g_selected, backends, grant);
+                     "OK selected=%s backends=%s grant=%s god_mode=%s\n",
+                     g_selected, backends, grant,
+                     g_god_mode ? "on" : "off");
             reply(ctx, out);
         }
         return;
@@ -2169,6 +2578,9 @@ int main(void)
     g_appd_sock = env_or("SEVYN_AI_APPD_SOCK", DEFAULT_APPD_SOCK);
     g_status_sock = env_or("SEVYN_AI_STATUS_SOCK", DEFAULT_STATUS_SOCK);
     g_cli_path = env_or("SEVYN_AI_CLI", DEFAULT_CLI);
+    g_god_grant_path = env_or("SEVYN_AI_GOD_GRANT", DEFAULT_GOD_GRANT);
+    g_god_marker_path = env_or("SEVYN_AI_GOD_MARKER", DEFAULT_GOD_MARKER);
+    g_audit_path = env_or("SEVYN_AI_AUDIT_LOG", DEFAULT_AUDIT_LOG);
     const char *read_root = getenv("SEVYN_AI_READ_ROOT");
     g_read_root = (read_root && *read_root) ? read_root : NULL;
     const char *write_root = getenv("SEVYN_AI_WRITE_ROOT");
@@ -2185,6 +2597,14 @@ int main(void)
 
     if (load_grant() != 0)
         return 1;
+
+    /* God mode (P2, D2): the marker survives a reboot, so the mode
+     * is evaluated here, at startup — a marker left on means the
+     * daemon starts under the god grant, and logs
+     * "AID god mode active", never silently. A broken standard
+     * grant above already refused to start; god mode does not
+     * rescue it. */
+    eval_god_mode();
 
     scan_backends();
     load_selection();

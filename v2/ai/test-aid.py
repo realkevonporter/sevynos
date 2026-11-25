@@ -150,6 +150,10 @@ def appd_handler(line):
         return f"OK launched {line[7:]}\n"
     if line.startswith("CLOSE "):
         return f"OK closed {line[6:]}\n"
+    if line.startswith("INSTALL "):
+        return f"OK installed {line[8:]}\n"
+    if line.startswith("UNINSTALL "):
+        return f"OK uninstalled {line[10:]}\n"
     if line == "LIST":
         return ("APP files|Files|1.0.0|#3b82f6|F\n"
                 "APP terminal|Terminal|1.0.0|#111827|>\n"
@@ -335,10 +339,18 @@ def main():
         "echo \"update available: 1.2.3\"; fi\n"
         "exit 0\n")
     fake_cli.chmod(0o755)
+    # P2: the god-mode grant (the full 11-permission list, a copy of
+    # the repo's grant-god.json) sits next to the standard grant but
+    # is ignored while god mode is off (§14g proves that). The
+    # template is the file `sevyn ai god on --confirm` copies the
+    # runtime god grant from; the runtime god grant is the file the
+    # daemon reads when the marker is present.
     god_grant = tmp / "grant-god.json"
-    god_grant.write_text(json.dumps({"permissions": [
-        "app.launch", "app.close", "app.list", "status.set",
-        "cli.exec", "app.uninstall", "app.install", "system.reboot"]}))
+    shutil.copy(HERE / "grant-god.json", god_grant)
+    god_template = tmp / "grant-god-template.json"
+    shutil.copy(HERE / "grant-god.json", god_template)
+    god_marker = tmp / "god-mode.json"
+    audit_log = tmp / "ai-audit.log"
     key_file = tmp / "muse-key"
     key_file.write_text("test-key-abc123\n")
     key_file.chmod(0o600)
@@ -465,6 +477,10 @@ def main():
         "SEVYN_AI_SETTINGS": str(read_root / "settings.json"),
         "SEVYN_AI_REGISTRY": str(read_root / "registry.json"),
         "SEVYN_AI_LOG": str(tmp / "aid.log"),
+        # P2 (god mode): the runtime god grant + marker + audit log.
+        "SEVYN_AI_GOD_GRANT": str(god_grant),
+        "SEVYN_AI_GOD_MARKER": str(god_marker),
+        "SEVYN_AI_AUDIT_LOG": str(audit_log),
     }
     aid_log = open(tmp / "aid.log", "w")
     aid = subprocess.Popen([str(aid_bin)], env=env, stdout=aid_log,
@@ -498,7 +514,7 @@ def main():
         check("STATUS -> grant csv",
               c.readline() ==
               "OK selected=echo-ai backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
-              "grant=app.launch,app.close,app.list,status.set")
+              "grant=app.launch,app.close,app.list,status.set god_mode=off")
 
         # 3. SELECT: valid, unknown, usage.
         c.send("SELECT plan-ai")
@@ -750,9 +766,10 @@ def main():
         shutil.copy(HERE / "backends" / "muse-ai.limits",
                     backends / "muse-ai.limits")
 
-        # 14g. God-mode-off boundary: a grant-god.json sits next to
-        #     the grant (it would allow cli.exec), but god mode is
-        #     off, so the standard grant still governs — EXEC denied.
+        # 14g. God-mode-off boundary: a grant-god.json (the full
+        #     11-permission list) sits next to the grant (it would
+        #     allow cli.exec), but god mode is off, so the standard
+        #     grant still governs — EXEC denied.
         fake_api.set_scenario([resp_tool_calls(
             [("call_1", "exec", {"args": "update status"})])])
         c.send("ASK check for updates")
@@ -1142,6 +1159,225 @@ def main():
         check("SELECT echo-ai back (leave for restart)",
               c.readline() == "OK selected echo-ai")
 
+        # 16. God mode (P2): the two-step confirm, the marker, the
+        #     god grant, the audit log, and the INSTALL / UNINSTALL /
+        #     REBOOT executors. §2 already proved STATUS reports
+        #     god_mode=off on a fresh start.
+        cli_god = {**os.environ,
+                   "SEVYN_AI_SOCK": str(sock_path),
+                   "SEVYN_AI_GOD_GRANT": str(god_grant),
+                   "SEVYN_AI_GOD_MARKER": str(god_marker),
+                   "SEVYN_AI_GOD_GRANT_TEMPLATE": str(god_template),
+                   "SEVYN_AI_AUDIT_LOG": str(audit_log)}
+
+        # 16b. A bare `god on` refuses (the two-step confirm, D1):
+        #      it prints the powers and exits 1, and no marker is
+        #      created.
+        bare = subprocess.run([str(sevyn_bin), "ai", "god", "on"],
+                              capture_output=True, text=True,
+                              env=cli_god, timeout=10)
+        check("bare `god on` refuses (exit 1, powers printed)",
+              bare.returncode != 0 and
+              "install and uninstall apps" in bare.stderr,
+              bare.stdout + bare.stderr)
+        check("bare `god on` created no marker", not god_marker.exists())
+
+        # 16c. `god on --confirm` enables: the marker is written,
+        #      the daemon reloads under the 11-permission god grant,
+        #      the boot-style line + the audit enable event land.
+        on = subprocess.run(
+            [str(sevyn_bin), "ai", "god", "on", "--confirm",
+             "--via", "cli"],
+            capture_output=True, text=True, env=cli_god, timeout=10)
+        check("`god on --confirm` succeeds",
+              on.returncode == 0, on.stdout + on.stderr)
+        marker_json = (json.loads(god_marker.read_text())
+                       if god_marker.exists() else {})
+        check("marker written (god_mode true, via cli)",
+              marker_json.get("god_mode") is True and
+              marker_json.get("enabled_by") == "cli",
+              god_marker.read_text() if god_marker.exists() else "(none)")
+        c.send("STATUS")
+        status = c.readline()
+        check("STATUS god_mode=on + 11-perm god grant",
+              "god_mode=on" in status and
+              "app.uninstall" in status and
+              "app.install" in status and
+              "system.reboot" in status and
+              "file.write" in status and
+              "system.update" in status, status)
+        check("daemon logged god mode active",
+              wait_for("god active",
+                       lambda: "AID god mode active" in log_text()))
+        check("statusd was SET ai.god_mode on (the tray mark)",
+              wait_recorded(fake_statusd, "SET ai.god_mode on"))
+        check("audit log has the GOD_MODE ON event",
+              audit_log.exists() and
+              "GOD_MODE ON" in audit_log.read_text(),
+              audit_log.read_text() if audit_log.exists() else "(none)")
+
+        # 16d. UNINSTALL runs under god mode (through appd).
+        c.send("ASK uninstall files")
+        check("ASK uninstall files, god on -> allowed=1",
+              c.readline() ==
+              "OK backend=echo-ai allowed=1 denied=0 failed=0")
+        check("appd saw UNINSTALL files",
+              wait_recorded(fake_appd, "UNINSTALL files"))
+
+        # 16e. INSTALL runs under god mode (through appd).
+        c.send("ASK install /tmp/test.sevyn")
+        check("ASK install, god on -> allowed=1",
+              c.readline() ==
+              "OK backend=echo-ai allowed=1 denied=0 failed=0")
+        check("appd saw INSTALL /tmp/test.sevyn",
+              wait_recorded(fake_appd, "INSTALL /tmp/test.sevyn"))
+
+        # 16f. The protected-apps guard: UNINSTALL terminal is a
+        #      denial, never reaches appd, and is logged distinctly.
+        c.send("ASK uninstall terminal")
+        check("ASK uninstall terminal -> denied=1",
+              c.readline() ==
+              "OK backend=echo-ai allowed=0 denied=1 failed=0")
+        check("appd never saw UNINSTALL terminal",
+              "UNINSTALL terminal" not in fake_appd.recorded())
+        check("protected app denial logged",
+              "AID DENIED echo-ai UNINSTALL terminal (protected app)"
+              in log_text())
+
+        # 16g. REBOOT runs under god mode (the existing `sevyn
+        #      reboot` path — the fake CLI records the invocation).
+        c.send("ASK reboot")
+        check("ASK reboot, god on -> allowed=1",
+              c.readline() ==
+              "OK backend=echo-ai allowed=1 denied=0 failed=0")
+        check("fake CLI saw reboot",
+              cli_calls.exists() and
+              "reboot" in cli_calls.read_text(),
+              cli_calls.read_text() if cli_calls.exists() else "(none)")
+
+        # 16h. The audit log records the god-mode actions, and
+        #      `sevyn ai audit` prints them.
+        audit_text = audit_log.read_text()
+        check("audit log records the god-mode actions",
+              "UNINSTALL files" in audit_text and
+              "INSTALL /tmp/test.sevyn" in audit_text and
+              "REBOOT" in audit_text and
+              "UNINSTALL terminal" in audit_text, audit_text)
+        audit_cli = subprocess.run([str(sevyn_bin), "ai", "audit"],
+                                   capture_output=True, text=True,
+                                   env=cli_god, timeout=10)
+        check("`sevyn ai audit` prints the log (exit 0)",
+              audit_cli.returncode == 0 and
+              "UNINSTALL files" in audit_cli.stdout,
+              audit_cli.stdout + audit_cli.stderr)
+
+        # 16i. `god off` revokes: the marker is deleted, the daemon
+        #      reloads under the standard grant, and UNINSTALL is
+        #      denied again.
+        off = subprocess.run([str(sevyn_bin), "ai", "god", "off"],
+                             capture_output=True, text=True,
+                             env=cli_god, timeout=10)
+        check("`god off` succeeds",
+              off.returncode == 0, off.stdout + off.stderr)
+        check("marker removed by `god off`", not god_marker.exists())
+        c.send("STATUS")
+        status = c.readline()
+        check("STATUS god_mode=off + standard grant again",
+              "god_mode=off" in status and
+              "app.uninstall" not in status, status)
+        check("daemon logged god mode off",
+              wait_for("god off",
+                       lambda: "AID god mode off" in log_text()))
+        check("statusd was SET ai.god_mode off",
+              wait_recorded(fake_statusd, "SET ai.god_mode off"))
+        check("audit log has the GOD_MODE OFF event",
+              "GOD_MODE OFF" in audit_log.read_text())
+        c.send("ASK uninstall files")
+        check("ASK uninstall files, god off -> denied=1",
+              c.readline() ==
+              "OK backend=echo-ai allowed=0 denied=1 failed=0")
+
+        # 16j. Marker present + corrupt god grant: RELOAD falls back
+        #      to the standard grant and logs it — god mode does not
+        #      come on from a grant the daemon cannot parse.
+        god_marker.write_text(
+            '{"god_mode": true, "enabled_at": "2026-11-25T00:00:00Z", '
+            '"enabled_by": "cli"}')
+        god_grant.write_text('{"permissions": "not-an-array"}')
+        c.send("RELOAD")
+        check("RELOAD with corrupt god grant -> OK",
+              c.readline().startswith("OK grant reloaded"))
+        c.send("STATUS")
+        status = c.readline()
+        check("corrupt god grant falls back to standard (god_mode=off)",
+              "god_mode=off" in status and
+              "app.uninstall" not in status, status)
+        check("invalid god grant logged",
+              "AID god grant invalid, standard grant in force"
+              in log_text())
+
+        # Leave god mode ON at the end of §16: the §12 restart below
+        # proves the marker survives a daemon restart (the CLI
+        # re-copies the template over the corrupt god grant).
+        on2 = subprocess.run(
+            [str(sevyn_bin), "ai", "god", "on", "--confirm",
+             "--via", "cli"],
+            capture_output=True, text=True, env=cli_god, timeout=10)
+        check("re-enable god mode for the restart proof",
+              on2.returncode == 0, on2.stdout + on2.stderr)
+        c.send("STATUS")
+        check("STATUS god_mode=on before the restart",
+              "god_mode=on" in c.readline())
+
+        # 16k. Audit fail-closed: a second daemon whose audit log
+        #      sits under a path whose parent is a file can never
+        #      write the log, so its actions are refused, not run
+        #      unlogged.
+        not_a_dir = tmp / "not-a-dir"
+        not_a_dir.write_text("a file, not a directory\n")
+        fc_sock = tmp / "fc.sock"
+        fc_ctl = tmp / "fc-ctl"
+        os.mkfifo(fc_ctl)
+        fc_selected = tmp / "fc-selected.json"
+        fc_log = open(tmp / "aid-fc.log", "w")
+        fc_env = {**env,
+                  "SEVYN_AI_SOCK": str(fc_sock),
+                  "SEVYN_AI_CTL": str(fc_ctl),
+                  "SEVYN_AI_SELECTED": str(fc_selected),
+                  "SEVYN_AI_AUDIT_LOG": str(not_a_dir / "ai-audit.log")}
+        fc = subprocess.Popen([str(aid_bin)], env=fc_env,
+                              stdout=fc_log, stderr=subprocess.STDOUT)
+        try:
+            def fc_log_text():
+                fc_log.flush()
+                return (tmp / "aid-fc.log").read_text(errors="replace")
+
+            check("fail-closed daemon starts (god mode on from marker)",
+                  wait_for("fc ready",
+                           lambda: "AID ready" in fc_log_text()))
+            launches_before = len(
+                [line for line in fake_appd.recorded()
+                 if line.startswith("LAUNCH ")])
+            fc_c = SockClient(str(fc_sock))
+            fc_c.send("ASK launch files")
+            check("ASK with unwritable audit log -> failed=1",
+                  fc_c.readline() ==
+                  "OK backend=echo-ai allowed=0 denied=0 failed=1")
+            fc_c.close()
+            check("appd never saw the refused LAUNCH",
+                  len([line for line in fake_appd.recorded()
+                       if line.startswith("LAUNCH ")]) == launches_before)
+            check("audit failure logged",
+                  "AID AUDIT FAIL echo-ai LAUNCH files" in fc_log_text())
+        finally:
+            fc.send_signal(signal.SIGTERM)
+            try:
+                fc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                fc.kill()
+                fc.wait()
+            fc_log.close()
+
         ctl_w.close()
         c.close()
     finally:
@@ -1171,6 +1407,19 @@ def main():
         check("restart keeps persisted selection (echo-ai)", wait_for(
             "restart ready",
             lambda: "selected=echo-ai" in log2()))
+        # P2: god mode was left ON at the end of §16, so the marker
+        # survives the restart — the daemon starts under the god
+        # grant and logs it, never silently.
+        check("restart logs god mode active (marker survives)",
+              wait_for("god active on restart",
+                       lambda: "AID god mode active" in log2()))
+        check("restart socket exists", wait_for(
+            "aid2 socket", lambda: sock_path.exists()))
+        c2 = SockClient(str(sock_path))
+        c2.send("STATUS")
+        check("restart STATUS god_mode=on",
+              "god_mode=on" in c2.readline())
+        c2.close()
     finally:
         aid2.send_signal(signal.SIGTERM)
         try:
@@ -1183,6 +1432,12 @@ def main():
           f"rc={aid2.returncode}")
 
     # 13. Bad grant: fail-closed — the daemon refuses to start.
+    #     P2: the marker is still present (god mode was left on at
+    #     the end of §16), so this also proves a bad standard grant
+    #     refuses to start even with god mode on — god mode does not
+    #     rescue a broken standard grant.
+    check("marker still present for the bad-grant run (god mode on)",
+          god_marker.exists())
     bad_grant = tmp / "bad-grant.json"
     bad_grant.write_text('{"permissions": "not-an-array"}')
     bad_env = {**env, "SEVYN_AI_GRANT": str(bad_grant),

@@ -14,7 +14,9 @@
 //   TERMINAL settings-json defaultProfile=<name>
 //                                        (after catting the
 //                                        code-server settings file)
-//   TERMINAL ai-status selected=<id>     (after `ai status`)
+//   TERMINAL ai-status selected=<id> god_mode=<on|off>
+//                                        (after `ai status`)
+//   TERMINAL ai-audit lines=<n>         (after `ai audit ...`)
 //   TERMINAL ai-ask allowed=<n> denied=<m>
 //                                        (after `ai ask ...`)
 //   TERMINAL browser-open title=<t> url=<u>
@@ -60,6 +62,8 @@ const HELP_LINES: string[] = [
   "  sevyn ai select <id>        plug in a different AI",
   "  sevyn ai ask <task...>      ask the AI to do something",
   "  sevyn ai session <task...>  ask the AI in a session (read -> fix -> re-check)",
+  "  sevyn ai god on|off|status  god mode: full access for the AI",
+  "  sevyn ai audit [n]          show the last n AI audit log entries",
   "  sevyn browser open [url]    open a page in Chromium",
   "  sevyn browser tabs          list open tabs",
   "  sevyn browser status        Chromium + CDP + tab count",
@@ -89,9 +93,24 @@ function logMarkers(cmd: string, out: string): void {
       : "other";
     Sevyn.log("TERMINAL settings-json defaultProfile=" + profile);
   } else if (cmd === "ai status" || cmd.startsWith("ai status ")) {
+    // P2: the marker gains god_mode (substring-compatible with the
+    // existing e2e assertion on "TERMINAL ai-status selected=...").
     Sevyn.log(
-      "TERMINAL ai-status selected=" + (parseField(out, "selected") ?? "unknown"),
+      "TERMINAL ai-status selected=" +
+        (parseField(out, "selected") ?? "unknown") +
+        " god_mode=" +
+        (parseField(out, "god_mode") ?? "unknown"),
     );
+  } else if (cmd === "ai audit" || cmd.startsWith("ai audit ")) {
+    // P2: the count of audit lines shown (the CLI prints one entry
+    // per line, or "No AI activity yet.").
+    const lines = out
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "");
+    const count =
+      lines.length === 1 && lines[0] === "No AI activity yet." ? 0 : lines.length;
+    Sevyn.log("TERMINAL ai-audit lines=" + count);
   } else if (cmd === "ai ask" || cmd.startsWith("ai ask ")) {
     Sevyn.log(
       "TERMINAL ai-ask allowed=" +

@@ -1209,6 +1209,144 @@ async function main() {
     );
   }
 
+  // 8. God Mode (P2) via the Terminal: the two-step confirm, the
+  //    god grant, the protected-apps guard, and the audit log. The
+  //    guest never executes a REBOOT (the host test proves that
+  //    executor); the INSTALL here targets a bundle that does not
+  //    exist, so the executor runs and the action fails without
+  //    destroying anything. God mode ends OFF, so the final frame
+  //    is clean.
+  {
+    // Re-focus the Terminal input first (same as §7: a typed
+    // command that goes nowhere fails silently).
+    const shotTerm5 = await shot(b.qmp, join(OUT, "m4.5-shot-terminal-5.ppm"));
+    const termHeader5 = findWindowHeader(shotTerm5, 17, 24, 39);
+    check("god mode: Terminal window still up", !!termHeader5);
+    if (termHeader5) {
+      await moveTo(
+        termHeader5.left + 200,
+        termHeader5.top + 482,
+        shotTerm5.width,
+        shotTerm5.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
+    }
+  }
+  {
+    // God mode is off on a fresh boot: STATUS reports it.
+    const { exec, hit } = await termCmd(
+      "ai status",
+      /TERMINAL ai-status selected=muse-ai god_mode=off/,
+    );
+    check("god mode: `ai status` runs (EXEC 0)", !!exec, exec || "");
+    check("god mode: off on a fresh boot", !!hit, hit || "");
+  }
+  {
+    // A bare `god on` refuses (the two-step confirm, D1): exit 1,
+    // and god mode stays off. termCmd requires exit 0, so this one
+    // is typed by hand.
+    const before = logLines(b.logPath).length;
+    await typeText("ai god on");
+    await key("ret");
+    const refused = await waitForLog(
+      b.logPath,
+      /EXEC sevyn ai god on -> 1/,
+      30000,
+      before,
+    );
+    check("god mode: bare `ai god on` refused (EXEC 1)", !!refused, refused || "");
+    const { hit } = await termCmd(
+      "ai status",
+      /TERMINAL ai-status selected=muse-ai god_mode=off/,
+    );
+    check("god mode: still off after the bare enable", !!hit, hit || "");
+  }
+  {
+    // `god on --confirm` enables: the daemon reloads under the
+    // 11-permission god grant.
+    const beforeGod = logLines(b.logPath).length;
+    const { exec } = await termCmd("ai god on --confirm");
+    check("god mode: `ai god on --confirm` runs (EXEC 0)", !!exec, exec || "");
+    const active = await waitForLog(b.logPath, /AID god mode active/, 15000, beforeGod);
+    check("god mode: daemon logged god mode active", !!active, active || "");
+    const { hit } = await termCmd(
+      "ai status",
+      /TERMINAL ai-status selected=muse-ai god_mode=on/,
+    );
+    check("god mode: on after the confirm", !!hit, hit || "");
+  }
+  {
+    // The selected backend is muse-ai after §6/§7, so select
+    // echo-ai first: it is the stub that emits UNINSTALL/INSTALL.
+    const { exec } = await termCmd("ai select echo-ai");
+    check("god mode: `ai select echo-ai` runs (EXEC 0)", !!exec, exec || "");
+    const { hit } = await termCmd(
+      "ai status",
+      /TERMINAL ai-status selected=echo-ai god_mode=on/,
+    );
+    check("god mode: echo-ai selected, still on", !!hit, hit || "");
+  }
+  {
+    // The protected-apps guard: UNINSTALL terminal is a denial
+    // under god mode too, never reaches appd.
+    const before = logLines(b.logPath).length;
+    const { exec, hit } = await termCmd(
+      "ai ask uninstall terminal",
+      /TERMINAL ai-ask allowed=0 denied=1/,
+    );
+    check("god mode: `ai ask uninstall terminal` runs (EXEC 0)", !!exec, exec || "");
+    check("god mode: UNINSTALL terminal denied (protected app)", !!hit, hit || "");
+    const denied = await waitForLog(
+      b.logPath,
+      /AID DENIED echo-ai UNINSTALL terminal \(protected app\)/,
+      15000,
+      before,
+    );
+    check("god mode: protected-app denial logged", !!denied, denied || "");
+  }
+  {
+    // INSTALL of a bundle that does not exist: the executor runs
+    // (appd says not-installed) and the action FAILS — the INSTALL
+    // path is proven without destroying anything.
+    const before = logLines(b.logPath).length;
+    const { exec, hit } = await termCmd(
+      "ai ask install /nonexistent.sevyn",
+      /TERMINAL ai-ask allowed=0 denied=0/,
+    );
+    check(
+      "god mode: `ai ask install /nonexistent.sevyn` runs (EXEC 0)",
+      !!exec,
+      exec || "",
+    );
+    check("god mode: INSTALL ran (allowed=0 denied=0)", !!hit, hit || "");
+    const failed = await waitForLog(
+      b.logPath,
+      /AID EXEC FAIL echo-ai INSTALL \/nonexistent\.sevyn/,
+      15000,
+      before,
+    );
+    check("god mode: INSTALL failure logged (executor ran)", !!failed, failed || "");
+  }
+  {
+    // The audit log has entries (every action since boot is
+    // audited), and `ai audit` prints them.
+    const { exec, hit } = await termCmd("ai audit", /TERMINAL ai-audit lines=[1-9]\d*/);
+    check("god mode: `ai audit` runs (EXEC 0)", !!exec, exec || "");
+    check("god mode: audit log has entries", !!hit, hit || "");
+  }
+  {
+    // God mode off again, so the final frame is clean.
+    const { exec } = await termCmd("ai god off");
+    check("god mode: `ai god off` runs (EXEC 0)", !!exec, exec || "");
+    const { hit } = await termCmd(
+      "ai status",
+      /TERMINAL ai-status selected=echo-ai god_mode=off/,
+    );
+    check("god mode: off again at the end", !!hit, hit || "");
+  }
+
   // Final frame + clean poweroff.
   const shotFinal = join(OUT, "m4.5-shot-final.ppm");
   const imgFinal = await shot(b.qmp, shotFinal);

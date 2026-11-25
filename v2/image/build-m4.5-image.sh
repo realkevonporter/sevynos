@@ -352,6 +352,7 @@ cp "$OUT/os-version" "$STAGE/usr/share/sevyn/os-version"
 # (cp -a keeps the +x bit the daemon's scan requires.)
 cp -a "$ROOT/ai/backends/"* "$STAGE/usr/share/sevyn/ai/backends/"
 cp "$ROOT/ai/grant.json" "$STAGE/usr/share/sevyn/ai/grant.json"
+cp "$ROOT/ai/grant-god.json" "$STAGE/usr/share/sevyn/ai/grant-god.json"
 
 # CA bundle (P0): muse-ai verifies the Model API's TLS certificate
 # against the system bundle, so the bundle must be in the guest

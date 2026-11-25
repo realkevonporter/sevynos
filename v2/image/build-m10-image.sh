@@ -596,6 +596,7 @@ fi
 # (cp -a keeps the +x bit the daemon's scan requires.)
 cp -a "$ROOT/ai/backends/"* "$STAGE/usr/share/sevyn/ai/backends/"
 cp "$ROOT/ai/grant.json" "$STAGE/usr/share/sevyn/ai/grant.json"
+cp "$ROOT/ai/grant-god.json" "$STAGE/usr/share/sevyn/ai/grant-god.json"
 
 # Sevyn Code: the extracted code-server tree, plus the terminal
 # default (the integrated terminal spawns `sevyn` with no args, so
