@@ -1164,9 +1164,12 @@ async function main() {
     // then reads it, is denied the write, and re-reads it
     // unchanged. The content is "volume 42", not "volume=42":
     // the check's typeText has no QKeyCode for "=" (the second
-    // round crashed typing it).
+    // round crashed typing it). And the command is "files write
+    // ...", not "sevyn files write ...": termCmd prepends "sevyn "
+    // itself, so the extra "sevyn" made the verb invalid (the
+    // third round's write never returned EXEC 0).
     const { exec: writeExec } = await termCmd(
-      "sevyn files write /data/settings.json volume 42",
+      "files write /data/settings.json volume 42",
     );
     check(
       "muse-ai session: settings file created for the session",
