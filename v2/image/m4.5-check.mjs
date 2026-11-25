@@ -1162,9 +1162,11 @@ async function main() {
     // first round failed exactly this way (allowed=0 denied=1
     // failed=2). Create it first with known content; the session
     // then reads it, is denied the write, and re-reads it
-    // unchanged.
+    // unchanged. The content is "volume 42", not "volume=42":
+    // the check's typeText has no QKeyCode for "=" (the second
+    // round crashed typing it).
     const { exec: writeExec } = await termCmd(
-      "sevyn files write /data/settings.json volume=42",
+      "sevyn files write /data/settings.json volume 42",
     );
     check(
       "muse-ai session: settings file created for the session",
