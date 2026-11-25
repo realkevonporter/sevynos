@@ -50,6 +50,7 @@
 #include <netdb.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -72,10 +73,18 @@
 #define READ_BUDGET (256 * 1024) /* per-ASK read budget (§1.6) */
 #define MAX_ACTIONS 64        /* per-ASK action cap (muse-ai.limits) */
 #define MAX_API_ROUNDS 4      /* plan -> act -> observe -> re-plan */
+#define MAX_SESSION_ROUNDS 16 /* session agent loop cap (P1, §1.4.1) */
 #define API_TIMEOUT_S 60      /* per API call (daemon allows 300 s) */
+#define SESSION_RESULT_TIMEOUT_S 300 /* wait for a daemon RESULT (P1):
+                                      * the daemon's per-action budget
+                                      * for muse-ai, so a RESULT that
+                                      * never comes ends the session
+                                      * instead of hanging it. */
+#define ACTION_LINE_CAP 2048  /* daemon action-line cap (LINE_CAP) */
 #define RESP_CAP (512 * 1024) /* API response body cap */
 #define KEY_MAX 512           /* API key, trimmed */
 #define SNAPSHOT_CAP (8 * 1024) /* device snapshot in the prompt */
+#define PRISTINE_PREFIX "/usr/share/sevyn/pristine/"
 
 #define DEFAULT_API_BASE "https://api.meta.ai/v1"
 #define DEFAULT_MODEL "muse-spark-1.3"
@@ -190,21 +199,63 @@ static char *read_file_cap(const char *path, size_t cap)
     return buf;
 }
 
-/* Read one line from stdin, up to cap bytes (the task line). Returns
- * malloc'd text without the trailing newline, or NULL on EOF. */
-static char *read_task_line(void)
+/* Read one line from stdin (fd 0) with a deadline, unbuffered.
+ * stdin is a pipe from the daemon: the daemon writes the task line,
+ * then (in session mode) a RESULT line after each action — so the
+ * read must NOT use buffered stdio (fgets), which could swallow a
+ * RESULT line into its buffer while this code waits on the next
+ * one. Returns malloc'd text without the trailing newline, or NULL
+ * on EOF / timeout / error. A line longer than the buffer is
+ * truncated, not fatal. */
+static char *read_line_timeout(int timeout_s)
 {
     char *buf = malloc(TASK_CAP + 2);
     if (!buf)
         return NULL;
-    if (!fgets(buf, TASK_CAP + 2, stdin)) {
-        free(buf);
-        return NULL;
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_s;
+    size_t llen = 0;
+    for (;;) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long remain_ms = (deadline.tv_sec - now.tv_sec) * 1000 +
+                         (deadline.tv_nsec - now.tv_nsec) / 1000000;
+        if (remain_ms <= 0) {
+            free(buf);
+            return NULL;
+        }
+        struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+        int pr = poll(&pfd, 1, (int)remain_ms);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            free(buf);
+            return NULL;
+        }
+        if (pr == 0) {
+            free(buf);
+            return NULL;
+        }
+        char c;
+        ssize_t r = read(STDIN_FILENO, &c, 1);
+        if (r == 0) {
+            free(buf);
+            return NULL;
+        }
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            free(buf);
+            return NULL;
+        }
+        if (c == '\n') {
+            buf[llen] = '\0';
+            return buf;
+        }
+        if (llen + 1 < TASK_CAP + 2)
+            buf[llen++] = c;
     }
-    size_t n = strlen(buf);
-    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
-        buf[--n] = '\0';
-    return buf;
 }
 
 /* ------------------------------------------------------------------ */
@@ -367,6 +418,12 @@ static int read_path_allowed(const char *path)
         return 0;
     if (strstr(path, "..") != NULL)
         return 0;
+    /* A path with whitespace can never survive the daemon's
+     * single-token action parse — the first word would become the
+     * path and the rest the content. Refuse it here so the model
+     * gets a fast error instead of acting on the wrong file. */
+    if (strpbrk(path, " \t\n\r") != NULL)
+        return 0;
     /* Test-only override (SEVYN_AI_READ_ROOT): when set, READ may
      * only touch paths under it (the host test cannot write /data).
      * Unset in production, where the /data/ + /var/lib/sevyn/
@@ -417,6 +474,111 @@ static char *backend_read(const char *path, char *err, size_t errcap)
     }
     g_read_total += strlen(content);
     return content;
+}
+
+/* WRITE validation (P1, §1.4.3): mirrors the daemon's bounds, so
+ * the model gets a fast local refusal instead of emitting an
+ * action the daemon will deny. The daemon re-validates as the
+ * authority — this is a fast path, not the boundary. */
+static int write_path_allowed(const char *path)
+{
+    if (!path || path[0] != '/')
+        return 0;
+    if (strstr(path, "..") != NULL)
+        return 0;
+    /* Same whitespace rule as read_path_allowed: a path with
+     * whitespace would be split by the daemon's single-token parse,
+     * so the write would land on the wrong file. */
+    if (strpbrk(path, " \t\n\r") != NULL)
+        return 0;
+    if (strncmp(path, PRISTINE_PREFIX,
+                sizeof(PRISTINE_PREFIX) - 1) == 0)
+        return 0;
+    const char *root = getenv("SEVYN_AI_WRITE_ROOT");
+    if (root && *root) {
+        size_t n = strlen(root);
+        return strncmp(path, root, n) == 0 && path[n] == '/';
+    }
+    if (strncmp(path, "/data/", 6) != 0 &&
+        strncmp(path, "/var/lib/sevyn/", 15) != 0)
+        return 0;
+    return 1;
+}
+
+/* Validate a WRITE before emitting it: path allowed, and (when the
+ * file exists) a regular file within the read cap, so the model
+ * does not replace a file it could not have fully read. A new file
+ * needs an existing parent directory. Returns 0 with reason in err
+ * on refusal, 1 when the write may be emitted. */
+static int write_precheck(const char *path, char *err, size_t errcap)
+{
+    if (!write_path_allowed(path)) {
+        snprintf(err, errcap, "path not allowed: %s", path);
+        return 0;
+    }
+    /* The daemon's action line carries the path as one token of at
+     * most 127 chars (parse_action) — a longer path can never be
+     * emitted, so refuse it here with a fast error. */
+    size_t plen = strlen(path);
+    if (plen >= 128) {
+        snprintf(err, errcap, "path too long: %.100s", path);
+        return 0;
+    }
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        if (!S_ISREG(st.st_mode)) {
+            snprintf(err, errcap, "not a regular file: %s", path);
+            return 0;
+        }
+        if (st.st_size > (off_t)READ_CAP) {
+            snprintf(err, errcap,
+                     "file over the 64 KiB cap: %s", path);
+            return 0;
+        }
+        return 1;
+    }
+    char parent[128];
+    memcpy(parent, path, plen + 1);
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent) {
+        snprintf(err, errcap, "bad parent for %s", path);
+        return 0;
+    }
+    *slash = '\0';
+    struct stat pst;
+    if (stat(parent, &pst) != 0 || !S_ISDIR(pst.st_mode)) {
+        snprintf(err, errcap, "parent directory missing: %s", parent);
+        return 0;
+    }
+    return 1;
+}
+
+/* Escape WRITE content for the action line: \ -> \\, newline ->
+ * \n, tab -> \t. Returns malloc'd text. */
+static char *escape_write_content(const char *content)
+{
+    size_t n = strlen(content);
+    char *out = malloc(n * 2 + 1);
+    if (!out)
+        return NULL;
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = content[i];
+        if (c == '\\') {
+            out[w++] = '\\';
+            out[w++] = '\\';
+        } else if (c == '\n') {
+            out[w++] = '\\';
+            out[w++] = 'n';
+        } else if (c == '\t') {
+            out[w++] = '\\';
+            out[w++] = 't';
+        } else {
+            out[w++] = c;
+        }
+    }
+    out[w] = '\0';
+    return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -884,7 +1046,23 @@ static const char *TOOLS_JSON =
     "Never a shell command; only sevyn verbs.\","
     "\"parameters\":{\"type\":\"object\",\"properties\":"
     "{\"args\":{\"type\":\"string\",\"description\":\"The sevyn CLI arguments, e.g. \\\"update status\\\".\"}},"
-    "\"required\":[\"args\"]}}}"
+    "\"required\":[\"args\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"write\","
+    "\"description\":\"Replace a file's content. Only /data/ and "
+    "/var/lib/sevyn/ are writable; the previous copy is kept as "
+    "<path>.sevyn-bak. The existing file must be 64 KiB or smaller, "
+    "and the content must fit one action line (about 1900 bytes).\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":"
+    "{\"path\":{\"type\":\"string\",\"description\":\"Absolute path to write.\"},"
+    "\"content\":{\"type\":\"string\",\"description\":\"The new file content.\"}},"
+    "\"required\":[\"path\",\"content\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"update\","
+    "\"description\":\"Check for a system update (\\\"check\\\"), or "
+    "apply one (\\\"apply\\\" — the device reboots when it lands). "
+    "Apply is god-mode-only; under the standard grant it is refused.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":"
+    "{\"action\":{\"type\":\"string\",\"description\":\"\\\"check\\\" or \\\"apply\\\" (default \\\"check\\\").\"}},"
+    "\"required\":[]}}}"
     "]";
 
 /* A list of JSON message objects (each a full {"role":...} object). */
@@ -1122,12 +1300,29 @@ static void emit_actions(struct action_list *al)
 
 int main(void)
 {
-    /* The task: one line on stdin. */
-    char *task = read_task_line();
-    if (!task || task[0] == '\0') {
+    /* The task: one line on stdin — or, in session mode (P1,
+     * §1.4.1), a "SESSION" marker line first, then the task line.
+     * Both reads use the unbuffered reader: the daemon writes
+     * RESULT lines to the same stdin later, and buffered stdio
+     * would swallow them. A first line that is not "SESSION" is
+     * the task itself (ASK mode, backward compatible). */
+    int session_mode = 0;
+    char *first = read_line_timeout(30);
+    if (!first || first[0] == '\0') {
         printf("ERR empty task\nEND\n");
-        free(task);
+        free(first);
         return 0;
+    }
+    char *task = first;
+    if (strcmp(first, "SESSION") == 0) {
+        session_mode = 1;
+        task = read_line_timeout(30);
+        free(first);
+        if (!task || task[0] == '\0') {
+            printf("ERR empty task\nEND\n");
+            free(task);
+            return 0;
+        }
     }
     struct action_list actions;
     memset(&actions, 0, sizeof(actions));
@@ -1189,11 +1384,42 @@ int main(void)
               "the grant is refused. "
               "5. If you cannot do the task with the tools, call no "
               "tools — do nothing. "
-              "6. Keep actions minimal: only what the task asks for.\"}");
+              "6. Keep actions minimal: only what the task asks for. "
+              "7. write replaces a whole file: read it first, then "
+              "write the full corrected content. Only /data/ and "
+              "/var/lib/sevyn/ are writable, the existing file must "
+              "be 64 KiB or smaller, and the content must fit one "
+              "action line (about 1900 bytes) — for a longer fix, "
+              "write the file in pieces or say so. The previous copy "
+              "is kept as <path>.sevyn-bak. "
+              "8. update check asks whether a system update is "
+              "available; update apply installs it and the device "
+              "reboots. Apply is god-mode-only and is refused under "
+              "the standard grant — do not retry a refused apply.\"}");
     if (msg_push(&msgs, sys.data) != 0) {
         sb_free(&sys);
         printf("ERR out of memory\n");
         goto done;
+    }
+    if (session_mode) {
+        /* Session mode (P1, §1.4.1): the daemon reports each
+         * action's result, so the model can re-plan — read, fix,
+         * re-check. This message is only added when the session
+         * marker was actually seen, and it follows the main system
+         * message. */
+        struct strbuf sess;
+        if (sb_init(&sess) == 0) {
+            sb_append(&sess,
+                      "{\"role\":\"system\",\"content\":\""
+                      "You are in a session: after each tool call the "
+                      "daemon reports what happened (OK, DENIED, or "
+                      "FAILED with a reason). Use the result to "
+                      "decide the next step — read a file, fix it "
+                      "with write, then read it again to check the "
+                      "fix. End the session by calling no tools.\"}");
+            if (msg_push(&msgs, sess.data) != 0)
+                sb_free(&sess);
+        }
     }
 
     struct strbuf user;
@@ -1213,9 +1439,17 @@ int main(void)
     }
 
     /* Agent loop: plan -> act -> observe -> re-plan. READs are
-     * executed here and fed back; every other tool call becomes a
-     * final action and ends the loop. */
-    for (int round = 0; round < MAX_API_ROUNDS; round++) {
+     * executed here and fed back. In ASK mode every other tool call
+     * becomes a final action and ends the loop. In session mode
+     * (P1, §1.4.1) each action is emitted immediately and the
+     * daemon's RESULT is fed back, so the model re-plans — read,
+     * fix, re-check — until it calls no tools or the session round
+     * cap is reached. */
+    int max_rounds =
+        session_mode ? MAX_SESSION_ROUNDS : MAX_API_ROUNDS;
+    size_t emitted = 0; /* session-mode actions emitted so far */
+    int session_over = 0;
+    for (int round = 0; round < max_rounds && !session_over; round++) {
         char *req = build_request(model, &msgs);
         if (!req) {
             printf("ERR out of memory\n");
@@ -1269,19 +1503,54 @@ int main(void)
                 char rerr[256];
                 char *content = backend_read(path, rerr, sizeof(rerr));
                 if (content) {
-                    char *tm = tool_msg_json(c->id, content);
-                    if (tm && msg_push(&msgs, tm) != 0)
-                        free(tm);
                     /* Audit trail: the fetch is a READ action line
-                     * for the daemon to log. */
-                    struct strbuf line;
-                    if (sb_init(&line) == 0) {
-                        sb_append(&line, "READ ");
-                        sb_append(&line, path);
-                        if (act_push(&actions, line.data) != 0)
-                            sb_free(&line);
+                     * for the daemon to log. In session mode it is
+                     * emitted now and the daemon's verdict is read
+                     * back before the tool result is built, so a
+                     * denied/failed read reaches the model. */
+                    char *result = NULL;
+                    if (session_mode) {
+                        printf("READ %s\n", path);
+                        fflush(stdout);
+                        emitted++;
+                        result = read_line_timeout(
+                            SESSION_RESULT_TIMEOUT_S);
+                        if (!result) {
+                            free(content);
+                            free(path);
+                            session_over = 1;
+                            break;
+                        }
+                    } else {
+                        struct strbuf line;
+                        if (sb_init(&line) == 0) {
+                            sb_append(&line, "READ ");
+                            sb_append(&line, path);
+                            if (act_push(&actions, line.data) != 0)
+                                sb_free(&line);
+                        }
                     }
+                    struct strbuf cm;
+                    if (sb_init(&cm) == 0) {
+                        sb_append(&cm, content);
+                        if (result &&
+                            strncmp(result, "RESULT OK", 9) != 0) {
+                            sb_append(&cm, "\nDaemon: ");
+                            sb_append(&cm, result);
+                        }
+                        char *tm = tool_msg_json(c->id, cm.data);
+                        if (tm && msg_push(&msgs, tm) != 0)
+                            free(tm);
+                        sb_free(&cm);
+                    }
+                    free(result);
                     free(content);
+                    if (session_mode && emitted >= MAX_ACTIONS) {
+                        free(path);
+                        printf("ERR action cap reached\n");
+                        session_over = 1;
+                        break;
+                    }
                 } else {
                     struct strbuf em;
                     if (sb_init(&em) == 0) {
@@ -1296,8 +1565,13 @@ int main(void)
                 free(path);
                 continue;
             }
-            /* A non-READ tool call becomes a final action line. */
+            /* A non-READ tool call becomes an action line.
+             * tool_err carries a specific refusal for the model
+             * (a failed write precheck, a too-long content); when
+             * it is NULL and no line was built, the arguments were
+             * missing. */
             char *line = NULL;
+            char *tool_err = NULL;
             if (strcmp(c->name, "launch") == 0) {
                 char *id = args_field(c->args_json, "id");
                 if (id) {
@@ -1348,6 +1622,68 @@ int main(void)
                     }
                 }
                 free(args);
+            } else if (strcmp(c->name, "write") == 0) {
+                /* P1: replace a file's content. The precheck
+                 * mirrors the daemon's bounds (§1.4.3); the content
+                 * is escaped onto one action line, and a content
+                 * that does not fit the line is refused here, not
+                 * truncated. */
+                char *p = args_field(c->args_json, "path");
+                char *ct = args_field(c->args_json, "content");
+                if (!p || !ct) {
+                    tool_err =
+                        strdup("ERR: write needs a path and content");
+                } else {
+                    char werr[256];
+                    if (!write_precheck(p, werr, sizeof(werr))) {
+                        struct strbuf em;
+                        if (sb_init(&em) == 0) {
+                            sb_append(&em, "ERR: ");
+                            sb_append(&em, werr);
+                            tool_err = em.data;
+                        }
+                    } else {
+                        char *esc = escape_write_content(ct);
+                        if (!esc) {
+                            tool_err = strdup("ERR: out of memory");
+                        } else {
+                            size_t need = strlen("WRITE ") +
+                                          strlen(p) + 1 +
+                                          strlen(esc) + 1;
+                            if (need > ACTION_LINE_CAP) {
+                                tool_err = strdup(
+                                    "ERR: write content too long for "
+                                    "one action line (about 1900 "
+                                    "bytes max)");
+                            } else {
+                                struct strbuf sb;
+                                if (sb_init(&sb) == 0) {
+                                    sb_append(&sb, "WRITE ");
+                                    sb_append(&sb, p);
+                                    sb_append(&sb, " ");
+                                    sb_append(&sb, esc);
+                                    line = sb.data;
+                                }
+                            }
+                            free(esc);
+                        }
+                    }
+                }
+                free(p);
+                free(ct);
+            } else if (strcmp(c->name, "update") == 0) {
+                /* P1: check for, or apply, a system update. */
+                char *act = args_field(c->args_json, "action");
+                if (!act || strcmp(act, "check") == 0) {
+                    line = strdup("UPDATE");
+                } else if (strcmp(act, "apply") == 0) {
+                    line = strdup("UPDATE apply");
+                } else {
+                    tool_err = strdup(
+                        "ERR: update action must be \"check\" or "
+                        "\"apply\"");
+                }
+                free(act);
             } else {
                 /* Unknown tool: tell the model so it can correct
                  * itself, and record nothing. */
@@ -1363,16 +1699,56 @@ int main(void)
                 continue;
             }
             if (!line) {
-                /* Missing arguments: tell the model, record nothing. */
+                /* No action line: tell the model why (a specific
+                 * refusal, or missing arguments), record nothing. */
                 struct strbuf em;
                 if (sb_init(&em) == 0) {
-                    sb_append(&em, "ERR: tool ");
-                    sb_append(&em, c->name);
-                    sb_append(&em, " is missing its arguments");
+                    if (tool_err) {
+                        sb_append(&em, tool_err);
+                    } else {
+                        sb_append(&em, "ERR: tool ");
+                        sb_append(&em, c->name);
+                        sb_append(&em, " is missing its arguments");
+                    }
                     char *tm = tool_msg_json(c->id, em.data);
                     if (tm && msg_push(&msgs, tm) != 0)
                         free(tm);
                     sb_free(&em);
+                }
+                free(tool_err);
+                continue;
+            }
+            free(tool_err);
+            if (session_mode) {
+                /* Emit now, read the RESULT, feed it back — the
+                 * model re-plans on the outcome instead of ending
+                 * the session. */
+                printf("%s\n", line);
+                fflush(stdout);
+                emitted++;
+                free(line);
+                char *result =
+                    read_line_timeout(SESSION_RESULT_TIMEOUT_S);
+                if (!result) {
+                    /* The daemon is gone (or the per-action budget
+                     * expired): end the session. */
+                    session_over = 1;
+                    break;
+                }
+                struct strbuf rm;
+                if (sb_init(&rm) == 0) {
+                    sb_append(&rm, "Daemon: ");
+                    sb_append(&rm, result);
+                    char *tm = tool_msg_json(c->id, rm.data);
+                    if (tm && msg_push(&msgs, tm) != 0)
+                        free(tm);
+                    sb_free(&rm);
+                }
+                free(result);
+                if (emitted >= MAX_ACTIONS) {
+                    printf("ERR action cap reached\n");
+                    session_over = 1;
+                    break;
                 }
                 continue;
             }

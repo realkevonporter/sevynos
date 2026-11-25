@@ -59,6 +59,7 @@ const HELP_LINES: string[] = [
   "  sevyn ai list|status        which AI is plugged in",
   "  sevyn ai select <id>        plug in a different AI",
   "  sevyn ai ask <task...>      ask the AI to do something",
+  "  sevyn ai session <task...>  ask the AI in a session (read -> fix -> re-check)",
   "  sevyn browser open [url]    open a page in Chromium",
   "  sevyn browser tabs          list open tabs",
   "  sevyn browser status        Chromium + CDP + tab count",
@@ -94,6 +95,15 @@ function logMarkers(cmd: string, out: string): void {
   } else if (cmd === "ai ask" || cmd.startsWith("ai ask ")) {
     Sevyn.log(
       "TERMINAL ai-ask allowed=" +
+        (parseField(out, "allowed") ?? "?") +
+        " denied=" +
+        (parseField(out, "denied") ?? "?"),
+    );
+  } else if (cmd === "ai session" || cmd.startsWith("ai session ")) {
+    // P1: same shape as ai ask — the session reply carries the
+    // counts of the actions the daemon ran across the session.
+    Sevyn.log(
+      "TERMINAL ai-session allowed=" +
         (parseField(out, "allowed") ?? "?") +
         " denied=" +
         (parseField(out, "denied") ?? "?"),

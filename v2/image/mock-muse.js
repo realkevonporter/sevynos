@@ -8,33 +8,63 @@
 // build-m5-image.sh), and it logs every request to the console so
 // the harness can grep the serial log for the wire.
 //
-// Run: node v2/image/mock-muse.js  (or the code-server node binary
-// in the guest, as the init snippet does).
+// P1: the mock is task-aware. A task that asks to "session fix" the
+// settings gets a session sequence — read the settings, try to
+// write a fix (denied under the standard grant, which has no
+// file.write), read again to re-check, then stop — so the check can
+// prove the session protocol (read -> fix -> re-check) and the
+// grant gate in the guest. Every other task gets the LAUNCH reply,
+// so the P0 ASK check is unaffected.
 const http = require("node:http");
 
 const PORT = 7071;
 
+// Build one tool-call reply, exactly as the real Chat Completions
+// API returns it (arguments are a JSON string).
+function toolReply(id, name, args) {
+  return {
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              function: { name, arguments: JSON.stringify(args) },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  };
+}
+
 // The canned reply: the model "decides" to launch the Files app.
-// The arguments are a JSON string, exactly as the real Chat
-// Completions API returns them.
-const REPLY = {
+const LAUNCH_REPLY = toolReply("call_1", "launch", { id: "files" });
+
+// The session sequence (P1): read, write, re-read, then stop. The
+// write targets /data/settings.json — a real guest file — but the
+// standard grant has no file.write, so the daemon denies it and
+// the file is untouched; the session still proves the loop ran.
+const SESSION_REPLIES = [
+  toolReply("call_1", "read", { path: "/data/settings.json" }),
+  toolReply("call_2", "write", {
+    path: "/data/settings.json",
+    content: "volume=99\n",
+  }),
+  toolReply("call_3", "read", { path: "/data/settings.json" }),
+];
+let sessionCount = 0;
+
+// No more tool calls: the agent loop ends (and the session ends).
+const NO_TOOLS_REPLY = {
   choices: [
     {
-      message: {
-        role: "assistant",
-        content: null,
-        tool_calls: [
-          {
-            id: "call_1",
-            type: "function",
-            function: {
-              name: "launch",
-              arguments: JSON.stringify({ id: "files" }),
-            },
-          },
-        ],
-      },
-      finish_reason: "tool_calls",
+      message: { role: "assistant", content: "done" },
+      finish_reason: "stop",
     },
   ],
 };
@@ -46,8 +76,12 @@ const server = http.createServer((req, res) => {
   });
   req.on("end", () => {
     let model = "(unparsed)";
+    let task = "";
     try {
-      model = JSON.parse(body).model || "(no model)";
+      const parsed = JSON.parse(body);
+      model = parsed.model || "(no model)";
+      const userMsg = (parsed.messages || []).find((m) => m.role === "user");
+      task = (userMsg && userMsg.content) || "";
     } catch {}
     console.log(`MUSE-MOCK ${req.method} ${req.url} model=${model}`);
     if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
@@ -55,7 +89,18 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ error: { message: "not found" } }));
       return;
     }
-    const data = JSON.stringify(REPLY);
+    // The session task gets the session sequence (one reply per
+    // request, then no-tools); every other task gets LAUNCH.
+    let reply;
+    if (task.includes("session fix")) {
+      reply =
+        sessionCount < SESSION_REPLIES.length
+          ? SESSION_REPLIES[sessionCount++]
+          : NO_TOOLS_REPLY;
+    } else {
+      reply = LAUNCH_REPLY;
+    }
+    const data = JSON.stringify(reply);
     res.writeHead(200, {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(data),
