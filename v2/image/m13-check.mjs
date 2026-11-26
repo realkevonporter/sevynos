@@ -320,6 +320,13 @@ function hsConfig() {
     "  type: sqlite\n" +
     "  sqlite:\n" +
     `    path: ${join(HS_STATE, "db.sqlite")}\n` +
+    // The unix socket defaults to /var/run/headscale/headscale.sock —
+    // on the shared KVM box that path belongs to the LIVE Headscale
+    // (root-owned), and the runner cannot remove its stale socket
+    // (run 45727765039: permission denied, serve died). Keep the
+    // in-job socket inside the job's own state dir.
+    `unix_socket: ${join(HS_STATE, "headscale.sock")}\n` +
+    'unix_socket_permission: "0770"\n' +
     "log:\n" +
     "  level: info\n" +
     "  format: text\n" +
