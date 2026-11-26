@@ -453,14 +453,109 @@ function listNotes(): string[] {
   return names;
 }
 
+// Find in note (gap unit 5, audit #6): all case-insensitive,
+// non-overlapping occurrences of the query, in order. An empty query
+// has no matches — the caller clears the match instead.
+function findMatches(text: string, query: string): Array<{ start: number; end: number }> {
+  if (query === "") return [];
+  const lower = text.toLowerCase();
+  const q = query.toLowerCase();
+  const out: Array<{ start: number; end: number }> = [];
+  let i = lower.indexOf(q);
+  while (i >= 0) {
+    out.push({ start: i, end: i + q.length });
+    i = lower.indexOf(q, i + q.length);
+  }
+  return out;
+}
+
 function Notes(): React.ReactElement {
   const [names, setNames] = React.useState<string[]>(() => listNotes());
   const [open, setOpen] = React.useState<string | null>(null);
   const [body, setBody] = React.useState<string>("");
   const [saved, setSaved] = React.useState<string>("");
 
+  // --- Find in note (gap unit 5, audit #6). -------------------------
+  // Ctrl+F (or the Find button) opens the bar; typing selects the
+  // first match, Enter goes to the next (wrapping), Shift+Enter to
+  // the previous (wrapping), Esc closes the bar and returns focus to
+  // the note. The match is shown by selecting it through the
+  // renderer's controlled `selection` prop (unit-3 model), so a match
+  // can be copied with Ctrl+C like any selection.
+  const [findOpen, setFindOpen] = React.useState(false);
+  const [findQuery, setFindQuery] = React.useState("");
+  const [findIndex, setFindIndex] = React.useState(-1);
+  const [findSel, setFindSel] = React.useState<{
+    start: number;
+    end: number;
+  } | null>(null);
+
+  function resetFind(): void {
+    setFindOpen(false);
+    setFindQuery("");
+    setFindIndex(-1);
+    setFindSel(null);
+  }
+
+  function openFind(): void {
+    setFindOpen(true);
+    setFindQuery("");
+    setFindIndex(-1);
+    setFindSel(null);
+  }
+
+  function onFindQueryChange(q: string): void {
+    setFindQuery(q);
+    if (q === "") {
+      // Empty query clears the match: collapse the selection to the
+      // start of the last match (or the start of the note).
+      setFindIndex(-1);
+      const at = findSel ? findSel.start : 0;
+      setFindSel({ start: at, end: at });
+      return;
+    }
+    const m = findMatches(body, q);
+    if (m.length === 0) {
+      // No match: report honestly and change nothing — the previous
+      // selection (if any) stays where it was, and nothing crashes.
+      setFindIndex(-1);
+      return;
+    }
+    setFindIndex(0);
+    setFindSel(m[0]);
+  }
+
+  function jumpFind(dir: 1 | -1): void {
+    const m = findMatches(body, findQuery);
+    if (m.length === 0) return;
+    const next =
+      findIndex < 0
+        ? dir === 1
+          ? 0
+          : m.length - 1
+        : (findIndex + dir + m.length) % m.length;
+    setFindIndex(next);
+    setFindSel(m[next]);
+  }
+
+  function onNoteSelectionChange(e: {
+    nativeEvent: { selection: { start: number; end: number } };
+  }): void {
+    const s = e.nativeEvent.selection;
+    // The user moved the caret by other means (arrows, click,
+    // typing): the find match is no longer the selection, so drop
+    // it — otherwise the bar would show an "i of N" that no longer
+    // points anywhere, and the renderer contract asks the app to
+    // clear the prop when the selection diverges.
+    if (findSel && (s.start !== findSel.start || s.end !== findSel.end)) {
+      setFindSel(null);
+      setFindIndex(-1);
+    }
+  }
+
   function openNote(name: string): void {
     const { code, out } = runCli("sevyn files cat /data/notes/" + name);
+    resetFind();
     setOpen(name);
     setBody(code === 0 ? out : "");
     setSaved("");
@@ -468,6 +563,7 @@ function Notes(): React.ReactElement {
 
   function newNote(): void {
     const name = "Note " + (names.length + 1);
+    resetFind();
     setOpen(name);
     setBody("");
     setSaved("");
@@ -490,12 +586,23 @@ function Notes(): React.ReactElement {
     Sevyn.log("NOTES saved=" + open);
   }
 
+  const matches = findQuery === "" ? [] : findMatches(body, findQuery);
+  const findCountText =
+    findQuery === ""
+      ? ""
+      : matches.length === 0
+        ? "No matches"
+        : findIndex >= 0
+          ? findIndex + 1 + " of " + matches.length
+          : matches.length + " matches";
+
   if (open !== null) {
     return (
       <View style={{ flex: 1, padding: 16 }}>
         <View style={{ flexDirection: "row", alignItems: "center" }}>
           <Pressable
             onPress={() => {
+              resetFind();
               setOpen(null);
               setNames(listNotes());
             }}
@@ -516,6 +623,21 @@ function Notes(): React.ReactElement {
             {open}
           </Text>
           <Pressable
+            onPress={openFind}
+            style={{
+              height: 36,
+              borderRadius: 8,
+              backgroundColor: "#e5e7eb",
+              justifyContent: "center",
+              alignItems: "center",
+              paddingLeft: 16,
+              paddingRight: 16,
+              marginRight: 12,
+            }}
+          >
+            <Text style={{ fontSize: 15, color: "#111827" }}>Find</Text>
+          </Pressable>
+          <Pressable
             onPress={saveNote}
             style={{
               height: 36,
@@ -532,11 +654,88 @@ function Notes(): React.ReactElement {
             </Text>
           </Pressable>
         </View>
+        {findOpen ? (
+          <View style={{ flexDirection: "row", alignItems: "center", marginTop: 12 }}>
+            <TextInput
+              value={findQuery}
+              onChangeText={onFindQueryChange}
+              onSubmitEditing={(e: { nativeEvent: { shiftKey: boolean } }) => {
+                if (e && e.nativeEvent && e.nativeEvent.shiftKey) jumpFind(-1);
+                else jumpFind(1);
+              }}
+              onEscape={resetFind}
+              placeholder="Find in note"
+              autoFocus
+              style={{
+                flex: 1,
+                height: 36,
+                backgroundColor: "#ffffff",
+                borderRadius: 8,
+                paddingLeft: 12,
+                paddingRight: 12,
+                fontSize: 15,
+                color: "#111827",
+              }}
+            />
+            {findCountText ? (
+              <Text style={{ fontSize: 14, color: "#6b7280", marginLeft: 8 }}>
+                {findCountText}
+              </Text>
+            ) : null}
+            <Pressable
+              onPress={() => jumpFind(-1)}
+              style={{
+                height: 36,
+                width: 36,
+                borderRadius: 8,
+                backgroundColor: "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+                marginLeft: 8,
+              }}
+            >
+              <Text style={{ fontSize: 15, color: "#111827" }}>↑</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => jumpFind(1)}
+              style={{
+                height: 36,
+                width: 36,
+                borderRadius: 8,
+                backgroundColor: "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+                marginLeft: 8,
+              }}
+            >
+              <Text style={{ fontSize: 15, color: "#111827" }}>↓</Text>
+            </Pressable>
+            <Pressable
+              onPress={resetFind}
+              style={{
+                height: 36,
+                width: 36,
+                borderRadius: 8,
+                backgroundColor: "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+                marginLeft: 8,
+              }}
+            >
+              <Text style={{ fontSize: 15, color: "#111827" }}>✕</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <TextInput
           value={body}
           onChangeText={setBody}
           placeholder="Write a note…"
           multiline
+          autoFocus
+          selection={findSel ?? undefined}
+          onSelectionChange={onNoteSelectionChange}
+          onFindRequest={openFind}
+          onEscape={findOpen ? resetFind : undefined}
           style={{
             flex: 1,
             backgroundColor: "#ffffff",

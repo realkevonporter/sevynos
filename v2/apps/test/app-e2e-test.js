@@ -218,6 +218,122 @@ check("notes: real notes screen, no status leak", () => {
   );
 });
 
+// Find in note (gap unit 5, audit #6): Ctrl+F opens the find bar,
+// typing selects the first match, Enter cycles (wrapping),
+// Shift+Enter goes back, a query with no match changes nothing,
+// an empty query clears the match, Esc closes and returns focus to
+// the note, and the Find button reopens the bar. The note body is
+// "buy milk and bread\nbuy milk again\n": "milk" matches [4,8) and
+// [23,27).
+function pressCtrl(code) {
+  Sevyn._handlers.key({ key: code, pressed: true, ctrl: true });
+}
+function pressShiftEnter() {
+  Sevyn._handlers.key({ key: 28, pressed: true, shift: true });
+}
+function pressEscape() {
+  Sevyn._handlers.key({ key: 1, pressed: true });
+}
+function pressBackspace() {
+  Sevyn._handlers.key({ key: 14, pressed: true });
+}
+function findHighlights() {
+  const last = Sevyn._presents[Sevyn._presents.length - 1];
+  return last.ops.filter((o) => o.type === "rect" && o.color === "#3b82f680");
+}
+// The note's match highlight is one rect on the match's row: match 1
+// sits on row 0, match 2 on row 1 (line height 15 * 1.25 = 18.75),
+// so the highlight's y tells the matches apart — the test asserts
+// the row, not the instance state (the bundle's renderer is its own
+// module copy, so the test cannot read instance fields).
+function highlightRowY() {
+  const hs = findHighlights();
+  assert.equal(hs.length, 1, "exactly one highlight rect");
+  return hs[0].y;
+}
+
+check("notes find: Ctrl+F, type, Enter cycles, Shift+Enter, Esc", () => {
+  const handler = (cmd) => {
+    if (cmd === "sevyn files list /data/notes") return "0\nf Shopping\n";
+    if (cmd === "sevyn files cat /data/notes/Shopping")
+      return "0\nbuy milk and bread\nbuy milk again\n";
+    return "0\n";
+  };
+  loadAs(
+    {
+      id: "notes",
+      name: "Notes",
+      color: "#eab308",
+      glyph: "N",
+      permissions: ["cli.exec"],
+    },
+    appBundle,
+    handler,
+  );
+  let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Shopping"), "seeded note listed");
+  tapText("Shopping", 15);
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("buy milk and bread")),
+    "note body loaded from /data/notes",
+  );
+
+  // Ctrl+F opens the find bar and focuses its field.
+  pressCtrl(33); // Ctrl+F
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Find in note"), "find field opened");
+
+  // Typing selects the first match (row 0).
+  type("milk");
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("1 of 2"), "match count shown");
+  const row0 = highlightRowY();
+  assert.ok(findHighlights().length >= 1, "match highlighted while find has focus");
+
+  // Enter cycles to the next match (row 1), then wraps to the first.
+  pressEnter();
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("2 of 2"), "count advanced");
+  assert.equal(highlightRowY(), row0 + 18.75, "second match selected, one row down");
+  pressEnter();
+  assert.equal(highlightRowY(), row0, "Enter wrapped to the first match");
+
+  // Shift+Enter goes back to the previous match.
+  pressShiftEnter();
+  assert.equal(highlightRowY(), row0 + 18.75, "Shift+Enter went back");
+
+  // A query with no match is reported honestly: the count says so
+  // and the selection does not move.
+  pressCtrl(30); // Ctrl+A in the find field, then replace the query
+  type("zzz");
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("No matches"), "no-match reported");
+  assert.equal(highlightRowY(), row0 + 18.75, "no match leaves the selection untouched");
+
+  // An empty query clears the match: no highlight at all.
+  pressCtrl(30); // Ctrl+A in the find field
+  pressBackspace();
+  assert.equal(findHighlights().length, 0, "empty query cleared the highlight");
+
+  // Esc closes the bar and returns focus to the note: typing lands
+  // in the note again, at the end.
+  pressEscape();
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(!texts.includes("Find in note"), "find field closed");
+  type("x");
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("buy milk again\nx")),
+    "typing after Esc went back into the note",
+  );
+
+  // The Find button reopens the bar.
+  tapText("Find", 15);
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Find in note"), "Find button reopened the bar");
+});
+
 check("music (no permission): status line says not permitted", () => {
   const last = loadAs({
     id: "music",
