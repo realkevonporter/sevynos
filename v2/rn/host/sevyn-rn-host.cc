@@ -1597,6 +1597,28 @@ void RnHost::setWindowState(const std::string& state) {
 
 void RnHost::dispatchKey(uint32_t key, bool pressed,
                          const KeyModifiers& modifiers) {
+  // Quit shortcut (gap unit 7, audit #8): Alt+F4 / Super+Q quits
+  // the focused app through the same close path the title-bar X
+  // uses (exitRequested_ — the main loop exits 0, appd reports
+  // STOPPED; closeApp() above refuses exactly when appId_ is
+  // empty, and the same condition gates the quit here, so the
+  // terminal quits like its X and the shell refuses like its
+  // missing X). Intercepted here, before the key reaches JS: a
+  // focused TextInput would otherwise swallow Super+Q as a typed
+  // 'q' (the renderer types any KEYMAP key when only Super is held
+  // — sevyn-renderer.js handleTextInputKey), and Alt+F4 would be
+  // ignored entirely. The shell swallows the chord too, never
+  // forwarding it, so it cannot type into a focused shell input.
+  const QuitAction quit =
+      quitShortcutAction(key, pressed, modifiers, !appId_.empty());
+  if (quit == QuitAction::kQuit) {
+    logLine("HOST quit shortcut: %s (app %s)",
+            key == kQuitF4Key ? "Alt+F4" : "Super+Q", appId_.c_str());
+    exitRequested_.store(true);
+    return;
+  }
+  if (quit == QuitAction::kSwallow)
+    return;
   if (!hasKeyHandler_ || !runtime_)
     return;
   jsi::Runtime& rt = *runtime_;
