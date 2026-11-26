@@ -368,7 +368,8 @@ class RnHost {
   void dispatchPointer(const std::string& type, double x, double y,
                        uint32_t button, bool pressed);
   void dispatchScroll(double x, double y, double dx, double dy);
-  void dispatchKey(uint32_t key, bool pressed, bool shift);
+  void dispatchKey(uint32_t key, bool pressed,
+                   const KeyModifiers& modifiers);
   // M9 surface resize: update the host size, Sevyn.width/height,
   // and the JS size handler (the renderer re-lays out + presents).
   void dispatchSize(int width, int height);
@@ -1548,7 +1549,8 @@ void RnHost::setWindowState(const std::string& state) {
   }
 }
 
-void RnHost::dispatchKey(uint32_t key, bool pressed, bool shift) {
+void RnHost::dispatchKey(uint32_t key, bool pressed,
+                         const KeyModifiers& modifiers) {
   if (!hasKeyHandler_ || !runtime_)
     return;
   jsi::Runtime& rt = *runtime_;
@@ -1556,7 +1558,11 @@ void RnHost::dispatchKey(uint32_t key, bool pressed, bool shift) {
     jsi::Object ev(rt);
     ev.setProperty(rt, "key", (double)key);
     ev.setProperty(rt, "pressed", pressed);
-    ev.setProperty(rt, "shift", shift);
+    ev.setProperty(rt, "shift", modifiers.shift());
+    ev.setProperty(rt, "ctrl", modifiers.ctrl());
+    ev.setProperty(rt, "alt", modifiers.alt());
+    ev.setProperty(rt, "super", modifiers.super());
+    ev.setProperty(rt, "meta", modifiers.meta());
     keyHandler_->call(rt, ev);
     rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
@@ -2016,7 +2022,11 @@ void RnHost::fireDueHeadlessInput() {
       // A tap is a down + an up; the file carries both lines.
       dispatchPointer(ev.type, ev.x, ev.y, /*button=*/1, ev.pressed);
     } else {
-      dispatchKey(ev.code, ev.pressed, ev.shift);
+      // Headless `key` lines carry shift only (no per-side
+      // keycodes, no Ctrl/Alt/Super) — the snapshot is shift-only.
+      KeyModifiers modifiers;
+      modifiers.setShift(ev.shift);
+      dispatchKey(ev.code, ev.pressed, modifiers);
     }
   }
 }
@@ -2088,8 +2098,8 @@ int RnHost::run() {
         dispatchScroll(x, y, dx, dy);
       });
   wayland_->setKeyHandler(
-      [this](uint32_t key, bool pressed, bool shift) {
-        dispatchKey(key, pressed, shift);
+      [this](uint32_t key, bool pressed, const KeyModifiers& modifiers) {
+        dispatchKey(key, pressed, modifiers);
       });
   // M9: a configure with a new size (resize drag, output mode)
   // re-lays out JS at the new size.

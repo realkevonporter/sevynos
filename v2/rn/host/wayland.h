@@ -27,6 +27,7 @@
 
 #include "common.h"
 #include "genesis-presenter.h"
+#include "key-modifiers.h"
 #include "painter.h"
 
 struct xdg_wm_base;
@@ -54,12 +55,17 @@ class Wayland {
   using ScrollHandler =
       std::function<void(double x, double y, double dx, double dy)>;
   // Key event: evdev keycode (28 Enter, 103 Up, 105 Left, 106 Right,
-  // 108 Down, 15 Tab, 1 Esc…), pressed or released. shift is the
-  // state of either Shift key at the moment of the event (tracked in
-  // wayland.cc — the host reads no xkb keymap, so modifiers are
-  // tracked by keycode, not by keysym).
-  using KeyHandler =
-      std::function<void(uint32_t key, bool pressed, bool shift)>;
+  // 108 Down, 15 Tab, 1 Esc…), pressed or released. modifiers is the
+  // Ctrl / Alt / Super(= Meta) / Shift state at the moment of the
+  // event (tracked in wayland.cc — the host reads no xkb keymap, so
+  // modifiers are tracked by keycode, not by keysym). Modifier keys
+  // themselves are forwarded like any other key (except Shift,
+  // which is swallowed — pre-existing behaviour), so JS sees a
+  // modifier's own press/release as well as the state it lends to
+  // the next key: a Ctrl press arrives with ctrl already true, a
+  // Ctrl release with ctrl already false.
+  using KeyHandler = std::function<void(uint32_t key, bool pressed,
+                                        const KeyModifiers& modifiers)>;
   // Frame callback: the compositor is ready for the next frame.
   using FrameHandler = std::function<void()>;
   // Close request from the compositor (window X / Alt-F4). Set for
@@ -371,12 +377,14 @@ class Wayland {
   bool restorePending_ = false;
   WindowStateHandler windowStateHandler_;
 
-  // Either Shift key held (evdev 42 left, 54 right). The host reads no
-  // xkb keymap, so modifiers are tracked by keycode here and forwarded
-  // with every key event (see onKeyboardKey). Per-key booleans, so
-  // holding both Shifts and releasing one still counts as Shift.
-  bool shiftLeft_ = false;
-  bool shiftRight_ = false;
+  // Modifier state (Ctrl / Alt / Super / Shift), tracked by evdev
+  // keycode in onKeyboardKey and forwarded with every key event
+  // (see KeyHandler). Per-key booleans inside KeyModifiers, so
+  // holding both keys of a pair and releasing one still counts as
+  // held. The host reads no xkb keymap, so the wl_keyboard
+  // modifiers event is not used for this: its bitmask needs the
+  // keymap to interpret, and the keymap fd is closed unread.
+  KeyModifiers modifiers_;
 
   PointerHandler pointerHandler_;
   ScrollHandler scrollHandler_;

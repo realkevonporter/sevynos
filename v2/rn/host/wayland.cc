@@ -946,18 +946,16 @@ void Wayland::onKeyboardKey(void* data, wl_keyboard* keyboard, uint32_t serial,
   (void)serial;
   (void)time;
   // Shift keys (evdev 42 left, 54 right) are modifiers, not input:
-  // track the state and do not forward them as key events.
-  if (key == 42 || key == 54) {
-    bool down = (state == WL_KEYBOARD_KEY_STATE_PRESSED);
-    if (key == 42)
-      self->shiftLeft_ = down;
-    else
-      self->shiftRight_ = down;
+  // track the state and do not forward them as key events. Ctrl /
+  // Alt / Meta are tracked the same way but ARE forwarded, with the
+  // modifier snapshot attached — JS sees the modifier's own
+  // press/release as well as the state it lends to the next key.
+  self->modifiers_.onKey(key, state == WL_KEYBOARD_KEY_STATE_PRESSED);
+  if (self->modifiers_.isShiftKey(key))
     return;
-  }
   if (self->keyHandler_)
     self->keyHandler_(key, state == WL_KEYBOARD_KEY_STATE_PRESSED,
-                      self->shiftLeft_ || self->shiftRight_);
+                      self->modifiers_);
 }
 
 void Wayland::onKeyboardModifiers(void* data, wl_keyboard* keyboard,
@@ -967,6 +965,11 @@ void Wayland::onKeyboardModifiers(void* data, wl_keyboard* keyboard,
   (void)data;
   (void)keyboard;
   (void)serial;
+  // Deliberately unused: the modifiers bitmask needs the xkb
+  // keymap to say which bit is Ctrl / Alt / Super, and the host
+  // closes the keymap fd unread (onKeyboardKeymap). Modifier state
+  // comes from the key events instead, tracked by evdev keycode in
+  // onKeyboardKey — layout-independent, same as Shift always was.
   (void)mods_depressed;
   (void)mods_latched;
   (void)mods_locked;
