@@ -13,3 +13,4 @@ export const Text = "Text" as const;
 export const Image = "Image" as const;
 export const Pressable = "Pressable" as const;
 export const ScrollView = "ScrollView" as const;
+export const TextInput = "TextInput" as const;

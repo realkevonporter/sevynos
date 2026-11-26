@@ -15,6 +15,8 @@
 import * as React from "react";
 import { View, Text, Pressable } from "./host";
 import { Dock } from "./Dock";
+import { AiButton } from "./AiButton";
+import { AiSidebar } from "./AiSidebar";
 import { APPS, type ShellApp } from "./apps";
 import { StatusTray } from "./StatusTray";
 import { Wallpaper } from "./Wallpaper";
@@ -41,6 +43,10 @@ function readSetting(key: string): string | null {
 export function Shell(): React.ReactElement {
   const [launching, setLaunching] = React.useState<string | null>(null);
   const [powerMenu, setPowerMenu] = React.useState(false);
+  // AI sidebar (DESIGN.md §2.8, phase 1): the corner button opens
+  // it; the sidebar closes itself. Opening it closes the power
+  // menu — the two panels overlap in the top-right corner.
+  const [aiOpen, setAiOpen] = React.useState(false);
   // Hourly time resync (#134 follow-up): the old time service
   // re-synced every hour (DEFAULT_RESYNC_INTERVAL_MS); the v2
   // image init only syncs once at boot, so the shell owns the
@@ -256,6 +262,18 @@ export function Shell(): React.ReactElement {
           </View>
         </React.Fragment>
       ) : null}
+      {/* AI button + sidebar: last children, so they paint over the
+          desktop (and over the power menu, which they close on
+          open). The button hides while the sidebar is open. */}
+      {aiOpen ? null : (
+        <AiButton
+          onPress={() => {
+            setPowerMenu(false);
+            setAiOpen(true);
+          }}
+        />
+      )}
+      {aiOpen ? <AiSidebar onClose={() => setAiOpen(false)} /> : null}
     </View>
   );
 }
