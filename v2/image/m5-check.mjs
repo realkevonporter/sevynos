@@ -1787,15 +1787,43 @@ async function main() {
     // fails fast instead of burning 120 s per step. If a future
     // run shows an EXEC later than 25 s, that is new evidence
     // for a late-EXEC re-check, not for another blind extension.
+    // Round 6 (M5 run 45829947853): the probe is `net status`,
+    // not `browser status`. The refocus must prove FOCUS, and
+    // `browser status` on this branch is the slowest CLI call in
+    // the harness: 2 CDP requests + the new Stage 5 runtime
+    // roundtrip, against the host's 10 s exec kill — ~3 s when
+    // Chromium is idle, over budget after the warm-open relaunch
+    // + page load (SIGKILL, exit 124, which the [01] pattern
+    // rejects). `net status` is local (no CDP, no runtime socket)
+    // and Terminal-scoped (see terminalEchoRe), so a failed verify
+    // now means the input never ran, not that the browser CLI was
+    // slow. On failure the discriminator below tells the two
+    // apart directly: a Terminal-scoped EXEC with ANY exit code
+    // means the command ran (focus worked) and was killed/slow;
+    // no such line means the command was never typed (focus
+    // broken). The Browser app never runs `net status`, so the
+    // EXEC line is Terminal-specific even before scoping.
     const verifyFocus = async () => {
+      const before = logLines(b.logPath).length;
       const { exec } = await termCmd(
-        "browser status",
+        "net status",
         null,
-        /EXEC sevyn browser status -> [01]/,
+        /EXEC sevyn net status -> [01]/,
         25000,
       );
-      diag(`verify exec=${!!exec}`);
-      return !!exec;
+      if (!exec) {
+        const ran = await waitForTerminalExec(
+          b.logPath,
+          /EXEC sevyn net status -> \d+/,
+          /JS TERMINAL net-status/,
+          2000,
+          before,
+        );
+        diag(`verify exec=false ran=${ran ? ran.trim() : "no-exec-line"}`);
+        return false;
+      }
+      diag(`verify exec=true`);
+      return true;
     };
     // Round 8 (m13 run 43715706248, head 0f82d7d9 — same refocus
     // code here): wait for a Terminal RELAUNCHED from the dock
