@@ -1345,14 +1345,22 @@ function findTerminalDockIcon(img, known) {
 // (left..right, top..top+499 — the true bottom, not
 // findWindowHeader's band end) and inside the frame, AND at least
 // half the pixels in a 41x11 box around it must be the input-row
-// background colour. That last clause is what makes the dock-band
-// overlap safe: the input row sits in the dock's y-band, so a
-// blind click there would hit a dock icon (this run's (303,768)
-// is the red C icon when the Terminal is hidden — measured 0/451
-// input-row pixels there, vs 0.82-0.92 when the row is present).
-// When the Terminal is absent the frame shows the dock icon, not
-// input-row pixels, so the guard refuses and the caller fails
-// fast instead of launching an app. Returns {x, y} or null.
+// background colour OR the Terminal body colour. That last clause
+// is what makes the dock-band overlap safe: the input row sits in
+// the dock's y-band, so a blind click there would hit a dock icon
+// (this run's (303,768) is the red C icon when the Terminal is
+// hidden — measured 0/451 input-row pixels there, vs 0.82-0.92
+// when the row is present). When the Terminal is absent the frame
+// shows the dock icon, not input-row pixels, so the guard refuses
+// and the caller fails fast instead of launching an app.
+// Stage 5: the input row counts the body colour too. The
+// unfocused input row renders as the window body colour
+// (#111827), not #1f2937 — the M5 crash frames (runs 45803769258
+// + 45811879516) measure 0/451 #1f2937 in the guard box but
+// 301-342/451 #111827 when the row is present, and 0/451 #111827
+// on the bare desktop (the point lands on the red C icon there),
+// so the body colour discriminates just as well. Returns
+// {x, y} or null.
 function refocusInputPointSafe(known, img, W, H) {
   if (!known) return null;
   const x = known.left + 200;
@@ -1382,7 +1390,8 @@ function refocusInputPointSafe(known, img, W, H) {
           TERMINAL_INPUT_RGB[0],
           TERMINAL_INPUT_RGB[1],
           TERMINAL_INPUT_RGB[2],
-        )
+        ) ||
+        pixelMatches(img, xx, yy, 17, 24, 39)
       ) {
         n++;
       }

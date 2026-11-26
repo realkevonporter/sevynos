@@ -1881,6 +1881,15 @@ function findTerminalDockIcon(img, known) {
 // pixels, never a blind click (same pattern as dragStartPoint's
 // longest-run fallback). Minimum 20px, matching the fragment-raise
 // minimum; ties go to the run nearest the fixed point.
+//
+// Stage 5: "input-row pixels" means the input-row colour OR the
+// Terminal body colour (#111827) at both counting sites. The
+// unfocused input row renders as the window body colour, not
+// #1f2937 — the M5 crash frames (runs 45803769258 + 45811879516)
+// measure 0/451 #1f2937 in the guard box but 301-342/451 #111827
+// when the row is present, and 0/451 #111827 on the bare desktop
+// (the point lands on the red C icon there), so the body colour
+// discriminates just as well.
 function refocusInputPointSafe(known, img, W, H) {
   if (!known) return null;
   const y = known.top + 482;
@@ -1913,7 +1922,8 @@ function refocusInputPointSafe(known, img, W, H) {
             TERMINAL_INPUT_RGB[0],
             TERMINAL_INPUT_RGB[1],
             TERMINAL_INPUT_RGB[2],
-          )
+          ) ||
+          pixelMatches(img, xx, yy, 17, 24, 39)
         ) {
           n++;
         }
@@ -1934,14 +1944,15 @@ function refocusInputPointSafe(known, img, W, H) {
   for (let x = x0; x <= x1 + 1; x++) {
     const m =
       x <= x1 &&
-      pixelMatches(
+      (pixelMatches(
         img,
         x,
         y,
         TERMINAL_INPUT_RGB[0],
         TERMINAL_INPUT_RGB[1],
         TERMINAL_INPUT_RGB[2],
-      );
+      ) ||
+        pixelMatches(img, x, y, 17, 24, 39));
     if (m && s < 0) s = x;
     if (!m && s >= 0) {
       const len = x - s;
