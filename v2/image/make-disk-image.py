@@ -136,6 +136,10 @@ def main():
     ap.add_argument("--esp-mb", type=int, default=1152)
     ap.add_argument("--data-mb", type=int, default=864)
     ap.add_argument("--make-data-disk", default=None)
+    ap.add_argument("--seed-dir", default=None,
+                    help="host directory tree to seed onto the data "
+                         "partition, preserving relative paths "
+                         "(forwarded to make-data-disk.py)")
     ap.add_argument("--sysroot", default="/")
     args = ap.parse_args()
 
@@ -271,10 +275,13 @@ def build(tmp, args, kernel, initramfs, make_data_disk, sysroot,
 
     # --- Data partition (ext4, LABEL=SEVYN_DATA) ------------------------
     print(f"data partition: {args.data_mb} MiB ext4 (LABEL=SEVYN_DATA)")
-    run([sys.executable, str(make_data_disk),
-         "--kernel", str(kernel), "--initramfs", str(initramfs),
-         "--version", args.version, "--out", str(data_img),
-         "--size-mb", str(args.data_mb), "--label", "SEVYN_DATA"])
+    data_disk_cmd = [sys.executable, str(make_data_disk),
+                     "--kernel", str(kernel), "--initramfs", str(initramfs),
+                     "--version", args.version, "--out", str(data_img),
+                     "--size-mb", str(args.data_mb), "--label", "SEVYN_DATA"]
+    if args.seed_dir is not None:
+        data_disk_cmd += ["--seed-dir", str(args.seed_dir)]
+    run(data_disk_cmd)
     data_sectors = math.ceil(data_img.stat().st_size / SECTOR)
 
     # --- GPT + assembly -------------------------------------------------
