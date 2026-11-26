@@ -30,19 +30,23 @@
 //                          /usr/local/bin/sevyn only; gated by the
 //                          cli.exec permission (ERR string otherwise).
 //
-// TextInput (M4, caret + multiline in the GF65 fixes): a controlled
-// input, single-line by default. Props: value, onChangeText,
-// onSubmitEditing, placeholder, autoFocus, multiline, secureTextEntry.
-// The focused input eats printable keys (US keycode map below,
-// Shift-aware), Backspace, Delete, and Enter (submit — or a newline
-// when multiline); Tab moves focus, Escape blurs. The caret moves
-// with Left/Right/Home/End and, when multiline, Up/Down between
-// wrapped lines; it is drawn from the value (masked when secure),
-// never the placeholder. Copy/paste/cut (gap unit 2): Ctrl+C/X/V
-// through the host clipboard (Sevyn.clipboardRead/Write), using the
-// minimal selection range below — a collapsed selection copies/cuts
-// the whole value until unit 3 lands the selection model. A
-// Ctrl+letter that is not C/X/V is swallowed, never typed.
+// TextInput (M4, caret + multiline in the GF65 fixes; selection model
+// in gap unit 3, audit #9/#24): a controlled input, single-line by
+// default. Props: value, onChangeText, onSubmitEditing, placeholder,
+// autoFocus, multiline, secureTextEntry, onSelectionChange. The focused
+// input eats printable keys (US keycode map below, Shift-aware),
+// Backspace, Delete, and Enter (submit — or a newline when multiline);
+// Tab moves focus, Escape blurs. The caret moves with
+// Left/Right/Home/End and, when multiline, Up/Down between wrapped
+// lines; it is drawn from the value (masked when secure), never the
+// placeholder. Selection: Shift+arrows/Home/End extend it from an
+// anchor, Ctrl+arrows jump by word (Shift+Ctrl extends by word), and a
+// left-button drag selects the text under the pointer; the range is
+// drawn as a highlight and reported via onSelectionChange, and
+// Backspace/Delete/typing replace it. Copy/paste/cut (gap unit 2):
+// Ctrl+C/X/V through the host clipboard (Sevyn.clipboardRead/Write),
+// operating on the selection — a collapsed selection copies/cuts the
+// whole value. A Ctrl+letter that is not C/X/V is swallowed, never typed.
 //
 // The renderer keeps a yoga-id -> instance map for hit routing and a
 // focus list for keyboard activation. ScrollView scrolls via
@@ -428,6 +432,45 @@ function emitInstance(inst, ox, oy, ops, clip) {
       radius: st.borderRadius || 0,
       nodeId: inst.yogaId,
     });
+    // Selection highlight (gap unit 3): the selected range, drawn
+    // under the text so the glyphs stay readable — the painter
+    // blends the alpha. One rect per visual line the range covers;
+    // a range that ends exactly at a line break draws nothing on
+    // the next line. The caret below still marks the focus end.
+    if (focusedInstance === inst) {
+      const { start, end } = selectionRangeFor(inst);
+      if (start !== end) {
+        const hlText = textInputValueText(inst);
+        const hlLines = visualLines(hlText, font.size, font.bold, multiline ? w : 0);
+        const lineH = font.size * 1.25;
+        hlLines.forEach((line, row) => {
+          const s = Math.max(start, line.start);
+          const e = Math.min(end, line.end);
+          if (e <= s) return;
+          const x0 = Sevyn.measureText(
+            hlText.slice(line.start, s),
+            font.size,
+            font.bold,
+            0,
+          ).width;
+          const x1 = Sevyn.measureText(
+            hlText.slice(line.start, e),
+            font.size,
+            font.bold,
+            0,
+          ).width;
+          ops.push({
+            type: "rect",
+            x: x + x0,
+            y: y + row * lineH + 1,
+            w: Math.max(0, x1 - x0),
+            h: Math.max(1, lineH - 2),
+            color: "#3b82f680",
+            nodeId: -1,
+          });
+        });
+      }
+    }
     if (display) {
       ops.push({
         type: "text",
@@ -573,12 +616,14 @@ function presentRoot() {
 // ------------------------------------------------------------------- focus
 let focusedInstance = null;
 
-// TextInput caret state. The caret offset (character index into the
-// value) lives on the instance; it is (re)set to the end of the value
-// on focus and clamped lazily to [0, value.length], so an external
-// value change (e.g. Terminal clearing the input on submit) can never
-// leave it out of range. No click-to-place: a tap focuses the input,
-// arrows move the caret.
+// TextInput caret + selection state (gap unit 3, audit #9/#24). The
+// caret offset (character index into the value) lives on the instance;
+// it is (re)set to the end of the value on focus and clamped lazily to
+// [0, value.length], so an external value change (e.g. Terminal
+// clearing the input on submit) can never leave it out of range. A
+// left-button press places the caret at the char under the pointer
+// (click-to-place) and a drag from there selects; arrows move the
+// caret, Shift+arrows extend a selection from an anchor.
 function textInputValueText(inst) {
   const props = inst.props || {};
   const value = typeof props.value === "string" ? props.value : "";
@@ -596,17 +641,14 @@ function caretOffsetFor(inst) {
 }
 
 function setCaretOffset(inst, n) {
-  inst.caretOffset = Math.max(0, Math.min(textInputValue(inst).length, n));
-  // A plain caret move collapses the selection to the caret (unit 3's
-  // Shift+arrows set the range explicitly after moving it).
-  inst.selectionStart = inst.caretOffset;
-  inst.selectionEnd = inst.caretOffset;
+  // A plain caret move collapses the selection to the caret.
+  setSelectionState(inst, n, null);
 }
 
-// Selection range for copy/cut/paste (gap unit 2): [start, end) into
-// the value, clamped, start <= end. The range lives on the instance
-// and is collapsed at the caret; nothing sets a non-collapsed range
-// yet — that is unit 3's selection model (gap #9).
+// Selection range for copy/cut/paste/delete (gap units 2 + 3):
+// [start, end) into the value, clamped, start <= end. The range lives
+// on the instance as [min(anchor, caret), max(anchor, caret)] and is
+// collapsed at the caret when there is no anchor.
 function selectionRangeFor(inst) {
   const value = textInputValue(inst);
   const caret = caretOffsetFor(inst);
@@ -617,9 +659,151 @@ function selectionRangeFor(inst) {
   return { start: Math.min(lo, hi), end: Math.max(lo, hi) };
 }
 
+// The single mutation point for caret + selection. anchor === null
+// collapses the selection to the caret; otherwise the selection is
+// [min(anchor, caret), max(anchor, caret)]. Fires onSelectionChange
+// (the RN shape) when the normalized range actually changes — a
+// collapsed range moving with the caret counts, so a plain arrow key
+// reports it too.
+function setSelectionState(inst, caret, anchor) {
+  const value = textInputValue(inst);
+  const prev = selectionRangeFor(inst);
+  const c = Math.max(0, Math.min(value.length, caret));
+  const a = anchor == null ? null : Math.max(0, Math.min(value.length, anchor));
+  inst.caretOffset = c;
+  inst.selectionAnchor = a;
+  inst.selectionStart = a == null ? c : Math.min(a, c);
+  inst.selectionEnd = a == null ? c : Math.max(a, c);
+  notifySelectionChange(inst, prev);
+}
+
+function notifySelectionChange(inst, prev, next) {
+  const range = next || selectionRangeFor(inst);
+  if (prev && prev.start === range.start && prev.end === range.end) return;
+  const props = inst.props || {};
+  if (typeof props.onSelectionChange !== "function") return;
+  try {
+    props.onSelectionChange({
+      nativeEvent: { selection: { start: range.start, end: range.end } },
+    });
+  } catch (e) {
+    Sevyn.log("onSelectionChange failed: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// Move the caret, keeping (or starting) a selection: the anchor is
+// the caret position where the selection started (Shift+arrows,
+// Shift+Home/End, drag-select). When anchor and caret meet the range
+// collapses but the anchor stays — it equals the caret then, so the
+// next Shift+arrow re-opens the selection from the same place either
+// way.
+function extendCaretTo(inst, n) {
+  const anchor =
+    typeof inst.selectionAnchor === "number"
+      ? inst.selectionAnchor
+      : caretOffsetFor(inst);
+  setSelectionState(inst, n, anchor);
+}
+
+// Word jumps (Ctrl+Left/Right): a word is a run of word characters
+// ([A-Za-z0-9_]) or a run of punctuation — spaces are skipped first,
+// so the caret never gets stuck on a punctuation boundary. Ctrl+Left
+// from mid-word lands at that word's start; from a word start it
+// lands at the previous word's start. Ctrl+Right is the mirror.
+function isWordChar(ch) {
+  return (
+    (ch >= "a" && ch <= "z") ||
+    (ch >= "A" && ch <= "Z") ||
+    (ch >= "0" && ch <= "9") ||
+    ch === "_"
+  );
+}
+
+function isSpaceChar(ch) {
+  return ch === " " || ch === "\t" || ch === "\n";
+}
+
+function wordStartBefore(value, pos) {
+  let i = pos;
+  while (i > 0 && isSpaceChar(value[i - 1])) i--;
+  if (i <= 0) return i;
+  const word = isWordChar(value[i - 1]);
+  while (i > 0 && !isSpaceChar(value[i - 1]) && isWordChar(value[i - 1]) === word) i--;
+  return i;
+}
+
+function wordEndAfter(value, pos) {
+  const n = value.length;
+  let i = pos;
+  while (i < n && isSpaceChar(value[i])) i++;
+  if (i >= n) return i;
+  const word = isWordChar(value[i]);
+  while (i < n && !isSpaceChar(value[i]) && isWordChar(value[i]) === word) i++;
+  return i;
+}
+
+// Absolute box of a TextInput in root coordinates, matching the
+// positions emitInstance draws at: Yoga layouts summed up the parent
+// chain, minus each ancestor ScrollView's scroll offset (the Yoga
+// layout alone is pre-scroll). measureBox cannot do this — it has no
+// scroll correction.
+function inputBox(inst) {
+  const l = Sevyn.yogaGetLayout(inst.yogaId);
+  let pageX = 0;
+  let pageY = 0;
+  let n = inst;
+  while (n) {
+    const a = Sevyn.yogaGetLayout(n.yogaId);
+    pageX += a.x;
+    pageY += a.y;
+    if (n.type === "ScrollView") {
+      pageX -= n.scrollX || 0;
+      pageY -= n.scrollY || 0;
+    }
+    n = n.parent;
+  }
+  return { x: pageX, y: pageY, width: l.width, height: l.height };
+}
+
+// Character offset under a pointer point, for click-to-place and
+// drag-select. The row comes from the wrapped visual lines (the same
+// wrapping the display uses); within the row the caret goes to the
+// nearest char boundary. Points outside the box clamp to the nearest
+// edge, so dragging past an end extends the selection to it.
+// Left-aligned text is assumed, matching the caret math in
+// emitInstance.
+function offsetAtPoint(inst, px, py) {
+  const box = inputBox(inst);
+  const font = fontOf(inst);
+  const multiline = !!(inst.props && inst.props.multiline);
+  const text = textInputValueText(inst);
+  const lines = visualLines(text, font.size, font.bold, multiline ? box.width : 0);
+  const lineH = font.size * 1.25;
+  let row = Math.floor((py - box.y) / lineH);
+  row = Math.max(0, Math.min(lines.length - 1, row));
+  const line = lines[row];
+  const localX = px - box.x;
+  let best = line.start;
+  let bestDist = Infinity;
+  for (let i = line.start; i <= line.end; i++) {
+    const w =
+      i === line.start
+        ? 0
+        : Sevyn.measureText(text.slice(line.start, i), font.size, font.bold, 0).width;
+    const d = Math.abs(localX - w);
+    if (d < bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
 // Text copy/cut read: the selection, or the whole field value when
-// the selection is collapsed (interim until unit 3 — with no way to
-// select a range yet, copy must still work end to end).
+// the selection is collapsed — with a selection model the range is
+// what gets copied; with no selection, copying the whole field is
+// the deliberate fallback (an API key field is copied whole, not
+// left empty, when nothing is selected).
 function selectionTextFor(inst) {
   const value = textInputValue(inst);
   const { start, end } = selectionRangeFor(inst);
@@ -646,9 +830,10 @@ function clipboardWrite(text) {
 function focusInstance(inst) {
   focusedInstance = inst;
   if (inst && inst.type === "TextInput") {
-    inst.caretOffset = textInputValue(inst).length;
-    inst.selectionStart = inst.caretOffset;
-    inst.selectionEnd = inst.caretOffset;
+    // Focus puts the caret at the end of the value with no selection;
+    // a pointer press on the input re-places it (click-to-place) right
+    // after this, and a keyboard focus keeps the end position.
+    setSelectionState(inst, textInputValue(inst).length, null);
   }
 }
 
@@ -756,24 +941,33 @@ const KEYMAP = {
 // Keys for the focused TextInput. Returns true when the key is
 // consumed (no focus movement), false for Tab/Escape, which fall
 // through to the focus handling below. Typing, Backspace, and Delete
-// edit at the caret offset; Left/Right/Home/End move it; Up/Down move
-// between visual lines when multiline (single-line: swallowed, never
-// a focus move — the M4 behaviour, kept). Ctrl+C/X/V copy, cut, and
-// paste through the host clipboard (gap unit 2); any other
-// Ctrl+printable is swallowed, never typed.
+// edit at the caret offset, replacing the selection when one exists;
+// Left/Right/Home/End move it (Shift extends the selection,
+// Ctrl+Left/Right jump by word, Shift+Ctrl extends by word);
+// Up/Down move between visual lines when multiline (single-line:
+// swallowed, never a focus move — the M4 behaviour, kept). Ctrl+C/X/V
+// copy, cut, and paste through the host clipboard (gap unit 2),
+// operating on the selection; any other Ctrl+printable is swallowed,
+// never typed.
 function handleTextInputKey(inst, ev) {
   const props = inst.props || {};
   const value = textInputValue(inst);
   const multiline = !!props.multiline;
   const offset = caretOffsetFor(inst);
   const change = (next, nextOffset) => {
+    const prev = selectionRangeFor(inst);
     if (typeof props.onChangeText === "function") props.onChangeText(next);
     // Clamp against the NEW value's length: props.value is still the
     // old value until the state update flushes.
-    inst.caretOffset = Math.max(0, Math.min(next.length, nextOffset));
-    // An edit collapses the selection to the new caret.
-    inst.selectionStart = inst.caretOffset;
-    inst.selectionEnd = inst.caretOffset;
+    const caret = Math.max(0, Math.min(next.length, nextOffset));
+    // An edit collapses the selection to the new caret. The notified
+    // range uses the new length explicitly — selectionRangeFor would
+    // clamp against the still-old props.value.
+    inst.caretOffset = caret;
+    inst.selectionAnchor = null;
+    inst.selectionStart = caret;
+    inst.selectionEnd = caret;
+    notifySelectionChange(inst, prev, { start: caret, end: caret });
   };
   // Copy/paste/cut (gap unit 2): Ctrl+C/X/V, using the modifier state
   // unit 1 puts on the event. A Ctrl+letter that is not C/X/V is
@@ -823,32 +1017,66 @@ function handleTextInputKey(inst, ev) {
       return false;
     case 28: // Enter — submit, or a newline when multiline.
       if (multiline) {
-        change(value.slice(0, offset) + "\n" + value.slice(offset), offset + 1);
+        // A newline replaces the selection, like typed text.
+        const { start, end } = selectionRangeFor(inst);
+        change(value.slice(0, start) + "\n" + value.slice(end), start + 1);
       } else if (typeof props.onSubmitEditing === "function") {
         props.onSubmitEditing();
       }
       return true;
-    case 14: // Backspace — delete the char before the caret.
-      if (offset > 0) {
+    case 14: {
+      // Backspace — delete the selection, else the char
+      // before the caret.
+      const { start, end } = selectionRangeFor(inst);
+      if (start !== end) {
+        change(value.slice(0, start) + value.slice(end), start);
+      } else if (offset > 0) {
         change(value.slice(0, offset - 1) + value.slice(offset), offset - 1);
       }
       return true;
-    case 111: // Delete — delete the char at the caret.
-      if (offset < value.length) {
+    }
+    case 111: {
+      // Delete — delete the selection, else the char at the
+      // caret.
+      const { start, end } = selectionRangeFor(inst);
+      if (start !== end) {
+        change(value.slice(0, start) + value.slice(end), start);
+      } else if (offset < value.length) {
         change(value.slice(0, offset) + value.slice(offset + 1), offset);
       }
       return true;
-    case 105: // Left
-      setCaretOffset(inst, offset - 1);
+    }
+    case 105: // Left — plain: move the caret; Shift: extend the
+      // selection; Ctrl: jump by word (Shift+Ctrl extends by word).
+      if (ev.ctrl) {
+        const target = wordStartBefore(value, offset);
+        if (ev.shift) extendCaretTo(inst, target);
+        else setCaretOffset(inst, target);
+      } else if (ev.shift) {
+        extendCaretTo(inst, offset - 1);
+      } else {
+        setCaretOffset(inst, offset - 1);
+      }
       return true;
-    case 106: // Right
-      setCaretOffset(inst, offset + 1);
+    case 106: // Right — mirror of Left.
+      if (ev.ctrl) {
+        const target = wordEndAfter(value, offset);
+        if (ev.shift) extendCaretTo(inst, target);
+        else setCaretOffset(inst, target);
+      } else if (ev.shift) {
+        extendCaretTo(inst, offset + 1);
+      } else {
+        setCaretOffset(inst, offset + 1);
+      }
       return true;
-    case 102: // Home
-      setCaretOffset(inst, 0);
+    case 102: // Home — start of the line (Ctrl: start of the value,
+      // the same for a single line).
+      if (ev.shift) extendCaretTo(inst, 0);
+      else setCaretOffset(inst, 0);
       return true;
-    case 107: // End
-      setCaretOffset(inst, value.length);
+    case 107: // End — end of the line (Ctrl: end of the value).
+      if (ev.shift) extendCaretTo(inst, value.length);
+      else setCaretOffset(inst, value.length);
       return true;
     case 103: // Up
     case 108: // Down
@@ -867,18 +1095,24 @@ function handleTextInputKey(inst, ev) {
         const j = ev.key === 103 ? i - 1 : i + 1;
         if (j >= 0 && j < lines.length) {
           const target = lines[j];
-          setCaretOffset(inst, Math.min(target.start + col, target.end));
+          const next = Math.min(target.start + col, target.end);
+          if (ev.shift) extendCaretTo(inst, next);
+          else setCaretOffset(inst, next);
         }
       }
       return true;
     default: {
       const pair = KEYMAP[ev.key];
       if (pair && typeof props.onChangeText === "function") {
-        // Insert at the caret, not at the end.
-        change(
-          value.slice(0, offset) + (ev.shift ? pair[1] : pair[0]) + value.slice(offset),
-          offset + 1,
-        );
+        // Insert at the caret — replacing the selection when one
+        // exists, like Backspace/Delete above.
+        const { start, end } = selectionRangeFor(inst);
+        const ch = ev.shift ? pair[1] : pair[0];
+        if (start !== end) {
+          change(value.slice(0, start) + ch + value.slice(end), start + 1);
+        } else {
+          change(value.slice(0, offset) + ch + value.slice(offset), offset + 1);
+        }
       }
       return true;
     }
@@ -925,7 +1159,29 @@ function handleKey(ev) {
   presentRoot();
 }
 
+// Drag-select state (gap unit 3): { inst, anchor } while a
+// left-button drag on a TextInput is active, null otherwise.
+let textDrag = null;
+
+// Left button: the Wayland host forwards the Linux input code
+// (0x110 left, 0x111 right — wayland.h); the headless event-file
+// driver and the mock tests send 1. Anything else (right, middle)
+// is not a drag-select button. An event with no button at all is
+// treated as a left press, matching the old tap behaviour.
+function isLeftButton(ev) {
+  return ev.button === 0x110 || ev.button === 1 || ev.button === undefined;
+}
+
 function handlePointer(ev) {
+  // Drag-select (gap unit 3): a left-button press on a TextInput
+  // starts a drag; motion extends the selection from the press
+  // anchor; release (or the pointer leaving the surface) ends it.
+  // The host forwards motion whether or not a button is held, so
+  // the drag flag — not the motion event — decides whether motion
+  // selects. A "leave" arrives as a far-off motion below; ending
+  // the drag here keeps it from dragging the selection to an edge.
+  if (ev.type === "leave") textDrag = null;
+  if (ev.type === "button" && !ev.pressed) textDrag = null;
   // Motion arrives under three type strings, and pointer-move
   // listeners need all of them. The real Wayland host forwards
   // pointer motion as "motion" (wayland.cc onPointerMotion) and the
@@ -948,6 +1204,17 @@ function handlePointer(ev) {
   }
   if (moveEv) {
     let changed = false;
+    // Drag-select: motion while a TextInput drag is active extends
+    // the selection from the press anchor to the char under the
+    // pointer. Only a moved caret re-presents — motion that stays
+    // inside the same char is a no-op.
+    if (textDrag) {
+      const off = offsetAtPoint(textDrag.inst, moveEv.x, moveEv.y);
+      if (off !== caretOffsetFor(textDrag.inst)) {
+        setSelectionState(textDrag.inst, off, textDrag.anchor);
+        changed = true;
+      }
+    }
     for (const fn of Array.from(pointerMoveListeners)) {
       try {
         if (fn(moveEv) === true) changed = true;
@@ -980,8 +1247,22 @@ function handlePointer(ev) {
       " label " +
       (inst && inst.props ? inst.props.accessibilityLabel || "" : ""),
   );
-  if (!inst) return;
+  if (!inst) {
+    textDrag = null;
+    return;
+  }
   focusInstance(inst);
+  if (inst.type === "TextInput" && isLeftButton(ev)) {
+    // Left press on a TextInput starts a drag-select: the anchor is
+    // the char under the pointer (click-to-place — a press with no
+    // motion leaves the caret there, replacing the old tap-focus
+    // behaviour that always put the caret at the end).
+    const off = offsetAtPoint(inst, ev.x, ev.y);
+    textDrag = { inst, anchor: off };
+    setSelectionState(inst, off, off);
+  } else {
+    textDrag = null;
+  }
   if (inst.props && inst.props.onPress) {
     inst.props.onPress();
     // Pinpoint a stuck tap: if the loop wedges inside the navigation,
