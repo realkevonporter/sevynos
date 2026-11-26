@@ -172,6 +172,7 @@ check("unmount frees yoga nodes", () => {
 // --- TextInput (M4) -----------------------------------------------------
 const submitted = [];
 const inputClicks = [];
+const selections = [];
 let inputValue = "";
 let noteValue = "";
 function InputApp() {
@@ -186,6 +187,7 @@ function InputApp() {
       value,
       onChangeText: setValue,
       onSubmitEditing: () => submitted.push(value),
+      onSelectionChange: (e) => selections.push(e.nativeEvent.selection),
       placeholder: "type a command",
       autoFocus: true,
       style: {
@@ -378,6 +380,200 @@ check("TextInput clipboard: paste strips newlines in a single-line input", () =>
   assert.equal(inputValue, "aA/aA/abcdef", "newlines stripped on single-line paste");
 });
 
+// --- TextInput selection (gap unit 3, audit #9/#24) -------------------
+// The mock measures 0.55 * size per char, so at fontSize 16 a char
+// boundary sits at hit.x + i * 8.8. The command input holds
+// "aA/aA/abcdef" (12 chars) with the caret at the end from here on.
+function keyShiftCtrl(code) {
+  Sevyn._handlers.key({ key: code, pressed: true, ctrl: true, shift: true });
+}
+function inputInstByPlaceholder(ph) {
+  for (const inst of renderer._instancesByYogaId.values()) {
+    if (inst.type === "TextInput" && inst.props && inst.props.placeholder === ph)
+      return inst;
+  }
+  return null;
+}
+function selectionOf(inst) {
+  assert.ok(inst, "input instance exists");
+  return {
+    start: inst.selectionStart,
+    end: inst.selectionEnd,
+    caret: inst.caretOffset,
+  };
+}
+function commandSelection() {
+  return selectionOf(inputInstByPlaceholder("type a command"));
+}
+function hitRect(h, color) {
+  const hit = lastPresent().ops.find(
+    (o) => o.type === "rect" && o.h === h && o.color === color,
+  );
+  assert.ok(hit, "hit rect exists");
+  return hit;
+}
+function pressAt(x, y, button, nodeId) {
+  Sevyn._handlers.pointer({
+    type: "button",
+    x,
+    y,
+    button,
+    pressed: true,
+    nodeId,
+  });
+}
+function releaseAt(x, y, button) {
+  Sevyn._handlers.pointer({ type: "button", x, y, button, pressed: false });
+}
+function moveTo(x, y) {
+  Sevyn._handlers.pointer({ type: "motion", x, y, button: 0, pressed: false });
+}
+function highlights() {
+  return lastPresent().ops.filter((o) => o.type === "rect" && o.color === "#3b82f680");
+}
+
+check(
+  "TextInput selection: Shift+Left/Right extends and shrinks, Backspace deletes the range",
+  () => {
+    assert.equal(inputValue, "aA/aA/abcdef");
+    key(105, true);
+    key(105, true);
+    key(105, true); // Shift+Left x3 — caret 12 -> 9, anchor 12
+    assert.deepEqual(commandSelection(), { start: 9, end: 12, caret: 9 });
+    assert.equal(highlights().length, 1, "one highlight rect for the range");
+    const hit = hitRect(32, "#1f2937");
+    assert.equal(caret().x, hit.x + 9 * 8.8 + 1, "caret at the selection's focus end");
+    key(106, true); // Shift+Right — shrink from the focus end
+    assert.deepEqual(commandSelection(), { start: 10, end: 12, caret: 10 });
+    key(14); // Backspace — deletes the "ef" selection
+    assert.equal(inputValue, "aA/aA/abcd");
+    assert.deepEqual(commandSelection(), { start: 10, end: 10, caret: 10 });
+    assert.equal(highlights().length, 0, "no highlight once collapsed");
+    key(18);
+    key(33); // type "ef" back
+    assert.equal(inputValue, "aA/aA/abcdef");
+  },
+);
+
+check("TextInput selection: Ctrl+C/X copy and cut the selected range", () => {
+  key(105, true);
+  key(105, true);
+  key(105, true); // Shift+Left x3 — select "def" [9,12]
+  keyCtrl(46); // Ctrl+C
+  assert.equal(
+    Sevyn.clipboardRead(),
+    "def",
+    "copy wrote the selection, not the whole value",
+  );
+  assert.equal(inputValue, "aA/aA/abcdef", "copy did not change the value");
+  keyCtrl(45); // Ctrl+X
+  assert.equal(Sevyn.clipboardRead(), "def", "cut copied before deleting");
+  assert.equal(inputValue, "aA/aA/abc", "cut deleted only the selection");
+  assert.deepEqual(commandSelection(), { start: 9, end: 9, caret: 9 });
+  keyCtrl(47); // Ctrl+V — paste it back
+  assert.equal(inputValue, "aA/aA/abcdef", "paste restored the cut text");
+  assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+});
+
+check("TextInput selection: Shift+Home/End select to the line ends", () => {
+  key(102, true); // Shift+Home
+  assert.deepEqual(commandSelection(), { start: 0, end: 12, caret: 0 });
+  key(107, true); // Shift+End — back to the end, collapsed
+  assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+  key(102); // Home
+  key(106);
+  key(106);
+  key(106);
+  key(106); // Right x4 — caret 4
+  key(107, true); // Shift+End
+  assert.deepEqual(commandSelection(), { start: 4, end: 12, caret: 12 });
+  key(107); // End — collapse
+  assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+});
+
+check(
+  "TextInput selection: Ctrl+Left/Right jump by word, Shift+Ctrl extends by word",
+  () => {
+    // Value "aA/aA/abcdef": word runs are aA | / | aA | / | abcdef.
+    keyCtrl(105); // Ctrl+Left: 12 -> 6
+    assert.equal(commandSelection().caret, 6);
+    keyCtrl(105); // 6 -> 5 (past the "/")
+    assert.equal(commandSelection().caret, 5);
+    keyCtrl(105); // 5 -> 3
+    assert.equal(commandSelection().caret, 3);
+    keyCtrl(106); // Ctrl+Right: 3 -> 5
+    assert.equal(commandSelection().caret, 5);
+    keyCtrl(106); // 5 -> 6
+    assert.equal(commandSelection().caret, 6);
+    keyShiftCtrl(106); // Ctrl+Shift+Right: [6,12]
+    assert.deepEqual(commandSelection(), { start: 6, end: 12, caret: 12 });
+    keyShiftCtrl(105); // Ctrl+Shift+Left: back to 6, collapsed
+    assert.deepEqual(commandSelection(), { start: 6, end: 6, caret: 6 });
+    keyShiftCtrl(106); // Ctrl+Shift+Right: [6,12] again
+    assert.deepEqual(commandSelection(), { start: 6, end: 12, caret: 12 });
+    key(106); // plain Right collapses to the caret
+    assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+  },
+);
+
+check("TextInput selection: pointer drag selects the range, release ends it", () => {
+  const hit = hitRect(32, "#1f2937");
+  const charX = (i) => hit.x + i * 8.8;
+  const midY = hit.y + 16;
+  // 0x110 is the real host's left-button code (wayland.h).
+  pressAt(charX(2), midY, 0x110, hit.nodeId);
+  assert.deepEqual(commandSelection(), { start: 2, end: 2, caret: 2 });
+  moveTo(charX(8), midY);
+  assert.deepEqual(commandSelection(), { start: 2, end: 8, caret: 8 });
+  moveTo(charX(5), midY);
+  assert.deepEqual(commandSelection(), { start: 2, end: 5, caret: 5 });
+  moveTo(charX(0), midY);
+  assert.deepEqual(commandSelection(), { start: 0, end: 2, caret: 0 });
+  releaseAt(charX(0), midY, 0x110);
+  assert.deepEqual(commandSelection(), { start: 0, end: 2, caret: 0 });
+  moveTo(charX(10), midY); // motion after release selects nothing
+  assert.deepEqual(commandSelection(), { start: 0, end: 2, caret: 0 });
+  keyCtrl(46); // copy the drag selection
+  assert.equal(Sevyn.clipboardRead(), "aA", "copy wrote the drag selection");
+});
+
+check(
+  "TextInput selection: click places the caret, right-button does not drag, onSelectionChange fires",
+  () => {
+    const hit = hitRect(32, "#1f2937");
+    const charX = (i) => hit.x + i * 8.8;
+    const midY = hit.y + 16;
+    // Button 1 is the headless driver's left-button value.
+    pressAt(charX(4), midY, 1, hit.nodeId);
+    releaseAt(charX(4), midY, 1);
+    assert.deepEqual(commandSelection(), { start: 4, end: 4, caret: 4 });
+    // Right button (0x111): focuses (caret to the end) but starts
+    // no drag — the motion after it selects nothing.
+    pressAt(charX(8), midY, 0x111, hit.nodeId);
+    moveTo(charX(2), midY);
+    releaseAt(charX(2), midY, 0x111);
+    assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+    // onSelectionChange: the last report matches the last change.
+    const before = selections.length;
+    key(105, true);
+    key(105, true); // Shift+Left x2 from 12 -> [10,12]
+    assert.deepEqual(commandSelection(), { start: 10, end: 12, caret: 10 });
+    assert.ok(selections.length > before, "onSelectionChange fired");
+    assert.deepEqual(selections[selections.length - 1], { start: 10, end: 12 });
+  },
+);
+
+check("TextInput selection: typing replaces the selection", () => {
+  // Selection [10,12] ("ef") from the check above.
+  key(44, true); // Shift+Z — replaces "ef" with "Z"
+  assert.equal(inputValue, "aA/aA/abcdZ", "typing replaced the selection");
+  assert.deepEqual(commandSelection(), { start: 11, end: 11, caret: 11 });
+  key(14); // Backspace removes the Z
+  key(18);
+  key(33); // type "ef" back
+  assert.equal(inputValue, "aA/aA/abcdef", "value restored for the checks below");
+});
+
 // --- TextInput multiline (GF65 fix) ------------------------------------
 check("TextInput multiline: Tab reaches the note input", () => {
   key(15); // Tab — input -> button
@@ -426,6 +622,22 @@ check("TextInput multiline clipboard: paste keeps newlines", () => {
     "aaaa bbbb cccc dddd\npasted\nline",
     "multiline paste kept the newline",
   );
+});
+
+check("TextInput selection: drag-select across wrapped rows in a multiline input", () => {
+  // Note value "aaaa bbbb cccc dddd\npasted\nline", wrapped at
+  // 120px: row 0 "aaaa bbbb" [0,9), row 1 "cccc dddd" [10,19),
+  // row 2 "pasted" [20,26), row 3 "line" [27,31). Line height 20px.
+  const hit = hitRect(64, "#312e81");
+  const note = inputInstByPlaceholder("type a note");
+  const noteSelection = () => selectionOf(note);
+  pressAt(hit.x + 2 * 8.8, hit.y + 10, 0x110, hit.nodeId);
+  assert.deepEqual(noteSelection(), { start: 2, end: 2, caret: 2 });
+  moveTo(hit.x + 3 * 8.8, hit.y + 30); // row 1, char 13
+  assert.deepEqual(noteSelection(), { start: 2, end: 13, caret: 13 });
+  releaseAt(hit.x + 3 * 8.8, hit.y + 30, 0x110);
+  assert.deepEqual(noteSelection(), { start: 2, end: 13, caret: 13 });
+  assert.equal(highlights().length, 2, "one highlight rect per covered row");
 });
 
 // Restore the shell tree for a clean end state.
