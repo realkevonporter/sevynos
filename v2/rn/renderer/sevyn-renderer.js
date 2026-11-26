@@ -34,7 +34,7 @@
 // in gap unit 3, audit #9/#24): a controlled input, single-line by
 // default. Props: value, onChangeText, onSubmitEditing, placeholder,
 // autoFocus, multiline, secureTextEntry, onSelectionChange, selection,
-// onFindRequest, onEscape. The focused input eats printable keys (US
+// onFindRequest, onSaveRequest, onEscape. The focused input eats printable keys (US
 // keycode map below, Shift-aware), Backspace, Delete, and Enter (submit
 // — or a newline when multiline); Tab moves focus, Escape blurs (or
 // calls onEscape when the input has one — the app owns Escape then).
@@ -48,8 +48,13 @@
 // Backspace/Delete/typing replace it. Copy/paste/cut (gap unit 2):
 // Ctrl+C/X/V through the host clipboard (Sevyn.clipboardRead/Write),
 // operating on the selection — a collapsed selection copies/cuts the
-// whole value. A Ctrl+letter that is not C/X/V/A/Z/Y/F is swallowed,
+// whole value. A Ctrl+letter that is not C/X/V/A/Z/Y/F/S is swallowed,
 // never typed.
+//
+// Save (gap unit 6, audit #7): Ctrl+S on an input with
+// onSaveRequest calls it (the app saves — Notes writes the note to
+// /data/notes and shows "Saved."); without the prop it is swallowed
+// like any other Ctrl+letter.
 //
 // Find in app (gap unit 5, audit #6): the app drives find through
 // three props. Ctrl+F on an input with onFindRequest calls it (the app
@@ -1070,8 +1075,9 @@ const KEYMAP = {
 // operating on the selection; Ctrl+A selects the whole value and
 // Ctrl+Z / Ctrl+Y undo and redo through the per-input stack
 // (gap unit 4); Ctrl+F calls props.onFindRequest when the input has
-// one (gap unit 5 — the app opens its find field); any other
-// Ctrl+printable is swallowed, never typed.
+// one (gap unit 5 — the app opens its find field); Ctrl+S calls
+// props.onSaveRequest when the input has one (gap unit 6 — the app
+// saves); any other Ctrl+printable is swallowed, never typed.
 function handleTextInputKey(inst, ev) {
   const props = inst.props || {};
   const value = textInputValue(inst);
@@ -1097,12 +1103,22 @@ function handleTextInputKey(inst, ev) {
   };
   // Copy/paste/cut (gap unit 2) and select-all / undo / redo
   // (gap unit 4): Ctrl+A/Z/Y, using the modifier state unit 1 puts
-  // on the event. A Ctrl+letter that is not C/X/V/A/Z/Y/F is
+  // on the event. A Ctrl+letter that is not C/X/V/A/Z/Y/F/S is
   // swallowed — it is a shortcut, not text (without this Ctrl+C
   // would also type a 'c'). Other Ctrl keys (arrows, Home/End, ...)
   // fall through to the switch below, unchanged.
   if (ev.ctrl) {
     switch (ev.key) {
+      case 31: // S — save (gap unit 6): the app owns the save,
+        // so this only fires when the input opts in with
+        // onSaveRequest. Without the prop it is swallowed like any
+        // other Ctrl+letter (returning true here, not breaking —
+        // a break would fall through to the switch below and type
+        // an 's').
+        if (typeof props.onSaveRequest === "function") {
+          props.onSaveRequest();
+        }
+        return true;
       case 33: // F — find in app (gap unit 5): the app owns the
         // find UI, so this only fires when the input opts in with
         // onFindRequest. Without the prop it is swallowed like any
