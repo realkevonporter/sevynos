@@ -640,6 +640,62 @@ check("settings: channel switch applies and logs", () => {
   );
 });
 
+// Clipboard (gap unit 2): the known hit from the audit — the masked
+// Muse API key field accepts a pasted key. The mock clipboard stands
+// in for another app's copy: the key arrives through the host
+// clipboard (Sevyn.clipboardRead), not the keyboard, and the save
+// path proves the pasted value — not a typed one — reaches the
+// backend. (The key itself is a fake test string.)
+check("settings: paste a Muse API key with Ctrl+V, save it", () => {
+  const seen = [];
+  const handler = (cmd) => {
+    seen.push(cmd);
+    if (cmd === "sevyn update status") return "0\nversion=1 channel=nightly active=A\n";
+    if (cmd === "sevyn ai list") return "0\nselected=echo-ai backends=echo-ai,plan-ai\n";
+    if (cmd === "sevyn code status")
+      return "0\nrunning: yes\nserving: yes\nversion: 4.105.0\nterminal-shell: /usr/local/bin/sevyn\n";
+    if (cmd === "sevyn ai relay status")
+      return "0\nrelay agent: disabled\nagent: not running\npaired: unpaired\ndaemon relay: off\n";
+    return "0\n";
+  };
+  loadAs(
+    {
+      id: "settings",
+      name: "Settings",
+      color: "#6b7280",
+      glyph: "S",
+      permissions: ["cli.exec"],
+    },
+    settingsBundle,
+    handler,
+  );
+  Sevyn.clipboardWrite("sk-test-pasted-key-123");
+  // Focus order (see the channel check above): the Muse API key
+  // input is the 12th focusable.
+  pressTab(12);
+  Sevyn._handlers.key({ key: 47, pressed: true, ctrl: true }); // Ctrl+V
+  let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t === "•".repeat(22)),
+    "pasted key shown masked (22 bullets), texts=" + JSON.stringify(texts),
+  );
+  pressTab(1); // Save key
+  pressEnter();
+  assert.ok(
+    seen.includes('sevyn files write /tmp/muse-key.tmp "sk-test-pasted-key-123"'),
+    "pasted key written to the temp file, seen=" + JSON.stringify(seen),
+  );
+  assert.ok(
+    seen.includes("sevyn ai key --file /tmp/muse-key.tmp"),
+    "key handed to sevyn ai key --file",
+  );
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Muse API key saved.")),
+    "save confirmed",
+  );
+});
+
 check("settings: wallpaper style + color apply and log", () => {
   let channel = "nightly";
   let aiSelected = "echo-ai";

@@ -497,6 +497,18 @@ const Sevyn = {
     logs.push("UNMAXIMIZEAPP");
     return true;
   },
+  // Text clipboard (gap unit 2): the host's in-memory selection.
+  // The real host bridges the Wayland data-device selection; the
+  // mock holds the string so renderer tests can prove copy/paste
+  // round-trips through Sevyn.clipboardRead/Write.
+  _clipboard: "",
+  clipboardRead() {
+    return Sevyn._clipboard;
+  },
+  clipboardWrite(text) {
+    Sevyn._clipboard = typeof text === "string" ? text : "";
+    return true;
+  },
   // One-shot `sevyn` CLI run (M4). Records the call; tests answer
   // through _execHandler (a function of cmdline -> "code\noutput"),
   // defaulting to a bare success so template tests never see it.
@@ -680,6 +692,7 @@ const Sevyn = {
   _reset() {
     Sevyn._status = { battery: "87", wifi: "on", volume: "43" };
     Sevyn._execHandler = null;
+    Sevyn._clipboard = "";
     Sevyn._audioReset();
     nodes.clear();
     // NOTE: nextId is deliberately NOT reset. Yoga node IDs must be

@@ -47,13 +47,22 @@ The host installs a `Sevyn` global before running the bundle:
   broadcasts. Pointer events: `{type:'move'|'button'|'axis', x, y,
 button, pressed, nodeId?}` — `nodeId` is set on button-press only:
   the host hit-tests the last presented ops, topmost first. Key
-  events: `{key: <linux evdev keycode>, pressed, shift}` — `shift` is
-  true while either Shift key is held (M4: the host tracks evdev 42/54
-  and consumes the Shift keys themselves, so they never arrive as
-  `key` events; the renderer maps the shifted character from the
-  keycode + `shift`). Status events:
+  events: `{key: <linux evdev keycode>, pressed, shift, ctrl, alt,
+super, meta}` — the modifiers are true while the corresponding keys
+  are held (M4: the host tracks evdev 42/54 and consumes the Shift
+  keys themselves, so they never arrive as `key` events; the renderer
+  maps the shifted character from the keycode + `shift`; unit 1 added
+  ctrl/alt/super/meta the same way, and unit 2 uses `ctrl` for
+  TextInput copy/paste/cut). Status events:
   `{key, value}`. There is exactly one handler of each kind, owned by
   the renderer — the shell must not register its own.
+- `Sevyn.clipboardRead()` → `string`, `Sevyn.clipboardWrite(text)` →
+  `bool` — the text clipboard (gap unit 2): the Wayland data-device
+  selection in the real host, an in-memory string in headless mode.
+  The renderer drives them from TextInput Ctrl+C/X/V; no permission
+  gate (it is the user's own text), and the contents are never
+  logged. Copy offers `text/plain`; paste reads the selection's
+  `text/plain` (or `text/plain;...` variant).
 - `Sevyn.getStatus()` — last known `{battery, wifi, volume}` snapshot.
   M3: gated by the `status.read` permission — an app without it gets
   `{}` and its status subscriber never starts (the shell always has it).

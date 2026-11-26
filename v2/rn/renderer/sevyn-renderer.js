@@ -16,9 +16,11 @@
 //     nodeId is set on button-press only: the yoga id of the topmost
 //     hit op (host hit-tests the last presented ops).
 //   Sevyn.onKey(ev)      ev = {key: <linux keycode>, pressed: bool,
-//                               shift: bool}
-//     shift is the state of either Shift key at the moment of the
-//     event (tracked by keycode in the host — it reads no xkb keymap).
+//                               shift: bool, ctrl: bool, alt: bool,
+//                               super: bool, meta: bool}
+//     shift/ctrl/alt/super/meta are the modifier states at the moment
+//     of the event (tracked by keycode in the host — it reads no xkb
+//     keymap; unit 1 added ctrl/alt/super/meta next to shift).
 //   Sevyn.onStatus(ev)   ev = {key, value} — statusd push.
 //   Sevyn.onAppEvent(line) line = "EVENT LAUNCHED files" — appd push.
 //   Sevyn.listApps()     -> [{id, name, version, color, glyph,
@@ -36,7 +38,11 @@
 // when multiline); Tab moves focus, Escape blurs. The caret moves
 // with Left/Right/Home/End and, when multiline, Up/Down between
 // wrapped lines; it is drawn from the value (masked when secure),
-// never the placeholder. No selection — still M4 scope.
+// never the placeholder. Copy/paste/cut (gap unit 2): Ctrl+C/X/V
+// through the host clipboard (Sevyn.clipboardRead/Write), using the
+// minimal selection range below — a collapsed selection copies/cuts
+// the whole value until unit 3 lands the selection model. A
+// Ctrl+letter that is not C/X/V is swallowed, never typed.
 //
 // The renderer keeps a yoga-id -> instance map for hit routing and a
 // focus list for keyboard activation. ScrollView scrolls via
@@ -591,12 +597,58 @@ function caretOffsetFor(inst) {
 
 function setCaretOffset(inst, n) {
   inst.caretOffset = Math.max(0, Math.min(textInputValue(inst).length, n));
+  // A plain caret move collapses the selection to the caret (unit 3's
+  // Shift+arrows set the range explicitly after moving it).
+  inst.selectionStart = inst.caretOffset;
+  inst.selectionEnd = inst.caretOffset;
+}
+
+// Selection range for copy/cut/paste (gap unit 2): [start, end) into
+// the value, clamped, start <= end. The range lives on the instance
+// and is collapsed at the caret; nothing sets a non-collapsed range
+// yet — that is unit 3's selection model (gap #9).
+function selectionRangeFor(inst) {
+  const value = textInputValue(inst);
+  const caret = caretOffsetFor(inst);
+  const start = typeof inst.selectionStart === "number" ? inst.selectionStart : caret;
+  const end = typeof inst.selectionEnd === "number" ? inst.selectionEnd : caret;
+  const lo = Math.max(0, Math.min(value.length, start));
+  const hi = Math.max(0, Math.min(value.length, end));
+  return { start: Math.min(lo, hi), end: Math.max(lo, hi) };
+}
+
+// Text copy/cut read: the selection, or the whole field value when
+// the selection is collapsed (interim until unit 3 — with no way to
+// select a range yet, copy must still work end to end).
+function selectionTextFor(inst) {
+  const value = textInputValue(inst);
+  const { start, end } = selectionRangeFor(inst);
+  if (start === end) return value;
+  return value.slice(start, end);
+}
+
+// Host clipboard (gap unit 2): Sevyn.clipboardRead/Write are the
+// host functions (the Wayland selection in the real host, an
+// in-memory string in the mock/headless host). Guarded: an older
+// host without them pastes nothing instead of throwing.
+function clipboardRead() {
+  if (typeof Sevyn.clipboardRead === "function") {
+    const text = Sevyn.clipboardRead();
+    return typeof text === "string" ? text : "";
+  }
+  return "";
+}
+
+function clipboardWrite(text) {
+  if (typeof Sevyn.clipboardWrite === "function") Sevyn.clipboardWrite(text);
 }
 
 function focusInstance(inst) {
   focusedInstance = inst;
   if (inst && inst.type === "TextInput") {
     inst.caretOffset = textInputValue(inst).length;
+    inst.selectionStart = inst.caretOffset;
+    inst.selectionEnd = inst.caretOffset;
   }
 }
 
@@ -706,7 +758,9 @@ const KEYMAP = {
 // through to the focus handling below. Typing, Backspace, and Delete
 // edit at the caret offset; Left/Right/Home/End move it; Up/Down move
 // between visual lines when multiline (single-line: swallowed, never
-// a focus move — the M4 behaviour, kept).
+// a focus move — the M4 behaviour, kept). Ctrl+C/X/V copy, cut, and
+// paste through the host clipboard (gap unit 2); any other
+// Ctrl+printable is swallowed, never typed.
 function handleTextInputKey(inst, ev) {
   const props = inst.props || {};
   const value = textInputValue(inst);
@@ -717,7 +771,52 @@ function handleTextInputKey(inst, ev) {
     // Clamp against the NEW value's length: props.value is still the
     // old value until the state update flushes.
     inst.caretOffset = Math.max(0, Math.min(next.length, nextOffset));
+    // An edit collapses the selection to the new caret.
+    inst.selectionStart = inst.caretOffset;
+    inst.selectionEnd = inst.caretOffset;
   };
+  // Copy/paste/cut (gap unit 2): Ctrl+C/X/V, using the modifier state
+  // unit 1 puts on the event. A Ctrl+letter that is not C/X/V is
+  // swallowed — it is a shortcut, not text (without this Ctrl+C
+  // would also type a 'c'). Other Ctrl keys (arrows, Home/End, ...)
+  // fall through to the switch below, unchanged.
+  if (ev.ctrl) {
+    switch (ev.key) {
+      case 46: // C — copy the selection (whole value when collapsed).
+        clipboardWrite(selectionTextFor(inst));
+        return true;
+      case 45: {
+        // X — cut: copy, then delete the selection (or the whole value).
+        clipboardWrite(selectionTextFor(inst));
+        const { start, end } = selectionRangeFor(inst);
+        if (start !== end) {
+          change(value.slice(0, start) + value.slice(end), start);
+        } else if (value !== "") {
+          change("", 0);
+        }
+        return true;
+      }
+      case 47: {
+        // V — paste: replace the selection with the clipboard text.
+        const text = clipboardRead();
+        if (text !== "") {
+          const { start, end } = selectionRangeFor(inst);
+          // A single-line input cannot hold a newline: strip it (a
+          // pasted key never has one; a pasted paragraph stays one
+          // line). Multiline keeps newlines.
+          const insert = multiline ? text : text.replace(/[\r\n]+/g, "");
+          change(
+            value.slice(0, start) + insert + value.slice(end),
+            start + insert.length,
+          );
+        }
+        return true;
+      }
+      default:
+        if (KEYMAP[ev.key]) return true;
+        break;
+    }
+  }
   switch (ev.key) {
     case 15: // Tab — move focus.
     case 1: // Escape — blur.
