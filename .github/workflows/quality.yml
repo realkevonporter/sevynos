@@ -125,4 +125,5 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo build --manifest-path v2/rn/host-rs/Cargo.toml
+          cargo test -p sevyn-relay --manifest-path v2/rn/host-rs/Cargo.toml
           cargo fmt --check --manifest-path v2/rn/host-rs/Cargo.toml

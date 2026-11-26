@@ -64,7 +64,35 @@ if [ -z "$kernel" ]; then
 fi
 kernel_version="$(basename "$kernel" | sed 's/^vmlinuz-//')"
 
-for tool in busybox cpio curl gcc g++ pkg-config wayland-scanner python3 zstd modinfo cmake node npm openssl; do
+# Rust (Phase 2, relay agent): the relay is the first Rust binary
+# built into an image. build-deps.sh installs rustup into the
+# RUNNER's home ($HOME/.cargo), but this script runs under sudo,
+# where $HOME is /root and cargo is not on PATH — so resolve cargo
+# from the invoking user's home and put it on PATH here. A missing
+# toolchain fails loudly now, never as a silent relay-less image
+# later (the tools loop below then also sees `cargo`).
+CARGO_BIN="$(command -v cargo 2>/dev/null || true)"
+if [ -z "$CARGO_BIN" ] && [ -n "${SUDO_USER:-}" ]; then
+  _sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+  [ -z "$_sudo_home" ] && _sudo_home="/home/$SUDO_USER"
+  [ -x "$_sudo_home/.cargo/bin/cargo" ] && CARGO_BIN="$_sudo_home/.cargo/bin/cargo"
+fi
+if [ -z "$CARGO_BIN" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+  CARGO_BIN="$HOME/.cargo/bin/cargo"
+fi
+[ -n "$CARGO_BIN" ] || { echo "error: cargo not found (run v2/rn/host/build-deps.sh as the runner user first — it installs rustup 1.100.0 into the runner's \$HOME/.cargo)" >&2; exit 1; }
+PATH="$(dirname "$CARGO_BIN"):$PATH"
+export PATH
+# Under sudo rustup also loses its toolchain: it looks in
+# $HOME/.rustup (i.e. /root/.rustup — no default there), so point it
+# at the invoking user's rustup home, where build-deps.sh installed
+# 1.100.0. Only when that dir exists — a system cargo install has no
+# rustup home and must not be disturbed.
+_cargo_home="$(dirname "$(dirname "$CARGO_BIN")")"
+_rustup_home="$(dirname "$_cargo_home")/.rustup"
+[ -d "$_rustup_home" ] && export RUSTUP_HOME="$_rustup_home"
+
+for tool in busybox cpio curl gcc g++ pkg-config wayland-scanner python3 zstd modinfo cmake node npm openssl cargo; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "error: $tool not found" >&2
     exit 1
@@ -163,15 +191,40 @@ gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/sevyn-aid" \
 gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/muse-ai" \
   "$ROOT/ai/muse-ai.c" "$ROOT/loader/json.c" -lssl -lcrypto
 
+# The relay agent (Phase 2): the Rust TCP agent that takes tasks
+# from the cloud agent and drives them through the daemon's SESSION
+# verb. Release + --locked (the workspace lockfile must cover the
+# crate's deps — a stale lock fails loudly here). The build runs from
+# the workspace dir so rust-toolchain.toml pins 1.100.0 (the script
+# runs from the repo root, where no toolchain file applies and rustup
+# would fall back to whatever default the runner has). It uses a
+# scratch target dir under $BUILD_TMP, not the workspace target/:
+# this script runs under sudo, so a shared target dir would come
+# back root-owned and break the next runner-user cargo build. The
+# m4.5 image stages the REAL agent (the guest check drives a real
+# task through it, with the mock relay as the cloud peer).
+(
+  cd "$ROOT/rn/host-rs" || { echo "error: cannot cd to $ROOT/rn/host-rs" >&2; exit 1; }
+  CARGO_TARGET_DIR="$BUILD_TMP/cargo-target" \
+    cargo build --release --locked -p sevyn-relay \
+    || { echo "error: sevyn-relay cargo build failed" >&2; exit 1; }
+)
+cp "$BUILD_TMP/cargo-target/release/sevyn-relay" "$BUILD_TMP/sevyn-relay"
+[ -x "$BUILD_TMP/sevyn-relay" ] || { echo "error: sevyn-relay binary not built" >&2; exit 1; }
+
 # The update daemon + CLI (M8): sevyn-updated owns the A/B slots and
 # the feed check/download/apply flow; `sevyn` is the CLI (M4: update
 # + shell + files + code verbs, REPL mode). The daemon links OpenSSL
-# for Ed25519 feed verification.
+# for Ed25519 feed verification; the CLI links it too (Phase 2:
+# Ed25519 relay keypair generation).
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
   "$ROOT/update/sevyn-updated.c" "$ROOT/update/canonical.c" \
   "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lcrypto
+# The CLI links -lcrypto (Phase 2): `sevyn ai relay on` generates
+# the device Ed25519 keypair with OpenSSL EVP. libcrypto.so.3 is
+# already staged (muse-ai's closure), so no new runtime dep.
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
-  "$ROOT/update/sevyn.c"
+  "$ROOT/update/sevyn.c" -lcrypto -lcrypto
 
 # Update trust anchor (see the header): committed release anchor, or a
 # fresh per-image test keypair.
@@ -337,6 +390,7 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$BUILD_TMP/muse-ai:/usr/share/sevyn/ai/backends/muse-ai" \
   "$BUILD_TMP/sevyn-updated:/usr/local/bin/sevyn-updated" \
   "$BUILD_TMP/sevyn:/usr/local/bin/sevyn" \
+  "$BUILD_TMP/sevyn-relay:/usr/local/bin/sevyn-relay" \
   "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
   "$CODE_SERVER_DIR/lib/node:/usr/share/sevyn/code-server/lib/node"
 
@@ -367,6 +421,15 @@ cp -r "$SYSROOT/etc/ssl/certs" "$STAGE/etc/ssl/certs"
 # snippet below).
 mkdir -p "$STAGE/usr/share/sevyn/muse-mock"
 cp "$ROOT/image/mock-muse.js" "$STAGE/usr/share/sevyn/muse-mock/mock-muse.js"
+
+# Mock relay (Phase 2, test double): the cloud-agent peer for the
+# relay section of the m4.5 check. Staged here; started by init only
+# when sevyn.mockrelay=1 is on the kernel cmdline (see the init
+# snippet below). The file is staged even when the flag is off — the
+# check never runs the mock by hand (the Terminal can only exec
+# `sevyn`, never node), so init is its only entry point.
+mkdir -p "$STAGE/usr/share/sevyn/relay-mock"
+cp "$ROOT/image/mock-relay.js" "$STAGE/usr/share/sevyn/relay-mock/mock-relay.js"
 
 # Sevyn Code: the extracted code-server tree, plus the terminal
 # default (the integrated terminal spawns `sevyn` with no args, so
@@ -503,6 +566,25 @@ if [ "${MOCKMUSE:-0}" = "1" ]; then
   export MUSE_API_BASE=http://127.0.0.1:7071/v1
   /usr/share/sevyn/code-server/lib/node /usr/share/sevyn/muse-mock/mock-muse.js >/dev/console 2>&1 &
   echo "M4.5 init: mock Muse API started (sevyn.mockmuse=1)"
+fi
+# Mock relay (Phase 2): the cloud-agent peer for the relay check —
+# it speaks the relay protocol to the REAL sevyn-relay agent on
+# 127.0.0.1:17893, so the guest proves a real task over the real
+# agent with no network and no real cloud. Starts ONLY when the
+# kernel cmdline carries sevyn.mockrelay=1 (the m4.5 check boots
+# with it), from code-server's node like mock-muse. The mock runs
+# once per boot: it waits for the agent to be enabled (the check
+# enables it with `ai relay on --confirm --bind 127.0.0.1`), expects
+# the pairing-required error first, waits for the pairing approval,
+# then runs one task ("session fix the settings" — the §7 task, so
+# the session proves the same read -> denied write -> re-read counts
+# over the relay) and exits. No listen port: the mock CONNECTS to
+# the agent; a fixed loopback port is fine inside the guest anyway
+# (each guest has its own net namespace).
+for a in $(cat /proc/cmdline); do case "$a" in sevyn.mockrelay=*) MOCKRELAY=${a#sevyn.mockrelay=};; esac; done
+if [ "${MOCKRELAY:-0}" = "1" ]; then
+  /usr/share/sevyn/code-server/lib/node /usr/share/sevyn/relay-mock/mock-relay.js --mode auto --agent-port 17893 --task "session fix the settings" >/dev/console 2>&1 &
+  echo "M4.5 init: mock relay started (sevyn.mockrelay=1)"
 fi
 # AI daemon (M4.5): owns /run/sevyn-ai.sock. Starts after appd +
 # statusd so its first ASK can reach both. The harness drives it over

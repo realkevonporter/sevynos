@@ -151,6 +151,65 @@ function readAudit(): string[] {
     );
 }
 
+type AgentState = {
+  enabled: boolean;
+  paired: string;
+  pendingPeer: string;
+  pendingCode: string;
+  session: string;
+};
+
+// Relay agent (Phase 2): the cloud-agent listener, read from
+// `sevyn ai relay status` — one line per fact, `relay: ...` style
+// like `tailscale status` (INTERFACES.md §CLI). The CLI's exact
+// lines (sevyn.c, cmd_ai_relay status branch): `relay agent:
+// enabled|disabled`, `agent: running (pid N)|not running`,
+// `fingerprint: <full>`, `paired: <fp16>|unpaired`,
+// `pairing: pending <fp16> code <code>` (only while a pairing is
+// pending), `daemon relay: on|idle|off|unknown` (or
+// `daemon: unreachable`). `paired` is the pinned peer fingerprint,
+// or "unpaired"; `session` is the daemon's live state (on/idle/off).
+// parseField is unanchored (cli.ts), so "relay agent:" also matches
+// a bare "agent" key — the reads below use the full field names so
+// they do not depend on that accident. A stub that returns "0\n"
+// reads as disabled/unpaired, like the tailnet relay does in the
+// harness.
+function readAgent(): AgentState {
+  const { code, out } = runCli("sevyn ai relay status");
+  const off: AgentState = {
+    enabled: false,
+    paired: "",
+    pendingPeer: "",
+    pendingCode: "",
+    session: "",
+  };
+  if (code !== 0) return off;
+  const enabled =
+    parseField(out, "relay agent") === "enabled" ||
+    parseField(out, "agent") === "enabled" ||
+    parseField(out, "agent") === "on";
+  const pairedField =
+    parseField(out, "paired") ?? parseField(out, "peer_fingerprint") ?? "";
+  const paired = pairedField === "unpaired" || pairedField === "none" ? "" : pairedField;
+  const sessionField =
+    parseField(out, "session") ?? parseField(out, "daemon relay") ?? "";
+  const session =
+    sessionField === "on" || sessionField === "idle" || sessionField === "off"
+      ? sessionField
+      : "";
+  // The pending pairing rides one line: `pairing: pending <fp16>
+  // code <code>`. parseField cannot split it (it returns the first
+  // token only), so match the whole line.
+  const pairingLine = out.match(/pairing:\s*pending\s+(\S+)\s+code\s+(\S+)/);
+  return {
+    enabled,
+    paired,
+    pendingPeer: pairingLine ? pairingLine[1] : "",
+    pendingCode: pairingLine ? pairingLine[2] : "",
+    session,
+  };
+}
+
 type WifiState = {
   available: boolean;
   state: string;
@@ -233,6 +292,17 @@ export function Settings(): React.ReactElement {
   const [relayKey, setRelayKey] = React.useState<string>("");
   const [relayConfirm, setRelayConfirm] = React.useState<boolean>(false);
   const [relayMessage, setRelayMessage] = React.useState<string>("");
+  // Relay agent (Phase 2): the cloud-agent listener. `agentConfirm`
+  // is the two-step enable dialog; `revokeConfirm` the two-step
+  // forget dialog; `pairingDismissed` holds the fingerprint of a
+  // pending peer the user dismissed, so Dismiss hides the dialog
+  // without clearing the pending pairing (a different peer re-opens
+  // it). The pairing code is never logged.
+  const [agent, setAgent] = React.useState<AgentState>(() => readAgent());
+  const [agentConfirm, setAgentConfirm] = React.useState<boolean>(false);
+  const [revokeConfirm, setRevokeConfirm] = React.useState<boolean>(false);
+  const [pairingDismissed, setPairingDismissed] = React.useState<string>("");
+  const [agentMessage, setAgentMessage] = React.useState<string>("");
   const [auditLines, setAuditLines] = React.useState<string[]>(() => readAudit());
   // Muse API key (P0): the muse-ai backend reads it from
   // /data/ai/muse-key. It is typed here, written to a temp file, and
@@ -400,6 +470,77 @@ export function Settings(): React.ReactElement {
     setRelay(current);
     setRelayMessage("Left the tailnet.");
     Sevyn.log("SETTINGS relay=off");
+  }
+
+  // Relay agent (Phase 2): enable runs the two-step confirm — the
+  // caller (the dialog's Confirm button) already showed the
+  // exposure, and the CLI refuses a bare enable anyway. Disable is
+  // immediate (revoking access needs no confirm). Pair approves a
+  // pending pairing; revoke deletes the keys and the pin (two-step,
+  // via its own dialog — the caller already showed what is deleted).
+  // After each, the state is re-read and the audit view refreshed,
+  // so the banner and the pairing dialog follow the real state. The
+  // pairing code is never logged.
+  function enableAgent(): void {
+    const { code } = runCli("sevyn ai relay on --confirm --via settings");
+    if (code !== 0) {
+      setAgentMessage("Could not turn the relay agent on.");
+      return;
+    }
+    const current = readAgent();
+    setAgent(current);
+    setAuditLines(readAudit());
+    setAgentMessage(current.enabled ? "Relay agent is on." : "Relay agent is off.");
+    Sevyn.log("SETTINGS relay_agent=on");
+  }
+
+  function disableAgent(): void {
+    const { code } = runCli("sevyn ai relay off");
+    if (code !== 0) {
+      setAgentMessage("Could not turn the relay agent off.");
+      return;
+    }
+    const current = readAgent();
+    setAgent(current);
+    setAuditLines(readAudit());
+    setAgentMessage("Relay agent is off.");
+    Sevyn.log("SETTINGS relay_agent=off");
+  }
+
+  function pairAgent(): void {
+    const { code } = runCli("sevyn ai relay pair --confirm");
+    if (code !== 0) {
+      setAgentMessage("Could not pair the cloud agent.");
+      return;
+    }
+    const current = readAgent();
+    setAgent(current);
+    setAuditLines(readAudit());
+    setAgentMessage("Cloud agent paired.");
+    Sevyn.log("SETTINGS relay_agent=paired");
+  }
+
+  function revokeAgent(): void {
+    const { code } = runCli("sevyn ai relay revoke --confirm");
+    if (code !== 0) {
+      setAgentMessage("Could not forget the pairing.");
+      return;
+    }
+    const current = readAgent();
+    setAgent(current);
+    setAuditLines(readAudit());
+    setAgentMessage("Pairing forgotten.");
+    Sevyn.log("SETTINGS relay_agent=revoked");
+  }
+
+  function agentStatusLine(): string {
+    if (!agent.enabled) return "Relay agent: disabled";
+    let line = "Relay agent: enabled";
+    line +=
+      agent.paired !== "" ? " — paired to " + agent.paired.slice(0, 16) : " — unpaired";
+    if (agent.session === "on") line += " — session live";
+    else if (agent.session === "idle") line += " — session idle";
+    return line;
   }
 
   // Wallpaper (port of #123): the choice is written to
@@ -1440,6 +1581,293 @@ export function Settings(): React.ReactElement {
               </View>
             </View>
           ) : null}
+          {/* Relay agent (Phase 2): the cloud-agent listener, below
+              the tailnet join block. The toggle and Forget are always
+              present (two focusables); the dialogs' buttons exist
+              only while their dialog is open, so they never shift the
+              focus order. The pairing dialog opens whenever a pending
+              pairing exists, unless this peer was dismissed. */}
+          <Text
+            style={{ fontSize: 16, fontWeight: "bold", color: "#111827", marginTop: 24 }}
+          >
+            Relay agent
+          </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            Let the paired cloud agent run AI tasks on this device over the tailnet. It
+            acts only with the AI permissions already granted here, and every action is
+            logged.
+          </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            {agentStatusLine()}
+          </Text>
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            <Pressable
+              onPress={() => {
+                if (agent.enabled) disableAgent();
+                else setAgentConfirm(true);
+              }}
+              style={{
+                width: 180,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: agent.enabled ? "#1e40af" : "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+                marginRight: 12,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 15,
+                  fontWeight: "bold",
+                  color: agent.enabled ? "#ffffff" : "#111827",
+                  textAlign: "center",
+                }}
+              >
+                {agent.enabled ? "Turn relay agent off" : "Turn relay agent on"}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                if (agent.paired !== "") setRevokeConfirm(true);
+                else setAgentMessage("Nothing paired to forget.");
+              }}
+              style={{
+                width: 180,
+                height: 36,
+                borderRadius: 8,
+                backgroundColor: "#e5e7eb",
+                justifyContent: "center",
+                alignItems: "center",
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 15,
+                  fontWeight: "bold",
+                  color: "#111827",
+                  textAlign: "center",
+                }}
+              >
+                Forget this pairing
+              </Text>
+            </Pressable>
+          </View>
+          {/* Persistent banner while the agent is enabled: blue like
+              the tailnet banner, but it names the paired agent (not
+              the tailnet address), so the two are never confused. */}
+          {agent.enabled ? (
+            <Text
+              style={{
+                fontSize: 14,
+                color: "#1e40af",
+                backgroundColor: "#dbeafe",
+                marginTop: 12,
+                padding: 12,
+                borderRadius: 8,
+              }}
+            >
+              Relay agent is ON —{" "}
+              {agent.paired !== ""
+                ? "paired to " + agent.paired.slice(0, 16)
+                : "waiting for the cloud agent to pair"}
+              {agent.session === "on" ? ". A remote session is live." : "."}
+            </Text>
+          ) : null}
+          {agentMessage ? (
+            <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+              {agentMessage}
+            </Text>
+          ) : null}
+          {/* Two-step confirm (D1): the dialog lists what enabling
+              exposes, in plain language. Its buttons exist only
+              while it is open, so they never shift the focus order. */}
+          {agentConfirm ? (
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontSize: 14, color: "#374151" }}>
+                Turning the relay agent on lets the paired cloud agent run AI tasks on
+                this device:
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - the cloud agent connects over the tailnet only (no tailnet, no
+                connection)
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - it acts only with the AI permissions already granted on this device —
+                nothing more
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - it can read and write your files and run sevyn commands the AI is
+                allowed to run
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                - every action is logged to the AI audit log
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                The agent stays on across reboots until you turn it off.
+              </Text>
+              <View style={{ flexDirection: "row", marginTop: 12 }}>
+                <Pressable
+                  onPress={() => {
+                    setAgentConfirm(false);
+                    enableAgent();
+                  }}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#1e40af",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    marginRight: 12,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 15,
+                      fontWeight: "bold",
+                      color: "#ffffff",
+                      textAlign: "center",
+                    }}
+                  >
+                    Confirm
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setAgentConfirm(false)}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#e5e7eb",
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ fontSize: 15, color: "#111827", textAlign: "center" }}>
+                    Cancel
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+          {/* Pairing dialog (Phase 2): shown while a pending pairing
+              exists. Confirm pins the peer key; Dismiss only hides
+              this dialog — the pending pairing stays until approved
+              or revoked. Its buttons exist only while it is open, so
+              they never shift the focus order. */}
+          {agent.pendingPeer !== "" && pairingDismissed !== agent.pendingPeer ? (
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontSize: 14, color: "#374151" }}>
+                A cloud agent wants to pair with this device:
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                Peer: {agent.pendingPeer.slice(0, 16)}
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                Pairing code: {agent.pendingCode}
+              </Text>
+              <Text style={{ fontSize: 14, color: "#374151", marginTop: 4 }}>
+                Compare the code with the one the cloud agent shows. Confirm only if they
+                match.
+              </Text>
+              <View style={{ flexDirection: "row", marginTop: 12 }}>
+                <Pressable
+                  onPress={() => pairAgent()}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#1e40af",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    marginRight: 12,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 15,
+                      fontWeight: "bold",
+                      color: "#ffffff",
+                      textAlign: "center",
+                    }}
+                  >
+                    Confirm
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setPairingDismissed(agent.pendingPeer)}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#e5e7eb",
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ fontSize: 15, color: "#111827", textAlign: "center" }}>
+                    Dismiss
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+          {/* Two-step confirm for Forget: revoking deletes the device
+              keypair and the pinned peer key, so it needs the confirm
+              step. Its buttons exist only while it is open, so they
+              never shift the focus order. */}
+          {revokeConfirm ? (
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontSize: 14, color: "#374151" }}>
+                Forgetting this pairing deletes the device keypair and the pinned
+                cloud-agent key. The cloud agent will have to pair again from scratch.
+              </Text>
+              <View style={{ flexDirection: "row", marginTop: 12 }}>
+                <Pressable
+                  onPress={() => {
+                    setRevokeConfirm(false);
+                    revokeAgent();
+                  }}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#1e40af",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    marginRight: 12,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 15,
+                      fontWeight: "bold",
+                      color: "#ffffff",
+                      textAlign: "center",
+                    }}
+                  >
+                    Confirm
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setRevokeConfirm(false)}
+                  style={{
+                    width: 120,
+                    height: 36,
+                    borderRadius: 8,
+                    backgroundColor: "#e5e7eb",
+                    justifyContent: "center",
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ fontSize: 15, color: "#111827", textAlign: "center" }}>
+                    Cancel
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
           {/* AI activity (P2, §2.5): the last few audit log entries.
               Text lines, not focusable. */}
           <Text style={{ fontSize: 14, color: "#374151", marginTop: 16 }}>
@@ -1448,7 +1876,11 @@ export function Settings(): React.ReactElement {
           {auditLines.length > 0 ? (
             auditLines.map((line, i) => (
               <Text key={i} style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
-                {line}
+                {/* Phase 2: audit lines from a relay session carry
+                    " via=relay" — they show a "remote" badge (the
+                    lines render as plain Text, so the badge is a
+                    suffix, not a separate View). */}
+                {line.includes("via=relay") ? line + " · remote" : line}
               </Text>
             ))
           ) : (
