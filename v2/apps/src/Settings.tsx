@@ -1993,6 +1993,10 @@ export function Settings(): React.ReactElement {
             Choose the desktop wallpaper. It applies when Settings closes and is kept
             across reboots.
           </Text>
+          <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
+            Uploading your own photo is not supported yet — pick one of the built-in
+            styles below.
+          </Text>
           <View style={{ flexDirection: "row", marginTop: 12 }}>
             {WALLPAPER_STYLES.map((s) => wallpaperStyleButton(s.label, s.value))}
           </View>
@@ -2007,11 +2011,7 @@ export function Settings(): React.ReactElement {
                 {WALLPAPER_COLORS.map((c) => wallpaperColorSwatch(c.name, c.value))}
               </View>
             </View>
-          ) : (
-            <Text style={{ fontSize: 14, color: "#374151", marginTop: 12 }}>
-              Custom image wallpapers are not supported yet.
-            </Text>
-          )}
+          ) : null}
           {wallpaperMessage ? (
             <Text style={{ fontSize: 14, color: "#6b7280", marginTop: 8 }}>
               {wallpaperMessage}

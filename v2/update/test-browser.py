@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host-side tests for the M5 `sevyn` CLI verbs (v2/update/sevyn.c):
-`browser` (Chromium over CDP) and `net` (link state, DNS, announce).
+`browser` (Chromium over CDP), `net` (link state, DNS, announce),
+and `settings` (wallpaperStyle / wallpaperColor round-trip).
 
 Builds the CLI with the host gcc, then drives it against a FAKE CDP
 server (an HTTP server that records requests and replies like
@@ -835,6 +836,64 @@ def main():
               "wifi: on" in r.stdout, r.stdout)
     finally:
         fake.close()
+
+    # --- settings: wallpaperStyle (macos / macos-light) ---
+    # The Settings UI lists macOS and macOS Light, but the validator
+    # only accepted default|solid|cosmic|minimal, so tapping either
+    # never stuck — and read_settings repaired a hand-edited "macos"
+    # back to default. The verbs honour SEVYN_SETTINGS_PATH, so the
+    # whole round-trip is testable off-device against a temp file.
+    settings_path = str(tmp / "settings.json")
+    settings_env = {"SEVYN_SETTINGS_PATH": settings_path}
+    # Fresh system: defaults, no file needed.
+    r = run_cli(binary, ["settings", "get", "wallpaperStyle"], settings_env)
+    check("settings get: fresh default style is default",
+          r.returncode == 0
+          and r.stdout.strip() == "wallpaperStyle=default",
+          r.stdout + r.stderr)
+    r = run_cli(binary, ["settings", "get", "wallpaperColor"], settings_env)
+    check("settings get: fresh default color is #090b11",
+          r.returncode == 0
+          and r.stdout.strip() == "wallpaperColor=#090b11",
+          r.stdout + r.stderr)
+    # Every style the UI lists sets and survives a read-back.
+    for style in ("default", "solid", "cosmic", "minimal",
+                  "macos", "macos-light"):
+        r = run_cli(binary, ["settings", "set", "wallpaperStyle", style],
+                    settings_env)
+        check(f"settings set: {style} exits 0",
+              r.returncode == 0, r.stdout + r.stderr)
+        r = run_cli(binary, ["settings", "get", "wallpaperStyle"],
+                    settings_env)
+        check(f"settings get: {style} survives a read-back",
+              r.returncode == 0
+              and r.stdout.strip() == f"wallpaperStyle={style}",
+              r.stdout + r.stderr)
+    # An invalid style is still refused, and the stored value is
+    # untouched by the refused set.
+    r = run_cli(binary, ["settings", "set", "wallpaperStyle", "neon"],
+                settings_env)
+    check("settings set: invalid style exits 1", r.returncode == 1)
+    check("settings set: invalid style names the six accepted styles",
+          "default|solid|cosmic|minimal|macos|macos-light" in r.stderr,
+          r.stderr)
+    r = run_cli(binary, ["settings", "get", "wallpaperStyle"], settings_env)
+    check("settings get: refused set leaves the stored style alone",
+          r.stdout.strip() == "wallpaperStyle=macos-light",
+          r.stdout + r.stderr)
+    # A hand-edited file with "macos" is honoured, not repaired back
+    # to default (the read path gates on the same validator).
+    Path(settings_path).write_text(
+        '{"wallpaperStyle": "macos", "wallpaperColor": "#090b11"}\n')
+    r = run_cli(binary, ["settings", "get", "wallpaperStyle"], settings_env)
+    check("settings get: hand-edited macos survives the read",
+          r.stdout.strip() == "wallpaperStyle=macos", r.stdout + r.stderr)
+    # ... and a hand-edited invalid style still repairs to default.
+    Path(settings_path).write_text(
+        '{"wallpaperStyle": "neon", "wallpaperColor": "#090b11"}\n')
+    r = run_cli(binary, ["settings", "get", "wallpaperStyle"], settings_env)
+    check("settings get: hand-edited invalid style repairs to default",
+          r.stdout.strip() == "wallpaperStyle=default", r.stdout + r.stderr)
 
     server.shutdown()
     server.server_close()
