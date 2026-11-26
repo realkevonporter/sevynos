@@ -90,13 +90,21 @@ const server = http.createServer((req, res) => {
       return;
     }
     // The session task gets the session sequence (one reply per
-    // request, then no-tools); every other task gets LAUNCH.
+    // request, then no-tools); every other task gets LAUNCH. The
+    // sequence resets once exhausted: the m4.5 check runs the same
+    // "session fix" task twice (Terminal muse-ai session, then the
+    // relay session), and a single-use script would hand the relay
+    // session no-tools on its first request (allowed=0 — the §9
+    // failure on PR #167's fix head). Resetting on exhaustion keeps
+    // each session's sequence identical.
     let reply;
     if (task.includes("session fix")) {
-      reply =
-        sessionCount < SESSION_REPLIES.length
-          ? SESSION_REPLIES[sessionCount++]
-          : NO_TOOLS_REPLY;
+      if (sessionCount < SESSION_REPLIES.length) {
+        reply = SESSION_REPLIES[sessionCount++];
+      } else {
+        reply = NO_TOOLS_REPLY;
+        sessionCount = 0;
+      }
     } else {
       reply = LAUNCH_REPLY;
     }

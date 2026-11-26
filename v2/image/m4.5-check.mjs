@@ -1436,10 +1436,23 @@ async function main() {
       180000,
       beforePair,
     );
+    let sessionDetail = sessionEnd || "";
+    if (!sessionEnd) {
+      // Surface what the mock actually saw: on a counts mismatch
+      // the mock prints its real session-end (or FATAL) line, and
+      // the 180 s wait otherwise fails silent with no clue.
+      const actual = await waitForLog(
+        b.logPath,
+        /RELAY-MOCK (session-end allowed=\d+ denied=\d+ failed=\d+|FATAL .*)/,
+        5000,
+        beforePair,
+      );
+      if (actual) sessionDetail = `mock said: ${actual}`;
+    }
     check(
       "relay: task ran over the relay (allowed=2 denied=1 failed=0)",
       !!sessionEnd,
-      sessionEnd || "",
+      sessionDetail,
     );
     const sessionLog = await waitForLog(
       b.logPath,
