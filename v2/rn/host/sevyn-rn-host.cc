@@ -491,6 +491,12 @@ class RnHost {
   // cleared by a focus remap. Published to JS as Sevyn.windowState
   // and to the renderer's window-state store via onWindowState.
   std::string windowState_ = "normal";
+  // Text clipboard (gap unit 2): the headless-mode clipboard. With
+  // no Wayland connection there is no compositor selection, so the
+  // clipboard is just this string; in Wayland mode the Wayland layer
+  // owns the cache instead (see Sevyn.clipboardRead/Write below).
+  // Never logged: it holds the user's text.
+  std::string headlessClipboard_;
   // The Sevyn host object, kept so dispatchSize can update
   // Sevyn.width/Sevyn.height when the surface resizes (M9).
   jsi::Value sevynValue_;
@@ -1076,6 +1082,36 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
              hasSizeHandler_ = true;
            }
            return jsi::Value::undefined();
+         });
+  // Text clipboard (gap unit 2): the compositor selection, bridged
+  // to the renderer's TextInput copy/paste/cut. clipboardRead
+  // returns the current selection ("" when empty or clear);
+  // clipboardWrite copies text onto the selection and returns true
+  // when the copy landed (in headless mode the clipboard is the
+  // in-memory string above, so it always lands). No permission gate:
+  // the clipboard is the user's own text, and the compositor only
+  // lets the focused client set the selection. The text itself is
+  // never logged here or anywhere else in the host.
+  hostFn("clipboardRead", 0,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           if (wayland_)
+             return jsi::String::createFromUtf8(rt,
+                                                wayland_->clipboardText());
+           return jsi::String::createFromUtf8(rt, headlessClipboard_);
+         });
+  hostFn("clipboardWrite", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count < 1 || !args[0].isString())
+             return jsi::Value(false);
+           const std::string text = jsString(rt, args[0]);
+           if (wayland_) {
+             wayland_->setClipboardText(text);
+             return jsi::Value(true);
+           }
+           headlessClipboard_ = text;
+           return jsi::Value(true);
          });
   hostFn("getStatus", 0,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,

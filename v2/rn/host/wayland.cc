@@ -267,6 +267,19 @@ Wayland::~Wayland() {
     wl_surface_destroy(cursorSurface_);
   if (cursorTheme_)
     wl_cursor_theme_destroy(cursorTheme_);
+  // Text clipboard (gap unit 2): the source and the offers die
+  // with the connection; the device before the seat it hangs off,
+  // the manager last among the clipboard objects.
+  if (dataSource_)
+    wl_data_source_destroy(dataSource_);
+  if (dataOffer_)
+    wl_data_offer_destroy(dataOffer_);
+  if (pendingOffer_ && pendingOffer_ != dataOffer_)
+    wl_data_offer_destroy(pendingOffer_);
+  if (dataDevice_)
+    wl_data_device_destroy(dataDevice_);
+  if (dataDeviceManager_)
+    wl_data_device_manager_destroy(dataDeviceManager_);
   if (pointer_)
     wl_pointer_destroy(pointer_);
   if (keyboard_)
@@ -332,6 +345,17 @@ void Wayland::onRegistryGlobal(void* data, wl_registry* registry,
     self->seat_ = static_cast<wl_seat*>(
         wl_registry_bind(registry, name, &wl_seat_interface, v));
     wl_seat_add_listener(self->seat_, &kSeatListener, self);
+    self->maybeCreateDataDevice();
+  } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
+    // Text clipboard (gap unit 2): the manager is core protocol
+    // (version 3 carries all of data_device/data_source/data_offer).
+    // Genesis advertises it since the clipboard build; Weston does
+    // too. Bind at min(advertised, 3).
+    uint32_t v = version < 3 ? version : 3;
+    self->dataDeviceManager_ = static_cast<wl_data_device_manager*>(
+        wl_registry_bind(registry, name, &wl_data_device_manager_interface,
+                         v));
+    self->maybeCreateDataDevice();
   } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
     self->xdgWmBase_ = static_cast<xdg_wm_base*>(
         wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
@@ -810,6 +834,10 @@ void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
   Wayland* self = static_cast<Wayland*>(data);
   (void)pointer;
   (void)time;
+  // The serial is the clipboard's set_selection serial too (see
+  // onKeyboardKey): a click is an input event, and a copy made
+  // right after it carries this serial.
+  self->lastInputSerial_ = serial;
   // M9 move + resize (app windows only — the shell is fullscreen).
   // Left-button press in the title bar (44px, minus the close-X
   // zone) starts an interactive move; a press in the 8px right /
@@ -943,8 +971,10 @@ void Wayland::onKeyboardKey(void* data, wl_keyboard* keyboard, uint32_t serial,
                             uint32_t time, uint32_t key, uint32_t state) {
   Wayland* self = static_cast<Wayland*>(data);
   (void)keyboard;
-  (void)serial;
   (void)time;
+  // The serial is the clipboard's set_selection serial: the Ctrl+C
+  // press that triggers a copy carries it (see setClipboardText).
+  self->lastInputSerial_ = serial;
   // Shift keys (evdev 42 left, 54 right) are modifiers, not input:
   // track the state and do not forward them as key events. Ctrl /
   // Alt / Meta are tracked the same way but ARE forwarded, with the
@@ -982,6 +1012,225 @@ void Wayland::onKeyboardRepeatInfo(void* data, wl_keyboard* keyboard,
   (void)keyboard;
   (void)rate;
   (void)delay;
+}
+
+// --- Text clipboard (gap unit 2, wl_data_device) -------------------------
+//
+// Copy offers our text to the compositor; paste reads the
+// compositor's current selection into the cache. The bytes are the
+// user's text — no handler here logs them, only the MIME type.
+//
+// The compositor only lets the keyboard-focused client set the
+// selection (Smithay enforces it): a copy happens on the Ctrl+C key
+// press, when this surface holds focus, so the rule holds. When
+// unfocused the set is silently ignored server-side and the text
+// stays in the local cache only.
+
+void Wayland::maybeCreateDataDevice() {
+  if (dataDevice_ || !dataDeviceManager_ || !seat_)
+    return;
+  static const wl_data_device_listener kDataDeviceListener = {
+      &Wayland::onDataDeviceDataOffer, &Wayland::onDataDeviceEnter,
+      &Wayland::onDataDeviceLeave, &Wayland::onDataDeviceMotion,
+      &Wayland::onDataDeviceDrop, &Wayland::onDataDeviceSelection};
+  dataDevice_ =
+      wl_data_device_manager_get_data_device(dataDeviceManager_, seat_);
+  wl_data_device_add_listener(dataDevice_, &kDataDeviceListener, this);
+}
+
+void Wayland::setClipboardText(const std::string& text) {
+  clipboard_.set(text);
+  if (!dataDevice_)
+    return; // No manager (or headless): the local cache is the clipboard.
+  // Drop our previous offer first: destroying it clears the old
+  // selection server-side, and the new offer below replaces it in
+  // the same flush. Waiting for the compositor's `cancelled` event
+  // instead would leave the old source live while the new one is
+  // set — and a `cancelled` already in flight for a destroyed
+  // source is skipped by the pointer check in onDataSourceCancelled.
+  if (dataSource_) {
+    wl_data_source_destroy(dataSource_);
+    dataSource_ = nullptr;
+  }
+  static const wl_data_source_listener kDataSourceListener = {
+      &Wayland::onDataSourceTarget, &Wayland::onDataSourceSend,
+      &Wayland::onDataSourceCancelled,
+      &Wayland::onDataSourceDndDropPerformed,
+      &Wayland::onDataSourceDndFinished, &Wayland::onDataSourceAction};
+  dataSource_ = wl_data_device_manager_create_data_source(dataDeviceManager_);
+  wl_data_source_add_listener(dataSource_, &kDataSourceListener, this);
+  wl_data_source_offer(dataSource_, kClipboardTextMime);
+  wl_data_device_set_selection(dataDevice_, dataSource_, lastInputSerial_);
+  logLine("WAYLAND clipboard copy offered");
+}
+
+void Wayland::onDataSourceTarget(void* data, wl_data_source* source,
+                                 const char* mime_type) {
+  (void)data;
+  (void)source;
+  (void)mime_type;
+  // A reader picked a MIME type; the bytes go out in onDataSourceSend.
+}
+
+void Wayland::onDataSourceSend(void* data, wl_data_source* source,
+                               const char* mime_type, int32_t fd) {
+  Wayland* self = static_cast<Wayland*>(data);
+  (void)source;
+  if (mime_type && strcmp(mime_type, kClipboardTextMime) == 0)
+    writeTextToFd(fd, self->clipboard_.get());
+  close(fd);
+}
+
+void Wayland::onDataSourceCancelled(void* data, wl_data_source* source) {
+  Wayland* self = static_cast<Wayland*>(data);
+  // Our selection was replaced (by another client's copy, or by our
+  // own newer copy — which already nulled the pointer, so the check
+  // below skips it). Only destroy the live current source: a
+  // `cancelled` already in flight for a source we destroyed
+  // ourselves must never be dereferenced.
+  if (source == self->dataSource_) {
+    wl_data_source_destroy(source);
+    self->dataSource_ = nullptr;
+  }
+}
+
+void Wayland::onDataSourceDndDropPerformed(void* data,
+                                           wl_data_source* source) {
+  (void)data;
+  (void)source;
+}
+
+void Wayland::onDataSourceDndFinished(void* data, wl_data_source* source) {
+  (void)data;
+  (void)source;
+}
+
+void Wayland::onDataSourceAction(void* data, wl_data_source* source,
+                                 uint32_t dnd_action) {
+  (void)data;
+  (void)source;
+  (void)dnd_action;
+}
+
+void Wayland::onDataOfferOffer(void* data, wl_data_offer* offer,
+                               const char* mime_type) {
+  Wayland* self = static_cast<Wayland*>(data);
+  if (offer == self->pendingOffer_ && mime_type)
+    self->pendingMimes_.push_back(mime_type);
+}
+
+void Wayland::onDataOfferSourceActions(void* data, wl_data_offer* offer,
+                                       uint32_t actions) {
+  (void)data;
+  (void)offer;
+  (void)actions;
+}
+
+void Wayland::onDataOfferAction(void* data, wl_data_offer* offer,
+                                uint32_t dnd_action) {
+  (void)data;
+  (void)offer;
+  (void)dnd_action;
+}
+
+void Wayland::onDataDeviceDataOffer(void* data, wl_data_device* device,
+                                    wl_data_offer* offer) {
+  Wayland* self = static_cast<Wayland*>(data);
+  (void)device;
+  static const wl_data_offer_listener kDataOfferListener = {
+      &Wayland::onDataOfferOffer, &Wayland::onDataOfferSourceActions,
+      &Wayland::onDataOfferAction};
+  // The offer's MIME events arrive next, then the selection event
+  // names this offer (or never does — an offer that never becomes
+  // the selection is dropped in onDataDeviceSelection).
+  if (self->pendingOffer_ && self->pendingOffer_ != self->dataOffer_)
+    wl_data_offer_destroy(self->pendingOffer_);
+  self->pendingOffer_ = offer;
+  self->pendingMimes_.clear();
+  wl_data_offer_add_listener(offer, &kDataOfferListener, self);
+}
+
+void Wayland::onDataDeviceEnter(void* data, wl_data_device* device,
+                                uint32_t serial, wl_surface* surface,
+                                wl_fixed_t x, wl_fixed_t y,
+                                wl_data_offer* offer) {
+  (void)data;
+  (void)device;
+  (void)serial;
+  (void)surface;
+  (void)x;
+  (void)y;
+  (void)offer;
+  // Drag-and-drop enter: gap #18, not this unit.
+}
+
+void Wayland::onDataDeviceLeave(void* data, wl_data_device* device) {
+  (void)data;
+  (void)device;
+}
+
+void Wayland::onDataDeviceMotion(void* data, wl_data_device* device,
+                                 uint32_t time, wl_fixed_t x, wl_fixed_t y) {
+  (void)data;
+  (void)device;
+  (void)time;
+  (void)x;
+  (void)y;
+}
+
+void Wayland::onDataDeviceDrop(void* data, wl_data_device* device) {
+  (void)data;
+  (void)device;
+}
+
+void Wayland::onDataDeviceSelection(void* data, wl_data_device* device,
+                                    wl_data_offer* offer) {
+  Wayland* self = static_cast<Wayland*>(data);
+  (void)device;
+  // The offer announced just before this event carries the MIME
+  // list (the `offer` events precede the `selection` event). A
+  // re-announced selection names the offer we already hold — the
+  // cache already has its text, so there is nothing to read.
+  std::vector<std::string> mimes;
+  if (offer && offer == self->pendingOffer_)
+    mimes = self->pendingMimes_;
+  else if (offer && offer == self->dataOffer_)
+    mimes = self->offerMimes_;
+  if (self->pendingOffer_ && self->pendingOffer_ != offer &&
+      self->pendingOffer_ != self->dataOffer_)
+    wl_data_offer_destroy(self->pendingOffer_);
+  self->pendingOffer_ = nullptr;
+  self->pendingMimes_.clear();
+  if (!offer) {
+    // Selection cleared: the cache clears with it, so a paste after
+    // a clear pastes nothing instead of stale text.
+    if (self->dataOffer_)
+      wl_data_offer_destroy(self->dataOffer_);
+    self->dataOffer_ = nullptr;
+    self->offerMimes_.clear();
+    logLine("WAYLAND clipboard selection cleared");
+    return;
+  }
+  if (offer == self->dataOffer_)
+    return;
+  if (self->dataOffer_)
+    wl_data_offer_destroy(self->dataOffer_);
+  self->dataOffer_ = offer;
+  self->offerMimes_ = mimes;
+  const std::string mime = selectTextMime(self->offerMimes_);
+  if (mime.empty())
+    return; // Offered nothing textual; keep the old cache.
+  int fds[2];
+  if (pipe(fds) != 0)
+    return;
+  wl_data_offer_receive(offer, mime.c_str(), fds[1]);
+  close(fds[1]);
+  // Bounded read (200 ms, 1 MiB cap): a source that never answers
+  // cannot stall the dispatch loop.
+  std::string text = readTextFromFd(fds[0], kClipboardMaxBytes, 200);
+  close(fds[0]);
+  self->clipboard_.set(text);
+  logLine("WAYLAND clipboard selection received mime=%s", mime.c_str());
 }
 
 void Wayland::requestFrame() {

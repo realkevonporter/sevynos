@@ -126,6 +126,11 @@ jobs:
           g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
           -o /tmp/test-key-modifiers v2/rn/host/test-key-modifiers.cc
           && /tmp/test-key-modifiers
+      - name: Compile + run the text-clipboard unit test (no Wayland, no Hermes)
+        run: >-
+          g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
+          -o /tmp/test-text-clipboard v2/rn/host/test-text-clipboard.cc
+          && /tmp/test-text-clipboard
       - name: Build the Rust workspace
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"

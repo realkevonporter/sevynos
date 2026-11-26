@@ -230,6 +230,9 @@ function lastTexts() {
 function key(code, shift) {
   Sevyn._handlers.key({ key: code, pressed: true, shift: !!shift });
 }
+function keyCtrl(code) {
+  Sevyn._handlers.key({ key: code, pressed: true, ctrl: true });
+}
 function caret() {
   // The caret is the only 2-wide WHITE rect; the focus ring is gold.
   return lastPresent().ops.find(
@@ -330,6 +333,51 @@ check("TextInput: clicking the input focuses it again", () => {
   assert.equal(inputClicks.length, 1, "click did not fire the button");
 });
 
+// --- TextInput clipboard (gap unit 2) ----------------------------------
+// The mock clipboard stands in for the host's Wayland selection:
+// copy writes it, paste reads it, and the round-trip proves the
+// renderer's Ctrl+C/X/V wiring end to end.
+check(
+  "TextInput clipboard: Ctrl+C copies, Ctrl+V pastes at the caret, Ctrl+X cuts",
+  () => {
+    // Value is "aA/" from the earlier checks; the input is focused.
+    assert.equal(inputValue, "aA/");
+    keyCtrl(46); // Ctrl+C — copy
+    assert.equal(Sevyn.clipboardRead(), "aA/", "copy wrote the whole value");
+    assert.equal(inputValue, "aA/", "copy did not change the value");
+    key(102); // Home — caret to the start
+    keyCtrl(47); // Ctrl+V — paste at the caret
+    assert.equal(inputValue, "aA/aA/", "paste inserted at the caret, not the end");
+    keyCtrl(45); // Ctrl+X — cut
+    assert.equal(Sevyn.clipboardRead(), "aA/aA/", "cut copied before deleting");
+    assert.equal(inputValue, "", "cut cleared the value");
+    keyCtrl(47); // Ctrl+V — paste it back
+    assert.equal(inputValue, "aA/aA/", "paste restored the cut text");
+  },
+);
+
+check(
+  "TextInput clipboard: Ctrl+C types no 'c', Ctrl+letter is swallowed, empty paste is a no-op",
+  () => {
+    assert.equal(inputValue, "aA/aA/");
+    keyCtrl(46); // Ctrl+C again — copy, not a typed 'c'
+    assert.equal(inputValue, "aA/aA/", "Ctrl+C typed nothing");
+    assert.equal(Sevyn.clipboardRead(), "aA/aA/", "Ctrl+C still copied");
+    keyCtrl(30); // Ctrl+A — select-all is gap #4, not this unit: swallowed
+    assert.equal(inputValue, "aA/aA/", "Ctrl+A typed nothing");
+    Sevyn.clipboardWrite("");
+    keyCtrl(47); // Ctrl+V with an empty clipboard
+    assert.equal(inputValue, "aA/aA/", "empty paste changed nothing");
+  },
+);
+
+check("TextInput clipboard: paste strips newlines in a single-line input", () => {
+  // Caret is at the end of "aA/aA/".
+  Sevyn.clipboardWrite("ab\ncd\r\nef");
+  keyCtrl(47); // Ctrl+V
+  assert.equal(inputValue, "aA/aA/abcdef", "newlines stripped on single-line paste");
+});
+
 // --- TextInput multiline (GF65 fix) ------------------------------------
 check("TextInput multiline: Tab reaches the note input", () => {
   key(15); // Tab — input -> button
@@ -366,6 +414,17 @@ check("TextInput multiline: Enter inserts a newline instead of submitting", () =
   assert.ok(
     lastTexts().some((t) => t.includes("cccc dddd\n")),
     "wrapped display shows the newline",
+  );
+});
+
+check("TextInput multiline clipboard: paste keeps newlines", () => {
+  // Focus is on the note input; caret at the end of the note.
+  Sevyn.clipboardWrite("pasted\nline");
+  keyCtrl(47); // Ctrl+V
+  assert.equal(
+    noteValue,
+    "aaaa bbbb cccc dddd\npasted\nline",
+    "multiline paste kept the newline",
   );
 });
 

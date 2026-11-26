@@ -29,12 +29,17 @@
 #include "genesis-presenter.h"
 #include "key-modifiers.h"
 #include "painter.h"
+#include "text-clipboard.h"
 
 struct xdg_wm_base;
 struct xdg_surface;
 struct xdg_toplevel;
 struct zwlr_layer_shell_v1;
 struct zwlr_layer_surface_v1;
+struct wl_data_device_manager;
+struct wl_data_device;
+struct wl_data_source;
+struct wl_data_offer;
 
 namespace sevyn {
 
@@ -114,6 +119,18 @@ class Wayland {
   void setCloseHandler(CloseHandler h) { closeHandler_ = h; }
   void setSizeHandler(SizeHandler h) { sizeHandler_ = h; }
 
+  // Text clipboard (gap unit 2, wl_data_device): the compositor's
+  // selection, bridged to JS as Sevyn.clipboardRead/Write. Copy
+  // offers the text as "text/plain"; paste reads the compositor's
+  // current selection into the cache (see onDataDeviceSelection).
+  // False when the compositor advertises no data-device manager
+  // (Weston dev does; Genesis does since the clipboard build) —
+  // copy/paste then stay local to this process, never fail.
+  // Contents are never logged.
+  void setClipboardText(const std::string& text);
+  std::string clipboardText() const { return clipboard_.get(); }
+  bool clipboardAvailable() const { return dataDeviceManager_ != nullptr; }
+
   // Resize the surface to a new size (M9): destroy both wl_buffers
   // (doPresent recreates them at the new size), resize both
   // painters, and fire the size handler. A no-op for the current
@@ -158,6 +175,11 @@ class Wayland {
   // fullscreen xdg_toplevel otherwise; app windows always use the
   // toplevel path.
   void createSurface();
+
+  // Text clipboard (gap unit 2): bind the seat's data device once
+  // both the manager global and the seat exist. A no-op when either
+  // is missing or the device already exists.
+  void maybeCreateDataDevice();
 
   void onFrameDone();
   void onBufferRelease(int index);
@@ -250,6 +272,37 @@ class Wayland {
                                   uint32_t group);
   static void onKeyboardRepeatInfo(void* data, wl_keyboard* keyboard,
                                    int32_t rate, int32_t delay);
+  // Text clipboard (gap unit 2, wl_data_device): the source side
+  // serves our copy on request; the offer/device side receives the
+  // compositor's current selection. Contents are never logged.
+  static void onDataSourceTarget(void* data, wl_data_source* source,
+                                 const char* mime_type);
+  static void onDataSourceSend(void* data, wl_data_source* source,
+                               const char* mime_type, int32_t fd);
+  static void onDataSourceCancelled(void* data, wl_data_source* source);
+  static void onDataSourceDndDropPerformed(void* data,
+                                           wl_data_source* source);
+  static void onDataSourceDndFinished(void* data, wl_data_source* source);
+  static void onDataSourceAction(void* data, wl_data_source* source,
+                                 uint32_t dnd_action);
+  static void onDataOfferOffer(void* data, wl_data_offer* offer,
+                               const char* mime_type);
+  static void onDataOfferSourceActions(void* data, wl_data_offer* offer,
+                                       uint32_t actions);
+  static void onDataOfferAction(void* data, wl_data_offer* offer,
+                                uint32_t dnd_action);
+  static void onDataDeviceDataOffer(void* data, wl_data_device* device,
+                                    wl_data_offer* offer);
+  static void onDataDeviceEnter(void* data, wl_data_device* device,
+                                uint32_t serial, wl_surface* surface,
+                                wl_fixed_t x, wl_fixed_t y,
+                                wl_data_offer* offer);
+  static void onDataDeviceLeave(void* data, wl_data_device* device);
+  static void onDataDeviceMotion(void* data, wl_data_device* device,
+                                 uint32_t time, wl_fixed_t x, wl_fixed_t y);
+  static void onDataDeviceDrop(void* data, wl_data_device* device);
+  static void onDataDeviceSelection(void* data, wl_data_device* device,
+                                    wl_data_offer* offer);
 
   int width_, height_;
   bool fullscreen_;
@@ -270,6 +323,28 @@ class Wayland {
   // over a merely CURRENT mode (they can differ).
   bool outputPreferred_ = false;
   wl_seat* seat_ = nullptr;
+  // Text clipboard (gap unit 2): the data-device manager global +
+  // this seat's data device, created once both are bound (see
+  // maybeCreateDataDevice — registry order is the compositor's
+  // choice, so either bind can come first). dataSource_ is our
+  // current copy offer (null when nothing copied); dataOffer_ is
+  // the compositor's current selection offer (null when the
+  // selection is clear); offerMimes_ is its MIME list, collected
+  // from the offer events that precede the selection event.
+  // clipboard_ is the cache: the last copied text, or the last
+  // selection read from another client. lastInputSerial_ is the
+  // most recent key/pointer serial — set_selection carries it
+  // (Smithay ignores it, but the protocol asks for an input
+  // serial, and a future compositor may check it).
+  wl_data_device_manager* dataDeviceManager_ = nullptr;
+  wl_data_device* dataDevice_ = nullptr;
+  wl_data_source* dataSource_ = nullptr;
+  wl_data_offer* dataOffer_ = nullptr;
+  wl_data_offer* pendingOffer_ = nullptr;
+  std::vector<std::string> pendingMimes_;
+  std::vector<std::string> offerMimes_;
+  TextClipboard clipboard_;
+  uint32_t lastInputSerial_ = 0;
   xdg_wm_base* xdgWmBase_ = nullptr;
   wl_surface* surface_ = nullptr;
   xdg_surface* xdgSurface_ = nullptr;
