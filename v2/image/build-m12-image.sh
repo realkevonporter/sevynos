@@ -378,6 +378,7 @@ g++ -O2 -std=c++17 -Wall -Wextra -DSEVYN_HAVE_EGL=1 \
   -o "$BUILD_TMP/sevyn-rn-host" \
   "$ROOT/rn/host/common.cc" "$ROOT/rn/host/painter.cc" \
   "$ROOT/rn/host/genesis-presenter.cc" \
+  "$ROOT/rn/host/compositor-bridge.cc" "$ROOT/rn/host/runtime-control.cc" \
   "$ROOT/rn/host/wayland.cc" "$ROOT/rn/host/status.cc" \
   "$ROOT/rn/host/appclient.cc" \
   "$ROOT/rn/host/audiod-client.cc" \

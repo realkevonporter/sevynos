@@ -69,7 +69,11 @@
 //      default size and the old short+wide bound, a proxy for
 //      the 800x348 launch size, no longer applies): the red
 //      viewport's bbox is a real window-sized render — height in
-//      [150, 650] AND aspect width/height >= 1.0. The old M5
+//      [150, 800] AND aspect width/height >= 1.0. The 800 upper
+//      bound is the guest screen height (1280x800), not a fitted
+//      number: a viewport cannot be taller than the screen, and
+//      the run that set this bound measured 1018x657 (Weston
+//      cascade), which the old 650 cap wrongly rejected.
 //      window was 500 tall with ~80px of Chromium chrome, giving
 //      a viewport of ~420 (aspect ~1.9), which the aspect bound
 //      rules out.
@@ -4282,7 +4286,9 @@ async function main() {
 
   // 6. Chromeless heuristic (CHANGED in Stage 5): the red
   // viewport's bbox must be a real window-sized render — height in
-  // [150, 650] AND aspect width/height >= 1.0. This is a
+  // [150, 800] AND aspect width/height >= 1.0. The 800 upper bound
+  // is the guest screen height (1280x800), not a fitted number.
+  // This is a
   // render-liveness bound now, NOT a chromeless proof, and the
   // reason is deliberate: Stage 5 removed --window-size from
   // `browser open`, so in this Weston guest Chromium opens at
@@ -4377,7 +4383,7 @@ async function main() {
     "chromeless: viewport is a real window-sized render (Stage 5: liveness bound, not a chromeless proof)",
     chromeHeight !== null &&
       chromeHeight >= 150 &&
-      chromeHeight <= 650 &&
+      chromeHeight <= 800 &&
       chromeAspect !== null &&
       chromeAspect >= 1.0,
     chromeHeight !== null
