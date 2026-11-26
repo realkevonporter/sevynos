@@ -746,6 +746,7 @@ check("TextInput selection: drag-select across wrapped rows in a multiline input
 const findRequests = [];
 const findEscapes = [];
 const findSubmits = [];
+const saveRequests = []; // gap unit 6: Ctrl+S on the note input
 let findNoteValue = "";
 let findQueryValue = "";
 let findSelProp = null; // selection prop the test drives via re-render
@@ -769,6 +770,7 @@ function FindApp() {
         findRequests.push("find");
         setOpen(true);
       },
+      onSaveRequest: () => saveRequests.push("save"),
       onEscape: () => findEscapes.push("note-esc"),
       style: {
         width: 800,
@@ -898,6 +900,30 @@ check("Find in app: Escape without onEscape blurs, autoFocus refocuses the note"
   const noteHit = hitRect(64, "#312e81");
   assert.ok(caret(), "caret drawn again after the autoFocus refocus");
   assert.equal(caret().y, noteHit.y + 1, "caret back in the note input");
+});
+
+// --- Save (gap unit 6, audit #7) ------------------------------------
+// Ctrl+S on an input with onSaveRequest calls it; without the prop
+// the key is swallowed and types nothing.
+check("Save: Ctrl+S calls onSaveRequest and types nothing into the note", () => {
+  // Focus is back in the note (autoFocus refocus after the blur).
+  keyCtrl(31); // Ctrl+S
+  assert.deepEqual(saveRequests, ["save"], "onSaveRequest fired");
+  assert.equal(
+    findNoteValue,
+    "buy milk and bread buy milk again",
+    "no 's' typed into the note",
+  );
+});
+
+check("Save: Ctrl+S without onSaveRequest types nothing", () => {
+  // Focus is in the find field, which has no onSaveRequest.
+  const findHit = hitRect(32, "#1f2937");
+  pressAt(findHit.x + 2, findHit.y + 16, 1, findHit.nodeId);
+  releaseAt(findHit.x + 2, findHit.y + 16, 1);
+  keyCtrl(31); // Ctrl+S
+  assert.deepEqual(saveRequests, ["save"], "no second save request");
+  assert.equal(findQueryValue, "wq", "no 's' typed into the find field");
 });
 
 // Restore the shell tree for a clean end state.

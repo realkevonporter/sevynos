@@ -334,6 +334,74 @@ check("notes find: Ctrl+F, type, Enter cycles, Shift+Enter, Esc", () => {
   assert.ok(texts.includes("Find in note"), "Find button reopened the bar");
 });
 
+// Save in note (gap unit 6, audit #7): Ctrl+S writes the current
+// note to its backing file and shows "Saved."; pressing it again
+// with no changes still reports saved (the same content is written
+// again — idempotent, no corruption); editing clears the "Saved."
+// line, and a save after the edit writes the new content.
+check("notes save: Ctrl+S writes, Saved shown, no-change save, edit then save", () => {
+  const writes = [];
+  const handler = (cmd) => {
+    if (cmd === "sevyn files list /data/notes") return "0\nf Shopping\n";
+    if (cmd === "sevyn files cat /data/notes/Shopping")
+      return "0\nbuy milk and bread\nbuy milk again\n";
+    if (cmd === "sevyn files mkdir /data/notes") return "0\n";
+    if (cmd.startsWith("sevyn files write /data/notes/")) {
+      writes.push(cmd);
+      return "0\n";
+    }
+    return "0\n";
+  };
+  loadAs(
+    {
+      id: "notes",
+      name: "Notes",
+      color: "#eab308",
+      glyph: "N",
+      permissions: ["cli.exec"],
+    },
+    appBundle,
+    handler,
+  );
+  tapText("Shopping", 15);
+  let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("buy milk and bread")),
+    "note body loaded from /data/notes",
+  );
+
+  // Ctrl+S with no changes: writes the note, shows "Saved.".
+  pressCtrl(31); // Ctrl+S
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Saved."), "Saved feedback shown");
+  assert.equal(writes.length, 1, "one write for the first save");
+  assert.ok(
+    writes[0].includes("buy milk and bread"),
+    "first save wrote the current note content",
+  );
+
+  // Ctrl+S again with no changes: still reports saved, same
+  // content rewritten — no crash, no duplicate-write corruption.
+  pressCtrl(31); // Ctrl+S
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Saved."), "no-change save still reports saved");
+  assert.equal(writes.length, 2, "no-change save rewrote the note");
+  assert.equal(writes[1], writes[0], "no-change save wrote identical content");
+
+  // Editing clears the "Saved." line; a save after the edit writes
+  // the new content and shows "Saved." again.
+  pressCtrl(30); // Ctrl+A — select all, so the edit is caret-independent
+  type("fresh words");
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(!texts.includes("Saved."), "editing cleared the Saved feedback");
+  pressCtrl(31); // Ctrl+S
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Saved."), "Saved feedback shown after the edit");
+  assert.equal(writes.length, 3, "save after edit wrote again");
+  assert.ok(writes[2].includes("fresh words"), "save after edit wrote the new content");
+  assert.ok(!writes[2].includes("buy milk"), "old content replaced, not appended");
+});
+
 check("music (no permission): status line says not permitted", () => {
   const last = loadAs({
     id: "music",

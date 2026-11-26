@@ -586,6 +586,17 @@ function Notes(): React.ReactElement {
     Sevyn.log("NOTES saved=" + open);
   }
 
+  // Save (gap unit 6, audit #7): Ctrl+S is the explicit save
+  // gesture — it calls saveNote above, which writes the current
+  // note to its backing file in /data/notes (Notes has no
+  // auto-save; the Save button is the same call). Editing after a
+  // save clears the "Saved." line, so the feedback only ever means
+  // the file on disk matches what is on screen.
+  function onNoteBodyChange(t: string): void {
+    setBody(t);
+    setSaved("");
+  }
+
   const matches = findQuery === "" ? [] : findMatches(body, findQuery);
   const findCountText =
     findQuery === ""
@@ -664,6 +675,7 @@ function Notes(): React.ReactElement {
                 else jumpFind(1);
               }}
               onEscape={resetFind}
+              onSaveRequest={saveNote}
               placeholder="Find in note"
               autoFocus
               style={{
@@ -728,13 +740,14 @@ function Notes(): React.ReactElement {
         ) : null}
         <TextInput
           value={body}
-          onChangeText={setBody}
+          onChangeText={onNoteBodyChange}
           placeholder="Write a note…"
           multiline
           autoFocus
           selection={findSel ?? undefined}
           onSelectionChange={onNoteSelectionChange}
           onFindRequest={openFind}
+          onSaveRequest={saveNote}
           onEscape={findOpen ? resetFind : undefined}
           style={{
             flex: 1,
