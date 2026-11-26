@@ -96,7 +96,7 @@ async function main() {
   await new Promise((resolve, reject) => {
     execFile(
       "gcc",
-      ["-O2", "-Wall", "-Wextra", "-o", BIN, join(ROOT, "update", "sevyn.c")],
+      ["-O2", "-Wall", "-Wextra", "-o", BIN, join(ROOT, "update", "sevyn.c"), "-lcrypto"],
       (err, _out, stderr) => (err ? reject(new Error(stderr || String(err))) : resolve()),
     );
   });

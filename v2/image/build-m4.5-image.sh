@@ -224,7 +224,7 @@ gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
 # the device Ed25519 keypair with OpenSSL EVP. libcrypto.so.3 is
 # already staged (muse-ai's closure), so no new runtime dep.
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
-  "$ROOT/update/sevyn.c" -lcrypto -lcrypto
+  "$ROOT/update/sevyn.c" -lcrypto
 
 # Update trust anchor (see the header): committed release anchor, or a
 # fresh per-image test keypair.

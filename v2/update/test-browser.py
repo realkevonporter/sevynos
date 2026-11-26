@@ -271,7 +271,7 @@ def main():
     build_env["TMPDIR"] = str(tmp)
     build = subprocess.run(
         ["gcc", "-O2", "-Wall", "-Wextra", "-o", str(binary),
-         str(SEVYN_C)],
+         str(SEVYN_C), "-lcrypto"],
         capture_output=True, text=True, env=build_env)
     check("sevyn.c compiles clean", build.returncode == 0, build.stderr)
     if build.returncode != 0:
