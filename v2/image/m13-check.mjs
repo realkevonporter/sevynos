@@ -483,14 +483,26 @@ async function relaySetup() {
   if (!guestKey || !museKey) return null;
   // Host node: tailscaled in userspace-networking mode (no TUN, no
   // routes — the runner needs no privilege), then join as muse.
+  // The SOCKS5 server on the same node is the mock's path to the
+  // guest: a raw TCP connect from the runner to a 100.x address
+  // has no route (userspace mode installs none) and times out, but
+  // the node's SOCKS5 server forwards through its own netstack —
+  // the traffic still crosses the real tailnet (WireGuard/DERP)
+  // under the muse identity and the ACL.
   const hostState = join(HS_STATE, "host-node");
   mkdirSync(hostState, { recursive: true });
   const hostSock = join(HS_STATE, "host-node.sock");
+  const hostSocks5Port = await pickFreePort();
   const tsdLogFd = openSync(join(HS_STATE, "host-tailscaled.log"), "w");
   relayLogFds.push(tsdLogFd);
   const tsd = spawn(
     TS_DAEMON,
-    ["--tun=userspace-networking", `--statedir=${hostState}`, `--socket=${hostSock}`],
+    [
+      "--tun=userspace-networking",
+      `--statedir=${hostState}`,
+      `--socket=${hostSock}`,
+      `--socks5-server=127.0.0.1:${hostSocks5Port}`,
+    ],
     { stdio: ["ignore", tsdLogFd, tsdLogFd] },
   );
   relayProcs.push(tsd);
@@ -534,7 +546,7 @@ async function relaySetup() {
   } catch {}
   check("relay: host node has a 100.x address", !!hostIp, hostIp || "(none)");
   if (!hostIp) return null;
-  return { guestKey, hostSock, hostIp };
+  return { guestKey, hostSock, hostIp, socks5Port: hostSocks5Port };
 }
 
 // Stage the guest's pre-auth key onto the data disk (debugfs) at
@@ -3311,15 +3323,19 @@ async function main() {
     // MUST come back as an explicit "capture unavailable" error,
     // with no frame and no ai.screen mark. The host-side mock
     // (mock-relay.js --mode frame-refused) drives the request over
-    // the tailnet to the guest's 100.x:17893; the check enables
-    // the agent, watches the mock log for pairing-required,
-    // approves the pairing on the device, and waits for the mock
-    // to exit 0 with the refusal logged. The oracle pixel match
-    // (delivered PNG vs QMP screendump) is NOT provable here and
-    // is not attempted — it waits on the Genesis compositor
-    // landing in the m13 image (see FRAMES.md). Skipped entirely
-    // when the join never yielded a guest 100.x address — the
-    // join/ping checks above already fail the run in that case.
+    // the tailnet to the guest's 100.x:17893, via the muse node's
+    // SOCKS5 server (a direct connect from the runner has no
+    // route to 100.x — the host node runs userspace-networking —
+    // and times out; the first version of this section failed
+    // exactly that way, ETIMEDOUT with no pairing demand). The
+    // check enables the agent, watches the mock log for
+    // pairing-required, approves the pairing on the device, and
+    // waits for the mock to exit 0 with the refusal logged. The
+    // oracle pixel match (delivered PNG vs QMP screendump) is NOT
+    // provable here and is not attempted — it waits on the Genesis
+    // compositor landing in the m13 image (see FRAMES.md). Skipped
+    // entirely when the join never yielded a guest 100.x address —
+    // the join/ping checks above already fail the run in that case.
     check(
       "relay frames: guest 100.x address known (from the join)",
       !!relayGuestIp,
@@ -3344,6 +3360,11 @@ async function main() {
           relayGuestIp,
           "--agent-port",
           "17893",
+          // Via the muse node's SOCKS5 server (see relaySetup):
+          // the runner has no route to 100.x, so a direct connect
+          // times out; the proxy forwards through the tailnet.
+          "--socks5",
+          `127.0.0.1:${relay.socks5Port}`,
         ],
         { stdio: ["ignore", frameLogFd, frameLogFd] },
       );
