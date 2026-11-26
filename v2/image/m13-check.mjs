@@ -37,7 +37,10 @@
 //      in the check log — it is NOT a hard failure when
 //      gpu=fallback (the software fallback is a designed path);
 //      CI under llvmpipe should show gpu=yes, and the value must
-//      be reported (see the gpu gate in step 4).
+//      be reported (see the gpu gate in step 4). `browser open`
+//      no longer passes --window-size (Stage 5): the compositor
+//      configures Chromium's size on first map, and `browser
+//      embed` configures it to the content rect after launch.
 //   3. A real page renders: the host-served red page (page A)
 //      renders (red viewport on screen + its title over CDP);
 //      gated on SEVYN_V2_M13_INTERNET, the public example.com
@@ -49,19 +52,27 @@
 //      the green page's URL into its address bar, and the green
 //      page renders in Chromium; the app reports its gpu mode
 //      (`BROWSER gpu=yes|fallback`).
+//   4b. Stage 5 embed fails closed in the Weston guest: the app
+//      attempted `sevyn browser embed` (no compositor socket
+//      here), the host answered "compositor unavailable", the app
+//      shows the failure (not a blank area), and `browser
+//      status` reports `embedded: no`. Real adoption pixels are
+//      GF65-only.
 //   5. In-page click navigation (NEW — m5 never clicks inside a
 //      page): a BLUE link page with a centred link to the green
 //      page (blue so the check can tell it apart from page A,
 //      which is red); clicking the link navigates the tab (CDP
 //      title changes + green renders).
-//   6. Chromeless heuristic (NEW): the red viewport's bbox is
-//      short and wide — height in [150, 360] AND aspect
-//      width/height >= 2.0. Measured 768x225, aspect 3.41 (the
-//      launched window is 800x348, but only Chromium renders
-//      small — Browser 798 wide, Terminal 800 wide; see step 6).
-//      The old M5 window was 500 tall with ~80px of Chromium
-//      chrome, giving a viewport of ~420 (aspect ~1.9), which the
-//      aspect bound rules out.
+//   6. Chromeless heuristic (Stage 5: a render-liveness bound
+//      now, not a chromeless proof — `browser open` no longer
+//      passes --window-size, so Weston cascades Chromium at its
+//      default size and the old short+wide bound, a proxy for
+//      the 800x348 launch size, no longer applies): the red
+//      viewport's bbox is a real window-sized render — height in
+//      [150, 650] AND aspect width/height >= 1.0. The old M5
+//      window was 500 tall with ~80px of Chromium chrome, giving
+//      a viewport of ~420 (aspect ~1.9), which the aspect bound
+//      rules out.
 //   7. Close-tab (was: tab switching — CANNOT work under the
 //      single-tab contract: warm `browser open` closes the
 //      previous tab, so the red tab from step 3 is long gone by
@@ -4057,6 +4068,41 @@ async function main() {
         : "no BROWSER gpu= marker in log — expected gpu=yes under llvmpipe",
     );
   }
+  {
+    // 4b. Stage 5 embed fails CLOSED in the Weston guest: this
+    // guest boots Weston, not Genesis, so there is no
+    // sevyn-compositor.sock and no adoption can happen. The
+    // Browser app attempted `sevyn browser embed` when it mounted
+    // (tabs were already open) and again after go(), and the host
+    // answered "error: compositor unavailable" — the app must show
+    // that failure (not a blank area) and `browser status` must
+    // report `embedded: no`. A hang, a crash, or a claimed
+    // adoption here would fail this step; real adoption pixels
+    // are GF65-only (see the Stage 5 proof bar).
+    const embedFailed = await waitForLog(
+      b.logPath,
+      /BROWSER embed failed /,
+      60000,
+      browserLaunchBefore,
+    );
+    check(
+      "stage5: the Browser app reports the failed embed (no compositor in this guest)",
+      !!embedFailed,
+      embedFailed ?? "(no BROWSER embed failed marker since the Browser launch)",
+    );
+    await refocusTerminal();
+    const { hit } = await termCmd(
+      "browser status",
+      /TERMINAL browser-status running=yes tabs=1 embedded=no/,
+      /EXEC sevyn browser status -> [01]/,
+      20000,
+    );
+    check(
+      "stage5: `browser status` reports embedded: no in the Weston guest",
+      !!hit,
+      hit ?? "(no TERMINAL browser-status marker with embedded=no)",
+    );
+  }
 
   // 5. In-page click navigation (NEW — m5 never clicks inside a
   // page): open the BLUE link page, click its centred link, and the
@@ -4234,25 +4280,35 @@ async function main() {
     raisedLink ? `green=${raisedLink.count}px` : "no green on screen",
   );
 
-  // 6. Chromeless heuristic (NEW): the red viewport's bbox must be
-  // short and wide — height in [150, 360] AND aspect width/height
-  // >= 2.0.
+  // 6. Chromeless heuristic (CHANGED in Stage 5): the red
+  // viewport's bbox must be a real window-sized render — height in
+  // [150, 650] AND aspect width/height >= 1.0. This is a
+  // render-liveness bound now, NOT a chromeless proof, and the
+  // reason is deliberate: Stage 5 removed --window-size from
+  // `browser open`, so in this Weston guest Chromium opens at
+  // whatever size Weston cascades (no compositor sizes it to the
+  // content rect — there is no adoption here), and the old
+  // short+wide bound ([150, 360] + aspect >= 2.0) was a proxy for
+  // the 800x348 launch size that no longer exists. Do NOT
+  // re-tighten the band to whatever this run measures: the
+  // measurement is Weston-cascade-dependent, not a product
+  // property. What this step still proves: the page renders as a
+  // full window (not a sliver, not a chromed ~420-tall viewport
+  // hiding under a tab strip — the width gate above already
+  // rules the sliver out). Real chromelessness + the adoption
+  // geometry are proven on the GF65 (Stage 5 proof bar); the
+  // embed-failure path in this guest is proven in step 4b.
   //   Probe (run 43676257443's artifacts: m13-check.json,
   //   m13-boot-1.log, /tmp/ppm13/*.ppm — all frames 1280x800):
-  //   the launched app-mode window is 800x348, but the visible
-  //   Chromium window is 768x225 — red bbox (313,318)-(1080,542),
+  //   the launched app-mode window WAS 800x348, but the visible
+  //   Chromium window was 768x225 — red bbox (313,318)-(1080,542),
   //   stable across frames, aspect 768/225 = 3.41. Only Chromium
-  //   is small: the Browser app window is 798 wide (header
+  //   was small: the Browser app window is 798 wide (header
   //   (107,193)-(904,233)) and the Terminal is 800 wide, so this
-  //   is NOT a systematic compositor/display shrink (that would
-  //   scale every window by one factor); it is specific to the
-  //   Chromium window. The [150, 360] height band plus aspect
-  //   >= 2.0 still rules out the old chromed viewport (~420 tall,
-  //   aspect ~1.9): a chromed window would fail the aspect bound
-  //   even if its height fell in the band. Do NOT just widen
-  //   [320, 360] — the measured 225px is outside it for a reason
-  //   (the window itself renders smaller than launched), and a
-  //   widened height-only band would admit the chromed viewport.
+  //   was NOT a systematic compositor/display shrink (that would
+  //   scale every window by one factor); it was specific to the
+  //   Chromium window. That measurement is kept here as the
+  //   pre-Stage-5 record — it is not the bound any more.
   //   The measurement is taken on a settled frame after raising
   //   Chromium, so the window is frontmost; partial occlusion
   //   would shrink the bbox and fail honestly. A fresh `browser
@@ -4318,14 +4374,14 @@ async function main() {
   const chromeAspect =
     chromeWidth !== null && chromeHeight ? chromeWidth / chromeHeight : null;
   check(
-    "chromeless: viewport is app-mode content (short + wide), not chromed (~420 tall, aspect ~1.9)",
+    "chromeless: viewport is a real window-sized render (Stage 5: liveness bound, not a chromeless proof)",
     chromeHeight !== null &&
       chromeHeight >= 150 &&
-      chromeHeight <= 360 &&
+      chromeHeight <= 650 &&
       chromeAspect !== null &&
-      chromeAspect >= 2.0,
+      chromeAspect >= 1.0,
     chromeHeight !== null
-      ? `measured Chromium window ${chromeWidth}x${chromeHeight} aspect=${chromeAspect.toFixed(2)} (launched 800x348) ${JSON.stringify(chromeBox)}`
+      ? `measured Chromium window ${chromeWidth}x${chromeHeight} aspect=${chromeAspect.toFixed(2)} (no --window-size since Stage 5; Weston cascades the size) ${JSON.stringify(chromeBox)}`
       : "no red bbox (page never rendered)",
   );
   // Round 9: drag the Browser window back after the steps 5–6

@@ -48,7 +48,9 @@
 #include "appclient.h"
 #include "audiod-client.h"
 #include "common.h"
+#include "compositor-bridge.h"
 #include "painter.h"
+#include "runtime-control.h"
 #include "status.h"
 #include "wayland.h"
 #include "yoga-bridge.h"
@@ -333,6 +335,8 @@ class RnHost {
   // teardown — seen in CI as a segfault when a STATUS broadcast
   // arrived while the host was exiting.
   ~RnHost() {
+    if (runtimeControl_)
+      runtimeControl_->stop();
     if (appClient_)
       appClient_->stop();
     if (status_)
@@ -444,6 +448,13 @@ class RnHost {
   std::unique_ptr<YogaBridge> yoga_;
   std::unique_ptr<StatusClient> status_;
   std::unique_ptr<AppClient> appClient_;
+  // Stage 5: the Runtime control socket + compositor bridge
+  // client. One per host process (one bundle, one Wayland
+  // connection, one pid), so the bridge session
+  // "runtime:<own-pid>" is unambiguous. The control server owns
+  // the bridge client and the adopted state; the Browser app and
+  // the CLI reach it through the control socket, never directly.
+  std::unique_ptr<RuntimeControlServer> runtimeControl_;
   // The audiod client for the RN audio module (Sevyn.audio*): one
   // client per host process, stateless (one short-lived socket
   // connection per call). Copied — never shared — into the worker
@@ -2075,6 +2086,21 @@ int RnHost::run() {
     appEventQueue_.push(line);
   });
   appClient_->start();
+
+  // Stage 5: the Runtime control socket (per-app,
+  // /run/sevyn-runtime-<appid>.sock) and the compositor bridge
+  // client. Started for the shell too (as "shell") — the shape
+  // is per-process, not per-app, and a failed bind is soft
+  // (logged inside start(); an embed then fails with a clear
+  // error instead of the host refusing to start). The session
+  // is "runtime:<own-pid>": one bundle, one Wayland connection,
+  // one pid, so the compositor's registry.by_session is
+  // unambiguous. Runs in headless mode as well, so `sevyn app
+  // run browser --headless` can be driven through it.
+  runtimeControl_ = std::make_unique<RuntimeControlServer>(
+      appId_, RuntimeControlServer::defaultSocketPath(appId_),
+      "runtime:" + std::to_string(getpid()));
+  runtimeControl_->start();
 
   if (!headless_) {
   wayland_->setPointerHandler(

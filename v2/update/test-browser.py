@@ -7,12 +7,24 @@ server (an HTTP server that records requests and replies like
 Chromium's DevTools endpoint: /json/version, /json/list, PUT
 /json/new, /json/activate/<id>, /json/close/<id>) and a FAKE statusd
 (a Unix socket server that records SET lines and answers GET with
-canned STATUS values). No QEMU, no Chromium — the CI harness
+canned STATUS values), and a FAKE runtime (the Browser host's
+control socket: `browser-embed` / `browser-embedded-status`).
+No QEMU, no Chromium — the CI harness
 (m5-check) covers the guest end to end. A warm `browser open`
 relaunches Chromium with --app=<url> (no PUT /json/new): /json/new
 opens the new tab in a NEW top-level window, and Chrome makes that
 window a normal browser window (tab strip + omnibox), not an --app
 window — so the relaunch is what keeps every navigation chromeless.
+
+Stage 5: `browser open` no longer passes --window-size (the
+compositor configures Chromium's size on first map, and `browser
+embed` configures it to the content rect after launch); `browser
+embed <x> <y> <w> <h>` adopts Chromium into the Browser window
+through the host's control socket, and `browser status` reports
+the adopted state as an `embedded:` line. The fake runtime proves
+the CLI half of that contract; the host half (bridge ops,
+idempotency, chromium_died) is proven by
+v2/rn/host/test-compositor-bridge.cc against a fake compositor.
 
 Run: python3 v2/update/test-browser.py
 Exit 0 = all checks pass.
@@ -217,6 +229,98 @@ class FakeStatusd(threading.Thread):
             pass
 
 
+# --- fake runtime (Stage 5: the Browser host's control socket) --------
+
+class FakeRuntime(threading.Thread):
+    """Unix socket server speaking the host control protocol
+    (v2/rn/host/runtime-control.h): `browser-embed <pid> <x> <y>
+    <w> <h>` -> "embedded: yes <x>,<y>,<w>x<h>", and
+    `browser-embedded-status` -> the current adopted state.
+    Records every embed line it receives. With fail_embed set, the
+    embed answers "error: compositor unavailable" (a host whose
+    compositor socket is gone) instead of adopting."""
+
+    def __init__(self, path, fail_embed=False):
+        super().__init__(daemon=True)
+        self.path = path
+        self.fail_embed = fail_embed
+        self.recorded_lines = []
+        self.embedded = None  # (x, y, w, h) once adopted
+        self.lock = threading.Lock()
+        self.stop = False
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.bind(path)
+        self.sock.listen(4)
+        self.sock.settimeout(0.2)
+
+    def recorded(self):
+        with self.lock:
+            return list(self.recorded_lines)
+
+    def run(self):
+        while not self.stop:
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            conn.settimeout(5)
+            buf = b""
+            try:
+                while b"\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                line = buf.decode(errors="replace").strip()
+                parts = line.split()
+                if not parts:
+                    continue
+                if parts[0] == "browser-embedded-status":
+                    with self.lock:
+                        rect = self.embedded
+                    if rect is None:
+                        conn.sendall(b"embedded: no\n")
+                    else:
+                        conn.sendall(
+                            f"embedded: yes {rect[0]},{rect[1]},"
+                            f"{rect[2]}x{rect[3]}\n".encode())
+                elif parts[0] == "browser-embed" and len(parts) == 6:
+                    with self.lock:
+                        self.recorded_lines.append(line)
+                    if self.fail_embed:
+                        conn.sendall(b"error: compositor unavailable\n")
+                    else:
+                        with self.lock:
+                            self.embedded = tuple(
+                                int(p) for p in parts[2:6])
+                        conn.sendall(
+                            f"embedded: yes {parts[2]},{parts[3]},"
+                            f"{parts[4]}x{parts[5]}\n".encode())
+                else:
+                    conn.sendall(b"error: unknown command\n")
+            except (OSError, ValueError):
+                pass
+            finally:
+                conn.close()
+
+    def close(self):
+        self.stop = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+
 def _pid_gone(pid):
     """True when pid no longer exists, or is a zombie (dead but not
     yet reaped by its parent — kill(pid, 0) still answers for a
@@ -404,6 +508,11 @@ def main():
           len(argv_lines) == 1 and
           "--app=https://example.com" in json.loads(argv_lines[0]),
           str(argv_lines))
+    check("browser open: relaunch carries no --window-size (Stage 5)",
+          len(argv_lines) == 1 and
+          not any(a.startswith("--window-size")
+                  for a in json.loads(argv_lines[0])),
+          str(argv_lines))
     check("browser open: warm open closes the stale local tab",
           ("GET", "/json/close/" + "A" * 32) in REQUESTS,
           str(REQUESTS))
@@ -416,6 +525,11 @@ def main():
     check("browser open: bare hostname normalized to https on relaunch",
           len(argv_lines) == 1 and
           "--app=https://example.com" in json.loads(argv_lines[0]),
+          str(argv_lines))
+    check("browser open: bare-hostname relaunch has no --window-size",
+          len(argv_lines) == 1 and
+          not any(a.startswith("--window-size")
+                  for a in json.loads(argv_lines[0])),
           str(argv_lines))
 
     # --- browser open: SIGTERM-resistant Chromium is SIGKILLed ---
@@ -789,6 +903,110 @@ def main():
           r.stdout + r.stderr)
     check("browser open: silent-CDP wait bounded (< 8 s)",
           dt < 8, f"took {dt:.1f}s")
+
+    # --- browser embed / embedded status (Stage 5) ---
+    # The CLI half of the contract, against a fake runtime (the
+    # Browser host's control socket). The state file names a live
+    # pid (this test process) as the Chromium pid; the fake CDP
+    # server is still answering, so `browser status` reports
+    # running: yes throughout.
+    runtime_path = str(tmp / "runtime.sock")
+    runtime = FakeRuntime(runtime_path)
+    runtime.start()
+    embed_state = tmp / "embed-chromium.state"
+    embed_state.write_text(f"pid={os.getpid()}\ngpu=yes\n")
+    embed_env = dict(env)
+    embed_env["SEVYN_RUNTIME_SOCK"] = runtime_path
+    embed_env["SEVYN_CHROMIUM_STATE"] = str(embed_state)
+    try:
+        r = run_cli(binary, ["browser", "embed", "0", "152", "800", "348"],
+                    embed_env)
+        check("browser embed: exit 0 on adoption", r.returncode == 0,
+              r.stdout + r.stderr)
+        check("browser embed: prints the adopted rect",
+              r.stdout.strip() == "embedded: yes 0,152,800x348", r.stdout)
+        check("browser embed: host got browser-embed with the state pid",
+              runtime.recorded() ==
+              [f"browser-embed {os.getpid()} 0 152 800 348"],
+              str(runtime.recorded()))
+        # Idempotent re-embed (same rect): the CLI sends it again
+        # and the host answers the same line.
+        r = run_cli(binary, ["browser", "embed", "0", "152", "800", "348"],
+                    embed_env)
+        check("browser embed: re-embed is exit 0",
+              r.returncode == 0 and
+              r.stdout.strip() == "embedded: yes 0,152,800x348",
+              r.stdout + r.stderr)
+        check("browser embed: re-embed reaches the host",
+              len(runtime.recorded()) == 2, str(runtime.recorded()))
+        # browser status reports the adopted state from the host.
+        r = run_cli(binary, ["browser", "status"], embed_env)
+        check("browser status: embedded yes with the live rect",
+              r.returncode == 0 and
+              "embedded: yes 0,152,800x348" in r.stdout, r.stdout)
+    finally:
+        runtime.close()
+
+    # Fresh runtime, nothing adopted yet: status reports no.
+    runtime2 = FakeRuntime(str(tmp / "runtime2.sock"))
+    runtime2.start()
+    embed_env2 = dict(embed_env)
+    embed_env2["SEVYN_RUNTIME_SOCK"] = str(tmp / "runtime2.sock")
+    try:
+        r = run_cli(binary, ["browser", "status"], embed_env2)
+        check("browser status: embedded no before any embed",
+              r.returncode == 0 and "embedded: no" in r.stdout, r.stdout)
+        # A host whose compositor is gone fails the embed (the
+        # error surfaces, exit 1 — the app shows it, not a blank).
+        runtime2.close()
+        failing = FakeRuntime(str(tmp / "runtime3.sock"), fail_embed=True)
+        failing.start()
+        embed_env3 = dict(embed_env)
+        embed_env3["SEVYN_RUNTIME_SOCK"] = str(tmp / "runtime3.sock")
+        try:
+            r = run_cli(binary, ["browser", "embed", "0", "152", "800",
+                                 "348"], embed_env3)
+            check("browser embed: compositor failure is exit 1",
+                  r.returncode == 1, r.stdout + r.stderr)
+            check("browser embed: compositor error is printed",
+                  r.stdout.strip() == "error: compositor unavailable",
+                  r.stdout)
+        finally:
+            failing.close()
+    finally:
+        runtime2.close()
+
+    # No runtime socket at all (Browser app not running): embed
+    # fails, and status still reports embedded: no instead of
+    # failing the whole status over it.
+    no_runtime_env = dict(embed_env)
+    no_runtime_env["SEVYN_RUNTIME_SOCK"] = str(tmp / "no-such.sock")
+    r = run_cli(binary, ["browser", "embed", "0", "152", "800", "348"],
+                no_runtime_env)
+    check("browser embed: no runtime socket is exit 1",
+          r.returncode == 1 and "not running" in r.stderr,
+          r.stdout + r.stderr)
+    r = run_cli(binary, ["browser", "status"], no_runtime_env)
+    check("browser status: no runtime socket still reports embedded no",
+          "embedded: no" in r.stdout, r.stdout)
+    # Dead Chromium pid: embed refuses before touching the socket.
+    dead_state = tmp / "dead-chromium.state"
+    dead_state.write_text("pid=999999\ngpu=yes\n")
+    dead_env = dict(embed_env)
+    dead_env["SEVYN_CHROMIUM_STATE"] = str(dead_state)
+    r = run_cli(binary, ["browser", "embed", "0", "152", "800", "348"],
+                dead_env)
+    check("browser embed: dead Chromium pid is exit 1",
+          r.returncode == 1 and "not running" in r.stderr,
+          r.stdout + r.stderr)
+    # Bad arguments never reach the socket.
+    for args in (["browser", "embed", "0", "152", "800"],
+                 ["browser", "embed", "0", "152", "0", "348"],
+                 ["browser", "embed", "0", "152", "800", "x"],
+                 ["browser", "embed", "-1", "152", "800", "348"]):
+        r = run_cli(binary, args, embed_env)
+        check(f"browser embed: bad args exit 1 ({' '.join(args[2:])})",
+              r.returncode == 1, r.stdout + r.stderr)
 
     # --- net ---
     r = run_cli(binary, ["net", "status"], {})
