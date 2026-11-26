@@ -737,6 +737,169 @@ check("TextInput selection: drag-select across wrapped rows in a multiline input
   assert.equal(highlights().length, 2, "one highlight rect per covered row");
 });
 
+// --- Find in app (gap unit 5, audit #6) --------------------------------
+// A note-like multiline input with onFindRequest + a controlled
+// selection prop, and a find field that mounts with autoFocus when
+// Ctrl+F opens it — the renderer primitives Notes' find bar is built
+// on. The full flow (type a query, Enter cycles, Esc closes) is
+// proven in the app e2e test; these checks prove the primitives.
+const findRequests = [];
+const findEscapes = [];
+const findSubmits = [];
+let findNoteValue = "";
+let findQueryValue = "";
+let findSelProp = null; // selection prop the test drives via re-render
+function FindApp() {
+  const [note, setNote] = React.useState("buy milk and bread buy milk again");
+  const [query, setQuery] = React.useState("");
+  const [open, setOpen] = React.useState(false);
+  findNoteValue = note;
+  findQueryValue = query;
+  return h(
+    "View",
+    { style: { width: 800, height: 500, backgroundColor: "#111827" } },
+    h("TextInput", {
+      value: note,
+      onChangeText: setNote,
+      placeholder: "find note",
+      multiline: true,
+      autoFocus: true,
+      selection: findSelProp ?? undefined,
+      onFindRequest: () => {
+        findRequests.push("find");
+        setOpen(true);
+      },
+      onEscape: () => findEscapes.push("note-esc"),
+      style: {
+        width: 800,
+        height: 64,
+        backgroundColor: "#312e81",
+        fontSize: 16,
+        color: "#ffffff",
+      },
+    }),
+    open
+      ? h("TextInput", {
+          value: query,
+          onChangeText: setQuery,
+          onSubmitEditing: (e) =>
+            findSubmits.push(!!(e && e.nativeEvent && e.nativeEvent.shiftKey)),
+          onEscape: () => findEscapes.push("find-esc"),
+          placeholder: "find query",
+          autoFocus: true,
+          style: {
+            width: 800,
+            height: 32,
+            backgroundColor: "#1f2937",
+            fontSize: 16,
+            color: "#ffffff",
+          },
+        })
+      : null,
+    h("TextInput", {
+      value: "",
+      onChangeText: () => {},
+      placeholder: "plain input",
+      style: {
+        width: 800,
+        height: 32,
+        backgroundColor: "#14532d",
+        fontSize: 16,
+        color: "#ffffff",
+      },
+    }),
+  );
+}
+
+renderer.update(h(FindApp));
+// resetAfterCommit presents after the mutation phase but before the
+// layout phase where commitMount focuses, so the flush's own present
+// predates the focus — a second present (what every key/pointer
+// handler does after flushing) shows the caret.
+renderer._presentRoot();
+
+check("Find in app: Ctrl+F calls onFindRequest and focuses the find field", () => {
+  assert.ok(caret(), "note input focused on mount (autoFocus)");
+  keyCtrl(33); // Ctrl+F
+  assert.deepEqual(findRequests, ["find"], "onFindRequest fired");
+  const find = inputInstByPlaceholder("find query");
+  assert.ok(find, "find field mounted");
+  key(16); // q — must land in the find field, not the note
+  assert.equal(findQueryValue, "q", "typing went to the find field");
+  assert.equal(
+    findNoteValue,
+    "buy milk and bread buy milk again",
+    "note untouched by find typing",
+  );
+});
+
+check("Find in app: Ctrl+F without onFindRequest types nothing", () => {
+  // Focus is in the find field, which has no onFindRequest.
+  keyCtrl(33); // Ctrl+F
+  assert.deepEqual(findRequests, ["find"], "no second find request");
+  assert.equal(findQueryValue, "q", "no 'f' typed into the find field");
+});
+
+check("Find in app: Enter submits with shiftKey false, Shift+Enter true", () => {
+  key(28); // Enter
+  key(28, true); // Shift+Enter
+  assert.deepEqual(findSubmits, [false, true], "submit told Enter from Shift+Enter");
+});
+
+check(
+  "Find in app: selection prop selects the match, stale prop is not re-applied",
+  () => {
+    // "buy milk and bread buy milk again": "milk" is [4,8).
+    findSelProp = { start: 4, end: 8 };
+    renderer.update(h(FindApp));
+    const note = inputInstByPlaceholder("find note");
+    assert.deepEqual(selectionOf(note), { start: 4, end: 8, caret: 8 });
+    assert.equal(highlights().length, 1, "match highlighted");
+    // The user clicks into the note at char 2, then an unrelated
+    // re-render happens: the stale prop must not drag the selection
+    // back to the old match.
+    const hit = hitRect(64, "#312e81");
+    pressAt(hit.x + 2 * 8.8, hit.y + 10, 0x110, hit.nodeId);
+    releaseAt(hit.x + 2 * 8.8, hit.y + 10, 0x110);
+    assert.deepEqual(selectionOf(note), { start: 2, end: 2, caret: 2 });
+    renderer.update(h(FindApp));
+    assert.deepEqual(
+      selectionOf(note),
+      { start: 2, end: 2, caret: 2 },
+      "stale selection prop not re-applied after a user caret move",
+    );
+    assert.equal(highlights().length, 0, "no highlight once the match is gone");
+    findSelProp = null;
+    renderer.update(h(FindApp));
+  },
+);
+
+check("Find in app: Escape in the find field calls onEscape and keeps focus", () => {
+  const findHit = hitRect(32, "#1f2937");
+  pressAt(findHit.x + 2, findHit.y + 16, 1, findHit.nodeId);
+  releaseAt(findHit.x + 2, findHit.y + 16, 1);
+  key(1); // Escape
+  assert.deepEqual(findEscapes, ["find-esc"], "onEscape fired");
+  // The click placed the caret at 0, so 'w' inserts before the 'q' —
+  // the point is the keystroke landed in the find field at all.
+  key(17); // w — focus must still be in the find field
+  assert.equal(findQueryValue, "wq", "typing still lands in the find field");
+});
+
+check("Find in app: Escape without onEscape blurs, autoFocus refocuses the note", () => {
+  const plainHit = hitRect(32, "#14532d");
+  pressAt(plainHit.x + 2, plainHit.y + 16, 1, plainHit.nodeId);
+  releaseAt(plainHit.x + 2, plainHit.y + 16, 1);
+  key(1); // Escape — the plain input has no onEscape
+  assert.deepEqual(findEscapes, ["find-esc"], "no onEscape fired for the plain input");
+  // The blur drops focus; presentRoot re-focuses the first autoFocus
+  // input (the note), so the caret is back in the note, not the plain
+  // input.
+  const noteHit = hitRect(64, "#312e81");
+  assert.ok(caret(), "caret drawn again after the autoFocus refocus");
+  assert.equal(caret().y, noteHit.y + 1, "caret back in the note input");
+});
+
 // Restore the shell tree for a clean end state.
 renderer.update(h(App));
 

@@ -33,10 +33,12 @@
 // TextInput (M4, caret + multiline in the GF65 fixes; selection model
 // in gap unit 3, audit #9/#24): a controlled input, single-line by
 // default. Props: value, onChangeText, onSubmitEditing, placeholder,
-// autoFocus, multiline, secureTextEntry, onSelectionChange. The focused
-// input eats printable keys (US keycode map below, Shift-aware),
-// Backspace, Delete, and Enter (submit — or a newline when multiline);
-// Tab moves focus, Escape blurs. The caret moves with
+// autoFocus, multiline, secureTextEntry, onSelectionChange, selection,
+// onFindRequest, onEscape. The focused input eats printable keys (US
+// keycode map below, Shift-aware), Backspace, Delete, and Enter (submit
+// — or a newline when multiline); Tab moves focus, Escape blurs (or
+// calls onEscape when the input has one — the app owns Escape then).
+// The caret moves with
 // Left/Right/Home/End and, when multiline, Up/Down between wrapped
 // lines; it is drawn from the value (masked when secure), never the
 // placeholder. Selection: Shift+arrows/Home/End extend it from an
@@ -46,7 +48,24 @@
 // Backspace/Delete/typing replace it. Copy/paste/cut (gap unit 2):
 // Ctrl+C/X/V through the host clipboard (Sevyn.clipboardRead/Write),
 // operating on the selection — a collapsed selection copies/cuts the
-// whole value. A Ctrl+letter that is not C/X/V is swallowed, never typed.
+// whole value. A Ctrl+letter that is not C/X/V/A/Z/Y/F is swallowed,
+// never typed.
+//
+// Find in app (gap unit 5, audit #6): the app drives find through
+// three props. Ctrl+F on an input with onFindRequest calls it (the app
+// opens its find field); the app then selects each match by passing
+// it as the controlled `selection` prop {start, end} — the renderer
+// applies a changed selection on update, caret at the end of the
+// range, and remembers the last applied pair so a later render never
+// re-applies a stale match after the user moves the caret (the app
+// must clear the prop when the selection diverges — see commitUpdate).
+// onSubmitEditing receives {nativeEvent:{shiftKey}} so a find field
+// can tell Enter (next match) from Shift+Enter (previous). autoFocus
+// takes effect when the input mounts (commitMount), not only when
+// nothing is focused — a find field mounting while the note is
+// focused takes focus; the only other autoFocus inputs (Browser
+// address bar, Terminal prompt) mount once with their app and never
+// remount mid-session, so nothing else steals focus.
 //
 // The renderer keeps a yoga-id -> instance map for hit routing and a
 // focus list for keyboard activation. ScrollView scrolls via
@@ -437,7 +456,14 @@ function emitInstance(inst, ox, oy, ops, clip) {
     // blends the alpha. One rect per visual line the range covers;
     // a range that ends exactly at a line break draws nothing on
     // the next line. The caret below still marks the focus end.
-    if (focusedInstance === inst) {
+    // The highlight draws for ANY input with a non-collapsed
+    // selection, not only the focused one (gap unit 5): a find match
+    // is a selection the app set through the controlled `selection`
+    // prop while the find field holds focus, and it must stay visible
+    // while the user types the query. An input the user tabs away
+    // from keeps its selection visible the same way a desktop field
+    // does. The caret, below, stays focus-only.
+    {
       const { start, end } = selectionRangeFor(inst);
       if (start !== end) {
         const hlText = textInputValueText(inst);
@@ -689,6 +715,37 @@ function notifySelectionChange(inst, prev, next) {
   } catch (e) {
     Sevyn.log("onSelectionChange failed: " + (e && e.message ? e.message : String(e)));
   }
+}
+
+// Controlled `selection` prop (gap unit 5, audit #6): the app selects
+// a range by passing {start, end} — find-in-app selects each match
+// this way. commitUpdate applies a pair it has not applied before
+// (caret at the end of the range, through the unit-3 selection
+// model); a pair already applied is left alone, so a later render
+// never drags the caret back to a stale match after the user moves it
+// by other means. The contract is on the app: when the user moves the
+// caret (arrows, click, typing) the app must clear the prop —
+// onSelectionChange tells it the selection diverged — or the next
+// render with the same stale pair would re-apply it. An absent prop
+// clears the remembered pair and leaves the instance selection alone
+// (the app cannot clear a selection by removing the prop; it passes a
+// collapsed {start, end} pair for that).
+function selectionPropOf(props) {
+  const s = props && props.selection;
+  if (!s || typeof s.start !== "number" || typeof s.end !== "number") return null;
+  return { start: s.start, end: s.end };
+}
+
+function applySelectionProp(inst) {
+  const sel = selectionPropOf(inst.props);
+  if (!sel) {
+    inst.lastAppliedSelection = null;
+    return;
+  }
+  const key = sel.start + ":" + sel.end;
+  if (inst.lastAppliedSelection === key) return;
+  inst.lastAppliedSelection = key;
+  setSelectionState(inst, sel.end, sel.start);
 }
 
 // Move the caret, keeping (or starting) a selection: the anchor is
@@ -1012,7 +1069,9 @@ const KEYMAP = {
 // copy, cut, and paste through the host clipboard (gap unit 2),
 // operating on the selection; Ctrl+A selects the whole value and
 // Ctrl+Z / Ctrl+Y undo and redo through the per-input stack
-// (gap unit 4); any other Ctrl+printable is swallowed, never typed.
+// (gap unit 4); Ctrl+F calls props.onFindRequest when the input has
+// one (gap unit 5 — the app opens its find field); any other
+// Ctrl+printable is swallowed, never typed.
 function handleTextInputKey(inst, ev) {
   const props = inst.props || {};
   const value = textInputValue(inst);
@@ -1038,12 +1097,22 @@ function handleTextInputKey(inst, ev) {
   };
   // Copy/paste/cut (gap unit 2) and select-all / undo / redo
   // (gap unit 4): Ctrl+A/Z/Y, using the modifier state unit 1 puts
-  // on the event. A Ctrl+letter that is not C/X/V/A/Z/Y is
+  // on the event. A Ctrl+letter that is not C/X/V/A/Z/Y/F is
   // swallowed — it is a shortcut, not text (without this Ctrl+C
   // would also type a 'c'). Other Ctrl keys (arrows, Home/End, ...)
   // fall through to the switch below, unchanged.
   if (ev.ctrl) {
     switch (ev.key) {
+      case 33: // F — find in app (gap unit 5): the app owns the
+        // find UI, so this only fires when the input opts in with
+        // onFindRequest. Without the prop it is swallowed like any
+        // other Ctrl+letter (returning true here, not breaking —
+        // a break would fall through to the switch below and type
+        // an 'f').
+        if (typeof props.onFindRequest === "function") {
+          props.onFindRequest();
+        }
+        return true;
       case 30: // A — select all, through the unit-3 selection model.
         setSelectionState(inst, value.length, 0);
         return true;
@@ -1091,7 +1160,15 @@ function handleTextInputKey(inst, ev) {
   }
   switch (ev.key) {
     case 15: // Tab — move focus.
-    case 1: // Escape — blur.
+      return false;
+    case 1: // Escape — blur, unless the input owns Escape through
+      // onEscape (gap unit 5: a find field closes itself). The
+      // callback replaces the blur — the key is consumed either way
+      // the app handles it, so focus stays unless the app moves it.
+      if (typeof props.onEscape === "function") {
+        props.onEscape();
+        return true;
+      }
       return false;
     case 28: // Enter — submit, or a newline when multiline.
       if (multiline) {
@@ -1099,7 +1176,11 @@ function handleTextInputKey(inst, ev) {
         const { start, end } = selectionRangeFor(inst);
         change(value.slice(0, start) + "\n" + value.slice(end), start + 1);
       } else if (typeof props.onSubmitEditing === "function") {
-        props.onSubmitEditing();
+        // The submit event carries the Shift state (gap unit 5): a
+        // find field tells Enter (next match) from Shift+Enter
+        // (previous match) from it. Existing handlers take no
+        // argument and are unaffected.
+        props.onSubmitEditing({ nativeEvent: { shiftKey: !!ev.shift } });
       }
       return true;
     case 14: {
@@ -1662,7 +1743,14 @@ const hostConfig = {
     child.parent = parentInstance;
   },
   finalizeInitialChildren(instance, type, props, hostContext) {
-    return false;
+    // autoFocus takes effect on mount (gap unit 5): returning true
+    // runs commitMount, which focuses the input. A find field
+    // mounting while the note is focused takes focus this way; the
+    // presentRoot branch still covers the nothing-focused case
+    // (Terminal prompt, Browser address bar — both mount once with
+    // their app and never remount mid-session, so nothing else
+    // steals focus through this).
+    return type === "TextInput" && !!(props && props.autoFocus);
   },
   // NOTE: react-reconciler 0.34 has NO prepareUpdate / updatePayload —
   // updateHostComponent marks a host fiber for update whenever
@@ -1715,7 +1803,15 @@ const hostConfig = {
   commitTextUpdate(textInstance, oldText, newText) {
     textInstance.text = newText;
   },
-  commitMount(instance, type, props, internalInstanceHandle) {},
+  commitMount(instance, type, props, internalInstanceHandle) {
+    // autoFocus on mount (gap unit 5 — see finalizeInitialChildren).
+    // focusInstance puts the caret at the end of the value with no
+    // selection: an empty find field starts at 0, a note opened
+    // fresh starts at the end.
+    if (type === "TextInput" && props && props.autoFocus) {
+      focusInstance(instance);
+    }
+  },
   commitUpdate(instance, type, prevProps, nextProps, internalInstanceHandle) {
     instance.props = nextProps;
     applyStyleToNode(instance);
@@ -1723,7 +1819,14 @@ const hostConfig = {
     // measure function marks the Yoga node dirty, so the next layout
     // reads the new value (style re-application alone may not dirty
     // it when the style itself is unchanged).
-    if (type === "TextInput") installTextInputMeasure(instance);
+    if (type === "TextInput") {
+      installTextInputMeasure(instance);
+      // Controlled selection (gap unit 5): apply a changed
+      // `selection` prop through the unit-3 model. Props are already
+      // the new ones, so onSelectionChange fires with the new
+      // handler and a range the app just asked for.
+      applySelectionProp(instance);
+    }
   },
 
   hideInstance(instance) {
