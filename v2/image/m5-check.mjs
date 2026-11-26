@@ -1361,6 +1361,62 @@ function findTerminalDockIcon(img, known) {
 // on the bare desktop (the point lands on the red C icon there),
 // so the body colour discriminates just as well. Returns
 // {x, y} or null.
+// Visible fragment of the Terminal's TITLE BAR within the known
+// window rect (round 7, M5 run 45833879589). When Chromium covers
+// the header the strict scan returns null, but the bar still peeks
+// out where Chromium does not overlap in x — in the crash run, a
+// solid 79px run of #111827 at x103-181 over y286-332. The scan
+// covers the header band (top..top+43, the band
+// refocusFirstAttemptSafe uses) and returns the centre of the
+// longest run of header-colour pixels, preferring the row closest
+// to the band's vertical centre among the longest runs (the title
+// text splits some rows). Runs whose centre falls in the window
+// controls zone (within 120px of the right edge) are rejected —
+// the peek must never click minimize/maximize/close. Returns null
+// when no run reaches 20px. The point is always above the dock
+// band, so the click reaches the Terminal, never the dock.
+function findTitlePeekPoint(known, img, W, H) {
+  if (!known) return null;
+  const y0 = Math.max(known.top, 48);
+  const y1 = Math.min(known.top + 43, known.bottom, H - 1);
+  const x0 = Math.max(known.left, 0);
+  const x1 = Math.min(known.right, W - 1);
+  if (y0 > y1 || x0 > x1) return null;
+  const midY = (y0 + y1) / 2;
+  let best = null;
+  for (let y = y0; y <= y1; y++) {
+    let s = -1;
+    for (let x = x0; x <= x1 + 1; x++) {
+      // tol=2: the title bar is exactly #111827; the wallpaper
+      // gradient reads (17,24,42) — blue off by 3 — and must not
+      // count as a peek (verified on the run-7 frames).
+      const m = x <= x1 && pixelMatches(img, x, y, 17, 24, 39, 2);
+      if (m && s < 0) s = x;
+      if (!m && s >= 0) {
+        const len = x - s;
+        const cx = Math.round((s + x - 1) / 2);
+        if (
+          len >= 20 &&
+          cx < known.right - 120 &&
+          (!best ||
+            len > best.len ||
+            (len === best.len && Math.abs(y - midY) < Math.abs(best.y - midY)))
+        ) {
+          best = { x0: s, x1: x - 1, y, len };
+        }
+        s = -1;
+      }
+    }
+  }
+  if (!best) return null;
+  const cx = Math.round((best.x0 + best.x1) / 2);
+  const cy = best.y;
+  if (cx < known.left || cx > known.right || cy < known.top || cy > known.bottom)
+    return null;
+  if (cy >= DOCK_ICON_TOP_Y) return null;
+  return { x: cx, y: cy };
+}
+
 function refocusInputPointSafe(known, img, W, H) {
   if (!known) return null;
   const x = known.left + 200;
@@ -1923,6 +1979,38 @@ async function main() {
       shotRecovery.height,
     );
     diag(`recovery guard=${guardedNow ? `${guardedNow.x},${guardedNow.y}` : "null"}`);
+    // Round 7 (M5 run 45833879589): title-peek raise. The guarded
+    // input click NEVER produced an EXEC — not in this run, not in
+    // runs 45817659596 / 45824409192 / 45829947853 — although the
+    // guard proves Terminal pixels at the point: the click sits in
+    // the dock band (y768) where the dock pill swallows it (the
+    // boot log shows zero pointer lines after the browser open,
+    // and all four refocus frames are pixel-identical). Title
+    // clicks ABOVE the dock band are the proven path (the
+    // first-attempt verifies pass on them). When Chromium covers
+    // the header, the title bar still peeks out where Chromium
+    // does not overlap in x — in the crash run, a solid 79px run
+    // of #111827 at x103-181, y286-332. Click the peek: it raises
+    // the window, then the title+input clicks below run on the
+    // known rect (the window did not move — only its stacking
+    // changed). If the raise did not take, the title click lands
+    // on Chromium (harmless) and the verify fails, and the
+    // recovery below runs as before.
+    const peekPoint = findTitlePeekPoint(
+      termPos,
+      shotRecovery,
+      shotRecovery.width,
+      shotRecovery.height,
+    );
+    diag(`title peek=${peekPoint ? `${peekPoint.x},${peekPoint.y}` : "null"}`);
+    if (peekPoint) {
+      await moveTo(peekPoint.x, peekPoint.y, shotRecovery.width, shotRecovery.height);
+      await sleep(300);
+      await click();
+      await sleep(300);
+      await clickTitleAndInput();
+      if (await verifyFocus()) return true;
+    }
     if (guardedNow) {
       await moveTo(guardedNow.x, guardedNow.y, shotRecovery.width, shotRecovery.height);
       await sleep(300);
