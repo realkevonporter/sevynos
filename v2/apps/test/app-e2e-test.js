@@ -541,6 +541,12 @@ check("settings: channel switch applies and logs", () => {
   assert.ok(texts.includes("AI: echo-ai"), "current AI shown");
   assert.ok(texts.includes("echo-ai"), "echo-ai button shown");
   assert.ok(texts.includes("plan-ai"), "plan-ai button shown");
+  // 1b: the relay section renders (off in the harness — the e2e
+  // handler does not cover `tailscale status`, so it returns
+  // "0\n" and the relay reads off), with the join form.
+  assert.ok(texts.includes("AI relay"), "relay section shown");
+  assert.ok(texts.includes("Relay: off"), "relay off shown");
+  assert.ok(texts.includes("Join tailnet"), "relay join button shown");
   assert.ok(texts.includes("Power"), "power section shown");
   assert.ok(texts.includes("Shut Down"), "power shut down button shown");
   assert.ok(texts.includes("Restart"), "power restart button shown");
@@ -567,6 +573,13 @@ check("settings: channel switch applies and logs", () => {
   // Nightly, Stable, Sync Now, Timezone, Apply, echo-ai, plan-ai,
   // key input, Save key, Clear key, God toggle, Shut Down, Restart,
   // Default, Solid, Cosmic, Minimal, macOS, macOS Light] — 23.
+  // 1b's relay section adds three more in the AI section, after
+  // the God toggle and before Shut Down (the login-server input,
+  // the auth-key input, Join), so the order is [—, ▢, X, Scan,
+  // Nightly, Stable, Sync Now, Timezone, Apply, echo-ai, plan-ai,
+  // key input, Save key, Clear key, God toggle, login server,
+  // auth key, Join, Shut Down, Restart, Default, Solid, Cosmic,
+  // Minimal, macOS, macOS Light] — 26.
   pressTab(6); // —, ▢, X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
@@ -581,14 +594,15 @@ check("settings: channel switch applies and logs", () => {
   );
   // Focus order is now [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
-  // God toggle, Shut Down, Restart, Default, Solid, Cosmic, Minimal,
-  // macOS, macOS Light]: Stable -> Sync Now -> Timezone -> Apply
-  // -> echo-ai -> plan-ai -> key input -> Save key -> Clear key
-  // -> God toggle -> Shut Down -> Restart -> Default -> Solid
-  // -> Cosmic -> Minimal -> macOS -> macOS Light -> — -> ▢ -> X
-  // -> Scan -> Nightly. Stable is 6th, Nightly 5th, so 22 Tabs wrap
+  // God toggle, login server, auth key, Join, Shut Down, Restart,
+  // Default, Solid, Cosmic, Minimal, macOS, macOS Light]: Stable ->
+  // Sync Now -> Timezone -> Apply -> echo-ai -> plan-ai -> key input
+  // -> Save key -> Clear key -> God toggle -> login server -> auth
+  // key -> Join -> Shut Down -> Restart -> Default -> Solid ->
+  // Cosmic -> Minimal -> macOS -> macOS Light -> — -> ▢ -> X
+  // -> Scan -> Nightly. Stable is 6th, Nightly 5th, so 25 Tabs wrap
   // back to Nightly.
-  pressTab(22);
+  pressTab(25);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> Sync Now -> Timezone -> Apply -> echo-ai ->
@@ -659,9 +673,10 @@ check("settings: wallpaper style + color apply and log", () => {
   );
   // Focus order is [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
-  // God toggle, Shut Down, Restart, Default, Solid, Cosmic, Minimal,
-  // macOS, macOS Light]: Default is the 18th focusable.
-  pressTab(18);
+  // God toggle, login server, auth key, Join, Shut Down, Restart,
+  // Default, Solid, Cosmic, Minimal, macOS, macOS Light]: Default is
+  // the 21st focusable.
+  pressTab(21);
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS wallpaperStyle=default"),

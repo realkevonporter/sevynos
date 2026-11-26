@@ -26,6 +26,11 @@ export interface StatusSnapshot {
   // daemon SETs it on/off as the mode changes. The tray shows the
   // amber GOD pill while it is on — the status-bar mark (D1).
   "ai.god_mode"?: string;
+  // Relay 1b: statusd owns this key (default "off"); `sevyn
+  // tailscale up/down/revoke` SETs it on/off as the tailnet join
+  // changes. The tray shows the blue RELAY pill while it is on —
+  // the status-bar mark (R6), distinct from the amber GOD pill.
+  "ai.relay"?: string;
 }
 
 function batteryLabel(v?: string): string {
@@ -129,6 +134,28 @@ export function StatusTray(props: StatusTrayProps): React.ReactElement {
           }}
         >
           <Text style={{ fontSize: 13, color: "#fef3c7", fontWeight: "bold" }}>GOD</Text>
+        </View>
+      ) : null}
+      {/* RELAY pill (1b, R6): the status-bar mark while the relay is
+          on. Renders only when on, so a relay-off system (CI, fresh
+          boot) sees no change at all. Blue, distinct from the amber
+          GOD pill. Not a pressable — it is a mark, not a control;
+          the toggle lives in Settings. */}
+      {status["ai.relay"] === "on" ? (
+        <View
+          style={{
+            height: 36,
+            marginLeft: 16,
+            paddingHorizontal: 10,
+            borderRadius: 6,
+            backgroundColor: "#1e40af",
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <Text style={{ fontSize: 13, color: "#dbeafe", fontWeight: "bold" }}>
+            RELAY
+          </Text>
         </View>
       ) : null}
       {/* Power button: the tray's only pressable. A text label, not a

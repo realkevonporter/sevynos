@@ -275,9 +275,16 @@ static void print_usage(FILE *f)
             "                              open); saves it for later\n"
             "  sevyn net wifi disconnect   drop the association\n"
             "  sevyn net wifi forget <ssid> remove a saved network\n"
-            "  sevyn tailscale status      tailnet address, peers, DNS\n"
-            "                              (read-only: reports the daemon's\n"
-            "                              state; joining a tailnet is 1b)\n"
+            "  sevyn tailscale up --login-server <url>\n"
+            "                              join a tailnet (--authkey <key> or\n"
+            "                              --file <path> first; --confirm; the\n"
+            "                              interactive login prints an auth URL)\n"
+            "  sevyn tailscale down        leave the tailnet (keeps the node\n"
+            "                              registered; removes the reboot marker)\n"
+            "  sevyn tailscale revoke      forget the tailnet (--confirm; the\n"
+            "                              node is unregistered, re-joining needs\n"
+            "                              a fresh auth key)\n"
+            "  sevyn tailscale status      tailnet address, peers, DNS, relay\n"
             "  sevyn time status         clock, last sync, timezone,\n"
             "                              RTC state\n"
             "  sevyn time sync [--host <h>] [--port <p>]\n"
@@ -1826,6 +1833,11 @@ static int cmd_ai_key(int argc, char **argv)
 #define AI_GOD_MARKER_FILE "/data/ai/god-mode.json"
 #define AI_GOD_TEMPLATE_FILE "/usr/share/sevyn/ai/grant-god.json"
 #define AI_AUDIT_FILE "/data/logs/ai-audit.log"
+/* Relay 1b: the persisted join intent (R6) and the pending
+ * interactive-login URL (shown in Settings while `tailscale up`
+ * waits for approval on another device). */
+#define AI_RELAY_MARKER_FILE "/data/ai/relay.json"
+#define AI_RELAY_AUTH_URL_FILE "/data/ai/relay-auth-url"
 
 static const char *ai_god_grant_path(void)
 {
@@ -1845,6 +1857,16 @@ static const char *ai_god_template_path(void)
 static const char *ai_audit_path(void)
 {
     return env_or("SEVYN_AI_AUDIT_LOG", AI_AUDIT_FILE);
+}
+
+static const char *ai_relay_marker_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_MARKER", AI_RELAY_MARKER_FILE);
+}
+
+static const char *ai_relay_auth_url_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_AUTH_URL", AI_RELAY_AUTH_URL_FILE);
 }
 
 /* UTC ISO-8601 timestamp for the marker. */
@@ -4925,6 +4947,11 @@ static int cmd_net_wifi(int argc, char **argv)
 /*   status: not logged in   — daemon alive, no tailnet joined yet      */
 /*   status: stopped         — daemon present but stopped               */
 /*   status: running                                                    */
+/*   relay: enabled|disabled — the R6 marker (1b): the user joined and  */
+/*                           wants to stay joined across reboots        */
+/*   login_server: <url>     — from the marker, when joined (1b)        */
+/*   auth_url: <url>         — pending interactive login, while `up`    */
+/*                           waits for approval (1b)                    */
 /*   tailnet: <100.x>        — this device's tailnet address            */
 /*   hostname: <name>                                                   */
 /*   peers: <n>              — other tailnet nodes, one `peer:` line    */
@@ -4938,8 +4965,8 @@ static int cmd_net_wifi(int argc, char **argv)
 /* documented text format — one peer per line, `<IP> <host> <owner>    */
 /* <os> <state>`, the local node first; `#` and `Warning:` lines       */
 /* skipped. The GF65 on-device proof must confirm the real binary's    */
-/* output matches (see the 1a PR body). No join, no state change, no   */
-/* network traffic of its own: `tailscale up/down` is 1b.              */
+/* output matches (see the 1a PR body). `up` / `down` / `revoke` are   */
+/* 1b (below): the join, the kill switch, and the full forget.         */
 /* ------------------------------------------------------------------ */
 
 /* One `tailscale status` peer line: first two whitespace-separated
@@ -4959,6 +4986,264 @@ static int tailscale_parse_peer(const char *line, char *ip, size_t ip_cap,
     return 1;
 }
 
+/* The relay intent (R6): the /data/ai/relay.json marker exists when
+ * the user has joined a tailnet and wants to stay on it across
+ * reboots. Printed by every `tailscale status` path — the marker
+ * can exist while the daemon is stopped or logged out (mid-reboot,
+ * before the re-join lands, or after the daemon died). */
+static void print_relay_intent(void)
+{
+    printf("relay: %s\n",
+           access(ai_relay_marker_path(), F_OK) == 0 ? "enabled"
+                                                      : "disabled");
+}
+
+/* Read the login server out of the relay marker (the JSON the `up`
+ * verb wrote). Returns 1 and copies it to out, 0 when the marker
+ * is absent or has no login_server. Settings uses it to prefill
+ * the login-server field on a re-join. */
+static int ai_relay_marker_login_server(char *out, size_t cap)
+{
+    FILE *f = fopen(ai_relay_marker_path(), "r");
+    if (!f)
+        return 0;
+    char buf[1024];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    const char *p = strstr(buf, "\"login_server\"");
+    if (!p)
+        return 0;
+    p = strchr(p, ':');
+    if (!p)
+        return 0;
+    p++;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != '"')
+        return 0;
+    p++;
+    size_t i = 0;
+    while (p[i] && p[i] != '"' && i + 1 < cap) {
+        out[i] = p[i];
+        i++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+/* The pending interactive-login URL (written by `up` while it
+ * waits for approval). Returns 1 and copies it to out, 0 when
+ * there is none pending. */
+static int ai_relay_auth_url(char *out, size_t cap)
+{
+    FILE *f = fopen(ai_relay_auth_url_path(), "r");
+    if (!f)
+        return 0;
+    size_t n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    /* Strip trailing whitespace (the writer adds a newline). */
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
+                     out[n - 1] == ' ' || out[n - 1] == '\t'))
+        out[--n] = '\0';
+    return n > 0;
+}
+
+/* The relay's stored state lines for `tailscale status`: the login
+ * server (from the marker, when joined) and the pending auth URL
+ * (while an interactive login waits). Both are absent when there
+ * is nothing to show. */
+static void print_relay_state(void)
+{
+    char server[512];
+    if (ai_relay_marker_login_server(server, sizeof(server)))
+        printf("login_server: %s\n", server);
+    char url[1024];
+    if (ai_relay_auth_url(url, sizeof(url)))
+        printf("auth_url: %s\n", url);
+}
+
+/* What joining a tailnet exposes, in plain language (the two-step
+ * confirm: the CLI prints this when a bare `tailscale up` refuses;
+ * the Settings dialog lists it). */
+static void print_relay_powers(FILE *f)
+{
+    fprintf(f,
+            "Joining a tailnet makes this device reachable from it:\n"
+            "  - any node the tailnet ACL allows can reach this device\n"
+            "  - this device can reach the tailnet's nodes (per the ACL)\n"
+            "  - the tailnet's control plane (the login server) sees\n"
+            "    this device's tailnet address and connection state\n"
+            "The device stays joined across reboots until you leave\n"
+            "(`sevyn tailscale down`).\n");
+}
+
+/* Write the relay marker atomically (tmp + rename, like the god
+ * marker). The marker is the persisted R6 intent: this device stays
+ * on the tailnet across reboots; init re-joins from it. The marker
+ * is state, not a secret (the tray shows it), so 0644 is fine. The
+ * login server is stored so the boot re-join needs no auth key —
+ * the node key in /data/tailscale re-authenticates. Returns 0 on
+ * success, -1 on failure. */
+static int ai_relay_write_marker(const char *login_server,
+                                 const char *via)
+{
+    const char *marker = ai_relay_marker_path();
+    char dir[4000];
+    if (ai_dirname(marker, dir, sizeof(dir)) != 0 ||
+        ai_mkdir_p(dir) != 0)
+        return -1;
+    char now[32];
+    ai_iso_now(now, sizeof(now));
+    char json[1024];
+    snprintf(json, sizeof(json),
+             "{\"relay\": true, \"login_server\": \"%s\", "
+             "\"joined_at\": \"%s\", \"enabled_by\": \"%s\"}\n",
+             login_server, now, via);
+    if (strlen(marker) + 16 > 4096)
+        return -1;
+    char mtmp[4096];
+    snprintf(mtmp, sizeof(mtmp), "%s.tmp.%d", marker, getpid());
+    FILE *f = fopen(mtmp, "w");
+    if (!f)
+        return -1;
+    int wrc = 0;
+    if (fputs(json, f) == EOF)
+        wrc = -1;
+    if (fclose(f) != 0)
+        wrc = -1;
+    if (wrc != 0) {
+        unlink(mtmp);
+        return -1;
+    }
+    if (rename(mtmp, marker) != 0) {
+        unlink(mtmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* SET ai.relay on|off on statusd (the tray pill's source). Best
+ * effort — the join/leave itself already happened; a failed SET
+ * only means the tray pill is stale, so callers warn instead of
+ * failing the verb. Returns 0 on success, -1 when statusd could
+ * not be reached. */
+static int statusd_set_relay(const char *value)
+{
+    int fd = connect_sock("SEVYN_STATUS_SOCK", STATUS_SOCK);
+    if (fd < 0)
+        return -1;
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "SET ai.relay %s", value);
+    int rc = send_line(fd, cmd) == 0 ? 0 : -1;
+    close(fd);
+    return rc;
+}
+
+/* Find the first https:// URL in `tailscale up` output (the
+ * interactive-login URL). Returns 1 and copies it to out, 0 when
+ * there is none. */
+static int tailscale_find_auth_url(const char *out, char *url, size_t cap)
+{
+    const char *p = strstr(out, "https://");
+    if (!p)
+        return 0;
+    size_t n = 0;
+    while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\n' &&
+           p[n] != '\r' && n + 1 < cap) {
+        url[n] = p[n];
+        n++;
+    }
+    url[n] = '\0';
+    return n > 0;
+}
+
+/* Run `tailscale up` in the foreground, streaming the child's
+ * stdout to our stdout as it arrives. The interactive login path
+ * (no --authkey) blocks until the user approves the auth URL on
+ * another device, and the URL must reach Settings (via the
+ * auth-URL file) while the command is still waiting — not after
+ * it returns — so a plain run_capture (which only returns at
+ * exit) cannot carry it. The moment the auth URL appears in the
+ * output it is written to the auth-URL file (0600: a single-use
+ * login link) so Settings can show it too; the Terminal user sees
+ * the same URL in the streamed output. Returns the child's exit
+ * code, or -1 when the spawn failed; *out gets a malloc'd
+ * NUL-terminated stdout. */
+static int tailscale_up_stream(char *const argv[], char **out)
+{
+    *out = calloc(1, 1);
+    if (!*out)
+        return -1;
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        /* stderr stays on the console (the child's errors are
+         * one-liners the user should see). */
+        close(pipefd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    size_t cap = 65536, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        close(pipefd[0]);
+        return -1;
+    }
+    int url_written = 0;
+    for (;;) {
+        if (len + 4096 >= cap)
+            break;
+        ssize_t n = read(pipefd[0], buf + len, 4096);
+        if (n <= 0)
+            break;
+        /* Echo the chunk to the Terminal as it arrives (the user
+         * needs the auth URL while the command waits for
+         * approval). The whole accumulated buffer is scanned each
+         * chunk, so a URL split across two reads is still found
+         * once it is complete. */
+        fwrite(buf + len, 1, (size_t)n, stdout);
+        fflush(stdout);
+        len += (size_t)n;
+        buf[len] = '\0';
+        if (!url_written) {
+            char url[1024];
+            if (tailscale_find_auth_url(buf, url, sizeof(url))) {
+                const char *upath = ai_relay_auth_url_path();
+                FILE *uf = fopen(upath, "w");
+                if (uf) {
+                    fputs(url, uf);
+                    fputc('\n', uf);
+                    fclose(uf);
+                    chmod(upath, 0600);
+                    url_written = 1;
+                }
+            }
+        }
+    }
+    close(pipefd[0]);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    buf[len] = '\0';
+    free(*out);
+    *out = buf;
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return -1;
+}
+
 static int cmd_tailscale_status(void)
 {
     char *const targv[] = { (char *)"tailscale", (char *)"status", NULL };
@@ -4973,11 +5258,15 @@ static int cmd_tailscale_status(void)
      * stopped state exits non-zero. */
     if (strstr(out, "Logged out.") != NULL) {
         printf("status: not logged in\n");
+        print_relay_intent();
+        print_relay_state();
         free(out);
         return 0;
     }
     if (strstr(out, "Tailscale is stopped.") != NULL) {
         printf("status: stopped\n");
+        print_relay_intent();
+        print_relay_state();
         free(out);
         return 0;
     }
@@ -5034,6 +5323,8 @@ static int cmd_tailscale_status(void)
     char dns[128] = "";
     first_nameserver(dns, sizeof(dns));
     printf("status: running\n");
+    print_relay_intent();
+    print_relay_state();
     printf("tailnet: %s\n", self_ip);
     printf("hostname: %s\n", self_host);
     printf("peers: %d\n", npeers);
@@ -5044,17 +5335,245 @@ static int cmd_tailscale_status(void)
     return 0;
 }
 
+/* `sevyn tailscale up --login-server <url> [--authkey <key> |
+ * --file <path>] [--confirm] [--via <source>]` (relay 1b): join a
+ * tailnet. The pre-provisioned auth key is the first path (no
+ * browser needed — the key comes from the tailnet admin); without
+ * one, `tailscale up` prints an interactive auth URL and waits
+ * for approval on another device (the on-device browser is not a
+ * reliable approval surface, so the URL is shown in the Terminal
+ * and in Settings). --accept-dns=false is the default, not a
+ * troubleshooting step: tailscaled with DNS acceptance on would
+ * rewrite /etc/resolv.conf and fight udhcpc's rewrites on every
+ * DHCP renewal (investigation §4.1); the device is addressed by
+ * its 100.x tailnet IP and MagicDNS names are given up. The
+ * login server has no default — it is the user's infrastructure,
+ * not a shipped constant; the marker stores it so the boot
+ * re-join needs no auth key (the node key in /data/tailscale
+ * re-authenticates). A bare `up` (no --confirm) refuses after
+ * printing what joining exposes, like `god on` (D1). */
+static int cmd_tailscale_up(int argc, char **argv)
+{
+    const char *login_server = NULL;
+    const char *authkey = NULL;
+    const char *authkey_file = NULL;
+    int confirm = 0;
+    const char *via = "cli";
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--login-server") == 0 && i + 1 < argc) {
+            login_server = argv[++i];
+        } else if (strcmp(argv[i], "--authkey") == 0 && i + 1 < argc) {
+            authkey = argv[++i];
+        } else if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+            authkey_file = argv[++i];
+        } else if (strcmp(argv[i], "--confirm") == 0) {
+            confirm = 1;
+        } else if (strcmp(argv[i], "--via") == 0 && i + 1 < argc &&
+                   (strcmp(argv[i + 1], "cli") == 0 ||
+                    strcmp(argv[i + 1], "settings") == 0)) {
+            via = argv[++i];
+        } else {
+            return usage();
+        }
+    }
+    if (!login_server)
+        return usage();
+    if (authkey && authkey_file)
+        return usage();
+    if (strncmp(login_server, "http://", 7) != 0 &&
+        strncmp(login_server, "https://", 8) != 0) {
+        fprintf(stderr, "error: --login-server must be an http(s) URL\n");
+        return 1;
+    }
+    if (!confirm) {
+        /* Step one of the two-step confirm: show the exposure and
+         * refuse. A bare non-interactive join never puts the
+         * device on a tailnet. */
+        print_relay_powers(stderr);
+        fprintf(stderr,
+                "To join the tailnet at %s, run:\n"
+                "  sevyn tailscale up --login-server %s%s --confirm\n",
+                login_server, login_server,
+                authkey || authkey_file ? " --authkey <key>" : "");
+        return 1;
+    }
+    char keybuf[512];
+    if (authkey_file) {
+        /* The file is read + unlinked at once (the comms-password
+         * pattern): a single-use key must not linger. */
+        if (read_password_file(authkey_file, keybuf, sizeof(keybuf)) !=
+            0) {
+            fprintf(stderr, "error: cannot read the auth key file\n");
+            return 1;
+        }
+        authkey = keybuf;
+    }
+    char *targv[16];
+    int ti = 0;
+    targv[ti++] = (char *)"tailscale";
+    targv[ti++] = (char *)"up";
+    targv[ti++] = (char *)"--login-server";
+    targv[ti++] = (char *)login_server;
+    targv[ti++] = (char *)"--accept-dns=false";
+    if (authkey) {
+        targv[ti++] = (char *)"--authkey";
+        targv[ti++] = (char *)authkey;
+    }
+    targv[ti++] = NULL;
+    char *out = NULL;
+    int rc;
+    if (authkey) {
+        /* Pre-provisioned key: completes immediately, no login
+         * wait. */
+        rc = run_capture(targv, &out);
+    } else {
+        /* Interactive login: streams the auth URL to the Terminal
+         * and the auth-URL file while it waits for approval. */
+        rc = tailscale_up_stream(targv, &out);
+    }
+    if (rc == 127) {
+        fprintf(stderr, "error: tailscale not installed\n");
+        free(out);
+        return 1;
+    }
+    if (rc != 0) {
+        /* The auth-URL file is stale on failure — remove it so
+         * Settings stops showing a dead URL. */
+        unlink(ai_relay_auth_url_path());
+        fprintf(stderr, "error: tailscale up failed (rc=%d)\n", rc);
+        free(out);
+        return 1;
+    }
+    /* Success: the pending auth URL (if any) is spent — remove it,
+     * write the R6 marker, and mark the relay on in statusd. */
+    unlink(ai_relay_auth_url_path());
+    if (ai_relay_write_marker(login_server, via) != 0) {
+        fprintf(stderr,
+                "warning: joined the tailnet, but the relay marker "
+                "could not be written — the device will not re-join "
+                "after a reboot\n");
+    }
+    if (statusd_set_relay("on") != 0) {
+        fprintf(stderr,
+                "warning: joined the tailnet, but statusd could not "
+                "be reached — the tray pill will not show the relay\n");
+    }
+    printf("Joined the tailnet.\n");
+    free(out);
+    return 0;
+}
+
+/* `sevyn tailscale down` (relay 1b): the kill switch. `tailscale
+ * down` disconnects now and keeps the node registered (a later
+ * `up` re-connects without re-auth); removing the marker is what
+ * stops the boot re-join (R6). Leaving is always safe, so it needs
+ * no confirm. If the disconnect itself fails (the daemon is not
+ * running) the device is already off the tailnet, so the marker
+ * is still removed — the kill switch must work even when the
+ * daemon is broken — and the failure is only a warning. */
+static int cmd_tailscale_down(void)
+{
+    char *const targv[] = { (char *)"tailscale", (char *)"down", NULL };
+    char *out = NULL;
+    int rc = run_capture(targv, &out);
+    free(out);
+    if (rc == 127) {
+        fprintf(stderr, "error: tailscale not installed\n");
+        return 1;
+    }
+    if (rc != 0) {
+        fprintf(stderr,
+                "warning: tailscale down failed (rc=%d) — the daemon "
+                "was not reachable, so the device was already off "
+                "the tailnet; removing the marker anyway so it does "
+                "not re-join at boot\n",
+                rc);
+    }
+    const char *marker = ai_relay_marker_path();
+    if (unlink(marker) != 0 && errno != ENOENT) {
+        fprintf(stderr, "error: cannot remove the relay marker: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    if (statusd_set_relay("off") != 0) {
+        fprintf(stderr,
+                "warning: left the tailnet, but statusd could not "
+                "be reached — the tray pill will not clear\n");
+    }
+    printf("Left the tailnet.\n");
+    return 0;
+}
+
+/* `sevyn tailscale revoke [--confirm]` (relay 1b): forget the
+ * tailnet entirely. `tailscale logout` clears the node key — the
+ * node is unregistered, and re-joining needs a fresh auth key.
+ * The destructive one, so it needs --confirm like `god on`. Unlike
+ * `down` (the kill switch, which must work when broken), revoke is
+ * strict: a failed logout returns 1 without removing the marker,
+ * so a half-forgotten node cannot silently linger. */
+static int cmd_tailscale_revoke(int argc, char **argv)
+{
+    int confirm = 0;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--confirm") == 0) {
+            confirm = 1;
+        } else {
+            return usage();
+        }
+    }
+    if (!confirm) {
+        fprintf(stderr,
+                "Revoke forgets this tailnet: the node is "
+                "unregistered and re-joining needs a fresh auth key.\n"
+                "To revoke, run: sevyn tailscale revoke --confirm\n");
+        return 1;
+    }
+    char *const targv[] = { (char *)"tailscale", (char *)"logout", NULL };
+    char *out = NULL;
+    int rc = run_capture(targv, &out);
+    free(out);
+    if (rc == 127) {
+        fprintf(stderr, "error: tailscale not installed\n");
+        return 1;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "error: tailscale logout failed (rc=%d)\n", rc);
+        return 1;
+    }
+    const char *marker = ai_relay_marker_path();
+    if (unlink(marker) != 0 && errno != ENOENT) {
+        fprintf(stderr, "error: cannot remove the relay marker: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    unlink(ai_relay_auth_url_path());
+    if (statusd_set_relay("off") != 0) {
+        fprintf(stderr,
+                "warning: revoked the tailnet, but statusd could not "
+                "be reached — the tray pill will not clear\n");
+    }
+    printf("Tailnet revoked.\n");
+    return 0;
+}
+
 static int cmd_tailscale(int argc, char **argv)
 {
     if (argc < 3)
         return usage();
-    /* 1a is read-only: only `status`. `up` / `down` / `revoke`
-     * are 1b (join UX, two-step confirm, /data marker). */
     if (strcmp(argv[2], "status") == 0) {
         if (argc != 3)
             return usage();
         return cmd_tailscale_status();
     }
+    if (strcmp(argv[2], "up") == 0)
+        return cmd_tailscale_up(argc, argv);
+    if (strcmp(argv[2], "down") == 0) {
+        if (argc != 3)
+            return usage();
+        return cmd_tailscale_down();
+    }
+    if (strcmp(argv[2], "revoke") == 0)
+        return cmd_tailscale_revoke(argc, argv);
     return usage();
 }
 

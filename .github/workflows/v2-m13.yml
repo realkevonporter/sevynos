@@ -207,11 +207,36 @@ jobs:
           sudo env SEVYN_V2_VERSION=m13-test-1 sh v2/image/build-m13-image.sh
 
       - name: Run the M13 check in QEMU
+        env:
+          # Relay 1b: the guest check joins an in-job Headscale
+          # (the control protocol has no mock — a real Headscale
+          # binary is the only join proof). The step downloads the
+          # pinned binaries below; the check starts Headscale on
+          # 0.0.0.0:8080 and joins the guest + a host node against
+          # it. It never touches the live server.
+          SEVYN_V2_HEADSCALE: "1"
         run: |
           # The build step runs under sudo, so v2/image/build/ is
           # root-owned; hand it back to the runner first, or the check
           # cannot create m13-boot-*.log (EACCES — the M1 failure mode).
           sudo chown -R "$USER" v2/image/build
+          # Relay 1b: pinned + sha256-verified — the same versions
+          # the image (Tailscale 1.104.7) and the live server
+          # (Headscale 0.29.7) run.
+          mkdir -p v2/image/build/headscale
+          cd v2/image/build/headscale
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o headscale \
+            https://github.com/juanfont/headscale/releases/download/v0.29.7/headscale_0.29.7_linux_amd64
+          echo "e827fc9b12d958bc95b081c4401dd63f8e0471d025b45b508535a920532150a8  headscale" | sha256sum -c -
+          chmod +x headscale
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o tailscale.tar.gz \
+            https://pkgs.tailscale.com/stable/tailscale_1.104.7_amd64.tgz
+          echo "e56693ff74a64f2591b7e819c280635a100aae1ddfb0ef058fcd052b7cd8d16c  tailscale.tar.gz" | sha256sum -c -
+          tar xzf tailscale.tar.gz
+          test -x "tailscale_1.104.7_amd64/tailscale"
+          ./headscale version
+          ./tailscale_1.104.7_amd64/tailscale version
+          cd "$GITHUB_WORKSPACE"
           node v2/image/m13-check.mjs
 
       - name: Run the M12 check in QEMU (regression on the M13 image)
@@ -231,4 +256,5 @@ jobs:
             v2/image/build/m12-boot-*.log
             v2/image/build/m12-check.json
             v2/image/build/m12-data.img
+            v2/image/build/headscale-state/*.log
           if-no-files-found: warn
