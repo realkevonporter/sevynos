@@ -686,8 +686,8 @@ check("settings: wallpaper style + color apply and log", () => {
   assert.ok(texts.includes("macOS"), "macos style button shown");
   assert.ok(texts.includes("macOS Light"), "macos-light style button shown");
   assert.ok(
-    texts.some((t) => t.includes("Custom image wallpapers are not supported yet.")),
-    "no-custom-image note shown for a gradient style",
+    texts.some((t) => t.includes("Uploading your own photo is not supported yet")),
+    "no-custom-image note shown under the Appearance intro",
   );
   // Focus order is [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
