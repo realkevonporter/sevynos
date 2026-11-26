@@ -1,13 +1,18 @@
-// sevyn-relay — the SevynOS AI relay agent (Phase 2).
+// sevyn-relay — the SevynOS AI relay agent (Phase 2 + screen frames).
 //
 // Listens on the tailnet interface (or loopback for tests) for one
 // cloud-agent connection at a time, authenticates it (Ed25519 +
 // ephemeral X25519, HKDF-SHA256, ChaCha20-Poly1305 sealed frames),
 // and forwards its tasks to the AI daemon over /run/sevyn-ai.sock
 // as SESSION lines, replying with the daemon's final counts.
-// Started by init when /data/ai/relay-agent.json exists, and by
-// `sevyn ai relay on`. See ~/workspace/sevynos-ai-relay/phase2/
-// INTERFACES.md for the contract.
+// Screen observation (R8): a `frame-request` asks the compositor
+// for one still frame over the bridge socket and streams it back
+// as sealed `frame-start` / `frame-chunk` / `frame-end` frames
+// (JSON-chunked — see envelope.rs), turning the `ai.screen` mark
+// on while frames flow. Started by init when
+// /data/ai/relay-agent.json exists, and by `sevyn ai relay on`.
+// See ~/workspace/sevynos-ai-relay/phase2/ INTERFACES.md for the
+// contract and frame-types/FRAMES.md for the frame decision.
 
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
@@ -22,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use sevyn_relay::log::{init_file, log};
 use sevyn_relay::logf;
-use sevyn_relay::session::{handle_connection, DeviceIdentity, Timers};
+use sevyn_relay::session::{handle_connection, DeviceIdentity, FrameConfig, Timers};
 
 const DEFAULT_PORT: u16 = 17893;
 const DEFAULT_KEY_DIR: &str = "/data/ai";
@@ -42,16 +47,23 @@ struct Args {
     idle_timeout_secs: u64,
     max_session_secs: u64,
     heartbeat_secs: u64,
+    capture_sock: PathBuf,
+    status_sock: PathBuf,
+    screen_state: PathBuf,
 }
 
 fn usage() -> &'static str {
     "sevyn-relay --bind <ip> [--port 17893] [--key-dir /data/ai] \
      [--daemon-sock /run/sevyn-ai.sock] [--pidfile /run/sevyn-relay.pid] \
      [--log-file <path>] [--idle-timeout-secs 900] \
-     [--max-session-secs 14400] [--heartbeat-secs 30]"
+     [--max-session-secs 14400] [--heartbeat-secs 30] \
+     [--capture-sock $XDG_RUNTIME_DIR/sevyn-compositor.sock] \
+     [--status-sock /run/sevyn-status.sock] \
+     [--screen-state /data/ai/relay-screen.json]"
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
+    let frames = FrameConfig::default();
     let mut args = Args {
         bind: String::new(),
         port: DEFAULT_PORT,
@@ -62,6 +74,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         idle_timeout_secs: 900,
         max_session_secs: 14_400,
         heartbeat_secs: 30,
+        capture_sock: frames.capture_sock,
+        status_sock: frames.status_sock,
+        screen_state: frames.screen_state,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -98,6 +113,14 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--heartbeat-secs needs a number".to_string())?
             }
+            // Frame plumbing (R8): the bridge socket the agent asks
+            // for captures, the statusd socket for the ai.screen
+            // mark, and the screen state file `sevyn ai relay
+            // status` reads. All default to the production paths;
+            // host tests point them at fakes.
+            "--capture-sock" => args.capture_sock = PathBuf::from(take(&mut i)?),
+            "--status-sock" => args.status_sock = PathBuf::from(take(&mut i)?),
+            "--screen-state" => args.screen_state = PathBuf::from(take(&mut i)?),
             "--help" | "-h" => return Err("help".to_string()),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -179,6 +202,11 @@ fn run() -> Result<(), String> {
         max_session: Duration::from_secs(args.max_session_secs),
         heartbeat: Duration::from_secs(args.heartbeat_secs),
     };
+    let frames = FrameConfig {
+        capture_sock: args.capture_sock,
+        status_sock: args.status_sock,
+        screen_state: args.screen_state,
+    };
     let identity = Arc::new(identity);
     let session_active = Arc::new(AtomicBool::new(false));
 
@@ -208,9 +236,10 @@ fn run() -> Result<(), String> {
         let identity = Arc::clone(&identity);
         let key_dir = args.key_dir.clone();
         let daemon_sock = args.daemon_sock.clone();
+        let frames = frames.clone();
         thread::spawn(move || {
             let _guard = guard;
-            handle_connection(stream, &identity, &key_dir, &daemon_sock, timers);
+            handle_connection(stream, &identity, &key_dir, &daemon_sock, timers, frames);
         });
     }
     Err("listener closed".to_string())

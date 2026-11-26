@@ -1,7 +1,8 @@
 /* SevynOS v2 M1 — status daemon (sevyn-statusd).
  *
- * The live system-status service. It owns five values — battery, wifi,
- * volume, ai.god_mode (P2), ai.relay (relay 1b) — and pushes every
+ * The live system-status service. It owns six values — battery, wifi,
+ * volume, ai.god_mode (P2), ai.relay (relay 1b), ai.screen (relay
+ * frames, R8/S2) — and pushes every
  * change to all subscribers over a Unix socket.
  * Nothing in the system polls for status: changes arrive by event.
  *
@@ -140,13 +141,20 @@ struct value {
  * reads it from the snapshot to show the GOD pill. `ai.relay` is
  * the relay mark (1b): `sevyn tailscale up/down/revoke` SETs it
  * on/off as the tailnet join changes, and the tray reads it to
- * show the RELAY pill. */
+ * show the RELAY pill. `ai.screen` is the screen-observation
+ * mark (relay frames, R8/S2): the relay agent — not the daemon —
+ * SETs it on when the first frame of a session is delivered and
+ * off when the session ends, and the tray reads it to show the
+ * red SCREEN pill. The agent talks to statusd directly over the
+ * socket (the same fire-and-forget SET the daemon uses); the
+ * daemon itself never touches this key. */
 static struct value values[] = {
     { "battery", "unknown" },
     { "wifi", "unknown" },
     { "volume", "50" },
     { "ai.god_mode", "off" },
     { "ai.relay", "off" },
+    { "ai.screen", "off" },
 };
 #define NVALUES (sizeof(values) / sizeof(values[0]))
 

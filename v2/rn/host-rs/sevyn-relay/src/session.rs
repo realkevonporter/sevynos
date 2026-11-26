@@ -20,6 +20,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::capture;
 use crate::crypto::{
     b64_decode, b64_decode_32, b64_encode, derive_session_key, device_id, ecdh_shared,
     ephemeral_keypair, load_device_keypair, load_pinned_peer, pairing_code, random_32, verify_sig,
@@ -27,10 +28,12 @@ use crate::crypto::{
 };
 use crate::daemon;
 use crate::envelope::{
-    self, ErrorFrame, Hello, HelloAck, HelloOk, PingFrame, PongFrame, SealedFrame, SessionEndFrame,
-    TaskFrame, TypedFrame, MAX_TASK_BYTES,
+    self, ErrorFrame, FrameChunkFrame, FrameEndFrame, FrameRequestFrame, FrameStartFrame, Hello,
+    HelloAck, HelloOk, PingFrame, PongFrame, SealedFrame, SessionEndFrame, TaskFrame, TypedFrame,
+    FRAME_CHUNK_BYTES, FRAME_MIN_INTERVAL, MAX_TASK_BYTES,
 };
 use crate::logf;
+use crate::screen::{self, ScreenState};
 use crate::timeutil::iso_now;
 
 /// Lifecycle timers (R7 production defaults: 15 min idle, 4 h max,
@@ -153,6 +156,38 @@ impl Shared {
     }
 }
 
+/// Frame plumbing for one connection: where the agent reaches the
+/// compositor, statusd, and the screen state file. All paths have
+/// production defaults (`FrameConfig::default`); the agent's CLI
+/// flags override them so host tests can point at fakes.
+#[derive(Debug, Clone)]
+pub struct FrameConfig {
+    pub capture_sock: PathBuf,
+    pub status_sock: PathBuf,
+    pub screen_state: PathBuf,
+}
+
+impl Default for FrameConfig {
+    fn default() -> Self {
+        Self {
+            capture_sock: capture::default_capture_sock(),
+            status_sock: PathBuf::from(screen::DEFAULT_STATUS_SOCK),
+            screen_state: PathBuf::from(screen::DEFAULT_SCREEN_STATE),
+        }
+    }
+}
+
+/// Per-connection frame state: the rate-cap window, the delivered
+/// count (logged at session end with `via=relay`), and whether the
+/// SCREEN mark is on (so teardown can turn it off exactly once).
+struct FrameState {
+    frames: u64,
+    last_accepted: Option<Instant>,
+    screen_on: bool,
+    session_start_iso: String,
+    peer_fp16: String,
+}
+
 /// Handle one accepted cloud-agent connection to completion
 /// (handshake, then sealed frames until close, error, or a timer
 /// drop). Returns when the connection is over.
@@ -162,13 +197,14 @@ pub fn handle_connection(
     key_dir: &Path,
     daemon_sock: &Path,
     timers: Timers,
+    frames: FrameConfig,
 ) {
     let peer = stream
         .peer_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "?".to_string());
     logf!("connection from {peer}");
-    if let Err(e) = run_connection(stream, identity, key_dir, daemon_sock, timers) {
+    if let Err(e) = run_connection(stream, identity, key_dir, daemon_sock, timers, &frames) {
         logf!("connection from {peer} ended: {e}");
     } else {
         logf!("connection from {peer} closed");
@@ -181,6 +217,7 @@ fn run_connection(
     key_dir: &Path,
     daemon_sock: &Path,
     timers: Timers,
+    frames_cfg: &FrameConfig,
 ) -> Result<(), String> {
     // The handshake must arrive promptly; the session itself has no
     // read timeout (a SESSION in flight blocks the daemon's poll
@@ -286,6 +323,13 @@ fn run_connection(
         "session established with agent {}",
         &peer_fp[..16.min(peer_fp.len())]
     );
+    let mut frame_state = FrameState {
+        frames: 0,
+        last_accepted: None,
+        screen_on: false,
+        session_start_iso: iso_now(),
+        peer_fp16: peer_fp[..16.min(peer_fp.len())].to_string(),
+    };
 
     // --- 6. sealed loop + heartbeat thread ------------------------
     let shared = Arc::new(Shared {
@@ -323,6 +367,23 @@ fn run_connection(
         &last_task,
         &last_pong,
         daemon_sock,
+        frames_cfg,
+        &mut frame_state,
+    );
+    // Session stop: the frame count (with via=relay) and the SCREEN
+    // mark off — exactly once, however the loop ended (bye, EOF,
+    // error, or a timer drop), and only if a frame ever turned it
+    // on. A session that delivered no frame never touched the mark.
+    if frame_state.screen_on {
+        if let Err(e) = screen::status_set_screen(&frames_cfg.status_sock, false) {
+            logf!("ai.screen SET off failed: {e}");
+        }
+        screen::clear_screen_state(&frames_cfg.screen_state);
+    }
+    logf!(
+        "session with agent {} ended frames={} via=relay",
+        frame_state.peer_fp16,
+        frame_state.frames
     );
     // Close the socket now: the heartbeat thread may still be
     // asleep for up to one heartbeat interval holding a cloned
@@ -401,6 +462,8 @@ fn sealed_loop(
     last_task: &Arc<Mutex<Instant>>,
     last_pong: &Arc<Mutex<Instant>>,
     daemon_sock: &Path,
+    frames_cfg: &FrameConfig,
+    frame_state: &mut FrameState,
 ) -> Result<(), String> {
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -465,6 +528,34 @@ fn sealed_loop(
                 let json = serde_json::to_string(&pong).unwrap();
                 shared.send_sealed(&json)?;
             }
+            "frame-request" => {
+                let req: FrameRequestFrame = serde_json::from_str(&text)
+                    .map_err(|e| format!("frame-request frame is not valid: {e}"))?;
+                // A frame request is cloud activity: it resets the
+                // idle timer like a task does.
+                *last_task.lock().unwrap() = Instant::now();
+                // Rate cap (S1, ≤1 fps): a request inside the window
+                // is refused, never queued — queueing would let
+                // requests pile up past the cap.
+                if let Some(last) = frame_state.last_accepted {
+                    if last.elapsed() < FRAME_MIN_INTERVAL {
+                        logf!("frame {} refused: rate limited via=relay", req.id);
+                        shared.send_error(
+                            Some(&req.id),
+                            "frame rate limited: at most one frame per second",
+                        );
+                        continue;
+                    }
+                }
+                frame_state.last_accepted = Some(Instant::now());
+                match deliver_frame(&req.id, frames_cfg, frame_state, shared) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        logf!("frame {} refused: {e} via=relay", req.id);
+                        shared.send_error(Some(&req.id), &e);
+                    }
+                }
+            }
             "pong" => {
                 *last_pong.lock().unwrap() = Instant::now();
             }
@@ -477,6 +568,72 @@ fn sealed_loop(
             }
         }
     }
+}
+
+/// Deliver one frame for `frame-request` id: capture, then stream
+/// `frame-start` / `frame-chunk`* / `frame-end` over the sealed
+/// channel. On the first delivered frame of the session the SCREEN
+/// mark goes on (statusd `ai.screen`, plus the screen state file
+/// for `sevyn ai relay status` / Settings); the state file's frame
+/// count is updated on every delivery. No per-frame log line — the
+/// session-end line carries the count (see `run_connection`).
+///
+/// Errors are fail-closed and carry no pixels: a refused capture
+/// (S3), an oversize PNG, or a missing compositor all surface here
+/// as an error string, and the caller answers with an `error`
+/// frame for the request id.
+fn deliver_frame(
+    id: &str,
+    cfg: &FrameConfig,
+    state: &mut FrameState,
+    shared: &Arc<Shared>,
+) -> Result<(), String> {
+    let png = capture::capture_frame(&cfg.capture_sock)?;
+    state.frames += 1;
+    if !state.screen_on {
+        if let Err(e) = screen::status_set_screen(&cfg.status_sock, true) {
+            logf!("ai.screen SET on failed: {e}");
+        }
+        state.screen_on = true;
+    }
+    let screen_state = ScreenState {
+        screen: "on".to_string(),
+        agent: state.peer_fp16.clone(),
+        session_start: state.session_start_iso.clone(),
+        frames: state.frames,
+    };
+    if let Err(e) = screen::write_screen_state(&cfg.screen_state, &screen_state) {
+        logf!("screen state write failed: {e}");
+    }
+    let start = FrameStartFrame {
+        kind: "frame-start".to_string(),
+        id: id.to_string(),
+        width: png.width,
+        height: png.height,
+        bytes: png.bytes.len() as u64,
+        sha256: png.sha256_hex,
+    };
+    let json = serde_json::to_string(&start).unwrap();
+    shared.send_sealed(&json)?;
+    let mut seq = 0u64;
+    for chunk in png.bytes.chunks(FRAME_CHUNK_BYTES) {
+        let frame = FrameChunkFrame {
+            kind: "frame-chunk".to_string(),
+            id: id.to_string(),
+            seq,
+            data: b64_encode(chunk),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        shared.send_sealed(&json)?;
+        seq += 1;
+    }
+    let end = FrameEndFrame {
+        kind: "frame-end".to_string(),
+        id: id.to_string(),
+    };
+    let json = serde_json::to_string(&end).unwrap();
+    shared.send_sealed(&json)?;
+    Ok(())
 }
 
 /// The on-disk pending-pairing path (used by tests and the CLI
