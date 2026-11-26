@@ -2081,12 +2081,20 @@ async function main() {
   const clickDesktop = async (covered) => {
     const W = 1920;
     const H = 1080;
+    // Candidates must also dodge the shell's own interactive chrome
+    // (the input region covers exactly it — a click there reaches
+    // the shell, not the desktop): the 48px top bar, and the
+    // "New folder" (24–156, 70–104) / "New text file" (164–296,
+    // 70–104) desktop buttons. [960,60] first: below the top bar,
+    // above the icon grid (starts y=122), clear of the buttons.
+    // (The old first candidate [100,100] sat inside the "New
+    // folder" button — after the input-region fix it would create
+    // a folder instead of clicking the desktop.)
     const candidates = [
-      [100, 100],
+      [960, 60],
       [1820, 100],
       [100, 900],
       [1820, 900],
-      [960, 60],
     ];
     for (const [x, y] of candidates) {
       const hit = (covered || []).some(
@@ -2121,8 +2129,11 @@ async function main() {
   let calcH = await findHeader("calc-a", 139, 92, 246);
   check("window: calculator header found", !!calcH.box, JSON.stringify(calcH.box));
   if (calcH.box) {
-    // Focus restore: click the desktop so the fullscreen shell
-    // covers the window, then click the dock tile to bring it back.
+    // Focus restore: a click on the empty desktop must NOT cover the
+    // window — the shell's input region is its interactive chrome
+    // only (window-raise fix), so the click falls through to the
+    // window below and the header stays visible. The dock tile
+    // click still focuses the window through the app host's remap.
     const winRect = {
       x: calcH.box.x,
       y: calcH.box.y,
@@ -2132,38 +2143,64 @@ async function main() {
     const deskPt = await clickDesktop([winRect]);
     check("window: a free desktop point exists", !!deskPt, JSON.stringify(deskPt));
     await sleep(2000);
-    const covered = await findHeader("calc-covered", 139, 92, 246);
+    const afterDesktop = await findHeader("calc-desktop-click", 139, 92, 246);
     check(
-      "window: desktop click covers the window (header hidden)",
-      !covered.box,
-      covered.box ? JSON.stringify(covered.box) : "hidden",
+      "window: desktop click leaves the window visible (header still found)",
+      !!afterDesktop.box,
+      afterDesktop.box ? JSON.stringify(afterDesktop.box) : "hidden",
+    );
+    // Top bar: a click on its empty stretch (between the wordmark
+    // and the tray) is shell chrome, not desktop — the window must
+    // stay visible there too.
+    await pointerClick(b.qmp, 1920, 1080, 960, 24);
+    await sleep(2000);
+    const afterTopBar = await findHeader("calc-topbar-click", 139, 92, 246);
+    check(
+      "window: top-bar click leaves the window visible (header still found)",
+      !!afterTopBar.box,
+      afterTopBar.box ? JSON.stringify(afterTopBar.box) : "hidden",
     );
     // Dock tile: the calculator tile is #8b5cf6 in the dock band.
-    const tile = dockTile(covered.img, 139, 92, 246);
+    const tile = dockTile(afterDesktop.img, 139, 92, 246);
     check("window: calculator dock tile found", !!tile, JSON.stringify(tile));
     if (tile) {
       const c = flatTileCentre("calculator");
-      await pointerClick(b.qmp, covered.img.width, covered.img.height, c.x, c.y);
+      await pointerClick(
+        b.qmp,
+        afterDesktop.img.width,
+        afterDesktop.img.height,
+        c.x,
+        c.y,
+      );
       const remap = await waitForLog(b.logPath, /HOST FOCUS remap calculator/, 30000);
       check("window: FOCUS remap logged by the app host", !!remap);
       await sleep(2000);
       const restored = await findHeader("calc-restored", 139, 92, 246);
       check(
-        "window: dock click restores the covered window",
+        "window: dock click focuses the window",
         !!restored.box,
         JSON.stringify(restored.box),
       );
       win.calc = restored.box;
     } else {
       check("window: FOCUS remap logged by the app host", false, "no dock tile");
-      check("window: dock click restores the covered window", false, "no dock tile");
+      check("window: dock click focuses the window", false, "no dock tile");
     }
   } else {
     check("window: a free desktop point exists", false, "no header");
-    check("window: desktop click covers the window (header hidden)", false, "no header");
+    check(
+      "window: desktop click leaves the window visible (header still found)",
+      false,
+      "no header",
+    );
+    check(
+      "window: top-bar click leaves the window visible (header still found)",
+      false,
+      "no header",
+    );
     check("window: calculator dock tile found", false, "no header");
     check("window: FOCUS remap logged by the app host", false, "no header");
-    check("window: dock click restores the covered window", false, "no header");
+    check("window: dock click focuses the window", false, "no header");
   }
   if (win.calc) {
     // Minimize: the — button is the leftmost of the three title-bar

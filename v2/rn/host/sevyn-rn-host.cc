@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
@@ -1022,6 +1023,55 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
                  }
                  hits_.push_back(hit);
                }
+             }
+             // Shell input region (window-raise fix, #158 follow-up):
+             // with no layer-shell global (Weston 13) the shell is a
+             // fullscreen xdg_toplevel, so any pointer hit on it
+             // raises it above the app windows. Restrict its input
+             // region to the shell's own interactive rects — the
+             // hit-test list just rebuilt (every Pressable and
+             // TextInput; the renderer already marks exactly those
+             // with a nodeId, sevyn-renderer.js emitInstance) — plus
+             // the opaque top bar (Shell.tsx, 48px), whose only
+             // pressable is the Power button. A click on empty
+             // desktop then falls through to the window below
+             // instead of raising the shell. App windows keep the
+             // default whole-surface region; headless runs have no
+             // surface. No commit here — the present below commits
+             // the surface in the same frame. The region is
+             // re-derived on every present, so the dock, the AI
+             // sidebar, the power-menu backdrop (a fullscreen
+             // Pressable while open) and the desktop icons are all
+             // covered as they appear and disappear; the region
+             // rects round outward so no pressable loses its edge
+             // pixel. Known gap, by design: clicks on the shell's
+             // non-interactive chrome (dock gaps, sidebar message
+             // area) still fall through to the app behind it — they
+             // can never raise or hide a window, only deliver a
+             // stray click to the app.
+             if (!headless_ && wayland_ && wayland_->isFullscreen()) {
+               std::vector<Wayland::InputRect> region;
+               for (const auto& hit : hits_) {
+                 float x0 = hit.x, y0 = hit.y;
+                 float x1 = hit.x + hit.w, y1 = hit.y + hit.h;
+                 if (hit.hasClip) {
+                   x0 = std::max(x0, hit.cx);
+                   y0 = std::max(y0, hit.cy);
+                   x1 = std::min(x1, hit.cx + hit.cw);
+                   y1 = std::min(y1, hit.cy + hit.ch);
+                 }
+                 if (x1 <= x0 || y1 <= y0)
+                   continue;
+                 Wayland::InputRect r;
+                 r.x = (int)std::floor(x0);
+                 r.y = (int)std::floor(y0);
+                 r.w = (int)std::ceil(x1) - r.x;
+                 r.h = (int)std::ceil(y1) - r.y;
+                 region.push_back(r);
+               }
+               region.push_back(
+                   Wayland::InputRect{0, 0, wayland_->width(), 48});
+               wayland_->setInputRegion(region);
              }
              if (headless_) {
                // No surface: the ops go to the JSON dump for the
