@@ -61,6 +61,9 @@ Sevyn._execHandler = (cmd) => {
   if (cmd === "sevyn files list /data/Desktop") return "0\nd Photos\nf Notes.txt\n";
   if (cmd.startsWith("sevyn files mkdir ")) return "0\ncreated\n";
   if (cmd.startsWith("sevyn files write ")) return "0\nwrote\n";
+  // AI sidebar (phase 1): one-shot ask, canned counts reply.
+  if (cmd.startsWith("sevyn ai ask "))
+    return "0\nOK backend=muse-ai allowed=1 denied=0 failed=0\n";
   return "0\n";
 };
 
@@ -79,6 +82,10 @@ async function checkAsync(name, fn) {
 }
 
 const lastPresent = () => Sevyn._presents[Sevyn._presents.length - 1];
+// The AI button is a 56px square pressable (see AiButton.tsx) in the
+// same bottom band as the dock tiles, so the tile filter excludes
+// that size — otherwise the button counts as a 15th tile.
+const AI_BUTTON_SIZE = 56;
 // Tile pressables, left to right. The tray power button (#100) is also a
 // rect with a nodeId, but it lives in the top tray (y < 48); the dock
 // tiles are below it, so the y filter keeps it out of the count.
@@ -95,9 +102,86 @@ const tiles = (ops) =>
         o.type === "rect" &&
         o.y >= 48 &&
         o.w === o.h &&
-        o.w > 10,
+        o.w > 10 &&
+        o.w !== AI_BUTTON_SIZE,
     )
     .sort((a, b) => a.x - b.x);
+// The AI button rect (the only 56x56 square pressable) and the
+// sidebar panel rect (the only #111827 rect at its width).
+const aiButtonRect = (ops) =>
+  ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      o.w === AI_BUTTON_SIZE &&
+      o.h === AI_BUTTON_SIZE,
+  );
+const sidebarRect = (ops, width) =>
+  ops.find((o) => o.type === "rect" && o.w === width && o.color === "#111827");
+// A pressable rect containing the centre of a text op (the sidebar
+// header buttons are text pressables — the test finds the text, then
+// its pressable). Text ops carry x/y/w/h; the smallest containing
+// nodeId rect is the pressable (panels and rows are Views, nodeId -1).
+const pressableAtText = (ops, label) => {
+  const t = ops.find((o) => o.type === "text" && o.text === label);
+  assert.ok(t, "text " + label + " present");
+  const cx = t.x + t.w / 2;
+  const cy = t.y + t.h / 2;
+  const hit = ops
+    .filter(
+      (o) =>
+        o.type === "rect" &&
+        o.nodeId != null &&
+        o.nodeId >= 0 &&
+        cx >= o.x &&
+        cx < o.x + o.w &&
+        cy >= o.y &&
+        cy < o.y + o.h,
+    )
+    .sort((a, b) => a.w * a.h - b.w * b.h)[0];
+  assert.ok(hit, "pressable for " + label);
+  return hit;
+};
+const tap = (rect) => {
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: rect.x + 2,
+    y: rect.y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: rect.nodeId,
+  });
+};
+// Let the microtask queue + state flush settle (the sidebar's ask
+// resolves a Promise, then re-renders).
+const flush = async (n = 3) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+};
+// Key helpers (evdev codes; the renderer's US keymap) — the subset
+// for "list the installed apps", copied from app-e2e-test.js.
+const KEY_FOR = {
+  a: [30, false],
+  d: [32, false],
+  e: [18, false],
+  h: [35, false],
+  i: [23, false],
+  l: [38, false],
+  n: [49, false],
+  p: [25, false],
+  s: [31, false],
+  t: [20, false],
+  " ": [57, false],
+};
+function type(text) {
+  for (const ch of text) {
+    const [code, shift] = KEY_FOR[ch];
+    Sevyn._handlers.key({ key: code, pressed: true, shift });
+  }
+}
+function pressEnter() {
+  Sevyn._handlers.key({ key: 28, pressed: true });
+}
 // Desktop icon pressables (104x92) and desktop action pressables
 // (132x34), left to right.
 const desktopItems = (ops) =>
@@ -402,6 +486,95 @@ check("status push re-renders the tray", () => {
       afterTiles.every((t) => t.h === 61),
       "all tiles stay 61px",
     );
+  });
+
+  // AI sidebar (phase 1): the corner button opens a 360px sidebar;
+  // a typed question runs `sevyn ai ask` and shows the receipt;
+  // the header toggles full screen and closes back to the button.
+  // Sizes, not positions, are what this test proves — the mock's
+  // vertical layout ignores auto-height siblings (see the hover
+  // check above); placement is proven in QEMU (m9-check).
+  await checkAsync("AI button present, 56px, with AI monogram", () => {
+    const last = lastPresent();
+    assert.ok(aiButtonRect(last.ops), "AI button rect present");
+    const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
+    assert.ok(texts.includes("AI"), "AI monogram present");
+  });
+
+  await checkAsync("tap the AI button opens the sidebar", () => {
+    const last = lastPresent();
+    tap(aiButtonRect(last.ops));
+    const after = lastPresent();
+    const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+    assert.ok(
+      texts.some((t) => t.includes("Ask the AI to do something")),
+      "sidebar empty state shown",
+    );
+    assert.ok(texts.includes("Full screen"), "full-screen toggle shown");
+    assert.ok(texts.includes("Close"), "close shown");
+    assert.ok(texts.includes("Standard"), "standard mode mark shown");
+    assert.ok(sidebarRect(after.ops, 360), "360px sidebar panel present");
+    assert.ok(!aiButtonRect(after.ops), "button hidden while sidebar open");
+  });
+
+  await checkAsync("god mode push shows the GOD mark in the sidebar header", () => {
+    Sevyn._status["ai.god_mode"] = "on";
+    Sevyn._handlers.status({ key: "ai.god_mode", value: "on" });
+    const after = lastPresent();
+    const gods = after.ops.filter((o) => o.type === "text" && o.text === "GOD");
+    assert.equal(gods.length, 2, "GOD in tray + sidebar, got " + gods.length);
+    Sevyn._status["ai.god_mode"] = "off";
+    Sevyn._handlers.status({ key: "ai.god_mode", value: "off" });
+  });
+
+  await checkAsync(
+    "typing a question and submitting runs sevyn ai ask and shows the receipt",
+    async () => {
+      // The input is autoFocus, so key events go straight to it.
+      type("list the installed apps");
+      pressEnter();
+      await flush();
+      assert.ok(
+        Sevyn._logs.some((l) => l === "EXEC sevyn ai ask list the installed apps"),
+        "ai ask run, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      const after = lastPresent();
+      const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+      assert.ok(
+        texts.some((t) => t.includes("You: list the installed apps")),
+        "user turn shown",
+      );
+      assert.ok(
+        texts.some((t) => t.includes("1 allowed, 0 denied, 0 failed")),
+        "receipt shown, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(
+        Sevyn._logs.some((l) => l === "AI-SIDEBAR ask allowed=1 denied=0 failed=0"),
+        "sidebar marker logged",
+      );
+    },
+  );
+
+  await checkAsync("full-screen toggle grows the sidebar to the surface width", () => {
+    const last = lastPresent();
+    tap(pressableAtText(last.ops, "Full screen"));
+    const after = lastPresent();
+    const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+    assert.ok(texts.includes("Exit full screen"), "toggle flips");
+    assert.ok(sidebarRect(after.ops, 1024), "sidebar spans the 1024px surface");
+    assert.ok(!sidebarRect(after.ops, 360), "no 360px panel while full-screen");
+  });
+
+  await checkAsync("close returns to button-only", () => {
+    const last = lastPresent();
+    tap(pressableAtText(last.ops, "Close"));
+    const after = lastPresent();
+    const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+    assert.ok(
+      !texts.some((t) => t.includes("Ask the AI to do something")),
+      "sidebar gone",
+    );
+    assert.ok(aiButtonRect(after.ops), "button back after close");
   });
 
   console.log(`\n${passed} shell e2e checks passed`);
