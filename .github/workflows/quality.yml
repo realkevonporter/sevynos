@@ -121,6 +121,11 @@ jobs:
         run: >-
           sh v2/rn/host/build-host.sh v2/rn/host/deps
           /usr/share/wayland-protocols /tmp/sevyn-rn-host /tmp/sevyn-host-build
+      - name: Compile + run the key-modifier unit test (no Wayland, no Hermes)
+        run: >-
+          g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
+          -o /tmp/test-key-modifiers v2/rn/host/test-key-modifiers.cc
+          && /tmp/test-key-modifiers
       - name: Build the Rust workspace
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
