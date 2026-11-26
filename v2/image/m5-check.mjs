@@ -1971,8 +1971,14 @@ async function main() {
     // frame itself proves the input row is on screen at that
     // point (see refocusInputPointSafe). Anything else fails fast
     // with HARNESS FAILURE, as before.
+    // Round 9 (M5 run 45842258167): a guarded input click that
+    // failed its verify proves the guarded point does not focus
+    // the Terminal in this call — the toggle-hide guard below
+    // must not keep treating that point as "the Terminal is
+    // visible". Set wherever a guarded click + verify fails.
+    let guardedClickFailed = false;
     const shotRecovery = await shot(b.qmp, join(OUT, "m5-shot-refocus-recovery.ppm"));
-    const guardedNow = refocusInputPointSafe(
+    let guardedNow = refocusInputPointSafe(
       termPos,
       shotRecovery,
       shotRecovery.width,
@@ -1996,15 +2002,52 @@ async function main() {
     // changed). If the raise did not take, the title click lands
     // on Chromium (harmless) and the verify fails, and the
     // recovery below runs as before.
-    const peekPoint = findTitlePeekPoint(
+    // Round 9 (M5 run 45842258167): the peek is a single-frame
+    // read — the title bar's visible fragment can be absent in
+    // one frame (Chromium mid-move, a redraw tearing under TCG
+    // load) and present in the next. The peek worked 3 of 4
+    // attempts in that run and the single null skipped the raise
+    // path and crashed the harness. Re-shot once after a settle
+    // and retry the peek before giving up on it — a null peek is
+    // not proof the fragment is gone. The guard is refreshed
+    // from the retry frame too: the shotRecovery guard is stale
+    // by the time the peek + its 25 s verify finish.
+    let peekPoint = findTitlePeekPoint(
       termPos,
       shotRecovery,
       shotRecovery.width,
       shotRecovery.height,
     );
     diag(`title peek=${peekPoint ? `${peekPoint.x},${peekPoint.y}` : "null"}`);
+    let peekFrame = shotRecovery;
+    if (!peekPoint) {
+      await sleep(2000);
+      const shotPeekRetry = await shot(
+        b.qmp,
+        join(OUT, "m5-shot-refocus-peek-retry.ppm"),
+      );
+      peekPoint = findTitlePeekPoint(
+        termPos,
+        shotPeekRetry,
+        shotPeekRetry.width,
+        shotPeekRetry.height,
+      );
+      diag(`title peek retry=${peekPoint ? `${peekPoint.x},${peekPoint.y}` : "null"}`);
+      if (peekPoint) {
+        peekFrame = shotPeekRetry;
+        guardedNow = refocusInputPointSafe(
+          termPos,
+          shotPeekRetry,
+          shotPeekRetry.width,
+          shotPeekRetry.height,
+        );
+        diag(
+          `recovery guard retry=${guardedNow ? `${guardedNow.x},${guardedNow.y}` : "null"}`,
+        );
+      }
+    }
     if (peekPoint) {
-      await moveTo(peekPoint.x, peekPoint.y, shotRecovery.width, shotRecovery.height);
+      await moveTo(peekPoint.x, peekPoint.y, peekFrame.width, peekFrame.height);
       await sleep(300);
       await click();
       await sleep(300);
@@ -2012,11 +2055,12 @@ async function main() {
       if (await verifyFocus()) return true;
     }
     if (guardedNow) {
-      await moveTo(guardedNow.x, guardedNow.y, shotRecovery.width, shotRecovery.height);
+      await moveTo(guardedNow.x, guardedNow.y, peekFrame.width, peekFrame.height);
       await sleep(300);
       await click();
       await sleep(300);
       if (await verifyFocus()) return true;
+      guardedClickFailed = true;
       // A failed verify after a guarded click is NOT proof of
       // lost focus (round-5 slow-EXEC) — fall through to the
       // raise below, which re-clicks with a fresh window.
@@ -2122,6 +2166,7 @@ async function main() {
           await click();
           await sleep(300);
           if (await verifyFocus()) return true;
+          guardedClickFailed = true;
         }
         if (attempt === 0) await sleep(2000);
       }
@@ -2180,7 +2225,17 @@ async function main() {
       diag(
         `dock fallback check fresh=${dockFresh ? `${dockFresh.left},${dockFresh.top}-${dockFresh.right},${dockFresh.bottom}` : "null"} guard=${dockGuarded ? `${dockGuarded.x},${dockGuarded.y}` : "null"}`,
       );
-      if (!dockFresh && !dockGuarded) {
+      // Round 9 (M5 run 45842258167): the old gate refused the
+      // fallback whenever the guarded point existed — but that
+      // point sits in the dock band (y768), where the dock pill
+      // swallows the click (round 7: it NEVER produced an EXEC),
+      // so "guarded point exists" is not proof the Terminal is
+      // focusable. When a guarded click already failed its verify
+      // in this call, the Terminal provably did not receive the
+      // typed command, so a dock click cannot hide a focused
+      // window — it can only raise or re-show it — and the
+      // fallback is allowed to run.
+      if (!dockFresh && (!dockGuarded || guardedClickFailed)) {
         const dockIcon2 = findTerminalDockIcon(dockFrame, termPos);
         diag(
           `dock fallback icon=${dockIcon2 ? `${dockIcon2.x},${dockIcon2.y}` : "null"}`,
