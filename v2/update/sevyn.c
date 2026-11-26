@@ -1894,6 +1894,11 @@ static const char *ai_relay_auth_url_path(void)
 #define RELAY_AGENT_BIN "/usr/local/bin/sevyn-relay"
 #define RELAY_PID_FILE "/run/sevyn-relay.pid"
 #define RELAY_AGENT_PORT 17893
+/* The relay agent's log, shared with the init-at-boot redirect
+ * (build-m13-image.sh): the agent's session/refusal lines land
+ * here no matter how it was started, so the log is readable after
+ * shutdown (the m13 check's debugfs read) and on-device. */
+#define AI_RELAY_AGENT_LOG "/data/logs/sevyn-relay.log"
 
 static const char *ai_relay_agent_marker_path(void)
 {
@@ -2784,14 +2789,28 @@ static int ai_relay_start_agent(const char *bind_ip)
         close(errpipe[0]);
         if (setsid() < 0)
             _exit(127);
+        /* Stdin is /dev/null; stdout/stderr go to the agent log
+         * (AI_RELAY_AGENT_LOG, the same file init redirects to at
+         * boot), appended so a CLI start never clobbers the
+         * boot-time log. When the log cannot be opened (no
+         * /data/logs — the test sandbox), stdout/stderr fall back
+         * to /dev/null, the previous behaviour. */
         int dn = open("/dev/null", O_RDWR);
-        if (dn >= 0) {
+        int lg = open(AI_RELAY_AGENT_LOG,
+                      O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dn >= 0)
             dup2(dn, STDIN_FILENO);
+        if (lg >= 0) {
+            dup2(lg, STDOUT_FILENO);
+            dup2(lg, STDERR_FILENO);
+        } else if (dn >= 0) {
             dup2(dn, STDOUT_FILENO);
             dup2(dn, STDERR_FILENO);
-            if (dn > STDERR_FILENO)
-                close(dn);
         }
+        if (dn > STDERR_FILENO)
+            close(dn);
+        if (lg > STDERR_FILENO)
+            close(lg);
         char port[16];
         snprintf(port, sizeof(port), "%d", RELAY_AGENT_PORT);
         const char *bin = relay_agent_bin();
