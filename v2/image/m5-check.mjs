@@ -1692,6 +1692,10 @@ async function main() {
   // below).
   let termPos = null;
   const refocusTerminal = async () => {
+    // Round 4 (M5 run 45817659596): refocus decisions are logged
+    // so the next failure is diagnosable from the job log alone —
+    // no 365 MB artifact download to see which branch ran.
+    const diag = (msg) => console.log(`refocus: ${msg}`);
     const shotNow = await shot(b.qmp, join(OUT, "m5-shot-refocus.ppm"));
     const termFresh = findWindowHeader(shotNow, 17, 24, 39);
     if (termFresh) {
@@ -1718,6 +1722,9 @@ async function main() {
         // is a covered fragment, not the window.
       }
     }
+    diag(
+      `start fresh=${termFresh ? `${termFresh.left},${termFresh.top}-${termFresh.right},${termFresh.bottom}` : "null"} known=${termPos ? `${termPos.left},${termPos.top}-${termPos.right},${termPos.bottom}` : "null"} gate=${refocusFirstAttemptSafe(termFresh, termPos, shotNow.width, shotNow.height)}`,
+    );
     if (!termPos) {
       throw new Error(
         "HARNESS FAILURE: refocus failed — no Terminal header detected in the current frame and no known window position; the Terminal never regained focus, so no typed command can run",
@@ -1787,6 +1794,7 @@ async function main() {
         /EXEC sevyn browser status -> [01]/,
         25000,
       );
+      diag(`verify exec=${!!exec}`);
       return !!exec;
     };
     // Round 8 (m13 run 43715706248, head 0f82d7d9 — same refocus
@@ -1886,6 +1894,7 @@ async function main() {
       shotRecovery.width,
       shotRecovery.height,
     );
+    diag(`recovery guard=${guardedNow ? `${guardedNow.x},${guardedNow.y}` : "null"}`);
     if (guardedNow) {
       await moveTo(guardedNow.x, guardedNow.y, shotRecovery.width, shotRecovery.height);
       await sleep(300);
@@ -1898,6 +1907,7 @@ async function main() {
     }
     let raised = false;
     let relaunched = false;
+    let raisedViaFragment = false;
     // Round 8: when the strict scan finds no header, the
     // Terminal may still be on screen as a fragment (see
     // refocusFragmentRaisePointPartial) — the m13 crash run's
@@ -1915,14 +1925,19 @@ async function main() {
         shotNow.width,
         shotNow.height,
       );
+    diag(
+      `raise point=${raisePoint ? `${raisePoint.x},${raisePoint.y}` : "null"} partial=${termPartial ? `${termPartial.left},${termPartial.top}-${termPartial.right},${termPartial.bottom}` : "null"}`,
+    );
     if (raisePoint) {
       await moveTo(raisePoint.x, raisePoint.y, shotNow.width, shotNow.height);
       await sleep(300);
       await click();
       await sleep(300);
       raised = true;
+      raisedViaFragment = true;
     } else {
       const dockIcon = findTerminalDockIcon(shotNow, termPos);
+      diag(`dock icon=${dockIcon ? `${dockIcon.x},${dockIcon.y}` : "null"}`);
       if (dockIcon) {
         // Round 8: record the log position BEFORE the click, so
         // the code below can tell a RELAUNCH (a fresh `APPD
@@ -1942,27 +1957,21 @@ async function main() {
           5000,
           dockClickLines,
         ));
+        diag(`dock click relaunched=${relaunched}`);
       }
     }
-    if (raised) {
-      // Round 8: when the dock click relaunched Terminal, do
-      // NOT enter the attempt loop yet — the fresh app is still
-      // booting, and the loop's two attempts + 25 s verify
-      // windows would expire before it paints. Wait for
-      // readiness first (up to 30 s); the 25 s verify window in
-      // verifyFocus then starts FRESH, after the window is
-      // frame-proven ready. A readiness timeout fails fast with
-      // its own message, not the generic refocus one.
-      if (relaunched) {
-        const readyFrame = await waitForRelaunchedTerminal();
-        if (!readyFrame) {
-          throw new Error(
-            "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
-          );
-        }
-      }
-      // The window needs a moment to come forward; re-shot once
-      // if the first fresh frame still shows no header.
+    // The post-raise attempt loop, shared by the primary raise and
+    // the fix-v3 dock fallback below: re-derive the header from a
+    // fresh frame (the raise changes what is on top) and accept it
+    // only when it is consistent with the known window; then click
+    // title + input and re-verify. Only if the header is STILL
+    // undetectable after the raise does the guarded last-known-good
+    // input click run — and only when the fresh frame itself proves
+    // the input row is on screen at that point (see
+    // refocusInputPointSafe). Returns true when focus is verified.
+    // The window needs a moment to come forward; re-shot once if
+    // the first fresh frame still shows no header.
+    const tryRefocusAttempts = async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const shotFresh = await shot(b.qmp, join(OUT, "m5-shot-refocus-fresh.ppm"));
         const fresh2 = findWindowHeader(shotFresh, 17, 24, 39);
@@ -1998,6 +2007,72 @@ async function main() {
           if (await verifyFocus()) return true;
         }
         if (attempt === 0) await sleep(2000);
+      }
+      return false;
+    };
+    // Round 8: when the dock click relaunched Terminal, do NOT
+    // enter the attempt loop yet — the fresh app is still booting,
+    // and the loop's two attempts + 25 s verify windows would
+    // expire before it paints. Wait for readiness first (up to
+    // 30 s); the 25 s verify window in verifyFocus then starts
+    // FRESH, after the window is frame-proven ready. A readiness
+    // timeout fails fast with its own message, not the generic
+    // refocus one.
+    const waitForRelaunchReady = async () => {
+      const readyFrame = await waitForRelaunchedTerminal();
+      if (!readyFrame) {
+        throw new Error(
+          "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
+        );
+      }
+    };
+    if (raised) {
+      if (relaunched) await waitForRelaunchReady();
+      if (await tryRefocusAttempts()) return true;
+    }
+    // Fix v3 (m13 run 45000107835; M5 run 45817659596): the
+    // fragment raise demonstrably does not always raise — in the
+    // m13 run the click landed on a verified Terminal body pixel
+    // (751,495) and the stacking did not change (frame diff: only
+    // the cursor moved). M5 hit the same shape at its step-4
+    // refocus: after the warm-open relaunch the Terminal is fully
+    // covered, the fragment click raises nothing, and the attempt
+    // loop re-derives the same covered frame. Last resort: the
+    // Terminal's dock icon, tried on a FRESH frame. It runs ONLY
+    // when the raise came from the fragment point — never when the
+    // dock was already the primary path (it already had its chance
+    // there, and a second click could toggle-hide a Terminal the
+    // first click raised). The toggle-hide hazard is mitigated the
+    // same way as the primary dock path: the fallback runs only
+    // after the fragment raise failed to re-derive a header AND
+    // the input-row scan found nothing, i.e. the Terminal is
+    // buried and unfocused as far as the frames can tell (the
+    // focused app at the step-4 refocus is Chromium — the
+    // warm-open relaunch just opened a page in it). A hide (no
+    // APPD launched line) falls through to the same throw below;
+    // a raise re-enters the attempt loop, and a relaunch waits
+    // for readiness first.
+    if (raisedViaFragment) {
+      const dockFrame = await shot(b.qmp, join(OUT, "m5-shot-refocus-dock.ppm"));
+      const dockIcon2 = findTerminalDockIcon(dockFrame, termPos);
+      diag(
+        `fix-v3 dock fallback icon=${dockIcon2 ? `${dockIcon2.x},${dockIcon2.y}` : "null"}`,
+      );
+      if (dockIcon2) {
+        const dockClickLines = logLines(b.logPath).length;
+        await moveTo(dockIcon2.x, dockIcon2.y, dockFrame.width, dockFrame.height);
+        await sleep(300);
+        await click();
+        await sleep(1000);
+        const relaunched2 = !!(await waitForLog(
+          b.logPath,
+          /APPD launched terminal \(pid \d+\)/,
+          5000,
+          dockClickLines,
+        ));
+        diag(`fix-v3 dock click relaunched=${relaunched2}`);
+        if (relaunched2) await waitForRelaunchReady();
+        if (await tryRefocusAttempts()) return true;
       }
     }
     throw new Error(
