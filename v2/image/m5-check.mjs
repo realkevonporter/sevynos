@@ -1907,7 +1907,6 @@ async function main() {
     }
     let raised = false;
     let relaunched = false;
-    let raisedViaFragment = false;
     // Round 8: when the strict scan finds no header, the
     // Terminal may still be on screen as a fragment (see
     // refocusFragmentRaisePointPartial) — the m13 crash run's
@@ -1934,7 +1933,6 @@ async function main() {
       await click();
       await sleep(300);
       raised = true;
-      raisedViaFragment = true;
     } else {
       const dockIcon = findTerminalDockIcon(shotNow, termPos);
       diag(`dock icon=${dockIcon ? `${dockIcon.x},${dockIcon.y}` : "null"}`);
@@ -1999,6 +1997,9 @@ async function main() {
           shotFresh.width,
           shotFresh.height,
         );
+        diag(
+          `attempt ${attempt} fresh=${fresh2 ? `${fresh2.left},${fresh2.top}-${fresh2.right},${fresh2.bottom}` : "null"} guard=${guarded ? `${guarded.x},${guarded.y}` : "null"}`,
+        );
         if (guarded) {
           await moveTo(guarded.x, guarded.y, shotFresh.width, shotFresh.height);
           await sleep(300);
@@ -2030,49 +2031,60 @@ async function main() {
       if (relaunched) await waitForRelaunchReady();
       if (await tryRefocusAttempts()) return true;
     }
-    // Fix v3 (m13 run 45000107835; M5 run 45817659596): the
-    // fragment raise demonstrably does not always raise — in the
-    // m13 run the click landed on a verified Terminal body pixel
-    // (751,495) and the stacking did not change (frame diff: only
-    // the cursor moved). M5 hit the same shape at its step-4
-    // refocus: after the warm-open relaunch the Terminal is fully
-    // covered, the fragment click raises nothing, and the attempt
-    // loop re-derives the same covered frame. Last resort: the
-    // Terminal's dock icon, tried on a FRESH frame. It runs ONLY
-    // when the raise came from the fragment point — never when the
-    // dock was already the primary path (it already had its chance
-    // there, and a second click could toggle-hide a Terminal the
-    // first click raised). The toggle-hide hazard is mitigated the
-    // same way as the primary dock path: the fallback runs only
-    // after the fragment raise failed to re-derive a header AND
-    // the input-row scan found nothing, i.e. the Terminal is
-    // buried and unfocused as far as the frames can tell (the
-    // focused app at the step-4 refocus is Chromium — the
-    // warm-open relaunch just opened a page in it). A hide (no
+    // Fix v3 (m13 run 45000107835) + round 5 (M5 run
+    // 45824409192): the fragment raise demonstrably does not
+    // always raise — in the m13 run the click landed on a verified
+    // Terminal body pixel (751,495) and the stacking did not change
+    // (frame diff: only the cursor moved). And the primary dock
+    // raise can HIDE the Terminal instead: the round-5 diagnostics
+    // show the guarded input click focused it (guard=303,768) and
+    // the dock click then hid it (relaunched=false, both loop
+    // verifies false) — the fix-v3 fallback never ran because it
+    // was gated on raisedViaFragment while the raise came from the
+    // dock. Last resort: the Terminal's dock icon, tried on a
+    // FRESH frame. It runs whenever the Terminal is STILL
+    // undetectable on that fresh frame — no header AND no guarded
+    // input row — regardless of which path raised first. The
+    // undetectable check IS the toggle-hide guard: when the
+    // Terminal is visible a dock click could hide a focused window,
+    // so the fallback never fires; when nothing is visible the
+    // icon can only raise or re-show it (or no-op). A hide (no
     // APPD launched line) falls through to the same throw below;
     // a raise re-enters the attempt loop, and a relaunch waits
     // for readiness first.
-    if (raisedViaFragment) {
+    {
       const dockFrame = await shot(b.qmp, join(OUT, "m5-shot-refocus-dock.ppm"));
-      const dockIcon2 = findTerminalDockIcon(dockFrame, termPos);
-      diag(
-        `fix-v3 dock fallback icon=${dockIcon2 ? `${dockIcon2.x},${dockIcon2.y}` : "null"}`,
+      const dockFresh = findWindowHeader(dockFrame, 17, 24, 39);
+      const dockGuarded = refocusInputPointSafe(
+        termPos,
+        dockFrame,
+        dockFrame.width,
+        dockFrame.height,
       );
-      if (dockIcon2) {
-        const dockClickLines = logLines(b.logPath).length;
-        await moveTo(dockIcon2.x, dockIcon2.y, dockFrame.width, dockFrame.height);
-        await sleep(300);
-        await click();
-        await sleep(1000);
-        const relaunched2 = !!(await waitForLog(
-          b.logPath,
-          /APPD launched terminal \(pid \d+\)/,
-          5000,
-          dockClickLines,
-        ));
-        diag(`fix-v3 dock click relaunched=${relaunched2}`);
-        if (relaunched2) await waitForRelaunchReady();
-        if (await tryRefocusAttempts()) return true;
+      diag(
+        `dock fallback check fresh=${dockFresh ? `${dockFresh.left},${dockFresh.top}-${dockFresh.right},${dockFresh.bottom}` : "null"} guard=${dockGuarded ? `${dockGuarded.x},${dockGuarded.y}` : "null"}`,
+      );
+      if (!dockFresh && !dockGuarded) {
+        const dockIcon2 = findTerminalDockIcon(dockFrame, termPos);
+        diag(
+          `dock fallback icon=${dockIcon2 ? `${dockIcon2.x},${dockIcon2.y}` : "null"}`,
+        );
+        if (dockIcon2) {
+          const dockClickLines = logLines(b.logPath).length;
+          await moveTo(dockIcon2.x, dockIcon2.y, dockFrame.width, dockFrame.height);
+          await sleep(300);
+          await click();
+          await sleep(1000);
+          const relaunched2 = !!(await waitForLog(
+            b.logPath,
+            /APPD launched terminal \(pid \d+\)/,
+            5000,
+            dockClickLines,
+          ));
+          diag(`dock fallback click relaunched=${relaunched2}`);
+          if (relaunched2) await waitForRelaunchReady();
+          if (await tryRefocusAttempts()) return true;
+        }
       }
     }
     throw new Error(
