@@ -3299,8 +3299,11 @@ async function main() {
       check("relay: DNS resolves example.com after the join", !!hit, hit || "");
     }
     // Kill switch: `tailscale down` leaves, and `status` must
-    // report the relay as gone (`not logged in`). The guest is left
-    // unjoined at the end of the check, like the 1a state.
+    // report the relay as gone. After `down` the daemon is STOPPED
+    // (the real `tailscale status` prints "Tailscale is stopped.",
+    // exit 1 — the CLI maps it to `status: stopped`, exit 0), not
+    // "not logged in" (that is the never-joined state). The guest
+    // is left unjoined at the end of the check, like the 1a state.
     {
       const { exec } = await termCmd("tailscale down");
       check("relay: kill switch (`tailscale down` EXEC 0)", !!exec, exec || "");
@@ -3308,11 +3311,11 @@ async function main() {
     {
       const { exec, hit } = await termCmd(
         "tailscale status",
-        /TERMINAL tailscale-status logged_in=no/,
+        /TERMINAL tailscale-status logged_in=stopped tailnet=none peers=none/,
       );
       check("relay: `tailscale status` runs after down (EXEC 0)", !!exec, exec || "");
       check(
-        "relay: guest left the tailnet (`not logged in` after down)",
+        "relay: guest left the tailnet (`stopped`, no tailnet, no peers, after down)",
         !!hit,
         hit || "",
       );
