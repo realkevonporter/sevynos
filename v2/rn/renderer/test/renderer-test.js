@@ -359,14 +359,18 @@ check(
 );
 
 check(
-  "TextInput clipboard: Ctrl+C types no 'c', Ctrl+letter is swallowed, empty paste is a no-op",
+  "TextInput clipboard: Ctrl+C types no 'c', other Ctrl+letters are swallowed, empty paste is a no-op",
   () => {
     assert.equal(inputValue, "aA/aA/");
     keyCtrl(46); // Ctrl+C again — copy, not a typed 'c'
     assert.equal(inputValue, "aA/aA/", "Ctrl+C typed nothing");
     assert.equal(Sevyn.clipboardRead(), "aA/aA/", "Ctrl+C still copied");
-    keyCtrl(30); // Ctrl+A — select-all is gap #4, not this unit: swallowed
+    keyCtrl(30); // Ctrl+A — select-all (gap unit 4): selects the
+    // whole value, it is not typed and not swallowed
+    assert.deepEqual(commandSelection(), { start: 0, end: 6, caret: 6 });
     assert.equal(inputValue, "aA/aA/", "Ctrl+A typed nothing");
+    key(107); // End — collapse the selection so the paste below appends
+    assert.deepEqual(commandSelection(), { start: 6, end: 6, caret: 6 });
     Sevyn.clipboardWrite("");
     keyCtrl(47); // Ctrl+V with an empty clipboard
     assert.equal(inputValue, "aA/aA/", "empty paste changed nothing");
@@ -572,6 +576,99 @@ check("TextInput selection: typing replaces the selection", () => {
   key(18);
   key(33); // type "ef" back
   assert.equal(inputValue, "aA/aA/abcdef", "value restored for the checks below");
+});
+
+// --- TextInput accelerators (gap unit 4, audit #4/#5) -----------------
+// The command input holds "aA/aA/abcdef" (12 chars) with the caret
+// at the end from here on; every check restores that state.
+
+check("TextInput accelerators: Ctrl+A selects all and fires onSelectionChange", () => {
+  const before = selections.length;
+  keyCtrl(30); // Ctrl+A
+  assert.deepEqual(commandSelection(), { start: 0, end: 12, caret: 12 });
+  assert.equal(highlights().length, 1, "whole value highlighted");
+  assert.ok(selections.length > before, "onSelectionChange fired");
+  assert.deepEqual(selections[selections.length - 1], { start: 0, end: 12 });
+  key(107); // End — collapse the selection for the checks below
+  assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+});
+
+check(
+  "TextInput accelerators: typing then Ctrl+Z undoes, Ctrl+Y / Ctrl+Shift+Z redo",
+  () => {
+    key(45, true); // Shift+X — type "X" at the end
+    assert.equal(inputValue, "aA/aA/abcdefX", "typed X");
+    assert.deepEqual(commandSelection(), { start: 13, end: 13, caret: 13 });
+    keyCtrl(44); // Ctrl+Z
+    assert.equal(inputValue, "aA/aA/abcdef", "undo restored the prior value");
+    assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+    keyCtrl(21); // Ctrl+Y
+    assert.equal(inputValue, "aA/aA/abcdefX", "redo re-applied the typing");
+    assert.deepEqual(commandSelection(), { start: 13, end: 13, caret: 13 });
+    keyCtrl(44); // Ctrl+Z again
+    assert.equal(inputValue, "aA/aA/abcdef", "undo restored the prior value again");
+    keyShiftCtrl(44); // Ctrl+Shift+Z — redo through the Shift form
+    assert.equal(inputValue, "aA/aA/abcdefX", "Ctrl+Shift+Z redid the typing");
+    assert.deepEqual(commandSelection(), { start: 13, end: 13, caret: 13 });
+    keyCtrl(44); // Ctrl+Z — back to the shared start state
+    assert.equal(inputValue, "aA/aA/abcdef");
+    assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+  },
+);
+
+check("TextInput accelerators: undo of a paste restores the prior value", () => {
+  Sevyn.clipboardWrite("QQ");
+  keyCtrl(47); // Ctrl+V — paste at the end
+  assert.equal(inputValue, "aA/aA/abcdefQQ", "pasted QQ");
+  assert.deepEqual(commandSelection(), { start: 14, end: 14, caret: 14 });
+  keyCtrl(44); // Ctrl+Z — undo the paste
+  assert.equal(inputValue, "aA/aA/abcdef", "undo removed the pasted text");
+  assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+  keyCtrl(21); // Ctrl+Y — redo the paste
+  assert.equal(inputValue, "aA/aA/abcdefQQ", "redo re-applied the paste");
+  keyCtrl(44); // Ctrl+Z — back to the shared start state
+  assert.equal(inputValue, "aA/aA/abcdef");
+  assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+});
+
+check(
+  "TextInput accelerators: undo of a cut restores the prior value and selection",
+  () => {
+    key(105, true);
+    key(105, true);
+    key(105, true); // Shift+Left x3 — select "def" [9,12], caret 9
+    assert.deepEqual(commandSelection(), { start: 9, end: 12, caret: 9 });
+    keyCtrl(45); // Ctrl+X — cut the selection
+    assert.equal(inputValue, "aA/aA/abc", "cut deleted only the selection");
+    assert.deepEqual(commandSelection(), { start: 9, end: 9, caret: 9 });
+    keyCtrl(44); // Ctrl+Z — undo the cut
+    assert.equal(inputValue, "aA/aA/abcdef", "undo restored the cut text");
+    assert.deepEqual(commandSelection(), { start: 9, end: 12, caret: 9 });
+    keyCtrl(21); // Ctrl+Y — redo the cut
+    assert.equal(inputValue, "aA/aA/abc", "redo re-applied the cut");
+    assert.deepEqual(commandSelection(), { start: 9, end: 9, caret: 9 });
+    keyCtrl(44); // Ctrl+Z — back to the shared start state
+    assert.equal(inputValue, "aA/aA/abcdef");
+    assert.deepEqual(commandSelection(), { start: 9, end: 12, caret: 9 });
+    key(107); // End — collapse the selection for the checks below
+    assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
+  },
+);
+
+check("TextInput accelerators: a new edit after undo clears the redo stack", () => {
+  key(45, true); // Shift+X — type "X"
+  assert.equal(inputValue, "aA/aA/abcdefX");
+  keyCtrl(44); // Ctrl+Z — undo it; "X" now sits on the redo stack
+  assert.equal(inputValue, "aA/aA/abcdef");
+  key(53, true); // Shift+/ — type "?" instead: a new edit
+  assert.equal(inputValue, "aA/aA/abcdef?");
+  assert.deepEqual(commandSelection(), { start: 13, end: 13, caret: 13 });
+  keyCtrl(21); // Ctrl+Y — redo is cleared, so this is a no-op
+  assert.equal(inputValue, "aA/aA/abcdef?", "redo after a new edit changes nothing");
+  assert.deepEqual(commandSelection(), { start: 13, end: 13, caret: 13 });
+  keyCtrl(44); // Ctrl+Z — undo the "?" for the checks below
+  assert.equal(inputValue, "aA/aA/abcdef");
+  assert.deepEqual(commandSelection(), { start: 12, end: 12, caret: 12 });
 });
 
 // --- TextInput multiline (GF65 fix) ------------------------------------

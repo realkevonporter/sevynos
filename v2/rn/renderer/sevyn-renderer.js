@@ -705,6 +705,69 @@ function extendCaretTo(inst, n) {
   setSelectionState(inst, n, anchor);
 }
 
+// Undo/redo (gap unit 4, audit #4/#5): a per-input stack of
+// pre-edit snapshots { value, caret, anchor }. Every edit through
+// change() pushes the state before the edit and clears the redo
+// stack; undo moves the current state onto the redo stack and
+// applies the last snapshot, redo does the reverse. One entry per
+// edit — each keystroke is its own step, no coalescing. Capped at
+// UNDO_DEPTH entries; past the cap the oldest entry is dropped.
+// Only edits made through the input itself are recorded (an
+// external value change, e.g. Terminal clearing on submit, is not
+// an undoable edit). Caret moves never touch the stacks.
+const UNDO_DEPTH = 100;
+
+function undoSnapshotFor(inst) {
+  return {
+    value: textInputValue(inst),
+    caret: caretOffsetFor(inst),
+    anchor: typeof inst.selectionAnchor === "number" ? inst.selectionAnchor : null,
+  };
+}
+
+function pushUndo(inst) {
+  if (!Array.isArray(inst.undoStack)) inst.undoStack = [];
+  inst.undoStack.push(undoSnapshotFor(inst));
+  if (inst.undoStack.length > UNDO_DEPTH) inst.undoStack.shift();
+  inst.redoStack = [];
+}
+
+// Apply a snapshot without recording: like change() below, it
+// notifies onChangeText and then sets caret/selection against the
+// NEW value's length — props.value is still the old value until the
+// state update flushes, so selectionRangeFor would clamp wrong.
+function applyUndoSnapshot(inst, snap) {
+  const prev = selectionRangeFor(inst);
+  const props = inst.props || {};
+  if (typeof props.onChangeText === "function") props.onChangeText(snap.value);
+  const caret = Math.max(0, Math.min(snap.value.length, snap.caret));
+  const anchor =
+    snap.anchor == null ? null : Math.max(0, Math.min(snap.value.length, snap.anchor));
+  inst.caretOffset = caret;
+  inst.selectionAnchor = anchor;
+  inst.selectionStart = anchor == null ? caret : Math.min(anchor, caret);
+  inst.selectionEnd = anchor == null ? caret : Math.max(anchor, caret);
+  notifySelectionChange(inst, prev, {
+    start: inst.selectionStart,
+    end: inst.selectionEnd,
+  });
+}
+
+function undoEdit(inst) {
+  if (!Array.isArray(inst.undoStack) || inst.undoStack.length === 0) return;
+  if (!Array.isArray(inst.redoStack)) inst.redoStack = [];
+  inst.redoStack.push(undoSnapshotFor(inst));
+  applyUndoSnapshot(inst, inst.undoStack.pop());
+}
+
+function redoEdit(inst) {
+  if (!Array.isArray(inst.redoStack) || inst.redoStack.length === 0) return;
+  if (!Array.isArray(inst.undoStack)) inst.undoStack = [];
+  inst.undoStack.push(undoSnapshotFor(inst));
+  if (inst.undoStack.length > UNDO_DEPTH) inst.undoStack.shift();
+  applyUndoSnapshot(inst, inst.redoStack.pop());
+}
+
 // Word jumps (Ctrl+Left/Right): a word is a run of word characters
 // ([A-Za-z0-9_]) or a run of punctuation — spaces are skipped first,
 // so the caret never gets stuck on a punctuation boundary. Ctrl+Left
@@ -947,8 +1010,9 @@ const KEYMAP = {
 // Up/Down move between visual lines when multiline (single-line:
 // swallowed, never a focus move — the M4 behaviour, kept). Ctrl+C/X/V
 // copy, cut, and paste through the host clipboard (gap unit 2),
-// operating on the selection; any other Ctrl+printable is swallowed,
-// never typed.
+// operating on the selection; Ctrl+A selects the whole value and
+// Ctrl+Z / Ctrl+Y undo and redo through the per-input stack
+// (gap unit 4); any other Ctrl+printable is swallowed, never typed.
 function handleTextInputKey(inst, ev) {
   const props = inst.props || {};
   const value = textInputValue(inst);
@@ -956,6 +1020,9 @@ function handleTextInputKey(inst, ev) {
   const offset = caretOffsetFor(inst);
   const change = (next, nextOffset) => {
     const prev = selectionRangeFor(inst);
+    // Record the pre-edit state first: every edit through here is
+    // one undo step, and a new edit clears the redo stack.
+    pushUndo(inst);
     if (typeof props.onChangeText === "function") props.onChangeText(next);
     // Clamp against the NEW value's length: props.value is still the
     // old value until the state update flushes.
@@ -969,13 +1036,24 @@ function handleTextInputKey(inst, ev) {
     inst.selectionEnd = caret;
     notifySelectionChange(inst, prev, { start: caret, end: caret });
   };
-  // Copy/paste/cut (gap unit 2): Ctrl+C/X/V, using the modifier state
-  // unit 1 puts on the event. A Ctrl+letter that is not C/X/V is
+  // Copy/paste/cut (gap unit 2) and select-all / undo / redo
+  // (gap unit 4): Ctrl+A/Z/Y, using the modifier state unit 1 puts
+  // on the event. A Ctrl+letter that is not C/X/V/A/Z/Y is
   // swallowed — it is a shortcut, not text (without this Ctrl+C
   // would also type a 'c'). Other Ctrl keys (arrows, Home/End, ...)
   // fall through to the switch below, unchanged.
   if (ev.ctrl) {
     switch (ev.key) {
+      case 30: // A — select all, through the unit-3 selection model.
+        setSelectionState(inst, value.length, 0);
+        return true;
+      case 44: // Z — undo, or redo with Shift (Ctrl+Shift+Z).
+        if (ev.shift) redoEdit(inst);
+        else undoEdit(inst);
+        return true;
+      case 21: // Y — redo.
+        redoEdit(inst);
+        return true;
       case 46: // C — copy the selection (whole value when collapsed).
         clipboardWrite(selectionTextFor(inst));
         return true;
