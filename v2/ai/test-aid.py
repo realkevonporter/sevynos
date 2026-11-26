@@ -2160,10 +2160,22 @@ def main():
     check("`off` removes the screen state file",
           out.returncode == 0 and not r_screen.exists(),
           out.stdout + out.stderr)
-    check("`off` SET ai.screen off",
-          wait_recorded(s19_statusd, "SET ai.screen off") and
-          sum(1 for c in s19_statusd.recorded()
-              if c == "SET ai.screen off") == screen_off_before + 1)
+    # The count must be POLLED, not read once: "SET ai.screen off"
+    # is already in recorded() from 19d's `off`s, so wait_recorded
+    # returns at once and a single read races the fake daemon's
+    # thread appending this `off`'s SET — CI failed this check
+    # 76 us after the previous one (the line was present, the new
+    # count was not yet). Poll until the count grows, the same
+    # wait-for-the-event pattern the ai.relay check above uses.
+    screen_off_seen = False
+    screen_deadline = time.time() + 5.0
+    while time.time() < screen_deadline:
+        if sum(1 for c in s19_statusd.recorded()
+               if c == "SET ai.screen off") == screen_off_before + 1:
+            screen_off_seen = True
+            break
+        time.sleep(0.05)
+    check("`off` SET ai.screen off", screen_off_seen)
     out = r_cli(["status"], r_env())
     check("status after `off` reads screen: off",
           out.returncode == 0 and "screen: off" in out.stdout,

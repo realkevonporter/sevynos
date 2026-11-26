@@ -3022,9 +3022,15 @@ static int cmd_ai_relay(int argc, char **argv)
         }
         /* The kill switch clears the SCREEN mark too (the agent
          * never runs its teardown on SIGTERM) and drops the screen
-         * state file, so `status` reads off afterwards. */
+         * state file, so `status` reads off afterwards. The SET is
+         * best-effort like the relay SET below, but a failed SET
+         * warns — a silent failure would leave the SCREEN pill
+         * stuck with no trace. */
         unlink(ai_relay_screen_state_path());
-        statusd_set_screen("off");
+        if (statusd_set_screen("off") != 0)
+            fprintf(stderr,
+                    "warning: relay agent off, but statusd could not "
+                    "be reached — the SCREEN pill will not clear\n");
         if (statusd_set_relay("off") != 0)
             fprintf(stderr,
                     "warning: relay agent off, but statusd could not "
@@ -3161,7 +3167,11 @@ static int cmd_ai_relay(int argc, char **argv)
         unlink(ai_relay_peer_pub_path());
         unlink(ai_relay_pending_path());
         unlink(ai_relay_screen_state_path());
-        statusd_set_screen("off");
+        if (statusd_set_screen("off") != 0)
+            fprintf(stderr,
+                    "warning: relay pairing revoked, but statusd "
+                    "could not be reached — the SCREEN pill will not "
+                    "clear\n");
         const char *marker = ai_relay_agent_marker_path();
         if (unlink(marker) != 0 && errno != ENOENT) {
             fprintf(stderr, "error: cannot remove the relay-agent "
