@@ -1925,6 +1925,7 @@ def main():
     r_marker = s19 / "relay-agent.json"
     r_pidfile = s19 / "sevyn-relay.pid"
     r_audit = s19 / "ai-audit.log"
+    r_screen = s19 / "relay-screen.json"
     s19_sock = s19 / "aid.sock"
     s19_ctl = s19 / "ctl"
     os.mkfifo(s19_ctl)
@@ -1959,6 +1960,7 @@ def main():
                "SEVYN_AI_RELAY_KEY_PUB": str(r_key_pub),
                "SEVYN_AI_RELAY_PEER_PUB": str(r_peer_pub),
                "SEVYN_AI_RELAY_PENDING": str(r_pending),
+               "SEVYN_AI_RELAY_SCREEN_STATE": str(r_screen),
                "SEVYN_RELAY_PIDFILE": str(r_pidfile)}
         if agent is not None:
             env["SEVYN_RELAY_AGENT_BIN"] = str(agent)
@@ -2119,6 +2121,64 @@ def main():
     out = r_cli(["off"], r_env())
     check("`off` with a dead agent still succeeds",
           out.returncode == 0 and "Relay agent off." in out.stdout,
+          out.stdout + out.stderr)
+
+    # 19d2. Screen state (relay frames, R8/S2): `status` reads the
+    #       agent's screen state file — live since + frames when a
+    #       session is delivering frames, off otherwise (missing or
+    #       corrupt file). `off` removes the state file and SETs
+    #       ai.screen off, so the SCREEN mark clears even when the
+    #       agent is already dead (it never runs its teardown on
+    #       SIGTERM).
+    out = r_cli(["status"], r_env())
+    check("status with no screen state reads screen: off",
+          out.returncode == 0 and "screen: off" in out.stdout,
+          out.stdout + out.stderr)
+    r_screen.write_text(json.dumps({
+        "screen": "on",
+        "agent": peer_fp[:16],
+        "session_start": "2026-11-26T07:00:00Z",
+        "frames": 3}))
+    out = r_cli(["status"], r_env())
+    check("status with a live screen state shows since + frames",
+          out.returncode == 0 and
+          "screen: live since 2026-11-26T07:00:00Z frames=3" in out.stdout,
+          out.stdout + out.stderr)
+    r_screen.write_text("not json")
+    out = r_cli(["status"], r_env())
+    check("status with a corrupt screen state reads screen: off",
+          out.returncode == 0 and "screen: off" in out.stdout,
+          out.stdout + out.stderr)
+    r_screen.write_text(json.dumps({
+        "screen": "on",
+        "agent": peer_fp[:16],
+        "session_start": "2026-11-26T07:00:00Z",
+        "frames": 1}))
+    screen_off_before = sum(1 for c in s19_statusd.recorded()
+                            if c == "SET ai.screen off")
+    out = r_cli(["off"], r_env())
+    check("`off` removes the screen state file",
+          out.returncode == 0 and not r_screen.exists(),
+          out.stdout + out.stderr)
+    # The count must be POLLED, not read once: "SET ai.screen off"
+    # is already in recorded() from 19d's `off`s, so wait_recorded
+    # returns at once and a single read races the fake daemon's
+    # thread appending this `off`'s SET — CI failed this check
+    # 76 us after the previous one (the line was present, the new
+    # count was not yet). Poll until the count grows, the same
+    # wait-for-the-event pattern the ai.relay check above uses.
+    screen_off_seen = False
+    screen_deadline = time.time() + 5.0
+    while time.time() < screen_deadline:
+        if sum(1 for c in s19_statusd.recorded()
+               if c == "SET ai.screen off") == screen_off_before + 1:
+            screen_off_seen = True
+            break
+        time.sleep(0.05)
+    check("`off` SET ai.screen off", screen_off_seen)
+    out = r_cli(["status"], r_env())
+    check("status after `off` reads screen: off",
+          out.returncode == 0 and "screen: off" in out.stdout,
           out.stdout + out.stderr)
 
     # 19e. `on` without --bind refuses when not joined to a

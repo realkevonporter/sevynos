@@ -396,6 +396,57 @@ def main():
                 proc.returncode != 0 and "all NTP servers failed" in proc.stderr,
                 proc.stderr.strip()[:200],
             )
+
+        # 5. The ai.screen key (relay frames, R8/S2): the real
+        #    statusd must own the key — default "off" in the
+        #    snapshot — and broadcast a SET on/off to subscribers.
+        #    The relay agent SETs it directly over this socket; the
+        #    tray reads it for the SCREEN pill. No `sevyn` verb is
+        #    involved, so the check speaks the socket protocol
+        #    directly: SUBSCRIBE, then SET.
+        try:
+            sub = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sub.settimeout(5)
+            sub.connect(str(status_sock))
+            sub.sendall(b"SUBSCRIBE\n")
+            got = b""
+            deadline = time.time() + 5
+            while time.time() < deadline and b"ai.screen" not in got:
+                try:
+                    chunk = sub.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                got += chunk
+            check(
+                "ai.screen defaults to off in the snapshot",
+                b"STATUS ai.screen off" in got,
+                got.decode(errors="replace")[:300],
+            )
+            writer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            writer.settimeout(5)
+            writer.connect(str(status_sock))
+            writer.sendall(b"SET ai.screen on\n")
+            writer.close()
+            got = b""
+            deadline = time.time() + 5
+            while time.time() < deadline and b"STATUS ai.screen on" not in got:
+                try:
+                    chunk = sub.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                got += chunk
+            check(
+                "SET ai.screen on broadcasts to subscribers",
+                b"STATUS ai.screen on" in got,
+                got.decode(errors="replace")[:300],
+            )
+            sub.close()
+        except OSError as e:
+            check("ai.screen key (socket error)", False, str(e))
     finally:
         if fake is not None:
             fake.stop.set()

@@ -23,7 +23,13 @@
 //      logged in" behaviour): the guest joins an in-job Headscale
 //      with a staged pre-auth key, the host node (muse) pings it
 //      at its 100.x address, DNS still resolves after the join,
-//      and the kill switch (`tailscale down`) leaves the tailnet.
+//      the relay agent proves its frame-request path FAILS CLOSED
+//      over the real tailnet (no compositor in the m13 guest yet —
+//      Weston boots, not Genesis — so a frame request must come
+//      back as an explicit "capture unavailable" error and the
+//      SCREEN mark must never turn on; the oracle pixel match
+//      waits on the Genesis compositor landing in the image), and
+//      the kill switch (`tailscale down`) leaves the tailnet.
 //   2. Embed up: `browser open` the local page, then `browser
 //      status` reports running=yes over CDP (running=yes is only
 //      printed after a successful CDP /json/version probe, so it
@@ -477,14 +483,26 @@ async function relaySetup() {
   if (!guestKey || !museKey) return null;
   // Host node: tailscaled in userspace-networking mode (no TUN, no
   // routes — the runner needs no privilege), then join as muse.
+  // The SOCKS5 server on the same node is the mock's path to the
+  // guest: a raw TCP connect from the runner to a 100.x address
+  // has no route (userspace mode installs none) and times out, but
+  // the node's SOCKS5 server forwards through its own netstack —
+  // the traffic still crosses the real tailnet (WireGuard/DERP)
+  // under the muse identity and the ACL.
   const hostState = join(HS_STATE, "host-node");
   mkdirSync(hostState, { recursive: true });
   const hostSock = join(HS_STATE, "host-node.sock");
+  const hostSocks5Port = await pickFreePort();
   const tsdLogFd = openSync(join(HS_STATE, "host-tailscaled.log"), "w");
   relayLogFds.push(tsdLogFd);
   const tsd = spawn(
     TS_DAEMON,
-    ["--tun=userspace-networking", `--statedir=${hostState}`, `--socket=${hostSock}`],
+    [
+      "--tun=userspace-networking",
+      `--statedir=${hostState}`,
+      `--socket=${hostSock}`,
+      `--socks5-server=127.0.0.1:${hostSocks5Port}`,
+    ],
     { stdio: ["ignore", tsdLogFd, tsdLogFd] },
   );
   relayProcs.push(tsd);
@@ -528,7 +546,7 @@ async function relaySetup() {
   } catch {}
   check("relay: host node has a 100.x address", !!hostIp, hostIp || "(none)");
   if (!hostIp) return null;
-  return { guestKey, hostSock, hostIp };
+  return { guestKey, hostSock, hostIp, socks5Port: hostSocks5Port };
 }
 
 // Stage the guest's pre-auth key onto the data disk (debugfs) at
@@ -3298,6 +3316,106 @@ async function main() {
       );
       check("relay: DNS resolves example.com after the join", !!hit, hit || "");
     }
+    // Frames, interim (relay frames, R8/S2): the fail-closed path
+    // over the real tailnet. The m13 guest boots Weston, not the
+    // Genesis compositor — there is no bridge socket and no
+    // /data/screen/latest.png in the guest — so a frame request
+    // MUST come back as an explicit "capture unavailable" error,
+    // with no frame and no ai.screen mark. The host-side mock
+    // (mock-relay.js --mode frame-refused) drives the request over
+    // the tailnet to the guest's 100.x:17893, via the muse node's
+    // SOCKS5 server (a direct connect from the runner has no
+    // route to 100.x — the host node runs userspace-networking —
+    // and times out; the first version of this section failed
+    // exactly that way, ETIMEDOUT with no pairing demand). The
+    // check enables the agent, watches the mock log for
+    // pairing-required, approves the pairing on the device, and
+    // waits for the mock to exit 0 with the refusal logged. The
+    // oracle pixel match (delivered PNG vs QMP screendump) is NOT
+    // provable here and is not attempted — it waits on the Genesis
+    // compositor landing in the m13 image (see FRAMES.md). Skipped
+    // entirely when the join never yielded a guest 100.x address —
+    // the join/ping checks above already fail the run in that case.
+    check(
+      "relay frames: guest 100.x address known (from the join)",
+      !!relayGuestIp,
+      relayGuestIp || "(none)",
+    );
+    let frameRefusal = "";
+    if (relayGuestIp) {
+      {
+        const { exec } = await termCmd("ai relay on --confirm");
+        check("relay frames: `ai relay on --confirm` (EXEC 0)", !!exec, exec || "");
+      }
+      const frameLogPath = join(OUT, "mock-relay-frame.log");
+      const frameLogFd = openSync(frameLogPath, "w");
+      relayLogFds.push(frameLogFd);
+      const frameMock = spawn(
+        "node",
+        [
+          join(ROOT, "image", "mock-relay.js"),
+          "--mode",
+          "frame-refused",
+          "--agent-host",
+          relayGuestIp,
+          "--agent-port",
+          "17893",
+          // Via the muse node's SOCKS5 server (see relaySetup):
+          // the runner has no route to 100.x, so a direct connect
+          // times out; the proxy forwards through the tailnet.
+          "--socks5",
+          `127.0.0.1:${relay.socks5Port}`,
+        ],
+        { stdio: ["ignore", frameLogFd, frameLogFd] },
+      );
+      relayProcs.push(frameMock);
+      const frameExit = new Promise((resolve) =>
+        frameMock.on("close", (code) => resolve(code)),
+      );
+      // Pairing: the mock's first attempt demands pairing; approve
+      // it on the device, and the mock's next attempt (2 s later)
+      // pairs and drives the frame request.
+      {
+        let paired = false;
+        for (let i = 0; i < 30 && !paired; i++) {
+          if (readLog(frameLogPath).includes("pairing-required")) {
+            const { exec } = await termCmd("ai relay pair --confirm");
+            check("relay frames: `ai relay pair --confirm` (EXEC 0)", !!exec, exec || "");
+            paired = !!exec;
+            break;
+          }
+          await sleep(2000);
+        }
+        check("relay frames: mock demanded pairing within 60 s", paired);
+      }
+      {
+        const code = await Promise.race([frameExit, sleep(120000).then(() => "timeout")]);
+        check(
+          "relay frames: mock exits 0 (refusal received)",
+          code === 0,
+          `exit=${code}`,
+        );
+        frameRefusal = readLog(frameLogPath);
+        check(
+          "relay frames: mock logged the capture-unavailable refusal",
+          frameRefusal.includes("frame-refused capture unavailable"),
+          frameRefusal.slice(-400) || "(empty log)",
+        );
+      }
+      // No SCREEN mark: the agent SETs ai.screen on only when a
+      // frame is actually delivered, and none was. statusd logs
+      // every SET to the boot log, so its absence is the proof.
+      check(
+        "relay frames: no STATUSD SET ai.screen on (no frame delivered)",
+        !logHas(b.logPath, /STATUSD SET ai\.screen on/),
+      );
+      // Agent kill switch: `ai relay off` stops the agent before
+      // the tailnet kill switch below.
+      {
+        const { exec } = await termCmd("ai relay off");
+        check("relay frames: `ai relay off` (EXEC 0)", !!exec, exec || "");
+      }
+    }
     // Kill switch: `tailscale down` leaves, and `status` must
     // report the relay as gone. After `down` the daemon is STOPPED
     // (the real `tailscale status` prints "Tailscale is stopped.",
@@ -4487,6 +4605,32 @@ async function main() {
   const exited = await waitExit(b, 30000);
   check("shutdown: guest powers off on request", exited);
   closeBoot(b);
+  if (HEADSCALE) {
+    // The relay agent's log lives on the data disk
+    // (/data/logs/sevyn-relay.log, read back read-only after
+    // shutdown — the m4.5 audit-log precedent): prove the agent
+    // itself refused the frame request and closed the session
+    // with zero frames, so the fail-closed path is proven on
+    // both ends (the mock's host-side log above, the agent's
+    // guest-side log here). When the frame section never ran
+    // (local run, HEADSCALE unset) there is no log to read.
+    let agentLog = "";
+    try {
+      agentLog = await execAsync("debugfs", ["-R", "cat /logs/sevyn-relay.log", DISK]);
+    } catch {
+      agentLog = "";
+    }
+    check(
+      "relay frames: agent log refused the frame (capture unavailable)",
+      /frame .* refused: capture unavailable/.test(agentLog),
+      agentLog ? agentLog.slice(-400) : "debugfs read failed",
+    );
+    check(
+      "relay frames: agent log closed the session with frames=0",
+      /ended frames=0 via=relay/.test(agentLog),
+      agentLog ? agentLog.slice(-400) : "debugfs read failed",
+    );
+  }
   try {
     server.close();
   } catch {}

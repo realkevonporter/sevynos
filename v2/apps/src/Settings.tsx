@@ -157,6 +157,14 @@ type AgentState = {
   pendingPeer: string;
   pendingCode: string;
   session: string;
+  // Screen observation (relay frames, R8/S2): live while the
+  // paired agent is receiving still frames. `since` is the session
+  // start (ISO) and `frames` the delivered count, from the
+  // `screen:` line of `sevyn ai relay status` (the agent writes
+  // the state file on the first frame of a session).
+  screenLive: boolean;
+  screenSince: string;
+  screenFrames: string;
 };
 
 // Relay agent (Phase 2): the cloud-agent listener, read from
@@ -166,7 +174,9 @@ type AgentState = {
 // enabled|disabled`, `agent: running (pid N)|not running`,
 // `fingerprint: <full>`, `paired: <fp16>|unpaired`,
 // `pairing: pending <fp16> code <code>` (only while a pairing is
-// pending), `daemon relay: on|idle|off|unknown` (or
+// pending), `screen: live since <iso> frames=<n>|off` (frames
+// flowing — the agent writes the state file on the first frame of
+// a session), `daemon relay: on|idle|off|unknown` (or
 // `daemon: unreachable`). `paired` is the pinned peer fingerprint,
 // or "unpaired"; `session` is the daemon's live state (on/idle/off).
 // parseField is unanchored (cli.ts), so "relay agent:" also matches
@@ -182,6 +192,9 @@ function readAgent(): AgentState {
     pendingPeer: "",
     pendingCode: "",
     session: "",
+    screenLive: false,
+    screenSince: "",
+    screenFrames: "",
   };
   if (code !== 0) return off;
   const enabled =
@@ -201,12 +214,18 @@ function readAgent(): AgentState {
   // code <code>`. parseField cannot split it (it returns the first
   // token only), so match the whole line.
   const pairingLine = out.match(/pairing:\s*pending\s+(\S+)\s+code\s+(\S+)/);
+  // The screen state rides one line too: `screen: live since
+  // <iso> frames=<n>` (or `screen: off`).
+  const screenLine = out.match(/screen:\s*live since\s+(\S+)\s+frames=(\d+)/);
   return {
     enabled,
     paired,
     pendingPeer: pairingLine ? pairingLine[1] : "",
     pendingCode: pairingLine ? pairingLine[2] : "",
     session,
+    screenLive: screenLine !== null,
+    screenSince: screenLine ? screenLine[1] : "",
+    screenFrames: screenLine ? screenLine[2] : "",
   };
 }
 
@@ -1672,6 +1691,30 @@ export function Settings(): React.ReactElement {
                 ? "paired to " + agent.paired.slice(0, 16)
                 : "waiting for the cloud agent to pair"}
               {agent.session === "on" ? ". A remote session is live." : "."}
+            </Text>
+          ) : null}
+          {/* SCREEN LIVE banner (relay frames, R8/S2): red, distinct
+              from the blue relay banner — it says someone can see
+              the screen right now, not just that a remote session
+              is live. It names the paired agent and the session
+              start (S2), and states the view-only rule (S4). A Text,
+              not a Pressable, so it never shifts the focus order. */}
+          {agent.enabled && agent.screenLive ? (
+            <Text
+              style={{
+                fontSize: 14,
+                color: "#991b1b",
+                backgroundColor: "#fee2e2",
+                marginTop: 12,
+                padding: 12,
+                borderRadius: 8,
+              }}
+            >
+              SCREEN LIVE —{" "}
+              {agent.paired !== ""
+                ? agent.paired.slice(0, 16) + " can see this screen"
+                : "the paired cloud agent can see this screen"}{" "}
+              since {agent.screenSince}. Frames are view-only and never saved.
             </Text>
           ) : null}
           {agentMessage ? (

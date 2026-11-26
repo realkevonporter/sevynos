@@ -15,6 +15,19 @@ pub const MAX_TASK_BYTES: usize = 16 * 1024;
 /// Maximum bytes of one NDJSON line, including the newline.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
+/// Maximum bytes of one delivered frame (1 MiB). A frame over the
+/// cap is refused, never truncated or split across sessions.
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Raw bytes per `frame-chunk` (16 KiB). Base64 expands that to
+/// ~22 KiB of JSON text, comfortably inside the 64 KiB line cap.
+pub const FRAME_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Minimum interval between accepted frame requests (1 s): the
+/// ≤1 fps rate cap (S1). A request inside the interval is refused
+/// with an error, never queued.
+pub const FRAME_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Read one NDJSON line (without the trailing newline). Returns
 /// `Ok(None)` on clean EOF. Over-long lines are an error — the peer
 /// is misbehaving and the session must be dropped. Reads through
@@ -156,6 +169,62 @@ pub struct ErrorFrame {
     pub pairing_code: Option<String>,
 }
 
+/// Screen observation (R8, S1–S4) — on-demand still frames, JSON
+/// chunked, NOT binary (see FRAMES.md in the relay design dir for
+/// the decision): a 150–600 KB PNG cannot fit one 64 KiB NDJSON
+/// line, so the agent splits it into sealed `frame-chunk` frames.
+/// Each chunk is individually AEAD-sealed (the same channel as
+/// tasks), so confidentiality and integrity hold per chunk; the
+/// cloud reassembles and checks `sha256` + `bytes` from
+/// `frame-start` before trusting the pixels. Wire cost is ~1.33x
+/// the PNG (base64), trivial at ≤1 fps, and the framing stays the
+/// existing NDJSON reader — no mode-switching binary reader, no
+/// second framing implementation in every peer, no new desync
+/// failure mode in the most security-sensitive reader.
+
+/// Cloud → device: ask for one still frame now (S1 — off unless
+/// asked; each request is logged by the agent).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FrameRequestFrame {
+    #[serde(rename = "type")]
+    pub kind: String, // "frame-request"
+    pub id: String,
+}
+
+/// Device → cloud: a frame is coming; `sha256` is the hex SHA-256
+/// of the whole PNG, `bytes` its length. The cloud must verify both
+/// after reassembly and discard the frame on mismatch.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FrameStartFrame {
+    #[serde(rename = "type")]
+    pub kind: String, // "frame-start"
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// Device → cloud: one chunk of the PNG (`data` is base64, at most
+/// `FRAME_CHUNK_BYTES` raw bytes). `seq` starts at 0 and rises by
+/// one per chunk; the cloud must check the sequence is contiguous.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FrameChunkFrame {
+    #[serde(rename = "type")]
+    pub kind: String, // "frame-chunk"
+    pub id: String,
+    pub seq: u64,
+    pub data: String,
+}
+
+/// Device → cloud: the last chunk was sent; the frame is complete.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FrameEndFrame {
+    #[serde(rename = "type")]
+    pub kind: String, // "frame-end"
+    pub id: String,
+}
+
 /// The `type` field of an incoming sealed plaintext, used to
 /// dispatch before full deserialization.
 #[derive(Debug, Deserialize)]
@@ -204,5 +273,29 @@ mod tests {
         assert!(ok.len() <= MAX_TASK_BYTES);
         let over = "x".repeat(MAX_TASK_BYTES + 1);
         assert!(over.len() > MAX_TASK_BYTES);
+    }
+
+    #[test]
+    fn frame_chunk_fits_the_line_cap() {
+        // A full 16 KiB raw chunk, base64'd inside a sealed-frame
+        // JSON line, must stay inside the 64 KiB NDJSON cap — the
+        // invariant the JSON-chunked choice rests on.
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let raw = vec![0xABu8; FRAME_CHUNK_BYTES];
+        let chunk = FrameChunkFrame {
+            kind: "frame-chunk".to_string(),
+            id: "00000000-0000-0000-0000-000000000000".to_string(),
+            seq: 0,
+            data: B64.encode(&raw),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_json_line(&mut buf, &chunk).unwrap();
+        assert!(
+            buf.len() < MAX_LINE_BYTES,
+            "chunk line is {} bytes",
+            buf.len()
+        );
+        // And a max-size frame is 64 chunks at most.
+        assert_eq!(MAX_FRAME_BYTES / FRAME_CHUNK_BYTES, 64);
     }
 }

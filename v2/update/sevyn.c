@@ -1885,9 +1885,20 @@ static const char *ai_relay_auth_url_path(void)
 #define AI_RELAY_KEY_PUB_FILE "/data/ai/relay-key.pub"
 #define AI_RELAY_PEER_PUB_FILE "/data/ai/relay-peer.pub"
 #define AI_RELAY_PENDING_FILE "/data/ai/relay-pending.json"
+/* Screen state (relay frames, R8/S2): written by the agent on the
+ * first delivered frame of a session, removed when the session
+ * ends. `status` reads it for the banner line; `off`/`revoke`
+ * remove it (the kill switch must clear the mark even if the
+ * agent is already dead). */
+#define AI_RELAY_SCREEN_STATE_FILE "/data/ai/relay-screen.json"
 #define RELAY_AGENT_BIN "/usr/local/bin/sevyn-relay"
 #define RELAY_PID_FILE "/run/sevyn-relay.pid"
 #define RELAY_AGENT_PORT 17893
+/* The relay agent's log, shared with the init-at-boot redirect
+ * (build-m13-image.sh): the agent's session/refusal lines land
+ * here no matter how it was started, so the log is readable after
+ * shutdown (the m13 check's debugfs read) and on-device. */
+#define AI_RELAY_AGENT_LOG "/data/logs/sevyn-relay.log"
 
 static const char *ai_relay_agent_marker_path(void)
 {
@@ -1913,6 +1924,12 @@ static const char *ai_relay_peer_pub_path(void)
 static const char *ai_relay_pending_path(void)
 {
     return env_or("SEVYN_AI_RELAY_PENDING", AI_RELAY_PENDING_FILE);
+}
+
+static const char *ai_relay_screen_state_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_SCREEN_STATE",
+                  AI_RELAY_SCREEN_STATE_FILE);
 }
 
 static const char *relay_pid_path(void)
@@ -2269,6 +2286,7 @@ static int run_capture(char *const argv[], char **out);
 static int tailscale_parse_peer(const char *line, char *ip, size_t ip_cap,
                                 char *host, size_t host_cap);
 static int statusd_set_relay(const char *value);
+static int statusd_set_screen(const char *value);
 
 /* ------------------------------------------------------------------ */
 /* `sevyn ai relay ...` — the relay agent (AI relay Phase 2,          */
@@ -2291,10 +2309,12 @@ static int statusd_set_relay(const char *value);
 /*     persist.                                                         */
 /*   off — stop the agent (SIGTERM via the pidfile), remove the        */
 /*     marker, SET ai.relay off. Works even when the agent is          */
-/*     already dead (the kill switch).                                 */
+/*     already dead (the kill switch). The screen state file goes      */
+/*     too, so the SCREEN mark clears even if the agent died.          */
 /*   status — one line per fact: marker, agent alive, device           */
 /*     fingerprint, paired fingerprint (or "unpaired"), pending        */
-/*     pairing (when one exists), daemon relay= (via STATUS).          */
+/*     pairing (when one exists), screen state (live since + frames,   */
+/*     or "off"), daemon relay= (via STATUS).                          */
 /*   revoke [--confirm] — forget the pairing: keypair + peer pin +     */
 /*     pending + marker deleted, agent stopped, SET ai.relay off.      */
 /*   pair [--confirm] — approve a pending pairing: pin the peer key,   */
@@ -2769,14 +2789,28 @@ static int ai_relay_start_agent(const char *bind_ip)
         close(errpipe[0]);
         if (setsid() < 0)
             _exit(127);
+        /* Stdin is /dev/null; stdout/stderr go to the agent log
+         * (AI_RELAY_AGENT_LOG, the same file init redirects to at
+         * boot), appended so a CLI start never clobbers the
+         * boot-time log. When the log cannot be opened (no
+         * /data/logs — the test sandbox), stdout/stderr fall back
+         * to /dev/null, the previous behaviour. */
         int dn = open("/dev/null", O_RDWR);
-        if (dn >= 0) {
+        int lg = open(AI_RELAY_AGENT_LOG,
+                      O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dn >= 0)
             dup2(dn, STDIN_FILENO);
+        if (lg >= 0) {
+            dup2(lg, STDOUT_FILENO);
+            dup2(lg, STDERR_FILENO);
+        } else if (dn >= 0) {
             dup2(dn, STDOUT_FILENO);
             dup2(dn, STDERR_FILENO);
-            if (dn > STDERR_FILENO)
-                close(dn);
         }
+        if (dn > STDERR_FILENO)
+            close(dn);
+        if (lg > STDERR_FILENO)
+            close(lg);
         char port[16];
         snprintf(port, sizeof(port), "%d", RELAY_AGENT_PORT);
         const char *bin = relay_agent_bin();
@@ -2918,6 +2952,45 @@ static int cmd_ai_relay(int argc, char **argv)
             short_fp[16] = '\0';
             printf("pairing: pending %s code %s\n", short_fp, code);
         }
+        /* Screen state (relay frames, R8/S2): the agent writes
+         * /data/ai/relay-screen.json on the first delivered frame
+         * of a session and removes it at session end, so this line
+         * is the Settings banner's source (paired agent + session
+         * start + frame count). A missing file means no frames are
+         * flowing. A corrupt file reads as off — the agent's next
+         * delivery rewrites it. */
+        {
+            char *screen_json = read_file_cap(ai_relay_screen_state_path(), 512);
+            char since[64] = "";
+            char frames[32] = "";
+            if (screen_json != NULL) {
+                ai_relay_json_string(screen_json, "session_start",
+                                     since, sizeof(since));
+                /* "frames" is a number, not a string — parse it
+                 * out of the JSON by hand. */
+                const char *p = strstr(screen_json, "\"frames\"");
+                if (p != NULL) {
+                    p = strchr(p + 8, ':');
+                    if (p != NULL) {
+                        p++;
+                        while (*p == ' ' || *p == '\t')
+                            p++;
+                        size_t i = 0;
+                        while (p[i] >= '0' && p[i] <= '9' &&
+                               i + 1 < sizeof(frames)) {
+                            frames[i] = p[i];
+                            i++;
+                        }
+                        frames[i] = '\0';
+                    }
+                }
+                free(screen_json);
+            }
+            if (since[0] != '\0' && frames[0] != '\0')
+                printf("screen: live since %s frames=%s\n", since, frames);
+            else
+                printf("screen: off\n");
+        }
         /* Daemon relay= (via STATUS, the cmd_ai_god status
          * pattern). The daemon may be down — the local facts above
          * are still true, so report that and exit 0. */
@@ -2966,6 +3039,17 @@ static int cmd_ai_relay(int argc, char **argv)
                     strerror(errno));
             return 1;
         }
+        /* The kill switch clears the SCREEN mark too (the agent
+         * never runs its teardown on SIGTERM) and drops the screen
+         * state file, so `status` reads off afterwards. The SET is
+         * best-effort like the relay SET below, but a failed SET
+         * warns — a silent failure would leave the SCREEN pill
+         * stuck with no trace. */
+        unlink(ai_relay_screen_state_path());
+        if (statusd_set_screen("off") != 0)
+            fprintf(stderr,
+                    "warning: relay agent off, but statusd could not "
+                    "be reached — the SCREEN pill will not clear\n");
         if (statusd_set_relay("off") != 0)
             fprintf(stderr,
                     "warning: relay agent off, but statusd could not "
@@ -3101,6 +3185,12 @@ static int cmd_ai_relay(int argc, char **argv)
         unlink(ai_relay_key_pub_path());
         unlink(ai_relay_peer_pub_path());
         unlink(ai_relay_pending_path());
+        unlink(ai_relay_screen_state_path());
+        if (statusd_set_screen("off") != 0)
+            fprintf(stderr,
+                    "warning: relay pairing revoked, but statusd "
+                    "could not be reached — the SCREEN pill will not "
+                    "clear\n");
         const char *marker = ai_relay_agent_marker_path();
         if (unlink(marker) != 0 && errno != ENOENT) {
             fprintf(stderr, "error: cannot remove the relay-agent "
@@ -6113,6 +6203,23 @@ static int statusd_set_relay(const char *value)
         return -1;
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "SET ai.relay %s", value);
+    int rc = send_line(fd, cmd) == 0 ? 0 : -1;
+    close(fd);
+    return rc;
+}
+
+/* `SET ai.screen <value>` (relay frames, R8/S2): the kill switch
+ * (`off`/`revoke`) clears the SCREEN mark directly — a SIGTERM'd
+ * agent never runs its session-end teardown, so without this the
+ * pill would stick after the agent is gone. Best-effort, like the
+ * relay SET above. */
+static int statusd_set_screen(const char *value)
+{
+    int fd = connect_sock("SEVYN_STATUS_SOCK", STATUS_SOCK);
+    if (fd < 0)
+        return -1;
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "SET ai.screen %s", value);
     int rc = send_line(fd, cmd) == 0 ? 0 : -1;
     close(fd);
     return rc;

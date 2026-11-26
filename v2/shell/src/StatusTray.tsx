@@ -36,6 +36,13 @@ export interface StatusSnapshot {
   // RELAY pill while a remote session is live — the status-bar mark,
   // distinct from the amber GOD pill.
   "ai.relay"?: string;
+  // Screen (relay frames, R8/S2): statusd owns this key (default
+  // "off"); the relay agent — not the daemon — SETs it on when the
+  // first frame of a session is delivered and off when the session
+  // ends. The tray shows the red SCREEN pill while frames are
+  // flowing — the mark that someone can see the screen right now,
+  // distinct from the blue RELAY pill (reachable/connected only).
+  "ai.screen"?: string;
 }
 
 function batteryLabel(v?: string): string {
@@ -164,6 +171,32 @@ export function StatusTray(props: StatusTrayProps): React.ReactElement {
         >
           <Text style={{ fontSize: 13, color: "#dbeafe", fontWeight: "bold" }}>
             RELAY
+          </Text>
+        </View>
+      ) : null}
+      {/* SCREEN pill (relay frames, R8/S2): the status-bar mark
+          while still frames are flowing to the paired cloud agent
+          (ai.screen === "on"). Renders only when on, so a
+          relay-off/idle system (CI, fresh boot) sees no change at
+          all. The key is owned by the relay agent (first delivered
+          frame -> on, session end -> off), not by the daemon. Red,
+          distinct from the blue RELAY pill (reachable/connected
+          only) and the amber GOD pill. Not a pressable — it is a
+          mark, not a control; the toggle lives in Settings. */}
+      {status["ai.screen"] === "on" ? (
+        <View
+          style={{
+            height: 36,
+            marginLeft: 16,
+            paddingHorizontal: 10,
+            borderRadius: 6,
+            backgroundColor: "#991b1b",
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <Text style={{ fontSize: 13, color: "#fee2e2", fontWeight: "bold" }}>
+            SCREEN
           </Text>
         </View>
       ) : null}
