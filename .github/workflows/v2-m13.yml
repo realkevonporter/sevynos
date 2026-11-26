@@ -256,4 +256,5 @@ jobs:
             v2/image/build/m12-boot-*.log
             v2/image/build/m12-check.json
             v2/image/build/m12-data.img
+            v2/image/build/headscale-state/*.log
           if-no-files-found: warn

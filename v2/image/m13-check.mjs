@@ -152,9 +152,17 @@ const HS_STATE = join(OUT, "headscale-state");
 const HS_BIN = join(HS_DIR, "headscale");
 const TS_BIN = join(HS_DIR, "tailscale_1.104.7_amd64", "tailscale");
 const TS_DAEMON = join(HS_DIR, "tailscale_1.104.7_amd64", "tailscaled");
-const HS_PORT = 8080;
-const HS_URL = `http://127.0.0.1:${HS_PORT}`;
-const GUEST_HS_URL = `http://10.0.2.2:${HS_PORT}`;
+// Headscale's ports are EPHEMERAL (picked in relaySetup): the KVM
+// runners share one host network namespace, and a fixed 8080/9090/
+// 50443 risks the same EADDRINUSE collision the test-page server
+// already hit on 18080 (run 44803329836). The guest reaches the
+// in-job Headscale at 10.0.2.2:<port>, so GUEST_HS_URL is built
+// from the same picked port.
+let HS_PORT = 0;
+let HS_METRICS_PORT = 0;
+let HS_GRPC_PORT = 0;
+let HS_URL = "";
+let GUEST_HS_URL = "";
 // The host test-page server binds an EPHEMERAL port (listen(0)):
 // m5 and m13 share the KVM box, and two concurrent jobs binding
 // the old fixed 18080 collided with EADDRINUSE (run 44803329836).
@@ -262,6 +270,21 @@ async function relayHttpOk(url, timeoutMs = 30000) {
   return false;
 }
 
+async function pickFreePort() {
+  // Bind port 0, read the assigned port back, close. (A tiny race
+  // remains — another process could take it before Headscale binds —
+  // but the serve failure then prints the headscale log, so the
+  // cause is visible instead of a bare timeout.)
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 async function hsCli(...args) {
   return execAsync(HS_BIN, ["-c", join(HS_STATE, "config.yaml"), ...args]);
 }
@@ -270,8 +293,8 @@ function hsConfig() {
   return (
     `server_url: ${HS_URL}\n` +
     `listen_addr: 0.0.0.0:${HS_PORT}\n` +
-    "metrics_listen_addr: 127.0.0.1:9090\n" +
-    "grpc_listen_addr: 127.0.0.1:50443\n" +
+    `metrics_listen_addr: 127.0.0.1:${HS_METRICS_PORT}\n` +
+    `grpc_listen_addr: 127.0.0.1:${HS_GRPC_PORT}\n` +
     "grpc_allow_insecure: false\n" +
     "noise:\n" +
     `  private_key_path: ${join(HS_STATE, "noise_private.key")}\n` +
@@ -360,6 +383,13 @@ async function relaySetup() {
     missing.join(", ") || "all present",
   );
   if (missing.length) return null;
+  // Ephemeral ports (see the HS_PORT comment): the runners share
+  // one host network namespace, and a fixed port risks EADDRINUSE.
+  HS_PORT = await pickFreePort();
+  HS_METRICS_PORT = await pickFreePort();
+  HS_GRPC_PORT = await pickFreePort();
+  HS_URL = `http://127.0.0.1:${HS_PORT}`;
+  GUEST_HS_URL = `http://10.0.2.2:${HS_PORT}`;
   rmSync(HS_STATE, { recursive: true, force: true });
   mkdirSync(HS_STATE, { recursive: true });
   writeFileSync(join(HS_STATE, "config.yaml"), hsConfig());
@@ -380,8 +410,18 @@ async function relaySetup() {
   });
   relayProcs.push(hs);
   const up = await relayHttpOk(`${HS_URL}/`, 30000);
-  check("relay: in-job Headscale serves (HTTP 200)", up);
-  if (!up) return null;
+  check("relay: in-job Headscale serves (HTTP 200)", up, `port ${HS_PORT}`);
+  if (!up) {
+    // Say WHY it did not serve: the headscale log holds the bind /
+    // config error, and exitCode tells a dead process from a live
+    // one that never answered. (Run 45724871168 failed here with no
+    // log at all — a bare timeout with no cause.)
+    const hsLog = readLog(join(HS_STATE, "headscale.log"));
+    console.log(
+      `relay: headscale exitCode=${hs.exitCode} killed=${hs.killed} log:\n${hsLog.slice(-4000) || "(empty)"}`,
+    );
+    return null;
+  }
   let users = "";
   try {
     await hsCli("users", "create", "ci");
