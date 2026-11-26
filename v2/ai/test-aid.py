@@ -12,10 +12,18 @@ harness (m4.5-check) covers the guest end to end.
 against a fake `tailscale` binary on PATH, plus the first_up_iface
 tailscale0 exclusion in a user namespace (no privilege needed).
 §18 covers the relay 1b CLI (`tailscale up/down/revoke`, the /data
-marker, the statusd ai.relay mark, the pending auth-URL file)
-against the same fake (extended with up/down/logout) and a fresh
-fake statusd. No Headscale, no tailnet, no network anywhere in
-this file.
+marker, and the pending auth-URL file) against the same fake
+(extended with up/down/logout) and a fresh fake statusd. No
+Headscale, no tailnet, no network anywhere in this file. Phase 2
+moved ai.relay ownership: `tailscale up/down/revoke` NO LONGER
+SET ai.relay (that key is the relay SESSION state, owned by the
+daemon + `sevyn ai relay`); §18 asserts the absence.
+§19 covers the relay Phase 2 CLI (`sevyn ai relay
+on|off|status|revoke|pair`, two-step confirms, keypair + marker +
+pidfile, pairing approve/malformed) and the daemon's via=relay
+marking + ai.relay on/idle transitions + the grant boundary over
+the relay, driven by a fake `sevyn-relay` binary against a second
+daemon instance booted with the agent marker present.
 
 Run: python3 v2/ai/test-aid.py
 Exit 0 = all checks pass.
@@ -69,6 +77,15 @@ def wait_recorded(fake, line, timeout=5.0):
             return True
         time.sleep(0.05)
     return line in fake.recorded()
+
+
+def wait_no_recorded(fake, prefix, grace=0.5):
+    """Absence check: a statusd SET is fire-and-forget but sent
+    before the CLI exits, so after a short grace the fake thread
+    has recorded anything that was sent. Returns True when no
+    recorded line starts with prefix."""
+    time.sleep(grace)
+    return not any(c.startswith(prefix) for c in fake.recorded())
 
 
 class SockClient:
@@ -320,7 +337,8 @@ def main():
     sevyn_bin = tmp / "sevyn"
     sevyn_build = subprocess.run(
         ["gcc", "-O2", "-Wall", "-Wextra",
-         "-o", str(sevyn_bin), str(HERE.parent / "update" / "sevyn.c")],
+         "-o", str(sevyn_bin), str(HERE.parent / "update" / "sevyn.c"),
+         "-lcrypto"],
         capture_output=True, text=True)
     if sevyn_build.returncode != 0:
         print("FAIL: build of sevyn failed")
@@ -523,7 +541,7 @@ def main():
         check("STATUS -> grant csv",
               c.readline() ==
               "OK selected=echo-ai backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
-              "grant=app.launch,app.close,app.list,status.set god_mode=off")
+              "grant=app.launch,app.close,app.list,status.set god_mode=off relay=off")
 
         # 3. SELECT: valid, unknown, usage.
         c.send("SELECT plan-ai")
@@ -1737,8 +1755,11 @@ def main():
           out.stdout + out.stderr)
 
     # 18c. `up --authkey --confirm` joins: the marker is written
-    #      (login server + via), statusd is SET ai.relay on, and
-    #      `status` reports relay: enabled + the login server.
+    #      (login server + via), and `status` reports relay: enabled
+    #      + the login server. Phase 2 moved ai.relay ownership:
+    #      joining the tailnet no longer SETs ai.relay — that key is
+    #      the relay SESSION state (daemon + `ai relay` own it), so
+    #      the join must leave the statusd log untouched.
     out = relay_run(["up", "--login-server", login,
                      "--authkey", "hskey-test", "--confirm", "--via",
                      "cli"], relay_env())
@@ -1753,8 +1774,8 @@ def main():
           marker_json.get("enabled_by") == "cli",
           relay_marker.read_text() if relay_marker.exists()
           else "(none)")
-    check("statusd was SET ai.relay on (the tray mark)",
-          wait_recorded(relay_statusd, "SET ai.relay on"))
+    check("`up` SETs no ai.relay (ownership moved to daemon + ai relay)",
+          wait_no_recorded(relay_statusd, "SET ai.relay"))
     out = relay_run(["status"], {**relay_env(),
                                  "TAILSCALE_FAKE_SCENARIO": "running"})
     check("status after join -> relay: enabled + login_server",
@@ -1823,15 +1844,17 @@ def main():
             proc.kill()
             proc.wait()
 
-    # 18g. `down` leaves: the marker is removed, statusd is SET
-    #      ai.relay off, and `status` reports relay: disabled.
+    # 18g. `down` leaves: the marker is removed, and `status`
+    #      reports relay: disabled. Leaving the tailnet ends the
+    #      transport only — it no longer SETs ai.relay (Phase 2
+    #      ownership: the daemon + `ai relay` own that key).
     out = relay_run(["down"], relay_env())
     check("`down` succeeds",
           out.returncode == 0 and "Left the tailnet." in out.stdout,
           out.stdout + out.stderr)
     check("marker removed by `down`", not relay_marker.exists())
-    check("statusd was SET ai.relay off",
-          wait_recorded(relay_statusd, "SET ai.relay off"))
+    check("`down` SETs no ai.relay (ownership moved to daemon + ai relay)",
+          wait_no_recorded(relay_statusd, "SET ai.relay"))
     out = relay_run(["status"], {**relay_env(),
                                  "TAILSCALE_FAKE_SCENARIO": "logged-out"})
     check("status after down -> relay: disabled",
@@ -1852,7 +1875,8 @@ def main():
           out.stdout + out.stderr)
 
     # 18i. `revoke` needs --confirm; with it, the node is
-    #      forgotten, the marker is removed, and statusd is SET off.
+    #      forgotten and the marker is removed. (Phase 2: revoke no
+    #      longer SETs ai.relay — the daemon + `ai relay` own it.)
     relay_marker.write_text(
         '{"relay": true, "login_server": "%s", '
         '"joined_at": "2026-11-25T00:00:00Z", '
@@ -1880,6 +1904,485 @@ def main():
           out.stdout + out.stderr)
 
     relay_statusd.close()
+
+    # 19. Relay Phase 2: `sevyn ai relay on|off|status|revoke|pair`
+    #     and the daemon's via=relay marking. No tailnet, no network:
+    #     `on` binds loopback (--bind 127.0.0.1), the agent is a sleep
+    #     stand-in, and the relay client is a small C binary NAMED
+    #     sevyn-relay — the daemon detects the relay by the peer
+    #     exe basename (SO_PEERCRED + /proc/<pid>/exe) — driving
+    #     SESSIONs against a second daemon instance booted with the
+    #     agent marker present.
+    import base64
+    import hashlib
+
+    s19 = tmp / "s19"
+    s19.mkdir()
+    r_key = s19 / "relay-key"
+    r_key_pub = s19 / "relay-key.pub"
+    r_peer_pub = s19 / "relay-peer.pub"
+    r_pending = s19 / "relay-pending.json"
+    r_marker = s19 / "relay-agent.json"
+    r_pidfile = s19 / "sevyn-relay.pid"
+    r_audit = s19 / "ai-audit.log"
+    s19_sock = s19 / "aid.sock"
+    s19_ctl = s19 / "ctl"
+    os.mkfifo(s19_ctl)
+    s19_status_sock = s19 / "status.sock"
+    s19_appd_sock = s19 / "appd.sock"
+    s19_statusd = FakeDaemon(str(s19_status_sock), statusd_handler)
+    s19_appd = FakeDaemon(str(s19_appd_sock), appd_handler)
+    s19_statusd.start()
+    s19_appd.start()
+
+    # The sleep stand-in agent: it behaves like the real agent
+    # (which writes its own pidfile — main.rs:162 — the CLI only
+    # reads it), then stays alive until SIGTERM (the `off` kill
+    # switch). The CLI passes --bind/--port only, so the pidfile
+    # path comes from the inherited SEVYN_RELAY_PIDFILE env, the
+    # same override the CLI reads.
+    sleep_agent = s19 / "sleep-agent"
+    sleep_agent.write_text(
+        "#!/bin/sh\n"
+        "echo $$ > \"$SEVYN_RELAY_PIDFILE\"\n"
+        "sleep 60\n")
+    sleep_agent.chmod(0o755)
+
+    def r_env(agent=None):
+        env = {**os.environ,
+               "PATH": f"{fake_ts_dir}:{os.environ['PATH']}",
+               "TAILSCALE_FAKE_SCENARIO": "logged-out",
+               "SEVYN_AI_SOCK": str(s19_sock),
+               "SEVYN_STATUS_SOCK": str(s19_status_sock),
+               "SEVYN_AI_RELAY_AGENT_MARKER": str(r_marker),
+               "SEVYN_AI_RELAY_KEY": str(r_key),
+               "SEVYN_AI_RELAY_KEY_PUB": str(r_key_pub),
+               "SEVYN_AI_RELAY_PEER_PUB": str(r_peer_pub),
+               "SEVYN_AI_RELAY_PENDING": str(r_pending),
+               "SEVYN_RELAY_PIDFILE": str(r_pidfile)}
+        if agent is not None:
+            env["SEVYN_RELAY_AGENT_BIN"] = str(agent)
+        return env
+
+    def r_cli(args, env):
+        return subprocess.run(
+            [str(sevyn_bin), "ai", "relay"] + args,
+            capture_output=True, text=True, env=env, timeout=15)
+
+    def agent_pid_from_status(out):
+        for line in out.splitlines():
+            if line.startswith("agent: running (pid ") and \
+                    line.endswith(")"):
+                try:
+                    return int(line[len("agent: running (pid "):-1])
+                except ValueError:
+                    return None
+        return None
+
+    def pid_alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    # 19a. Bare `on` / `revoke` refuse (two-step confirm, D1
+    #      style); `pair` with nothing pending refuses; an unknown
+    #      action is a usage error. Nothing is created.
+    out = r_cli(["on"], r_env())
+    check("bare `ai relay on` refuses (exit 1, exposure printed)",
+          out.returncode != 0 and
+          "To enable the relay agent, run: sevyn ai relay on --confirm"
+          in out.stderr, out.stdout + out.stderr)
+    out = r_cli(["revoke"], r_env())
+    check("bare `ai relay revoke` refuses (exit 1)",
+          out.returncode != 0 and
+          "sevyn ai relay revoke --confirm" in out.stderr,
+          out.stdout + out.stderr)
+    out = r_cli(["pair"], r_env())
+    check("`ai relay pair` with nothing pending refuses",
+          out.returncode != 0 and "nothing to pair" in out.stderr,
+          out.stdout + out.stderr)
+    out = r_cli(["frobnicate"], r_env())
+    check("unknown `ai relay` action -> usage, exit 1",
+          out.returncode != 0)
+    check("bare verbs created no keypair or marker",
+          not r_key.exists() and not r_marker.exists())
+
+    # 19b. `on --confirm --bind 127.0.0.1` with the sleep stand-in:
+    #      keypair (seed 32 bytes 0600, pub 32 bytes 0644), marker
+    #      (relay_agent true, enabled_by cli), status shows the
+    #      fingerprint + unpaired + the live agent pid. The daemon
+    #      is not up yet, so status reports it unreachable and
+    #      still exits 0. A second `on` is already-on, exit 0.
+    out = r_cli(["on", "--confirm", "--bind", "127.0.0.1"],
+                r_env(agent=sleep_agent))
+    check("`on --confirm --bind` succeeds on port 17893",
+          out.returncode == 0 and
+          "listening on 127.0.0.1:17893" in out.stdout and
+          "Waiting for the cloud agent to pair" in out.stdout,
+          out.stdout + out.stderr)
+    check("keypair created (seed 32B 0600, pub 32B 0644)",
+          r_key.exists() and len(r_key.read_bytes()) == 32 and
+          (r_key.stat().st_mode & 0o777) == 0o600 and
+          r_key_pub.exists() and len(r_key_pub.read_bytes()) == 32 and
+          (r_key_pub.stat().st_mode & 0o777) == 0o644)
+    marker_json = json.loads(r_marker.read_text()) \
+        if r_marker.exists() else {}
+    check("agent marker written (relay_agent true, enabled_by cli)",
+          marker_json.get("relay_agent") is True and
+          marker_json.get("enabled_by") == "cli",
+          r_marker.read_text() if r_marker.exists() else "(none)")
+    out = r_cli(["status"], r_env())
+    dev_fp = hashlib.sha256(r_key_pub.read_bytes()).hexdigest()
+    check("status: enabled + full fingerprint + unpaired + daemon unreachable",
+          out.returncode == 0 and
+          "relay agent: enabled" in out.stdout and
+          f"fingerprint: {dev_fp}" in out.stdout and
+          "paired: unpaired" in out.stdout and
+          "daemon: unreachable" in out.stdout,
+          out.stdout + out.stderr)
+    agent_pid = agent_pid_from_status(out.stdout)
+    check("status: agent running (pid alive)",
+          agent_pid is not None and pid_alive(agent_pid))
+    out = r_cli(["on", "--confirm", "--bind", "127.0.0.1"],
+                r_env(agent=sleep_agent))
+    check("second `on` is already-on, exit 0",
+          out.returncode == 0 and
+          "Relay agent is already on." in out.stdout,
+          out.stdout + out.stderr)
+
+    # 19c. Pairing: the cloud agent's pending file (peer_key +
+    #      pairing_code, the code being SHA-256(device_pub ||
+    #      peer_pub) first 6 hex) shows in status; bare `pair`
+    #      prints the peer fingerprint + code and refuses; `pair
+    #      --confirm` pins the peer (0644) and clears the pending.
+    #      A pending file with the wrong code is malformed: status
+    #      shows no pairing line and `pair` refuses.
+    peer_raw = os.urandom(32)
+    peer_fp = hashlib.sha256(peer_raw).hexdigest()
+    pair_code = hashlib.sha256(
+        r_key_pub.read_bytes() + peer_raw).hexdigest()[:6]
+    r_pending.write_text(json.dumps({
+        "peer_key": base64.b64encode(peer_raw).decode(),
+        "pairing_code": pair_code}))
+    out = r_cli(["status"], r_env())
+    check("status shows the pending pairing (fp16 + code)",
+          f"pairing: pending {peer_fp[:16]} code {pair_code}" in out.stdout,
+          out.stdout + out.stderr)
+    out = r_cli(["pair"], r_env())
+    check("bare `pair` prints peer fingerprint + code and refuses",
+          out.returncode != 0 and
+          f"peer fingerprint: {peer_fp}" in out.stdout and
+          f"pairing code: {pair_code}" in out.stdout,
+          out.stdout + out.stderr)
+    out = r_cli(["pair", "--confirm"], r_env())
+    check("`pair --confirm` pins the peer and clears the pending",
+          out.returncode == 0 and
+          f"Paired with {peer_fp[:16]}." in out.stdout and
+          r_peer_pub.exists() and
+          len(r_peer_pub.read_bytes()) == 32 and
+          (r_peer_pub.stat().st_mode & 0o777) == 0o644 and
+          not r_pending.exists(),
+          out.stdout + out.stderr)
+    out = r_cli(["status"], r_env())
+    check("status after pairing shows paired fp16",
+          f"paired: {peer_fp[:16]}" in out.stdout,
+          out.stdout + out.stderr)
+    r_pending.write_text(json.dumps({
+        "peer_key": base64.b64encode(peer_raw).decode(),
+        "pairing_code": "000000"}))
+    out = r_cli(["status"], r_env())
+    check("malformed pending (wrong code) shows no pairing line",
+          "pairing: pending" not in out.stdout,
+          out.stdout + out.stderr)
+    out = r_cli(["pair"], r_env())
+    check("malformed pending -> `pair` refuses as malformed",
+          out.returncode != 0 and
+          "malformed" in out.stderr,
+          out.stdout + out.stderr)
+
+    # 19d. `off` is the kill switch: the agent process dies, the
+    #      marker is removed, statusd is SET ai.relay off. `off`
+    #      with an already-dead agent still succeeds.
+    out = r_cli(["off"], r_env())
+    check("`off` stops the agent and removes the marker",
+          out.returncode == 0 and
+          "Relay agent off." in out.stdout and
+          not r_marker.exists() and
+          (agent_pid is None or not pid_alive(agent_pid)),
+          out.stdout + out.stderr)
+    check("statusd was SET ai.relay off by `off`",
+          wait_recorded(s19_statusd, "SET ai.relay off"))
+    out = r_cli(["off"], r_env())
+    check("`off` with a dead agent still succeeds",
+          out.returncode == 0 and "Relay agent off." in out.stdout,
+          out.stdout + out.stderr)
+
+    # 19e. `on` without --bind refuses when not joined to a
+    #      tailnet (the fake prints logged-out); a non-IPv4 --bind
+    #      is a usage error; a missing agent binary refuses with
+    #      no marker.
+    out = r_cli(["on", "--confirm"], r_env(agent=sleep_agent))
+    check("`on --confirm` without --bind refuses (not joined)",
+          out.returncode != 0 and
+          "not joined to a tailnet" in out.stderr and
+          not r_marker.exists(),
+          out.stdout + out.stderr)
+    out = r_cli(["on", "--confirm", "--bind", "not-an-ip"],
+                r_env(agent=sleep_agent))
+    check("`on --confirm --bind not-an-ip` -> usage error",
+          out.returncode != 0 and
+          "--bind needs an IPv4 address" in out.stderr,
+          out.stdout + out.stderr)
+    out = r_cli(["on", "--confirm", "--bind", "127.0.0.1"],
+                r_env(agent=s19 / "no-such-agent"))
+    check("`on` with a missing agent binary refuses, no marker",
+          out.returncode != 0 and
+          "cannot start the relay agent" in out.stderr and
+          not r_marker.exists(),
+          out.stdout + out.stderr)
+
+    # 19f. The daemon side: a second daemon instance booted with
+    #      the agent marker present logs "AID relay enabled" and
+    #      starts idle (STATUS relay=idle, statusd SET ai.relay
+    #      idle at boot). The fake sevyn-relay binary drives
+    #      SESSIONs through it.
+    r_marker.write_text(
+        '{"relay_agent": true, "enabled_at": "2026-11-26T00:00:00Z", '
+        '"enabled_by": "cli"}\n')
+    s19_env = {**env,
+               "SEVYN_AI_SOCK": str(s19_sock),
+               "SEVYN_AI_CTL": str(s19_ctl),
+               "SEVYN_AI_BACKENDS_DIR": str(backends),
+               "SEVYN_AI_GRANT": str(grant),
+               "SEVYN_AI_SELECTED": str(s19 / "ai-selected.json"),
+               "SEVYN_AI_APPD_SOCK": str(s19_appd_sock),
+               "SEVYN_AI_STATUS_SOCK": str(s19_status_sock),
+               "SEVYN_AI_KEY_FILE": str(key_file),
+               "MUSE_API_BASE": fake_api.url,
+               "SEVYN_AI_READ_ROOT": str(read_root),
+               "SEVYN_AI_WRITE_ROOT": str(read_root),
+               "SEVYN_AI_CLI": str(fake_cli),
+               "SEVYN_AI_SETTINGS": str(read_root / "settings.json"),
+               "SEVYN_AI_REGISTRY": str(read_root / "registry.json"),
+               "SEVYN_AI_LOG": str(s19 / "aid.log"),
+               "SEVYN_AI_GOD_GRANT": str(god_grant),
+               "SEVYN_AI_GOD_MARKER": str(s19 / "god-mode.json"),
+               "SEVYN_AI_AUDIT_LOG": str(r_audit),
+               "SEVYN_AI_RELAY_AGENT_MARKER": str(r_marker)}
+    s19_log = open(s19 / "aid.log", "w")
+    aid2 = subprocess.Popen([str(aid_bin)], env=s19_env, stdout=s19_log,
+                            stderr=subprocess.STDOUT)
+    c2 = None
+
+    def s19_log_text():
+        s19_log.flush()
+        return (s19 / "aid.log").read_text(errors="replace")
+
+    def audit_relay_count():
+        return (r_audit.read_text(errors="replace").count("via=relay")
+                if r_audit.exists() else 0)
+
+    def relay_set_count(state):
+        return sum(1 for c in s19_statusd.recorded()
+                   if c == f"SET ai.relay {state}")
+
+    try:
+        check("second daemon starts with the marker present",
+              wait_for("AID ready (s19)",
+                       lambda: "AID ready" in s19_log_text()))
+        check("daemon logs AID relay enabled at boot",
+              "AID relay enabled" in s19_log_text(), s19_log_text())
+        check("statusd was SET ai.relay idle at boot",
+              wait_recorded(s19_statusd, "SET ai.relay idle"))
+        c2 = SockClient(str(s19_sock))
+        c2.send("STATUS")
+        s19_status = c2.readline()
+        check("STATUS relay=idle with the marker present (god off)",
+              "relay=idle" in s19_status and
+              "god_mode=off" in s19_status, s19_status)
+        # The session backend: echo-ai is NOT session-aware (it
+        # reads the first stdin line as its task, so the daemon's
+        # "SESSION" marker becomes its task and it emits nothing).
+        # one-action-ai reads one line and emits the action stored
+        # in one-action.txt, so it covers SESSION too — the test
+        # rewrites the file per check. (§15 is long done, so the
+        # shared file is free to reuse here.)
+        c2.send("SELECT one-action-ai")
+        check("SELECT one-action-ai for the relay daemon",
+              c2.readline() == "OK selected one-action-ai")
+
+        # The fake relay: a minimal SESSION client named
+        # sevyn-relay, so the daemon's peer-exe detection marks
+        # it via=relay. One reply line per SESSION.
+        fake_relay_c = s19 / "fake-relay.c"
+        fake_relay_c.write_text(
+            "#include <stdio.h>\n"
+            "#include <stdlib.h>\n"
+            "#include <string.h>\n"
+            "#include <sys/socket.h>\n"
+            "#include <sys/un.h>\n"
+            "#include <unistd.h>\n"
+            "int main(int argc, char **argv) {\n"
+            "    if (argc < 3) return 2;\n"
+            "    int fd = socket(AF_UNIX, SOCK_STREAM, 0);\n"
+            "    if (fd < 0) return 1;\n"
+            "    struct sockaddr_un a;\n"
+            "    memset(&a, 0, sizeof a);\n"
+            "    a.sun_family = AF_UNIX;\n"
+            "    if (strlen(argv[1]) >= sizeof a.sun_path) return 1;\n"
+            "    strcpy(a.sun_path, argv[1]);\n"
+            "    if (connect(fd, (struct sockaddr *)&a, sizeof a) != 0)\n"
+            "        return 1;\n"
+            "    FILE *f = fdopen(fd, \"r+\");\n"
+            "    if (!f) return 1;\n"
+            "    fprintf(f, \"SESSION\");\n"
+            "    for (int i = 2; i < argc; i++)\n"
+            "        fprintf(f, \" %s\", argv[i]);\n"
+            "    fprintf(f, \"\\n\");\n"
+            "    fflush(f);\n"
+            "    char line[2048];\n"
+            "    if (!fgets(line, sizeof line, f)) return 1;\n"
+            "    fputs(line, stdout);\n"
+            "    return strncmp(line, \"OK \", 3) == 0 ? 0 : 1;\n"
+            "}\n")
+        fake_relay = s19 / "sevyn-relay"
+        fr_build = subprocess.run(
+            ["gcc", "-O2", "-Wall", "-Wextra",
+             "-o", str(fake_relay), str(fake_relay_c)],
+            capture_output=True, text=True)
+        check("fake sevyn-relay builds clean",
+              fr_build.returncode == 0,
+              fr_build.stdout + fr_build.stderr)
+
+        def relay_session(*task_words):
+            return subprocess.run(
+                [str(fake_relay), str(s19_sock)] + list(task_words),
+                capture_output=True, text=True, timeout=15)
+
+        # An allowed action over the relay: the grant applies
+        # identically, the audit line gains via=relay, ai.relay
+        # goes on for the run and back to idle, and the console
+        # line names the relay.
+        one_action_file.write_text("LAUNCH files\n")
+        before = audit_relay_count()
+        on_before = relay_set_count("on")
+        idle_before = relay_set_count("idle")
+        out = relay_session("launch", "files")
+        check("relay SESSION launch files -> allowed=1",
+              out.returncode == 0 and
+              "OK backend=one-action-ai allowed=1 denied=0 failed=0"
+              in out.stdout, out.stdout + out.stderr)
+        check("audit gains a via=relay line for the relay action",
+              audit_relay_count() == before + 1,
+              r_audit.read_text(errors="replace") if r_audit.exists()
+              else "(none)")
+        check("ai.relay went on then idle around the relay SESSION",
+              wait_for("relay on/idle SETs",
+                       lambda: relay_set_count("on") == on_before + 1 and
+                       relay_set_count("idle") == idle_before + 1,
+                       timeout=5))
+        check("console SESSION line names via=relay",
+              "AID SESSION backend=one-action-ai via=relay" in s19_log_text(),
+              s19_log_text())
+        c2.send("STATUS")
+        s19_status = c2.readline()
+        check("STATUS relay=idle after the relay SESSION",
+              "relay=idle" in s19_status, s19_status)
+
+        # The grant boundary holds over the relay: UNINSTALL is
+        # not in the standard grant, so the relay SESSION is
+        # denied — and the denial is still audited via=relay.
+        one_action_file.write_text("UNINSTALL files\n")
+        before = audit_relay_count()
+        out = relay_session("uninstall", "files")
+        check("relay SESSION uninstall files -> denied=1 (grant holds)",
+              out.returncode == 0 and
+              "OK backend=one-action-ai allowed=0 denied=1 failed=0"
+              in out.stdout, out.stdout + out.stderr)
+        check("denied relay action is still audited via=relay",
+              audit_relay_count() == before + 1 and
+              "UNINSTALL files" in r_audit.read_text(errors="replace"))
+
+        # Negative control: the SAME session from a non-relay
+        # client (this Python process — exe basename python3, not
+        # sevyn-relay) is NOT marked via=relay and touches no
+        # ai.relay key.
+        one_action_file.write_text("LAUNCH files\n")
+        before = audit_relay_count()
+        on_before = relay_set_count("on")
+        c2.send("SESSION launch files")
+        check("non-relay SESSION launch files -> allowed=1",
+              c2.readline() ==
+              "OK backend=one-action-ai allowed=1 denied=0 failed=0")
+        check("non-relay SESSION adds no via=relay audit line",
+              audit_relay_count() == before)
+        check("non-relay SESSION touches no ai.relay key",
+              relay_set_count("on") == on_before)
+        c2.send("STATUS")
+        s19_status = c2.readline()
+        check("STATUS relay=idle after the non-relay SESSION",
+              "relay=idle" in s19_status, s19_status)
+
+        # 19g. Relay-down: the fake relay against a dead socket
+        #      fails fast (no hang, exit 1); `status` against a
+        #      dead daemon socket reports unreachable, exit 0.
+        out = subprocess.run(
+            [str(fake_relay), str(s19 / "no-such.sock"),
+             "launch", "files"],
+            capture_output=True, text=True, timeout=10)
+        check("fake relay against a dead socket fails fast (exit 1)",
+              out.returncode == 1)
+        out = r_cli(["status"], {**r_env(),
+                                 "SEVYN_AI_SOCK": str(s19 / "no-such.sock")})
+        check("`status` with the daemon down -> unreachable, exit 0",
+              out.returncode == 0 and
+              "daemon: unreachable" in out.stdout,
+              out.stdout + out.stderr)
+    finally:
+        aid2.send_signal(signal.SIGTERM)
+        try:
+            aid2.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            aid2.kill()
+            aid2.wait()
+        s19_log.close()
+        if c2 is not None:
+            c2.close()
+        # s19_statusd stays up: `revoke` (19h) SETs ai.relay off
+        # through it after the daemon is gone.
+        s19_appd.close()
+
+    # 19h. `revoke --confirm` forgets everything: the keypair,
+    #      the pinned peer key, the (malformed) pending file, and
+    #      the marker are all deleted, and statusd is SET ai.relay
+    #      off. Status afterwards reads disabled/unpaired.
+    off_before = sum(1 for c in s19_statusd.recorded()
+                     if c == "SET ai.relay off")
+    out = r_cli(["revoke", "--confirm"], r_env())
+    check("`revoke --confirm` succeeds",
+          out.returncode == 0 and
+          "Relay pairing revoked." in out.stdout,
+          out.stdout + out.stderr)
+    check("revoke deleted keypair + peer pin + pending + marker",
+          not r_key.exists() and not r_key_pub.exists() and
+          not r_peer_pub.exists() and not r_pending.exists() and
+          not r_marker.exists())
+    check("revoke SET ai.relay off",
+          wait_for("revoke SET off",
+                   lambda: sum(1 for c in s19_statusd.recorded()
+                               if c == "SET ai.relay off") == off_before + 1,
+                   timeout=5))
+    out = r_cli(["status"], r_env())
+    check("status after revoke reads disabled/unpaired",
+          out.returncode == 0 and
+          "relay agent: disabled" in out.stdout and
+          "paired: unpaired" in out.stdout,
+          out.stdout + out.stderr)
+    s19_statusd.close()
 
     print()
     if FAILURES:

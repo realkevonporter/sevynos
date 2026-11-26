@@ -61,7 +61,8 @@
  * globbing anywhere in this CLI — the exec bridge splits on
  * whitespace and the CLI takes argv as-is.
  *
- * Build: gcc, libc only.
+ * Build: gcc, libc + libcrypto (OpenSSL EVP for the relay agent's
+ * Ed25519 keypair — the daemon links it too, for feed verification).
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -74,6 +75,7 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <openssl/evp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -206,6 +208,10 @@ static void print_usage(FILE *f)
             "                              --confirm)\n"
             "  sevyn ai audit [n]          show the last n AI audit log\n"
             "                              entries (default 50)\n"
+            "  sevyn ai relay on|off|status|pair|revoke\n"
+            "                              relay agent: remote AI over\n"
+            "                              the tailnet (`on` needs\n"
+            "                              --confirm)\n"
             "  sevyn code status           Sevyn Code: running, serving,\n"
             "                              version, terminal shell\n"
             "  sevyn browser open [url]    open a URL (launches Chromium\n"
@@ -1869,6 +1875,56 @@ static const char *ai_relay_auth_url_path(void)
     return env_or("SEVYN_AI_RELAY_AUTH_URL", AI_RELAY_AUTH_URL_FILE);
 }
 
+/* Relay agent (Phase 2): the enable marker, the device Ed25519
+ * keypair (raw 32-byte seed / pubkey), the pinned cloud-agent
+ * pubkey, and the pending pairing — all under /data/ai. The agent
+ * pidfile lives on /run, the agent binary in /usr/local/bin. Env
+ * overrides for the host tests (the env_or pattern). */
+#define AI_RELAY_AGENT_MARKER_FILE "/data/ai/relay-agent.json"
+#define AI_RELAY_KEY_FILE "/data/ai/relay-key"
+#define AI_RELAY_KEY_PUB_FILE "/data/ai/relay-key.pub"
+#define AI_RELAY_PEER_PUB_FILE "/data/ai/relay-peer.pub"
+#define AI_RELAY_PENDING_FILE "/data/ai/relay-pending.json"
+#define RELAY_AGENT_BIN "/usr/local/bin/sevyn-relay"
+#define RELAY_PID_FILE "/run/sevyn-relay.pid"
+#define RELAY_AGENT_PORT 17893
+
+static const char *ai_relay_agent_marker_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_AGENT_MARKER",
+                  AI_RELAY_AGENT_MARKER_FILE);
+}
+
+static const char *ai_relay_key_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_KEY", AI_RELAY_KEY_FILE);
+}
+
+static const char *ai_relay_key_pub_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_KEY_PUB", AI_RELAY_KEY_PUB_FILE);
+}
+
+static const char *ai_relay_peer_pub_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_PEER_PUB", AI_RELAY_PEER_PUB_FILE);
+}
+
+static const char *ai_relay_pending_path(void)
+{
+    return env_or("SEVYN_AI_RELAY_PENDING", AI_RELAY_PENDING_FILE);
+}
+
+static const char *relay_pid_path(void)
+{
+    return env_or("SEVYN_RELAY_PIDFILE", RELAY_PID_FILE);
+}
+
+static const char *relay_agent_bin(void)
+{
+    return env_or("SEVYN_RELAY_AGENT_BIN", RELAY_AGENT_BIN);
+}
+
 /* UTC ISO-8601 timestamp for the marker. */
 static void ai_iso_now(char *out, size_t cap)
 {
@@ -2207,19 +2263,932 @@ static int cmd_ai_audit(int argc, char **argv)
     return 0;
 }
 
+/* Forward declarations: defined later in the file, in the
+ * tailscale section (run_capture is the generic spawn helper). */
+static int run_capture(char *const argv[], char **out);
+static int tailscale_parse_peer(const char *line, char *ip, size_t ip_cap,
+                                char *host, size_t host_cap);
+static int statusd_set_relay(const char *value);
+
+/* ------------------------------------------------------------------ */
+/* `sevyn ai relay ...` — the relay agent (AI relay Phase 2,          */
+/* INTERFACES.md). Local file operations + agent spawn, like `god` —  */
+/* not a daemon verb.                                                  */
+/*                                                                      */
+/*   on [--confirm] [--via cli|settings] [--bind <ip>] — two-step      */
+/*     confirm (D1): a bare `on` prints the exposure and refuses.      */
+/*     --confirm generates the device Ed25519 keypair when absent,     */
+/*     starts the agent (--bind <tailnet-ip> --port 17893), then       */
+/*     writes the agent marker. Without --bind the tailnet address     */
+/*     is auto-detected from `tailscale status` and `on` refuses       */
+/*     when the device is not joined — the agent has no transport      */
+/*     without the mesh, and `on` does NOT join it. --bind skips       */
+/*     that check (the guest mock check binds loopback, 127.0.0.1 —    */
+/*     only local processes can reach it, so it is not a hole — and    */
+/*     the check needs `on` to generate the keypair). When the agent   */
+/*     binary cannot be started, `on` fails and does NOT write the     */
+/*     marker: a missing agent is a broken image, not a state to       */
+/*     persist.                                                         */
+/*   off — stop the agent (SIGTERM via the pidfile), remove the        */
+/*     marker, SET ai.relay off. Works even when the agent is          */
+/*     already dead (the kill switch).                                 */
+/*   status — one line per fact: marker, agent alive, device           */
+/*     fingerprint, paired fingerprint (or "unpaired"), pending        */
+/*     pairing (when one exists), daemon relay= (via STATUS).          */
+/*   revoke [--confirm] — forget the pairing: keypair + peer pin +     */
+/*     pending + marker deleted, agent stopped, SET ai.relay off.      */
+/*   pair [--confirm] — approve a pending pairing: pin the peer key,   */
+/*     delete the pending file.                                        */
+/*                                                                      */
+/* Fingerprint = SHA-256(public key), lowercase hex; display = first   */
+/* 16 hex chars, full fingerprint via `status`. Pairing code = first   */
+/* 6 hex chars of SHA-256(device_pub || peer_pub).                     */
+/* ------------------------------------------------------------------ */
+
+/* Hex-encode `len` bytes into `out` (needs 2*len+1 bytes). */
+static void ai_relay_hex(const unsigned char *in, size_t len, char *out)
+{
+    static const char hexd[] = "0123456789abcdef";
+    for (size_t i = 0; i < len; i++) {
+        out[2 * i] = hexd[(in[i] >> 4) & 0xf];
+        out[2 * i + 1] = hexd[in[i] & 0xf];
+    }
+    out[2 * len] = '\0';
+}
+
+/* SHA-256 of `len` bytes, via EVP (the low-level SHA256() one-shot
+ * is deprecated in OpenSSL 3). Returns 0 on success. */
+static int ai_relay_sha256(const unsigned char *data, size_t len,
+                           unsigned char out[32])
+{
+    unsigned int dlen = 0;
+    if (EVP_Digest(data, len, out, &dlen, EVP_sha256(), NULL) != 1 ||
+        dlen != 32)
+        return -1;
+    return 0;
+}
+
+/* The fingerprint of a 32-byte public key: SHA-256, hex. `out`
+ * needs 65 bytes. Returns 0 on success. */
+static int ai_relay_fingerprint(const unsigned char pub[32], char *out,
+                                size_t cap)
+{
+    unsigned char digest[32];
+    if (cap < 65 || ai_relay_sha256(pub, 32, digest) != 0)
+        return -1;
+    ai_relay_hex(digest, 32, out);
+    return 0;
+}
+
+/* The pairing code: first 6 hex chars of SHA-256(device_pub ||
+ * peer_pub). Both sides compute it from the exchanged keys. `out`
+ * needs 7 bytes. Returns 0 on success. */
+static int ai_relay_pairing_code(const unsigned char dev[32],
+                                 const unsigned char peer[32], char *out,
+                                 size_t cap)
+{
+    unsigned char both[64];
+    memcpy(both, dev, 32);
+    memcpy(both + 32, peer, 32);
+    unsigned char digest[32];
+    if (cap < 7 || ai_relay_sha256(both, sizeof(both), digest) != 0)
+        return -1;
+    char hex[65];
+    ai_relay_hex(digest, 32, hex);
+    memcpy(out, hex, 6);
+    out[6] = '\0';
+    return 0;
+}
+
+/* One base64 digit. Returns -1 for anything outside the alphabet. */
+static int ai_relay_b64_val(int c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 26;
+    if (c >= '0' && c <= '9')
+        return c - '0' + 52;
+    if (c == '+')
+        return 62;
+    if (c == '/')
+        return 63;
+    return -1;
+}
+
+/* Minimal base64 decoder (the pending file stores the peer key
+ * base64). Returns 0 and sets *out_len, or -1 on bad input. */
+static int ai_relay_b64_decode(const char *in, unsigned char *out,
+                               size_t cap, size_t *out_len)
+{
+    size_t ilen = strlen(in);
+    if (ilen % 4 != 0)
+        return -1;
+    size_t n = 0;
+    for (size_t i = 0; i < ilen; i += 4) {
+        int v[4];
+        int pad = 0;
+        for (int j = 0; j < 4; j++) {
+            char c = in[i + (size_t)j];
+            if (c == '=') {
+                v[j] = 0;
+                pad++;
+            } else {
+                if (pad > 0)
+                    return -1;
+                v[j] = ai_relay_b64_val((unsigned char)c);
+                if (v[j] < 0)
+                    return -1;
+            }
+        }
+        if (pad > 2 || n + 3 - (size_t)pad > cap)
+            return -1;
+        out[n++] = (unsigned char)((v[0] << 2) | (v[1] >> 4));
+        if (pad < 2)
+            out[n++] =
+                (unsigned char)(((v[1] & 0xf) << 4) | (v[2] >> 2));
+        if (pad < 1)
+            out[n++] = (unsigned char)(((v[2] & 0x3) << 6) | v[3]);
+    }
+    *out_len = n;
+    return 0;
+}
+
+/* Extract the "..." value of "key" from a flat JSON object.
+ * Returns 1 and fills `out`, 0 when the key is absent. */
+static int ai_relay_json_string(const char *json, const char *key,
+                                char *out, size_t cap)
+{
+    size_t klen = strlen(key);
+    char pat[64];
+    if (klen + 2 >= sizeof(pat))
+        return 0;
+    pat[0] = '"';
+    memcpy(pat + 1, key, klen);
+    pat[klen + 1] = '"';
+    pat[klen + 2] = '\0';
+    const char *p = strstr(json, pat);
+    if (!p)
+        return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != ':')
+        return 0;
+    p++;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != '"')
+        return 0;
+    p++;
+    size_t i = 0;
+    while (p[i] && p[i] != '"' && i + 1 < cap) {
+        out[i] = p[i];
+        i++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+/* Write `len` bytes to `path` atomically (tmp + rename, like the
+ * god marker). The tmp file is created with `mode` so a secret
+ * (the relay seed, 0600) is never briefly world-readable.
+ * Returns 0 on success, -1 on failure. */
+static int ai_relay_write_atomic(const char *path, const void *data,
+                                 size_t len, mode_t mode)
+{
+    char dir[4000];
+    if (ai_dirname(path, dir, sizeof(dir)) != 0 ||
+        ai_mkdir_p(dir) != 0)
+        return -1;
+    if (strlen(path) + 16 > 4096)
+        return -1;
+    char tmp[4096];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, getpid());
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (fd < 0)
+        return -1;
+    /* open() honours mode only at creation; fchmod pins it even
+     * when the tmp file already existed. */
+    if (fchmod(fd, mode) != 0) {
+        close(fd);
+        unlink(tmp);
+        return -1;
+    }
+    const unsigned char *p = data;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, p + off, len - off);
+        if (w <= 0) {
+            close(fd);
+            unlink(tmp);
+            return -1;
+        }
+        off += (size_t)w;
+    }
+    if (close(fd) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Read a 32-byte raw key file. Returns 0 on success. */
+static int ai_relay_read_raw32(const char *path, unsigned char out[32])
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    size_t n = fread(out, 1, 32, f);
+    int extra = fgetc(f);
+    fclose(f);
+    return (n == 32 && extra == EOF) ? 0 : -1;
+}
+
+/* Generate a fresh Ed25519 keypair (OpenSSL EVP). The seed is the
+ * raw 32-byte private key. Returns 0 on success. */
+static int ai_relay_gen_keypair(unsigned char seed[32],
+                                unsigned char pub[32])
+{
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+    if (!ctx)
+        return -1;
+    EVP_PKEY *pkey = NULL;
+    int rc = -1;
+    if (EVP_PKEY_keygen_init(ctx) == 1 &&
+        EVP_PKEY_keygen(ctx, &pkey) == 1 && pkey) {
+        size_t slen = 32, plen = 32;
+        if (EVP_PKEY_get_raw_private_key(pkey, seed, &slen) == 1 &&
+            slen == 32 &&
+            EVP_PKEY_get_raw_public_key(pkey, pub, &plen) == 1 &&
+            plen == 32)
+            rc = 0;
+    }
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+    return rc;
+}
+
+/* Re-derive the public key from a raw 32-byte seed. Returns 0 on
+ * success. */
+static int ai_relay_pub_from_seed(const unsigned char seed[32],
+                                  unsigned char pub[32])
+{
+    EVP_PKEY *pkey =
+        EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, seed, 32);
+    if (!pkey)
+        return -1;
+    size_t plen = 32;
+    int rc = EVP_PKEY_get_raw_public_key(pkey, pub, &plen) == 1 &&
+                     plen == 32
+                 ? 0
+                 : -1;
+    EVP_PKEY_free(pkey);
+    return rc;
+}
+
+/* Load the device keypair when it exists; generate + store it when
+ * it does not (seed 0600, pub 0644). Fills `pub` either way. A seed
+ * with a missing pubkey is re-derived from the seed rather than
+ * rekeyed — rekeying would orphan the pairing. Returns 0 on
+ * success, -1 when no usable keypair could be produced. */
+static int ai_relay_ensure_keypair(unsigned char pub[32])
+{
+    unsigned char seed[32];
+    int have_seed = ai_relay_read_raw32(ai_relay_key_path(), seed) == 0;
+    int have_pub = ai_relay_read_raw32(ai_relay_key_pub_path(), pub) == 0;
+    int rc = -1;
+    if (have_seed && have_pub) {
+        rc = 0;
+        goto out;
+    }
+    if (have_seed && !have_pub) {
+        if (ai_relay_pub_from_seed(seed, pub) == 0 &&
+            ai_relay_write_atomic(ai_relay_key_pub_path(), pub, 32,
+                                  0644) == 0)
+            rc = 0;
+        goto out;
+    }
+    if (ai_relay_gen_keypair(seed, pub) != 0)
+        goto out;
+    if (ai_relay_write_atomic(ai_relay_key_path(), seed, 32, 0600) != 0)
+        goto out;
+    if (ai_relay_write_atomic(ai_relay_key_pub_path(), pub, 32, 0644) !=
+        0)
+        goto out;
+    rc = 0;
+out:
+    memset(seed, 0, sizeof(seed));
+    return rc;
+}
+
+/* Read the pending pairing: the peer's raw pubkey, the pairing code
+ * the agent stored, and the peer fingerprint. Returns 1 when a
+ * well-formed pending file exists, 0 when there is none, -1 when
+ * it exists but is malformed (bad base64, wrong length, or a
+ * pairing code that does not match the device + peer keys — a
+ * stale pending file after a rekey). */
+static int ai_relay_read_pending(unsigned char peer[32], char *code,
+                                 size_t code_cap, char *peer_fp,
+                                 size_t fp_cap)
+{
+    char *json = read_file_cap(ai_relay_pending_path(), 4096);
+    if (!json)
+        return 0;
+    char b64[128];
+    char stored_code[16];
+    int ok = ai_relay_json_string(json, "peer_key", b64, sizeof(b64)) &&
+             ai_relay_json_string(json, "pairing_code", stored_code,
+                                  sizeof(stored_code));
+    size_t plen = 0;
+    if (ok && ai_relay_b64_decode(b64, peer, 32, &plen) != 0)
+        ok = 0;
+    if (ok && plen != 32)
+        ok = 0;
+    if (ok && ai_relay_fingerprint(peer, peer_fp, fp_cap) != 0)
+        ok = 0;
+    if (ok) {
+        size_t clen = strlen(stored_code);
+        if (clen == 0 || clen + 1 > code_cap)
+            ok = 0;
+        else
+            memcpy(code, stored_code, clen + 1);
+    }
+    if (ok) {
+        /* When the device key exists, the stored code must be the
+         * one the device + peer keys produce — otherwise the
+         * pending file predates a rekey and the code on screen
+         * would not match the cloud agent's. */
+        unsigned char dev[32];
+        if (ai_relay_read_raw32(ai_relay_key_pub_path(), dev) == 0) {
+            char expect[7];
+            if (ai_relay_pairing_code(dev, peer, expect,
+                                      sizeof(expect)) != 0 ||
+                strcmp(expect, stored_code) != 0)
+                ok = 0;
+        }
+    }
+    free(json);
+    return ok ? 1 : -1;
+}
+
+/* True when `pid` is certainly gone (kill says "no such process").
+ * Anything else (alive, or no permission to signal it) counts as
+ * still there. */
+static int ai_relay_pid_gone(pid_t pid)
+{
+    return kill(pid, 0) != 0 && errno == ESRCH;
+}
+
+static void ai_relay_sleep_ms(long ms)
+{
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000 * 1000;
+    nanosleep(&ts, NULL);
+}
+
+/* The agent's pid from its pidfile. Returns the pid, or -1 when
+ * there is none / it is not a number. */
+static pid_t ai_relay_agent_pid(void)
+{
+    char *text = read_file_cap(relay_pid_path(), 64);
+    if (!text)
+        return -1;
+    char *end = NULL;
+    long pid = strtol(text, &end, 10);
+    free(text);
+    if (end == text || pid <= 0 || pid > INT_MAX)
+        return -1;
+    return (pid_t)pid;
+}
+
+/* Is the agent alive (pidfile + kill(pid, 0))? Fills *pid_out
+ * when non-NULL. */
+static int ai_relay_agent_alive(pid_t *pid_out)
+{
+    pid_t pid = ai_relay_agent_pid();
+    if (pid_out)
+        *pid_out = pid;
+    return pid >= 0 && !ai_relay_pid_gone(pid);
+}
+
+/* Stop the agent (SIGTERM via the pidfile, best-effort wait, then
+ * SIGKILL when it will not die — the kill switch must work).
+ * Tolerates a dead or missing agent. Returns 0 when no agent is
+ * left running, -1 when one survived SIGKILL or could not be
+ * signalled. */
+static int ai_relay_stop_agent(void)
+{
+    pid_t pid = ai_relay_agent_pid();
+    if (pid < 0 || ai_relay_pid_gone(pid))
+        return 0;
+    if (kill(pid, SIGTERM) != 0 && errno != ESRCH)
+        return -1;
+    for (int i = 0; i < 40 && !ai_relay_pid_gone(pid); i++)
+        ai_relay_sleep_ms(50);
+    if (ai_relay_pid_gone(pid))
+        return 0;
+    if (kill(pid, SIGKILL) != 0 && errno != ESRCH)
+        return -1;
+    for (int i = 0; i < 20 && !ai_relay_pid_gone(pid); i++)
+        ai_relay_sleep_ms(50);
+    return ai_relay_pid_gone(pid) ? 0 : -1;
+}
+
+/* This device's tailnet address, from `tailscale status` (the
+ * local node is the first peer line — the cmd_tailscale_status
+ * parser's contract). Returns 1 and fills `out`, 0 when the
+ * device is not on a tailnet (daemon stopped, logged out, or the
+ * binary missing). */
+static int ai_relay_tailnet_ip(char *out, size_t cap)
+{
+    char *const targv[] = { (char *)"tailscale", (char *)"status", NULL };
+    char *res = NULL;
+    int rc = run_capture(targv, &res);
+    if (!res || rc != 0) {
+        free(res);
+        return 0;
+    }
+    int found = 0;
+    char *save = NULL;
+    char *line = strtok_r(res, "\n", &save);
+    while (line) {
+        while (*line == ' ' || *line == '\t')
+            line++;
+        if (*line && *line != '#' && strncmp(line, "Warning:", 8) != 0) {
+            char ip[64], host[64];
+            if (tailscale_parse_peer(line, ip, sizeof(ip), host,
+                                     sizeof(host))) {
+                if (strlen(ip) + 1 <= cap) {
+                    snprintf(out, cap, "%s", ip);
+                    found = 1;
+                }
+                break;
+            }
+        }
+        line = strtok_r(NULL, "\n", &save);
+    }
+    free(res);
+    return found;
+}
+
+/* Start the agent detached (fork, setsid, exec the agent binary
+ * with --bind <ip> --port 17893). The parent confirms the exec
+ * through a CLOEXEC error pipe — EOF means the exec succeeded —
+ * and treats a child that exits non-zero inside the first second
+ * as a failed start (a bad bind, a missing key dir). A child that
+ * exits 0 or is still running counts as started; `status` is the
+ * liveness truth after that (the agent writes its own pidfile).
+ * Returns 0 on success, -1 on failure (errno is the exec errno
+ * when the exec itself failed). */
+static int ai_relay_start_agent(const char *bind_ip)
+{
+    int errpipe[2];
+    if (pipe(errpipe) != 0)
+        return -1;
+    /* The write end closes on a successful exec — the parent reads
+     * EOF then; an exec failure writes errno first. */
+    int flags = fcntl(errpipe[1], F_GETFD);
+    if (flags < 0 || fcntl(errpipe[1], F_SETFD, flags | FD_CLOEXEC) != 0) {
+        close(errpipe[0]);
+        close(errpipe[1]);
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(errpipe[0]);
+        close(errpipe[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(errpipe[0]);
+        if (setsid() < 0)
+            _exit(127);
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            dup2(dn, STDOUT_FILENO);
+            dup2(dn, STDERR_FILENO);
+            if (dn > STDERR_FILENO)
+                close(dn);
+        }
+        char port[16];
+        snprintf(port, sizeof(port), "%d", RELAY_AGENT_PORT);
+        const char *bin = relay_agent_bin();
+        char *aargv[7];
+        int ai = 0;
+        aargv[ai++] = (char *)bin;
+        aargv[ai++] = (char *)"--bind";
+        aargv[ai++] = (char *)bind_ip;
+        aargv[ai++] = (char *)"--port";
+        aargv[ai++] = port;
+        aargv[ai++] = NULL;
+        execvp(bin, aargv);
+        /* exec failed — report errno to the parent. */
+        int e = errno;
+        ssize_t w = write(errpipe[1], &e, sizeof(e));
+        (void)w;
+        _exit(127);
+    }
+    close(errpipe[1]);
+    /* Read the error pipe to EOF: any bytes mean exec failed. */
+    size_t got = 0;
+    char ebuf[sizeof(int)];
+    for (;;) {
+        ssize_t r = read(errpipe[0], ebuf + got, sizeof(ebuf) - got);
+        if (r <= 0)
+            break;
+        got += (size_t)r;
+        if (got >= sizeof(ebuf))
+            break;
+    }
+    close(errpipe[0]);
+    if (got == sizeof(int)) {
+        int child_errno = 0;
+        memcpy(&child_errno, ebuf, sizeof(child_errno));
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        errno = child_errno;
+        return -1;
+    }
+    /* Exec succeeded. Watch briefly: a non-zero exit inside the
+     * first second is a failed start (bad bind, bad key dir). */
+    for (int i = 0; i < 20; i++) {
+        int status = 0;
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+                return 0;
+            return -1;
+        }
+        if (w < 0 && errno != EINTR)
+            return 0;
+        ai_relay_sleep_ms(50);
+    }
+    return 0;
+}
+
+/* What enabling the relay agent exposes, in plain language (the
+ * two-step confirm: the CLI prints this when a bare `relay on`
+ * refuses; the Settings dialog lists it). */
+static void print_relay_agent_powers(FILE *f)
+{
+    fprintf(f,
+            "Enabling the relay agent lets your cloud AI reach this "
+            "device over the tailnet:\n"
+            "  - the paired cloud agent can ask this device's AI to "
+            "run tasks, with the same grant as the on-device AI\n"
+            "  - every remote action is logged to the AI audit log "
+            "with via=relay\n"
+            "  - the agent only listens on this device's tailnet "
+            "address — never the open internet\n"
+            "  - only the cloud agent you pair with can connect; "
+            "an unknown key has to be approved on this device first\n"
+            "The agent stays enabled across reboots until you turn "
+            "it off (`sevyn ai relay off`).\n");
+}
+
+/* Write the agent marker atomically (tmp + rename, like the god
+ * marker). State, not a secret, so 0644. Returns 0 on success. */
+static int ai_relay_write_agent_marker(const char *via)
+{
+    const char *marker = ai_relay_agent_marker_path();
+    char now[32];
+    ai_iso_now(now, sizeof(now));
+    char json[512];
+    if (snprintf(json, sizeof(json),
+                 "{\"relay_agent\": true, \"enabled_at\": \"%s\", "
+                 "\"enabled_by\": \"%s\"}\n",
+                 now, via) >= (int)sizeof(json))
+        return -1;
+    return ai_relay_write_atomic(marker, json, strlen(json), 0644);
+}
+
+/* `sevyn ai relay on|off|status|pair|revoke` (AI relay Phase 2). */
+static int cmd_ai_relay(int argc, char **argv)
+{
+    if (argc < 4)
+        return usage();
+    const char *action = argv[3];
+
+    if (strcmp(action, "status") == 0) {
+        if (argc != 4)
+            return usage();
+        printf("relay agent: %s\n",
+               access(ai_relay_agent_marker_path(), F_OK) == 0
+                   ? "enabled"
+                   : "disabled");
+        pid_t pid = -1;
+        if (ai_relay_agent_alive(&pid))
+            printf("agent: running (pid %d)\n", (int)pid);
+        else
+            printf("agent: not running\n");
+        unsigned char pub[32];
+        if (ai_relay_read_raw32(ai_relay_key_pub_path(), pub) == 0) {
+            char fp[65];
+            if (ai_relay_fingerprint(pub, fp, sizeof(fp)) == 0)
+                printf("fingerprint: %s\n", fp);
+        }
+        unsigned char peer[32];
+        if (ai_relay_read_raw32(ai_relay_peer_pub_path(), peer) == 0) {
+            char fp[65];
+            if (ai_relay_fingerprint(peer, fp, sizeof(fp)) == 0) {
+                char short_fp[17];
+                memcpy(short_fp, fp, 16);
+                short_fp[16] = '\0';
+                printf("paired: %s\n", short_fp);
+            }
+        } else {
+            printf("paired: unpaired\n");
+        }
+        unsigned char pend_peer[32];
+        char code[16];
+        char peer_fp[65];
+        int pend = ai_relay_read_pending(pend_peer, code, sizeof(code),
+                                         peer_fp, sizeof(peer_fp));
+        if (pend == 1) {
+            char short_fp[17];
+            memcpy(short_fp, peer_fp, 16);
+            short_fp[16] = '\0';
+            printf("pairing: pending %s code %s\n", short_fp, code);
+        }
+        /* Daemon relay= (via STATUS, the cmd_ai_god status
+         * pattern). The daemon may be down — the local facts above
+         * are still true, so report that and exit 0. */
+        int fd = connect_ai();
+        if (fd < 0) {
+            printf("daemon: unreachable\n");
+            return 0;
+        }
+        char line[2048];
+        int n = -1;
+        if (send_line(fd, "STATUS") == 0)
+            n = read_line(fd, line, sizeof(line));
+        close(fd);
+        if (n > 0) {
+            const char *p = strstr(line, " relay=");
+            if (p) {
+                p += 7;
+                char val[32];
+                size_t i = 0;
+                while (p[i] && p[i] != ' ' && i + 1 < sizeof(val)) {
+                    val[i] = p[i];
+                    i++;
+                }
+                val[i] = '\0';
+                printf("daemon relay: %s\n", val);
+                return 0;
+            }
+        }
+        printf("daemon relay: unknown\n");
+        return 0;
+    }
+
+    if (strcmp(action, "off") == 0) {
+        if (argc != 4)
+            return usage();
+        /* The kill switch: stop the agent, drop the marker, SET
+         * ai.relay off. Works even when the agent is already dead. */
+        if (ai_relay_stop_agent() != 0)
+            fprintf(stderr,
+                    "warning: the relay agent did not stop — it may "
+                    "still be running\n");
+        const char *marker = ai_relay_agent_marker_path();
+        if (unlink(marker) != 0 && errno != ENOENT) {
+            fprintf(stderr, "error: cannot remove the relay-agent "
+                    "marker: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+        if (statusd_set_relay("off") != 0)
+            fprintf(stderr,
+                    "warning: relay agent off, but statusd could not "
+                    "be reached — the tray pill will not clear\n");
+        printf("Relay agent off.\n");
+        return 0;
+    }
+
+    if (strcmp(action, "on") == 0) {
+        /* `relay on [--confirm] [--via <source>] [--bind <ip>]`. */
+        int confirm = 0;
+        const char *via = "cli";
+        const char *bind_ip = NULL;
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "--confirm") == 0) {
+                confirm = 1;
+            } else if (strcmp(argv[i], "--via") == 0 && i + 1 < argc &&
+                       (strcmp(argv[i + 1], "cli") == 0 ||
+                        strcmp(argv[i + 1], "settings") == 0)) {
+                via = argv[++i];
+            } else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
+                bind_ip = argv[++i];
+            } else {
+                return usage();
+            }
+        }
+        if (!confirm) {
+            /* Step one of the two-step confirm: show the exposure
+             * and refuse. A bare non-interactive enable never
+             * turns the relay agent on (D1). */
+            print_relay_agent_powers(stderr);
+            fprintf(stderr,
+                    "To enable the relay agent, run: sevyn ai relay "
+                    "on --confirm\n");
+            return 1;
+        }
+        /* Already on and the agent is alive: nothing to do. */
+        if (access(ai_relay_agent_marker_path(), F_OK) == 0 &&
+            ai_relay_agent_alive(NULL)) {
+            printf("Relay agent is already on.\n");
+            return 0;
+        }
+        /* The bind address: --bind wins (the guest mock check
+         * binds loopback); otherwise the tailnet address, which
+         * needs a joined tailnet — without one the agent has no
+         * transport, so refuse instead of joining here. */
+        char auto_ip[64] = "";
+        if (!bind_ip) {
+            if (!ai_relay_tailnet_ip(auto_ip, sizeof(auto_ip))) {
+                fprintf(stderr,
+                        "error: not joined to a tailnet — the relay "
+                        "agent has no transport. Join one first:\n"
+                        "  sevyn tailscale up --login-server <url> "
+                        "--confirm\n");
+                return 1;
+            }
+            bind_ip = auto_ip;
+        } else {
+            struct in_addr v4;
+            if (inet_pton(AF_INET, bind_ip, &v4) != 1) {
+                fprintf(stderr,
+                        "error: --bind needs an IPv4 address\n");
+                return 1;
+            }
+        }
+        /* The keypair first: the agent needs it to identify
+         * itself, and `status` prints its fingerprint. */
+        unsigned char pub[32];
+        if (ai_relay_ensure_keypair(pub) != 0) {
+            fprintf(stderr,
+                    "error: cannot generate or store the relay "
+                    "keypair\n");
+            return 1;
+        }
+        /* Start the agent before writing the marker: a missing or
+         * broken agent binary is a broken image, not a state to
+         * persist (INTERFACES.md). */
+        if (ai_relay_start_agent(bind_ip) != 0) {
+            fprintf(stderr,
+                    "error: cannot start the relay agent (%s) — the "
+                    "agent was not enabled\n",
+                    relay_agent_bin());
+            return 1;
+        }
+        if (ai_relay_write_agent_marker(via) != 0) {
+            fprintf(stderr,
+                    "error: cannot write the relay-agent marker: %s\n",
+                    strerror(errno));
+            /* The agent is running without its marker — stop it so
+             * the device is not left half-enabled. */
+            ai_relay_stop_agent();
+            return 1;
+        }
+        char fp[65];
+        if (ai_relay_fingerprint(pub, fp, sizeof(fp)) != 0) {
+            fprintf(stderr,
+                    "error: cannot fingerprint the relay key\n");
+            return 1;
+        }
+        printf("Relay agent on — listening on %s:%d.\n", bind_ip,
+               RELAY_AGENT_PORT);
+        printf("fingerprint: %s\n", fp);
+        printf("Waiting for the cloud agent to pair — approve the "
+               "pairing on this device when it connects.\n");
+        return 0;
+    }
+
+    if (strcmp(action, "revoke") == 0) {
+        int confirm = 0;
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "--confirm") == 0) {
+                confirm = 1;
+            } else {
+                return usage();
+            }
+        }
+        if (!confirm) {
+            fprintf(stderr,
+                    "Revoke forgets the relay pairing: the device "
+                    "keypair, the pinned cloud-agent key, any pending "
+                    "pairing, and the agent marker are all deleted, "
+                    "and the agent is stopped. Re-enabling needs a "
+                    "fresh pairing.\n"
+                    "To revoke, run: sevyn ai relay revoke "
+                    "--confirm\n");
+            return 1;
+        }
+        if (ai_relay_stop_agent() != 0)
+            fprintf(stderr,
+                    "warning: the relay agent did not stop — it may "
+                    "still be running\n");
+        unlink(ai_relay_key_path());
+        unlink(ai_relay_key_pub_path());
+        unlink(ai_relay_peer_pub_path());
+        unlink(ai_relay_pending_path());
+        const char *marker = ai_relay_agent_marker_path();
+        if (unlink(marker) != 0 && errno != ENOENT) {
+            fprintf(stderr, "error: cannot remove the relay-agent "
+                    "marker: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+        if (statusd_set_relay("off") != 0)
+            fprintf(stderr,
+                    "warning: relay pairing revoked, but statusd "
+                    "could not be reached — the tray pill will not "
+                    "clear\n");
+        printf("Relay pairing revoked.\n");
+        return 0;
+    }
+
+    if (strcmp(action, "pair") == 0) {
+        int confirm = 0;
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "--confirm") == 0) {
+                confirm = 1;
+            } else {
+                return usage();
+            }
+        }
+        unsigned char peer[32];
+        char code[16];
+        char peer_fp[65];
+        int pend = ai_relay_read_pending(peer, code, sizeof(code),
+                                         peer_fp, sizeof(peer_fp));
+        if (pend == 0) {
+            fprintf(stderr, "nothing to pair\n");
+            return 1;
+        }
+        if (pend < 0) {
+            fprintf(stderr,
+                    "error: the pending pairing is malformed — "
+                    "delete %s and let the cloud agent reconnect\n",
+                    ai_relay_pending_path());
+            return 1;
+        }
+        if (!confirm) {
+            printf("Pending pairing:\n");
+            printf("peer fingerprint: %s\n", peer_fp);
+            printf("pairing code: %s\n", code);
+            fprintf(stderr,
+                    "To approve this pairing, run: sevyn ai relay "
+                    "pair --confirm\n");
+            return 1;
+        }
+        if (ai_relay_write_atomic(ai_relay_peer_pub_path(), peer, 32,
+                                  0644) != 0) {
+            fprintf(stderr, "error: cannot pin the peer key: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+        if (unlink(ai_relay_pending_path()) != 0 && errno != ENOENT) {
+            fprintf(stderr, "error: cannot clear the pending pairing: "
+                    "%s\n",
+                    strerror(errno));
+            return 1;
+        }
+        char short_fp[17];
+        memcpy(short_fp, peer_fp, 16);
+        short_fp[16] = '\0';
+        printf("Paired with %s.\n", short_fp);
+        return 0;
+    }
+
+    return usage();
+}
+
 static int cmd_ai(int argc, char **argv)
 {
     if (argc < 3)
         return usage();
     const char *verb = argv[2];
 
-    /* `key`, `god`, and `audit` are local file operations, not
-     * daemon verbs (god writes the marker + grant and then asks the
-     * daemon to RELOAD; audit reads the daemon's log). */
+    /* `key`, `god`, `relay`, and `audit` are local file operations,
+     * not daemon verbs (god writes the marker + grant and then asks
+     * the daemon to RELOAD; relay writes the agent marker and spawns
+     * the agent; audit reads the daemon's log). */
     if (strcmp(verb, "key") == 0)
         return cmd_ai_key(argc, argv);
     if (strcmp(verb, "god") == 0)
         return cmd_ai_god(argc, argv);
+    if (strcmp(verb, "relay") == 0)
+        return cmd_ai_relay(argc, argv);
     if (strcmp(verb, "audit") == 0)
         return cmd_ai_audit(argc, argv);
 
@@ -5125,10 +6094,18 @@ static int ai_relay_write_marker(const char *login_server,
 }
 
 /* SET ai.relay on|off on statusd (the tray pill's source). Best
- * effort — the join/leave itself already happened; a failed SET
+ * effort — the disable/revoke itself already happened; a failed SET
  * only means the tray pill is stale, so callers warn instead of
  * failing the verb. Returns 0 on success, -1 when statusd could
- * not be reached. */
+ * not be reached.
+ *
+ * OWNERSHIP (Phase 2): ai.relay means the relay SESSION state
+ * (off/idle/on), owned by the daemon (on/idle, on SESSION
+ * start/end) and the `ai relay` CLI (off, on disable/revoke). The
+ * 1b tailscale up/down/revoke paths used to SET it on join/leave;
+ * they no longer do — joining a tailnet is transport, not a
+ * session. The tray pill (ai.relay === "on") now means a live
+ * remote session, which is the more important fact. */
 static int statusd_set_relay(const char *value)
 {
     int fd = connect_sock("SEVYN_STATUS_SOCK", STATUS_SOCK);
@@ -5444,19 +6421,18 @@ static int cmd_tailscale_up(int argc, char **argv)
         free(out);
         return 1;
     }
-    /* Success: the pending auth URL (if any) is spent — remove it,
-     * write the R6 marker, and mark the relay on in statusd. */
+    /* Success: the pending auth URL (if any) is spent — remove it
+     * and write the R6 marker. ai.relay is NOT set here (Phase 2
+     * ownership change — see statusd_set_relay): it now means the
+     * relay session state, owned by the daemon + the `ai relay`
+     * CLI. Joining the tailnet only makes the transport available;
+     * the tray pill lights when a remote session is live. */
     unlink(ai_relay_auth_url_path());
     if (ai_relay_write_marker(login_server, via) != 0) {
         fprintf(stderr,
                 "warning: joined the tailnet, but the relay marker "
                 "could not be written — the device will not re-join "
                 "after a reboot\n");
-    }
-    if (statusd_set_relay("on") != 0) {
-        fprintf(stderr,
-                "warning: joined the tailnet, but statusd could not "
-                "be reached — the tray pill will not show the relay\n");
     }
     printf("Joined the tailnet.\n");
     free(out);
@@ -5495,11 +6471,11 @@ static int cmd_tailscale_down(void)
                 strerror(errno));
         return 1;
     }
-    if (statusd_set_relay("off") != 0) {
-        fprintf(stderr,
-                "warning: left the tailnet, but statusd could not "
-                "be reached — the tray pill will not clear\n");
-    }
+    /* ai.relay is NOT set here (Phase 2 ownership change — see
+     * statusd_set_relay): leaving the tailnet ends the transport,
+     * and the session state is the daemon's + the `ai relay` CLI's
+     * to own. The agent, when enabled, is stopped by
+     * `sevyn ai relay off`, not by leaving the tailnet. */
     printf("Left the tailnet.\n");
     return 0;
 }
@@ -5547,11 +6523,9 @@ static int cmd_tailscale_revoke(int argc, char **argv)
         return 1;
     }
     unlink(ai_relay_auth_url_path());
-    if (statusd_set_relay("off") != 0) {
-        fprintf(stderr,
-                "warning: revoked the tailnet, but statusd could not "
-                "be reached — the tray pill will not clear\n");
-    }
+    /* ai.relay is NOT set here (Phase 2 ownership change — see
+     * statusd_set_relay): the session state belongs to the daemon
+     * + the `ai relay` CLI, not the tailnet join state. */
     printf("Tailnet revoked.\n");
     return 0;
 }

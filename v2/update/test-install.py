@@ -124,7 +124,7 @@ def main():
         td = Path(td)
         sevyn = td / "sevyn"
         r = subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-o",
-                            str(sevyn), str(SEVYN_C)],
+                            str(sevyn), str(SEVYN_C), "-lcrypto"],
                            capture_output=True, text=True)
         check("sevyn.c compiles warning-clean", r.returncode == 0,
               r.stderr[:400])

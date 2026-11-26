@@ -311,9 +311,10 @@ async function boot(tag) {
       initrd,
       "-append",
       // sevyn.mockmuse=1 starts the mock Muse API on loopback
-      // (127.0.0.1:7071) for the muse-ai section below — a test
-      // double, never a system service.
-      `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockmuse=1`,
+      // (127.0.0.1:7071) for the muse-ai section below, and
+      // sevyn.mockrelay=1 starts the mock relay for the §9 relay
+      // section — test doubles, never system services.
+      `console=ttyS0 sevyn.slot=${bootSlot} sevyn.mockmuse=1 sevyn.mockrelay=1`,
       "-display",
       "none",
       "-vga",
@@ -1347,6 +1348,160 @@ async function main() {
     check("god mode: off again at the end", !!hit, hit || "");
   }
 
+  // 9. Mock relay (Phase 2) via the Terminal: the mock relay (started
+  //    at boot by sevyn.mockrelay=1) speaks the relay protocol to the
+  //    REAL sevyn-relay agent on loopback, so the guest proves a real
+  //    task over the real agent with no network and no real cloud.
+  //    The check enables the agent on loopback, the mock's first
+  //    contact demands pairing, the check approves it via the CLI, and
+  //    the mock then runs the §7 task ("session fix the settings")
+  //    through the relay — the same read -> denied write -> re-read
+  //    counts, now marked via=relay. The mock is started by init, not
+  //    by the check: the Terminal can only exec `sevyn`, never node, so
+  //    there is no way for the check to launch the mock itself. (The
+  //    mock waits up to 30 min for the agent + the approval, so a slow
+  //    run-up to this section is fine.)
+  {
+    // Re-focus the Terminal input first (same as §7/§8).
+    const shotTerm6 = await shot(b.qmp, join(OUT, "m4.5-shot-terminal-6.ppm"));
+    const termHeader6 = findWindowHeader(shotTerm6, 17, 24, 39);
+    check("relay: Terminal window still up", !!termHeader6);
+    if (termHeader6) {
+      await moveTo(
+        termHeader6.left + 200,
+        termHeader6.top + 482,
+        shotTerm6.width,
+        shotTerm6.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
+    }
+  }
+  {
+    // The mock prints its ready line at boot; waitForLog scans the
+    // whole log, so it is found even though boot was minutes ago.
+    const ready = await waitForLog(b.logPath, /RELAY-MOCK ready/, 15000);
+    check("relay: mock relay started at boot", !!ready, ready || "");
+  }
+  {
+    // muse-ai must be selected again (§8 left echo-ai selected): only
+    // the mock Muse API scripts the "session fix" read/write/re-read
+    // sequence, so only muse-ai gives allowed=2 denied=1.
+    const { exec } = await termCmd("ai select muse-ai");
+    check("relay: `ai select muse-ai` runs (EXEC 0)", !!exec, exec || "");
+    const { hit } = await termCmd(
+      "ai status",
+      /TERMINAL ai-status selected=muse-ai god_mode=off/,
+    );
+    check("relay: muse-ai selected, god mode off", !!hit, hit || "");
+  }
+  {
+    // Enable the agent on loopback. The fingerprint + pairing-code
+    // lines print to the Terminal scrollback only (no Terminal marker
+    // exists for relay verbs), so this asserts EXEC 0; the mock's
+    // hello-ok line below proves the fingerprint end to end.
+    const beforeRelay = logLines(b.logPath).length;
+    const { exec } = await termCmd("ai relay on --confirm --bind 127.0.0.1");
+    check(
+      "relay: `ai relay on --confirm --bind 127.0.0.1` runs (EXEC 0)",
+      !!exec,
+      exec || "",
+    );
+    const pairing = await waitForLog(
+      b.logPath,
+      /RELAY-MOCK pairing-required code=[0-9a-f]{6}/,
+      120000,
+      beforeRelay,
+    );
+    check("relay: mock's first contact demands pairing", !!pairing, pairing || "");
+  }
+  {
+    // Approve the pairing via the CLI; the mock then reconnects and
+    // runs the task. The hello-ok line carries the device fingerprint
+    // (first 16 hex chars); the session-end line carries the counts.
+    const beforePair = logLines(b.logPath).length;
+    const { exec } = await termCmd("ai relay pair --confirm");
+    check("relay: `ai relay pair --confirm` runs (EXEC 0)", !!exec, exec || "");
+    const helloOk = await waitForLog(
+      b.logPath,
+      /RELAY-MOCK hello-ok device=[0-9a-f]{16}/,
+      120000,
+      beforePair,
+    );
+    check("relay: mock completed the handshake (hello-ok)", !!helloOk, helloOk || "");
+    const sessionEnd = await waitForLog(
+      b.logPath,
+      /RELAY-MOCK session-end allowed=2 denied=1 failed=0/,
+      180000,
+      beforePair,
+    );
+    let sessionDetail = sessionEnd || "";
+    if (!sessionEnd) {
+      // Surface what the mock actually saw: on a counts mismatch
+      // the mock prints its real session-end (or FATAL) line, and
+      // the 180 s wait otherwise fails silent with no clue.
+      const actual = await waitForLog(
+        b.logPath,
+        /RELAY-MOCK (session-end allowed=\d+ denied=\d+ failed=\d+|FATAL .*)/,
+        5000,
+        beforePair,
+      );
+      if (actual) sessionDetail = `mock said: ${actual}`;
+    }
+    check(
+      "relay: task ran over the relay (allowed=2 denied=1 failed=0)",
+      !!sessionEnd,
+      sessionDetail,
+    );
+    const sessionLog = await waitForLog(
+      b.logPath,
+      /AID SESSION backend=muse-ai via=relay task="session fix the settings" allowed=2 denied=1 failed=0/,
+      15000,
+      beforePair,
+    );
+    check(
+      "relay: daemon logged the session with via=relay",
+      !!sessionLog,
+      sessionLog || "",
+    );
+    const relayOn = await waitForLog(
+      b.logPath,
+      /STATUSD SET ai\.relay on/,
+      15000,
+      beforePair,
+    );
+    check("relay: ai.relay went on for the session", !!relayOn, relayOn || "");
+    const relayIdle = await waitForLog(
+      b.logPath,
+      /STATUSD SET ai\.relay idle/,
+      15000,
+      beforePair,
+    );
+    check(
+      "relay: ai.relay went idle when the session ended",
+      !!relayIdle,
+      relayIdle || "",
+    );
+  }
+  {
+    // The audit log has the relay session's entries; `ai audit 5`
+    // prints the last five (the count is all the Terminal marker
+    // carries — the lines themselves are asserted from the data disk
+    // after poweroff, below).
+    const { exec, hit } = await termCmd("ai audit 5", /TERMINAL ai-audit lines=[1-9]\d*/);
+    check("relay: `ai audit 5` runs (EXEC 0)", !!exec, exec || "");
+    check("relay: audit log has entries after the relay session", !!hit, hit || "");
+  }
+  {
+    // `ai relay status` shows the agent state (enabled, running,
+    // paired fingerprint, daemon relay state) — its lines print to the
+    // Terminal scrollback only, so EXEC 0 is the assertion here; the
+    // session state itself was proven by the STATUSD SET lines above.
+    const { exec } = await termCmd("ai relay status");
+    check("relay: `ai relay status` runs (EXEC 0)", !!exec, exec || "");
+  }
+
   // Final frame + clean poweroff.
   const shotFinal = join(OUT, "m4.5-shot-final.ppm");
   const imgFinal = await shot(b.qmp, shotFinal);
@@ -1370,6 +1525,25 @@ async function main() {
   b.ctl.write("POWEROFF\n");
   const exited = await waitExit(b, 30000);
   check("shutdown: guest powers off on request", exited);
+  {
+    // The audit log lives on the data disk: read it back read-only
+    // (the readState precedent) and prove the relay session's actions
+    // were audited with via=relay. The Terminal only logs the ai-audit
+    // count, never the lines themselves, so this is the only place the
+    // file's contents are observable.
+    let audit = "";
+    try {
+      audit = await execAsync("debugfs", ["-R", "cat /logs/ai-audit.log", DISK]);
+    } catch {
+      audit = "";
+    }
+    const relayLines = audit.split("\n").filter((l) => l.includes("via=relay")).length;
+    check(
+      "relay: audit log has via=relay entries",
+      relayLines > 0,
+      audit ? `${relayLines} relay lines` : "debugfs read failed",
+    );
+  }
   closeBoot(b);
   finish(
     checks.every((c) => c.ok),

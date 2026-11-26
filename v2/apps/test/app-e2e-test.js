@@ -519,6 +519,8 @@ check("settings: channel switch applies and logs", () => {
     }
     if (cmd === "sevyn code status")
       return "0\nrunning: yes\nserving: yes\nversion: 4.105.0\nterminal-shell: /usr/local/bin/sevyn\n";
+    if (cmd === "sevyn ai relay status")
+      return "0\nrelay agent: disabled\nagent: not running\npaired: unpaired\ndaemon relay: off\n";
     return "0\n";
   };
   loadAs(
@@ -547,6 +549,13 @@ check("settings: channel switch applies and logs", () => {
   assert.ok(texts.includes("AI relay"), "relay section shown");
   assert.ok(texts.includes("Relay: off"), "relay off shown");
   assert.ok(texts.includes("Join tailnet"), "relay join button shown");
+  // Phase 2: the relay-agent block renders (disabled in the harness
+  // — the stub above returns agent disabled / unpaired / session
+  // off), with its toggle and Forget button.
+  assert.ok(texts.includes("Relay agent"), "relay agent section shown");
+  assert.ok(texts.includes("Relay agent: disabled"), "relay agent status shown");
+  assert.ok(texts.includes("Turn relay agent on"), "relay agent toggle shown");
+  assert.ok(texts.includes("Forget this pairing"), "relay agent forget shown");
   assert.ok(texts.includes("Power"), "power section shown");
   assert.ok(texts.includes("Shut Down"), "power shut down button shown");
   assert.ok(texts.includes("Restart"), "power restart button shown");
@@ -580,6 +589,15 @@ check("settings: channel switch applies and logs", () => {
   // key input, Save key, Clear key, God toggle, login server,
   // auth key, Join, Shut Down, Restart, Default, Solid, Cosmic,
   // Minimal, macOS, macOS Light] — 26.
+  // Phase 2's relay-agent block adds two more in the AI section,
+  // after Join and before Shut Down (the agent toggle, Forget this
+  // pairing), so the order is [—, ▢, X, Scan, Nightly, Stable,
+  // Sync Now, Timezone, Apply, echo-ai, plan-ai, key input, Save
+  // key, Clear key, God toggle, login server, auth key, Join,
+  // Agent toggle, Forget, Shut Down, Restart, Default, Solid,
+  // Cosmic, Minimal, macOS, macOS Light] — 28. (The enable,
+  // pairing, and revoke dialogs' buttons exist only while open, so
+  // they never shift the count.)
   pressTab(6); // —, ▢, X, Scan, Nightly, Stable
   pressEnter();
   assert.ok(
@@ -594,15 +612,15 @@ check("settings: channel switch applies and logs", () => {
   );
   // Focus order is now [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
-  // God toggle, login server, auth key, Join, Shut Down, Restart,
-  // Default, Solid, Cosmic, Minimal, macOS, macOS Light]: Stable ->
-  // Sync Now -> Timezone -> Apply -> echo-ai -> plan-ai -> key input
-  // -> Save key -> Clear key -> God toggle -> login server -> auth
-  // key -> Join -> Shut Down -> Restart -> Default -> Solid ->
-  // Cosmic -> Minimal -> macOS -> macOS Light -> — -> ▢ -> X
-  // -> Scan -> Nightly. Stable is 6th, Nightly 5th, so 25 Tabs wrap
-  // back to Nightly.
-  pressTab(25);
+  // God toggle, login server, auth key, Join, Agent toggle, Forget,
+  // Shut Down, Restart, Default, Solid, Cosmic, Minimal, macOS,
+  // macOS Light]: Stable -> Sync Now -> Timezone -> Apply -> echo-ai
+  // -> plan-ai -> key input -> Save key -> Clear key -> God toggle ->
+  // login server -> auth key -> Join -> Agent toggle -> Forget ->
+  // Shut Down -> Restart -> Default -> Solid -> Cosmic -> Minimal ->
+  // macOS -> macOS Light -> — -> ▢ -> X -> Scan -> Nightly. Stable
+  // is 6th, Nightly 5th, so 27 Tabs wrap back to Nightly.
+  pressTab(27);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> Sync Now -> Timezone -> Apply -> echo-ai ->
@@ -673,10 +691,10 @@ check("settings: wallpaper style + color apply and log", () => {
   );
   // Focus order is [—, ▢, X, Scan, Nightly, Stable, Sync Now,
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
-  // God toggle, login server, auth key, Join, Shut Down, Restart,
-  // Default, Solid, Cosmic, Minimal, macOS, macOS Light]: Default is
-  // the 21st focusable.
-  pressTab(21);
+  // God toggle, login server, auth key, Join, Agent toggle, Forget,
+  // Shut Down, Restart, Default, Solid, Cosmic, Minimal, macOS,
+  // macOS Light]: Default is the 23rd focusable.
+  pressTab(23);
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS wallpaperStyle=default"),
@@ -706,6 +724,61 @@ check("settings: wallpaper style + color apply and log", () => {
   assert.ok(
     texts.some((t) => t.includes("Applies when Settings closes.")),
     "applies-on-close note shown",
+  );
+});
+
+// Phase 2: the relay-agent pairing dialog renders while a pending
+// pairing exists (peer fingerprint short form + pairing code +
+// Confirm / Dismiss), the agent banner names the enabled agent, and
+// an audit line carrying via=relay shows the "remote" badge. No Tab
+// presses here — the dialog buttons exist only while open, so they
+// never shift the focus count proven above.
+check("settings: relay agent pairing dialog + remote audit badge", () => {
+  const handler = (cmd) => {
+    if (cmd === "sevyn update status") return "0\nversion=1 channel=nightly active=A\n";
+    if (cmd === "sevyn ai list") return "0\nselected=echo-ai backends=echo-ai,plan-ai\n";
+    if (cmd === "sevyn ai status")
+      return "0\nselected=echo-ai backends=echo-ai,plan-ai god_mode=off\n";
+    if (cmd === "sevyn code status")
+      return "0\nrunning: yes\nserving: yes\nversion: 4.105.0\nterminal-shell: /usr/local/bin/sevyn\n";
+    if (cmd === "sevyn ai relay status")
+      return (
+        "0\nrelay agent: enabled\nagent: running (pid 1234)\n" +
+        "fingerprint: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\n" +
+        "paired: unpaired\npairing: pending abcdef0123456789 code 1a2b3c\ndaemon relay: idle\n"
+      );
+    if (cmd === "sevyn ai audit 5")
+      return "0\n2026-11-25T10:00:00Z muse-ai -> SESSION god_mode=off via=relay task=read\n";
+    return "0\n";
+  };
+  loadAs(
+    {
+      id: "settings",
+      name: "Settings",
+      color: "#6b7280",
+      glyph: "S",
+      permissions: ["cli.exec"],
+    },
+    settingsBundle,
+    handler,
+  );
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("Relay agent"), "relay agent section shown");
+  assert.ok(
+    texts.includes("Relay agent: enabled — unpaired — session idle"),
+    "relay agent status shown",
+  );
+  assert.ok(
+    texts.some((t) => t.includes("Relay agent is ON")),
+    "relay agent banner shown",
+  );
+  assert.ok(texts.includes("Peer: abcdef0123456789"), "pending peer shown");
+  assert.ok(texts.includes("Pairing code: 1a2b3c"), "pairing code shown");
+  assert.ok(texts.includes("Confirm"), "pairing confirm shown");
+  assert.ok(texts.includes("Dismiss"), "pairing dismiss shown");
+  assert.ok(
+    texts.some((t) => t.includes("via=relay") && t.includes("remote")),
+    "remote badge shown on relay audit line",
   );
 });
 

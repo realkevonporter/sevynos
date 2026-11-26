@@ -250,7 +250,16 @@ try {
 // --- CLI through `sevyn camera` ----------------------------------------
 if (process.env.SEVYN_CAMD_SKIP_CLI !== "1") {
   const sevynBin = join(tmp, "sevyn");
-  await run(CC, ["-O2", "-Wall", "-Wextra", "-Werror", "-o", sevynBin, SEVYN_C]);
+  await run(CC, [
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-o",
+    sevynBin,
+    SEVYN_C,
+    "-lcrypto",
+  ]);
   check("sevyn CLI compiles clean (-Wall -Wextra -Werror)", true);
   const cli = (args) =>
     run(sevynBin, ["camera", "--socket", sock, ...args]).then(

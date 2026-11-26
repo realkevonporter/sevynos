@@ -26,10 +26,15 @@ export interface StatusSnapshot {
   // daemon SETs it on/off as the mode changes. The tray shows the
   // amber GOD pill while it is on — the status-bar mark (D1).
   "ai.god_mode"?: string;
-  // Relay 1b: statusd owns this key (default "off"); `sevyn
-  // tailscale up/down/revoke` SETs it on/off as the tailnet join
-  // changes. The tray shows the blue RELAY pill while it is on —
-  // the status-bar mark (R6), distinct from the amber GOD pill.
+  // Relay (Phase 2): statusd owns this key (default "off"); it is
+  // now the live relay *session* state (off/idle/on), owned by the
+  // daemon + the `ai relay` CLI (the agent lifecycle) — SESSION
+  // start from a relay client SETs it on, SESSION end SETs it idle,
+  // `ai relay off` SETs it off. The 1b tailscale CLI no longer SETs
+  // it on join/leave; the tailnet-join state stays visible in
+  // Settings via `sevyn tailscale status`. The tray shows the blue
+  // RELAY pill while a remote session is live — the status-bar mark,
+  // distinct from the amber GOD pill.
   "ai.relay"?: string;
 }
 
@@ -136,11 +141,15 @@ export function StatusTray(props: StatusTrayProps): React.ReactElement {
           <Text style={{ fontSize: 13, color: "#fef3c7", fontWeight: "bold" }}>GOD</Text>
         </View>
       ) : null}
-      {/* RELAY pill (1b, R6): the status-bar mark while the relay is
-          on. Renders only when on, so a relay-off system (CI, fresh
-          boot) sees no change at all. Blue, distinct from the amber
-          GOD pill. Not a pressable — it is a mark, not a control;
-          the toggle lives in Settings. */}
+      {/* RELAY pill (Phase 2): the status-bar mark while a remote
+          relay session is live (ai.relay === "on"). Renders only
+          when on, so a relay-off/idle system (CI, fresh boot) sees
+          no change at all. The key is now owned by the daemon +
+          the `ai relay` CLI (the agent lifecycle: SESSION start
+          -> on, SESSION end -> idle, `ai relay off` -> off), not
+          by the tailscale CLI's join/leave. Blue, distinct from
+          the amber GOD pill. Not a pressable — it is a mark, not
+          a control; the toggle lives in Settings. */}
       {status["ai.relay"] === "on" ? (
         <View
           style={{

@@ -195,9 +195,11 @@ def main():
     fake_sock = tmp / "fake.sock"
 
     # 0. Both C files build warning-free (the image build uses
-    # -Wall -Wextra; a warning here is a failure).
+    # -Wall -Wextra; a warning here is a failure). sevyn.c links
+    # libcrypto since Phase 2 (relay Ed25519 via OpenSSL EVP);
+    # -lcrypto is harmless on statusd.c, which does not use it.
     for src, out in [(STATUSD_SRC, statusd_bin), (SEVYN_SRC, sevyn_bin)]:
-        proc = run(["gcc", "-O2", "-Wall", "-Wextra", "-o", str(out), str(src)])
+        proc = run(["gcc", "-O2", "-Wall", "-Wextra", "-o", str(out), str(src), "-lcrypto"])
         check(f"build {src.name} warning-free", proc.returncode == 0,
               proc.stderr.strip()[:300])
 

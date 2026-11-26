@@ -221,7 +221,35 @@ if [ -z "$kernel" ]; then
 fi
 kernel_version="$(basename "$kernel" | sed 's/^vmlinuz-//')"
 
-for tool in busybox cpio curl gcc g++ pkg-config wayland-scanner python3 zstd modinfo cmake node npm openssl unzip strip sgdisk mkfs.vfat mcopy mdir mmd mkfs.ext4 debugfs blkid efibootmgr; do
+# Rust (Phase 2, relay agent): the relay is the first Rust binary
+# built into an image. build-deps.sh installs rustup into the
+# RUNNER's home ($HOME/.cargo), but this script runs under sudo,
+# where $HOME is /root and cargo is not on PATH — so resolve cargo
+# from the invoking user's home and put it on PATH here. A missing
+# toolchain fails loudly now, never as a silent relay-less image
+# later (the tools loop below then also sees `cargo`).
+CARGO_BIN="$(command -v cargo 2>/dev/null || true)"
+if [ -z "$CARGO_BIN" ] && [ -n "${SUDO_USER:-}" ]; then
+  _sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+  [ -z "$_sudo_home" ] && _sudo_home="/home/$SUDO_USER"
+  [ -x "$_sudo_home/.cargo/bin/cargo" ] && CARGO_BIN="$_sudo_home/.cargo/bin/cargo"
+fi
+if [ -z "$CARGO_BIN" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+  CARGO_BIN="$HOME/.cargo/bin/cargo"
+fi
+[ -n "$CARGO_BIN" ] || { echo "error: cargo not found (run v2/rn/host/build-deps.sh as the runner user first — it installs rustup 1.100.0 into the runner's \$HOME/.cargo)" >&2; exit 1; }
+PATH="$(dirname "$CARGO_BIN"):$PATH"
+export PATH
+# Under sudo rustup also loses its toolchain: it looks in
+# $HOME/.rustup (i.e. /root/.rustup — no default there), so point it
+# at the invoking user's rustup home, where build-deps.sh installed
+# 1.100.0. Only when that dir exists — a system cargo install has no
+# rustup home and must not be disturbed.
+_cargo_home="$(dirname "$(dirname "$CARGO_BIN")")"
+_rustup_home="$(dirname "$_cargo_home")/.rustup"
+[ -d "$_rustup_home" ] && export RUSTUP_HOME="$_rustup_home"
+
+for tool in busybox cpio curl gcc g++ pkg-config wayland-scanner python3 zstd modinfo cmake node npm openssl unzip strip sgdisk mkfs.vfat mcopy mdir mmd mkfs.ext4 debugfs blkid efibootmgr cargo; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "error: $tool not found" >&2
     exit 1
@@ -327,15 +355,35 @@ gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/sevyn-aid" \
 gcc -O2 -Wall -Wextra -I"$ROOT/loader" -o "$BUILD_TMP/muse-ai" \
   "$ROOT/ai/muse-ai.c" "$ROOT/loader/json.c" -lssl -lcrypto
 
+# The relay agent (Phase 2): the Rust TCP agent that takes tasks
+# from the cloud agent and drives them through the daemon's SESSION
+# verb. Release + --locked (the workspace lockfile must cover the
+# crate's deps — a stale lock fails loudly here). The build runs from
+# the workspace dir so rust-toolchain.toml pins 1.100.0 (the script
+# runs from the repo root, where no toolchain file applies and rustup
+# would fall back to whatever default the runner has). It uses a
+# scratch target dir under $BUILD_TMP, not the workspace target/:
+# this script runs under sudo, so a shared target dir would come
+# back root-owned and break the next runner-user cargo build.
+(
+  cd "$ROOT/rn/host-rs" || { echo "error: cannot cd to $ROOT/rn/host-rs" >&2; exit 1; }
+  CARGO_TARGET_DIR="$BUILD_TMP/cargo-target" \
+    cargo build --release --locked -p sevyn-relay \
+    || { echo "error: sevyn-relay cargo build failed" >&2; exit 1; }
+)
+cp "$BUILD_TMP/cargo-target/release/sevyn-relay" "$BUILD_TMP/sevyn-relay"
+[ -x "$BUILD_TMP/sevyn-relay" ] || { echo "error: sevyn-relay binary not built" >&2; exit 1; }
+
 # The update daemon + CLI (M8): sevyn-updated owns the A/B slots and
 # the feed check/download/apply flow; `sevyn` is the CLI (M4: update
 # + shell + files + code verbs, REPL mode). The daemon links OpenSSL
-# for Ed25519 feed verification.
+# for Ed25519 feed verification; the CLI links it too (Phase 2:
+# Ed25519 relay keypair generation).
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
   "$ROOT/update/sevyn-updated.c" "$ROOT/update/canonical.c" \
   "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lcrypto
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
-  "$ROOT/update/sevyn.c"
+  "$ROOT/update/sevyn.c" -lcrypto
 
 # The camera daemon (camd): native V4L2 capture, no Chromium, no
 # ffmpeg. Links libjpeg-turbo (YUYV/MJPEG encode + decode) and
@@ -622,6 +670,7 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$BUILD_TMP/sevyn:/usr/local/bin/sevyn" \
   "$BUILD_TMP/sevyn-camd:/usr/local/bin/sevyn-camd" \
   "$BUILD_TMP/sevyn-audiod:/usr/local/bin/sevyn-audiod" \
+  "$BUILD_TMP/sevyn-relay:/usr/local/bin/sevyn-relay" \
   "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
   "$CODE_SERVER_DIR/lib/node:/usr/share/sevyn/code-server/lib/node" \
   "$CHROMIUM_DIR/chrome:/usr/share/sevyn/chromium/chrome"
@@ -1355,6 +1404,27 @@ if [ -f /data/ai/relay.json ]; then
       echo "TAILSCALE re-join rc=$RC"
     fi
   ) &
+fi
+# AI relay 2: the relay agent (R6) — start it when the user enabled
+# it (`sevyn ai relay on` writes /data/ai/relay-agent.json). The
+# bind address comes from the tailnet (`tailscale ip -4`); the
+# backgrounded re-join above may still be in flight, so the address
+# may not exist yet — and if it does, the interface may not be fully
+# up. The agent retries its bind for up to 60s on failure, so a
+# slow re-join does not lose the agent; if `tailscale ip` gives
+# nothing at all, log and skip starting (the agent has no transport
+# without the mesh — starting it would fail outright). No restart
+# (same known gap as tailscaled): if the agent dies it stays dead
+# until reboot, visible in its log + the missing pidfile, and
+# `sevyn ai relay status` reports it as not running.
+if [ -f /data/ai/relay-agent.json ]; then
+  RELAY_IP=$(/usr/local/bin/tailscale ip -4 2>/dev/null | head -n 1 || true)
+  if [ -n "$RELAY_IP" ]; then
+    echo "RELAY agent starting (bind $RELAY_IP:17893)"
+    /usr/local/bin/sevyn-relay --bind "$RELAY_IP" --port 17893 >/data/logs/sevyn-relay.log 2>&1 &
+  else
+    echo "RELAY agent not started: no tailnet address yet (re-join still in flight?)"
+  fi
 fi
 # Sevyn Code (M4): code-server serves the IDE on 127.0.0.1:8080
 # (localhost only — the browser that paints it arrives in M5). It

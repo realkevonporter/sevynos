@@ -133,7 +133,9 @@
  * replacing /data/ + /var/lib/sevyn/), SEVYN_AI_WRITE_ROOT
  * (test-only: the one directory WRITE may touch, same replacement),
  * SEVYN_AI_GOD_GRANT, SEVYN_AI_GOD_MARKER, SEVYN_AI_AUDIT_LOG
- * (test-only: the god-mode grant, marker, and audit log paths).
+ * (test-only: the god-mode grant, marker, and audit log paths),
+ * SEVYN_AI_RELAY_AGENT_MARKER (the relay agent-enable marker;
+ * default /data/ai/relay-agent.json).
  *
  * Build: gcc, libc only (+ the M3 JSON parser for the grant).
  */
@@ -216,6 +218,13 @@
 /* The statusd key the daemon SETs on every god-mode transition, so
  * the shell's status tray can show the mode mark (D1). */
 #define GOD_MODE_STATUS_KEY "ai.god_mode"
+/* AI relay (Phase 2, design §5): the agent-enable marker — its
+ * existence at boot means the relay is enabled for this boot — and
+ * the statusd key the daemon SETs on relay transitions (off/idle/on)
+ * so the tray can show the live-session mark. The daemon never SETs
+ * "off": the CLI sets it on disable, and statusd's default is off. */
+#define DEFAULT_RELAY_AGENT_MARKER "/data/ai/relay-agent.json"
+#define RELAY_STATUS_KEY "ai.relay"
 /* REBOOT executor (P2): `sevyn reboot` asks statusd and exits 0
  * once the request is sent; the 30 s bound is the same as EXEC, so
  * a wedged CLI cannot stall the daemon. */
@@ -235,6 +244,14 @@ static const char *g_cli_path;
 static const char *g_god_grant_path;
 static const char *g_god_marker_path;
 static const char *g_audit_path;
+/* AI relay (Phase 2): the agent-enable marker path (env-overridable
+ * for the host tests; the production default is the /data path
+ * above) and the daemon's own view of the relay state — what STATUS
+ * reports and what the tray reads via statusd. "off" is the default;
+ * "idle" once the marker exists at boot; "on" while a relay SESSION
+ * is live. */
+static const char *g_relay_agent_marker_path;
+static const char *g_relay = "off";
 /* 1 while the god grant is the live grant, 0 while the standard
  * grant governs. Set only by eval_god_mode(), never by a backend. */
 static int g_god_mode = 0;
@@ -442,15 +459,22 @@ static int audit_probe(void)
 /* Append one audit line. Returns 0 on success, -1 when the line
  * could not be written. The caller has already probed, so a failure
  * here is a race (disk full mid-action) — it is logged to the
- * console, but the action's outcome stands (it already ran). */
+ * console, but the action's outcome stands (it already ran).
+ *
+ * Phase 2 relay (design §4.4): via_relay marks relay-driven
+ * actions with " via=relay" after god_mode — additive, so on-device
+ * lines (via_relay 0) are byte-identical to before and existing
+ * tooling keeps working. */
 static int audit_append(const char *actor, const char *action_line,
-                        const char *result, const char *detail)
+                        const char *result, const char *detail,
+                        int via_relay)
 {
     char ts[32];
     audit_timestamp(ts, sizeof(ts));
     char line[2048];
-    int n = snprintf(line, sizeof(line), "%s %s god_mode=%s %s %s %s\n",
-                     ts, actor, g_god_mode ? "on" : "off", action_line,
+    int n = snprintf(line, sizeof(line), "%s %s god_mode=%s%s %s %s %s\n",
+                     ts, actor, g_god_mode ? "on" : "off",
+                     via_relay ? " via=relay" : "", action_line,
                      result, detail ? detail : "");
     if (n < 0)
         return -1;
@@ -966,7 +990,7 @@ static int eval_god_mode(void)
             g_god_mode = 0;
             log_line("AID god mode off");
             if (audit_append("daemon", "GOD_MODE OFF", "OK",
-                             "marker removed") != 0)
+                             "marker removed", 0) != 0)
                 log_line("AID AUDIT FAIL god-mode off event not logged");
             char serr[128];
             if (status_set(GOD_MODE_STATUS_KEY, "off", serr,
@@ -987,7 +1011,7 @@ static int eval_god_mode(void)
         if (g_god_mode) {
             g_god_mode = 0;
             if (audit_append("daemon", "GOD_MODE OFF", "OK",
-                             "god grant invalid") != 0)
+                             "god grant invalid", 0) != 0)
                 log_line("AID AUDIT FAIL god-mode off event not logged");
             char serr[128];
             if (status_set(GOD_MODE_STATUS_KEY, "off", serr,
@@ -1008,7 +1032,7 @@ static int eval_god_mode(void)
         char detail[64];
         snprintf(detail, sizeof(detail), "via=%s",
                  enabled_by[0] ? enabled_by : "unknown");
-        if (audit_append("daemon", "GOD_MODE ON", "OK", detail) != 0)
+        if (audit_append("daemon", "GOD_MODE ON", "OK", detail, 0) != 0)
             log_line("AID AUDIT FAIL god-mode on event not logged");
         char serr[128];
         if (status_set(GOD_MODE_STATUS_KEY, "on", serr,
@@ -1018,6 +1042,21 @@ static int eval_god_mode(void)
         log_line("AID god grant loaded (%zu permissions)", ngod);
     }
     return 1;
+}
+
+/* Drive the ai.relay state (Phase 2, design §5.2): update the
+ * daemon's own view (what STATUS reports) and SET the statusd key
+ * the tray reads. The daemon SETs "on" at a relay SESSION start and
+ * "idle" at its end (and at boot when the marker exists); it never
+ * SETs "off" — the CLI owns that transition, and statusd's default
+ * is off. A failed SET is logged, never fatal: the daemon's own
+ * view is still correct. */
+static void relay_set_state(const char *state)
+{
+    g_relay = state;
+    char serr[128];
+    if (status_set(RELAY_STATUS_KEY, state, serr, sizeof(serr)) != 0)
+        log_line("AID relay status key not set: %s", serr);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1803,9 +1842,11 @@ static int execute_action(const struct action *a, char *err,
  * (§2.5); the log is probed BEFORE anything runs, so a broken log
  * refuses the action instead of letting it run unlogged
  * (fail-closed). An executor policy refusal (-2, the protected-apps
- * guard) counts as a denial with its own log line, not a failure. */
+ * guard) counts as a denial with its own log line, not a failure.
+ * via_relay (Phase 2) marks relay-driven actions in the audit log
+ * — it changes the marking only, never the grant decision. */
 static int run_one_action(const struct action *a, char *detail,
-                          size_t detail_cap)
+                          size_t detail_cap, int via_relay)
 {
     char action_line[LINE_CAP];
     if (strcmp(a->verb, "EXEC") == 0)
@@ -1836,7 +1877,8 @@ static int run_one_action(const struct action *a, char *detail,
         log_line("AID DENIED %s %s (%s)", g_selected, action_line,
                  a->perm ? a->perm : "unknown action");
         if (audit_append(g_selected, action_line, "DENIED",
-                         a->perm ? a->perm : "unknown action") != 0)
+                         a->perm ? a->perm : "unknown action",
+                         via_relay) != 0)
             log_line("AID AUDIT FAIL %s %s: denial not logged",
                      g_selected, action_line);
         snprintf(detail, detail_cap, "%s",
@@ -1847,7 +1889,8 @@ static int run_one_action(const struct action *a, char *detail,
     int xrc = execute_action(a, xerr, sizeof(xerr));
     if (xrc == 0) {
         log_line("AID ALLOW %s %s", g_selected, action_line);
-        if (audit_append(g_selected, action_line, "OK", xerr) != 0)
+        if (audit_append(g_selected, action_line, "OK", xerr,
+                         via_relay) != 0)
             log_line("AID AUDIT FAIL %s %s: action not logged",
                      g_selected, action_line);
         snprintf(detail, detail_cap, "%s", xerr);
@@ -1860,14 +1903,15 @@ static int run_one_action(const struct action *a, char *detail,
         log_line("AID DENIED %s %s (protected app)", g_selected,
                  action_line);
         if (audit_append(g_selected, action_line, "DENIED",
-                         "protected app") != 0)
+                         "protected app", via_relay) != 0)
             log_line("AID AUDIT FAIL %s %s: denial not logged",
                      g_selected, action_line);
         snprintf(detail, detail_cap, "protected app");
         return 0;
     }
     log_line("AID EXEC FAIL %s %s: %s", g_selected, action_line, xerr);
-    if (audit_append(g_selected, action_line, "FAILED", xerr) != 0)
+    if (audit_append(g_selected, action_line, "FAILED", xerr,
+                     via_relay) != 0)
         log_line("AID AUDIT FAIL %s %s: failure not logged",
                  g_selected, action_line);
     snprintf(detail, detail_cap, "%s", xerr);
@@ -2099,11 +2143,13 @@ static int write_all_quiet(int fd, const char *buf, size_t len)
  * Returns 0 with the counts filled in, -1 with reason in err when
  * the session cannot start or nothing ran (a timeout with partial
  * progress is a 0 with the counts so far — the work already done
- * is real and the reply says so). */
+ * is real and the reply says so). via_relay (Phase 2) is threaded
+ * to run_one_action so relay-driven actions are marked in the audit
+ * log; it changes the marking only, never the grant decision. */
 static int run_session(const char *backend_path, const char *task,
                        int timeout_s, size_t max_actions, int *allowed,
                        int *denied, int *failed, char *err,
-                       size_t errcap)
+                       size_t errcap, int via_relay)
 {
     *allowed = *denied = *failed = 0;
     int in_pipe[2], out_pipe[2];
@@ -2192,7 +2238,8 @@ static int run_session(const char *backend_path, const char *task,
         if (parse_action(line, &a) != 0)
             continue; /* chatter, not an action */
         char detail[256];
-        int outcome = run_one_action(&a, detail, sizeof(detail));
+        int outcome = run_one_action(&a, detail, sizeof(detail),
+                                     via_relay);
         if (outcome == 1)
             (*allowed)++;
         else if (outcome == 0)
@@ -2257,11 +2304,15 @@ static int run_session(const char *backend_path, const char *task,
 
 /* Run one verb. `reply` is called with the reply line for socket
  * clients (NULL for control-serial callers, whose replies go to the
- * console instead). Mirrors appd's run_verb. */
+ * console instead). Mirrors appd's run_verb. via_relay (Phase 2)
+ * marks the client as the relay agent (detected at accept() from
+ * the peer exe basename); it is threaded to the ASK/SESSION paths
+ * for audit marking and, for SESSION, the ai.relay transitions.
+ * The control-serial caller passes 0. */
 typedef void (*reply_fn)(void *ctx, const char *line);
 
 static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
-                     int from_ctl)
+                     int from_ctl, int via_relay)
 {
     /* TASK_CAP: the verb line may carry a 16 KiB ASK task. Replies
      * stay short (out is LINE_CAP). */
@@ -2336,16 +2387,20 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
     if (strcmp(line, "STATUS") == 0) {
         scan_backends();
         backends_csv(backends, sizeof(backends));
+        /* Phase 2 relay: STATUS gains relay=<on|off|idle> — the
+         * daemon's own view of the relay state (what the tray reads
+         * via statusd). Additive, after god_mode. */
         if (from_ctl)
             log_line("AID STATUS selected=%s backends=%s grant=%s "
-                     "god_mode=%s",
+                     "god_mode=%s relay=%s",
                      g_selected, backends, grant,
-                     g_god_mode ? "on" : "off");
+                     g_god_mode ? "on" : "off", g_relay);
         else if (reply) {
             snprintf(out, sizeof(out),
-                     "OK selected=%s backends=%s grant=%s god_mode=%s\n",
+                     "OK selected=%s backends=%s grant=%s god_mode=%s "
+                     "relay=%s\n",
                      g_selected, backends, grant,
-                     g_god_mode ? "on" : "off");
+                     g_god_mode ? "on" : "off", g_relay);
             reply(ctx, out);
         }
         return;
@@ -2425,7 +2480,7 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         for (size_t i = 0; i < n_actions; i++) {
             char detail[256];
             int rc = run_one_action(&actions[i], detail,
-                                    sizeof(detail));
+                                    sizeof(detail), via_relay);
             if (rc == 1)
                 allowed++;
             else if (rc == 0)
@@ -2481,9 +2536,20 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         read_backend_limits(g_selected, &timeout_s, &max_actions);
         int allowed = 0, denied = 0, failed = 0;
         char err[256];
-        if (run_session(backend_path, arg, timeout_s, max_actions,
-                        &allowed, &denied, &failed, err,
-                        sizeof(err)) != 0) {
+        /* Phase 2 relay (design §5.2): a SESSION from the relay
+         * agent is a live remote session — ai.relay goes "on" for
+         * the run and back to "idle" when it ends (success or
+         * failure; the steady state after a session is idle). The
+         * control-serial path passes via_relay 0, so it never
+         * touches the key. */
+        if (via_relay)
+            relay_set_state("on");
+        int ssrc = run_session(backend_path, arg, timeout_s, max_actions,
+                               &allowed, &denied, &failed, err,
+                               sizeof(err), via_relay);
+        if (via_relay)
+            relay_set_state("idle");
+        if (ssrc != 0) {
             if (from_ctl)
                 log_line("AID SESSION FAIL backend %s: %s", g_selected,
                          err);
@@ -2495,9 +2561,14 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
             }
             return;
         }
-        log_line("AID SESSION backend=%s task=\"%s\" allowed=%d "
+        /* Phase 2 relay (design §4.4): the SESSION console line
+         * gains the same conditional field as the audit line, so
+         * the harness and the console show which sessions came
+         * over the relay. */
+        log_line("AID SESSION backend=%s%s task=\"%s\" allowed=%d "
                  "denied=%d failed=%d",
-                 g_selected, arg, allowed, denied, failed);
+                 g_selected, via_relay ? " via=relay" : "", arg,
+                 allowed, denied, failed);
         if (from_ctl)
             log_line("AID SESSION OK backend=%s allowed=%d denied=%d "
                      "failed=%d",
@@ -2520,9 +2591,37 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
 /* socket clients + main loop                                          */
 /* ------------------------------------------------------------------ */
 
+/* Phase 2 relay (INTERFACES.md): mark a client as relay-driven by
+ * the peer process's exe basename — 1 iff it is "sevyn-relay".
+ * SO_PEERCRED gives the peer pid; /proc/<pid>/exe gives its binary.
+ * A marking signal only, not a security boundary: the grant is
+ * enforced identically either way, and any root process could
+ * already do anything. */
+static int peer_via_relay(int fd)
+{
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0)
+        return 0;
+    char exe[64];
+    snprintf(exe, sizeof(exe), "/proc/%d/exe", (int)cred.pid);
+    char target[4096];
+    ssize_t n = readlink(exe, target, sizeof(target) - 1);
+    if (n <= 0)
+        return 0;
+    target[n] = '\0';
+    const char *base = strrchr(target, '/');
+    base = base ? base + 1 : target;
+    return strcmp(base, "sevyn-relay") == 0;
+}
+
 struct client {
     int fd;
     int dead;
+    /* Phase 2 relay: 1 when the peer exe basename is "sevyn-relay"
+     * (set at accept()); threaded to run_verb for audit marking
+     * and the ai.relay transitions. */
+    int via_relay;
     /* TASK_CAP: a client may send a 16 KiB ASK task line. */
     char in[TASK_CAP];
     size_t in_len;
@@ -2581,6 +2680,8 @@ int main(void)
     g_god_grant_path = env_or("SEVYN_AI_GOD_GRANT", DEFAULT_GOD_GRANT);
     g_god_marker_path = env_or("SEVYN_AI_GOD_MARKER", DEFAULT_GOD_MARKER);
     g_audit_path = env_or("SEVYN_AI_AUDIT_LOG", DEFAULT_AUDIT_LOG);
+    g_relay_agent_marker_path =
+        env_or("SEVYN_AI_RELAY_AGENT_MARKER", DEFAULT_RELAY_AGENT_MARKER);
     const char *read_root = getenv("SEVYN_AI_READ_ROOT");
     g_read_root = (read_root && *read_root) ? read_root : NULL;
     const char *write_root = getenv("SEVYN_AI_WRITE_ROOT");
@@ -2605,6 +2706,16 @@ int main(void)
      * grant above already refused to start; god mode does not
      * rescue it. */
     eval_god_mode();
+
+    /* AI relay (Phase 2, design §5.3/R6): when the agent marker
+     * exists the relay is enabled for this boot — log it, never
+     * silently, and mark the relay idle until a session starts.
+     * The daemon never SETs "off" (the CLI sets it on disable;
+     * statusd's default is off). */
+    if (access(g_relay_agent_marker_path, F_OK) == 0) {
+        log_line("AID relay enabled");
+        relay_set_state("idle");
+    }
 
     scan_backends();
     load_selection();
@@ -2714,6 +2825,7 @@ int main(void)
                 struct client *c = &g_clients[g_nclients++];
                 memset(c, 0, sizeof(*c));
                 c->fd = cfd;
+                c->via_relay = peer_via_relay(cfd);
             }
         }
         idx++;
@@ -2733,7 +2845,7 @@ int main(void)
                     if (ch == '\n' || ch == '\r') {
                         if (ctl_len > 0) {
                             ctl_buf[ctl_len] = '\0';
-                            run_verb(ctl_buf, NULL, NULL, 1);
+                            run_verb(ctl_buf, NULL, NULL, 1, 0);
                             ctl_len = 0;
                         }
                     } else if (ctl_len + 1 < sizeof(ctl_buf)) {
@@ -2772,7 +2884,8 @@ int main(void)
                             if (c->in_len > 0) {
                                 c->in[c->in_len] = '\0';
                                 run_verb(c->in, socket_reply,
-                                         (void *)(intptr_t)c->fd, 0);
+                                         (void *)(intptr_t)c->fd, 0,
+                                         c->via_relay);
                                 c->in_len = 0;
                             }
                         } else if (c->in_len + 1 < sizeof(c->in)) {

@@ -243,7 +243,7 @@ def main():
           str(LOADER / "json.c"), str(LOADER / "verify.c"), "-lcrypto"],
          "daemon"),
         (["gcc", "-O2", "-Wall", "-Wextra", "-o", str(cli_bin),
-          str(HERE / "sevyn.c")], "cli"),
+          str(HERE / "sevyn.c"), "-lcrypto"], "cli"),
         (["gcc", "-O2", "-Wall", "-Wextra", "-I", str(HERE), "-o",
           str(canon_bin), str(canon_main), str(HERE / "canonical.c"),
           str(LOADER / "json.c")], "canonical test main"),
