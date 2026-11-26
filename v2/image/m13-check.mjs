@@ -1679,6 +1679,16 @@ const TERMINAL_WINDOW_HEIGHT_PX = 499;
 const DOCK_BAND_TOP_Y = 700;
 const DOCK_ICON_TOP_Y = 740;
 const MIN_DOCK_ICON_RUN_PX = 20;
+// Stage 5: a run longer than a dock icon can be is a window
+// sliver, not the icon — the Terminal's own bottom rows show
+// below Chromium in the dock band (a 864px run at y=791 in the
+// M5 IDE-refocus crash frames, run 45803769258), and the merge
+// below centres on the longest run, so the sliver dragged the
+// "icon" point to (731,746), inside Chromium — a no-op click
+// that raised nothing. Dock icons are ~64px wide (measured
+// runs up to 64px); 100px caps the icon with margin while
+// excluding any window sliver.
+const MAX_DOCK_ICON_RUN_PX = 100;
 // The input row's background colour (#1f2937): the neighbourhood
 // check in refocusInputPointSafe counts it around the click point.
 const TERMINAL_INPUT_RGB = [31, 41, 55];
@@ -1808,11 +1818,16 @@ function findTerminalDockIcon(img, known) {
       const m = !inWindow && pixelMatches(img, x, y, 17, 24, 39);
       if (m && s < 0) s = x;
       if (!m && s >= 0) {
-        if (x - s >= MIN_DOCK_ICON_RUN_PX) runs.push({ x0: s, x1: x - 1, y });
+        // Stage 5: drop over-long runs — a window sliver, not an
+        // icon (see MAX_DOCK_ICON_RUN_PX above). Without the cap
+        // the sliver becomes the longest run and the bbox merge
+        // centres on it instead of on the icon.
+        if (x - s >= MIN_DOCK_ICON_RUN_PX && x - s <= MAX_DOCK_ICON_RUN_PX)
+          runs.push({ x0: s, x1: x - 1, y });
         s = -1;
       }
     }
-    if (s >= 0 && W - s >= MIN_DOCK_ICON_RUN_PX) {
+    if (s >= 0 && W - s >= MIN_DOCK_ICON_RUN_PX && W - s <= MAX_DOCK_ICON_RUN_PX) {
       runs.push({ x0: s, x1: W - 1, y });
     }
   }
