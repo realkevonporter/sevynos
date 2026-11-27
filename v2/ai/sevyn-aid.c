@@ -171,6 +171,10 @@
 #define DEFAULT_STATUS_SOCK "/run/sevyn-status.sock"
 
 #define LINE_CAP 2048
+/* A backend ERR chatter line stashed for the reply (muse-ai's longest
+ * is "Muse API unreachable: " plus a <=255-byte transport error).
+ * The reply carries it as error=<text> so a 0/0/0 names its cause. */
+#define BACKEND_ERR_CAP 512
 /* The ASK task line (P0): a real agent task plus attached context
  * does not fit in 2,048 bytes. Backend action lines stay LINE_CAP
  * (actions are short by construction); only the task-carrying
@@ -1922,18 +1926,40 @@ static int run_one_action(const struct action *a, char *detail,
 /* backends: spawn + run                                               */
 /* ------------------------------------------------------------------ */
 
+/* Stash the first backend ERR chatter line (muse-ai prints one, then
+ * END, when the API call fails: no key, unreachable, HTTP status,
+ * malformed). Only the first is kept — it is the root cause — and the
+ * text is single-line by construction, so the reply stays one line.
+ * A no-op when the stash is already set or the caller passed none. */
+static void stash_backend_err(char *backend_err, size_t backend_errcap,
+                              const char *line)
+{
+    if (!backend_err || backend_errcap == 0 || backend_err[0] != '\0')
+        return;
+    snprintf(backend_err, backend_errcap, "%s", line + 4);
+    for (char *p = backend_err; *p; p++) {
+        if (*p == '\n' || *p == '\r')
+            *p = ' ';
+    }
+}
+
 /* Run one backend on a task: write the task line to its stdin, read
  * action lines from its stdout until END / EOF / timeout. timeout_s
  * and max_actions are the backend's own limits (P0: read from its
  * .limits file, defaults 5 s / 32); a runaway backend is still
  * killed — the timeout grows, it does not disappear. The task line
  * may be TASK_CAP (16 KiB); backend action lines stay LINE_CAP.
- * Returns 0 with the parsed actions, -1 with reason in err. */
+ * Returns 0 with the parsed actions, -1 with reason in err. An
+ * ERR chatter line the backend prints is stashed in backend_err
+ * (first one only) so the reply can name the failure's cause. */
 static int run_backend(const char *backend_path, const char *task,
                        int timeout_s, size_t max_actions,
                        struct action *actions, size_t *n_actions,
-                       char *err, size_t errcap)
+                       char *err, size_t errcap,
+                       char *backend_err, size_t backend_errcap)
 {
+    if (backend_err && backend_errcap > 0)
+        backend_err[0] = '\0';
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
         snprintf(err, errcap, "cannot create pipes");
@@ -2036,8 +2062,14 @@ static int run_backend(const char *backend_path, const char *task,
                 break;
             }
             struct action a;
-            if (parse_action(line, &a) == 0)
+            if (parse_action(line, &a) == 0) {
                 actions[(*n_actions)++] = a;
+            } else if (strncmp(line, "ERR ", 4) == 0) {
+                /* A backend ERR line is why it produced no actions —
+                 * stash the first one so the reply names the cause
+                 * instead of a bare 0/0/0. */
+                stash_backend_err(backend_err, backend_errcap, line);
+            }
             /* Unparseable lines are ignored, not fatal: a backend
              * may print chatter; only action-shaped lines act. */
         } else if (llen + 1 < sizeof(line)) {
@@ -2149,9 +2181,12 @@ static int write_all_quiet(int fd, const char *buf, size_t len)
 static int run_session(const char *backend_path, const char *task,
                        int timeout_s, size_t max_actions, int *allowed,
                        int *denied, int *failed, char *err,
-                       size_t errcap, int via_relay)
+                       size_t errcap, int via_relay,
+                       char *backend_err, size_t backend_errcap)
 {
     *allowed = *denied = *failed = 0;
+    if (backend_err && backend_errcap > 0)
+        backend_err[0] = '\0';
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
         snprintf(err, errcap, "cannot create pipes");
@@ -2235,8 +2270,11 @@ static int run_session(const char *backend_path, const char *task,
         if (line[0] == '\0')
             continue;
         struct action a;
-        if (parse_action(line, &a) != 0)
+        if (parse_action(line, &a) != 0) {
+            if (strncmp(line, "ERR ", 4) == 0)
+                stash_backend_err(backend_err, backend_errcap, line);
             continue; /* chatter, not an action */
+        }
         char detail[256];
         int outcome = run_one_action(&a, detail, sizeof(detail),
                                      via_relay);
@@ -2463,8 +2501,10 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         }
         size_t n_actions = 0;
         char err[256];
+        char backend_err[BACKEND_ERR_CAP];
         if (run_backend(backend_path, arg, timeout_s, max_actions,
-                        actions, &n_actions, err, sizeof(err)) != 0) {
+                        actions, &n_actions, err, sizeof(err),
+                        backend_err, sizeof(backend_err)) != 0) {
             free(actions);
             if (from_ctl)
                 log_line("AID ASK FAIL backend %s: %s", g_selected,
@@ -2494,12 +2534,14 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
                  g_selected, arg, allowed, denied, failed);
         if (from_ctl)
             log_line("AID ASK OK backend=%s allowed=%d denied=%d "
-                     "failed=%d",
-                     g_selected, allowed, denied, failed);
+                     "failed=%d%s%s",
+                     g_selected, allowed, denied, failed,
+                     backend_err[0] ? " error=" : "", backend_err);
         else if (reply) {
             snprintf(out, sizeof(out),
-                     "OK backend=%s allowed=%d denied=%d failed=%d\n",
-                     g_selected, allowed, denied, failed);
+                     "OK backend=%s allowed=%d denied=%d failed=%d%s%s\n",
+                     g_selected, allowed, denied, failed,
+                     backend_err[0] ? " error=" : "", backend_err);
             reply(ctx, out);
         }
         return;
@@ -2536,6 +2578,7 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         read_backend_limits(g_selected, &timeout_s, &max_actions);
         int allowed = 0, denied = 0, failed = 0;
         char err[256];
+        char backend_err[BACKEND_ERR_CAP];
         /* Phase 2 relay (design §5.2): a SESSION from the relay
          * agent is a live remote session — ai.relay goes "on" for
          * the run and back to "idle" when it ends (success or
@@ -2546,7 +2589,8 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
             relay_set_state("on");
         int ssrc = run_session(backend_path, arg, timeout_s, max_actions,
                                &allowed, &denied, &failed, err,
-                               sizeof(err), via_relay);
+                               sizeof(err), via_relay,
+                               backend_err, sizeof(backend_err));
         if (via_relay)
             relay_set_state("idle");
         if (ssrc != 0) {
@@ -2571,12 +2615,14 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
                  allowed, denied, failed);
         if (from_ctl)
             log_line("AID SESSION OK backend=%s allowed=%d denied=%d "
-                     "failed=%d",
-                     g_selected, allowed, denied, failed);
+                     "failed=%d%s%s",
+                     g_selected, allowed, denied, failed,
+                     backend_err[0] ? " error=" : "", backend_err);
         else if (reply) {
             snprintf(out, sizeof(out),
-                     "OK backend=%s allowed=%d denied=%d failed=%d\n",
-                     g_selected, allowed, denied, failed);
+                     "OK backend=%s allowed=%d denied=%d failed=%d%s%s\n",
+                     g_selected, allowed, denied, failed,
+                     backend_err[0] ? " error=" : "", backend_err);
             reply(ctx, out);
         }
         return;
