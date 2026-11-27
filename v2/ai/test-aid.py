@@ -715,9 +715,10 @@ def main():
         fake_api.set_scenario([resp_tool_calls(
             [("call_1", "launch", {"id": "files"})])])
         c.send("ASK launch files")
-        check("ASK muse-ai no key -> allowed=0",
+        check("ASK muse-ai no key -> allowed=0, error names the cause",
               c.readline() ==
-              "OK backend=muse-ai allowed=0 denied=0 failed=0")
+              "OK backend=muse-ai allowed=0 denied=0 failed=0 "
+              "error=no Muse API key configured")
         check("no key made no API call",
               len(fake_api.requests) == 0)
         key_file.write_text("test-key-abc123\n")
@@ -750,13 +751,26 @@ def main():
         fake_api.set_scenario([{"status": 401, "body": {
             "error": {"message": "invalid key"}}}])
         c.send("ASK launch files")
-        check("ASK muse-ai bad key -> allowed=0",
+        check("ASK muse-ai bad key -> allowed=0, error names the cause",
               c.readline() ==
-              "OK backend=muse-ai allowed=0 denied=0 failed=0")
+              "OK backend=muse-ai allowed=0 denied=0 failed=0 "
+              "error=Muse API returned HTTP 401")
+
+        # 14d2. The same failure in a session: the backend's ERR line
+        #     rides the SESSION reply too, not just ASK.
+        fake_api.set_scenario([{"status": 401, "body": {
+            "error": {"message": "invalid key"}}}])
+        c.send("SESSION launch files")
+        check("SESSION muse-ai bad key -> allowed=0, error names cause",
+              c.readline() ==
+              "OK backend=muse-ai allowed=0 denied=0 failed=0 "
+              "error=Muse API returned HTTP 401")
 
         # 14e. Context cap: a READ over 64 KiB is refused by the
         #     backend itself — the model is told the read failed, and
-        #     no READ action reaches the daemon.
+        #     no READ action reaches the daemon. No ERR line is
+        #     printed, so the reply stays the bare 0/0/0: the error
+        #     field appears only when the backend reports one.
         fake_api.set_scenario([
             resp_tool_calls([("call_1", "read",
                               {"path": str(read_root / "big.bin")})]),
