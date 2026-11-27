@@ -168,6 +168,9 @@ function pressEnter() {
 function pressCtrlC() {
   Sevyn._handlers.key({ key: 46, pressed: true, ctrl: true });
 }
+function pressCtrlShiftC() {
+  Sevyn._handlers.key({ key: 46, pressed: true, ctrl: true, shift: true });
+}
 function pressTab(n) {
   for (let i = 0; i < n; i++) Sevyn._handlers.key({ key: 15, pressed: true });
 }
@@ -719,6 +722,15 @@ check("terminal: Ctrl+C cancels the typed line, empty-prompt Ctrl+C is harmless"
   );
   texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
   assert.ok(texts.includes("shell: running (pid 123)"), "command output shown");
+  // Ctrl+Shift+C copies the typed line; plain Ctrl+C stays interrupt.
+  type("shell status");
+  pressCtrlShiftC();
+  assert.equal(
+    Sevyn.clipboardRead(),
+    "shell status",
+    "Ctrl+Shift+C copied the typed line",
+  );
+  pressCtrlC(); // clear the line so the empty-prompt check below starts clean
   // Ctrl+C at an empty prompt: harmless — echoes ^C, runs nothing.
   const execsBefore = Sevyn._logs.filter((l) => l.startsWith("EXEC ")).length;
   pressCtrlC();
@@ -729,7 +741,11 @@ check("terminal: Ctrl+C cancels the typed line, empty-prompt Ctrl+C is harmless"
     execsBefore,
     "empty-prompt Ctrl+C ran no command",
   );
-  assert.equal(Sevyn.clipboardRead(), "sentinel", "still nothing copied");
+  assert.equal(
+    Sevyn.clipboardRead(),
+    "shell status",
+    "empty-prompt Ctrl+C copied nothing (clipboard still holds the copy)",
+  );
 });
 
 check("settings: channel switch applies and logs", () => {

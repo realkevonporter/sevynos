@@ -70,6 +70,8 @@ const HELP_LINES: string[] = [
   "  sevyn net status            link, address, gateway, DNS",
   "  sevyn net dns <host>        resolve a name",
   "  Ctrl+C                      cancel the line you are typing",
+  "  Ctrl+Shift+V                paste from the clipboard",
+  "  Ctrl+Shift+C                copy the input line",
   "",
   "Type a command below and press Enter.",
 ];
@@ -253,7 +255,10 @@ export function Terminal(): React.ReactElement {
   // A process interrupt is a follow-up for when exec grows a
   // cancellable path; it cannot be built on this bridge. In
   // Terminal Ctrl+C is interrupt, never copy (the renderer's
-  // onInterruptRequest opt-in) and never a typed 'c'.
+  // onInterruptRequest opt-in) and never a typed 'c'. Ctrl+Shift+C
+  // copies instead — the renderer's interrupt fires on plain Ctrl+C
+  // only — so the Terminal finally has a copy chord for the shared
+  // clipboard, and Ctrl+Shift+V pastes from it.
   function interrupt(): void {
     append(["sevyn> " + input + "^C"]);
     setInput("");
