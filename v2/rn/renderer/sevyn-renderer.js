@@ -15,6 +15,19 @@
 //                               button, pressed, nodeId?}
 //     nodeId is set on button-press only: the yoga id of the topmost
 //     hit op (host hit-tests the last presented ops).
+//     Button codes are the Linux input codes (0x110 left, 0x111
+//     right, 0x112 middle); the headless driver and the mock tests
+//     send 1 for left, 2 for right. A right-button press dispatches
+//     the hit view's onContextMenu({nativeEvent:{x, y, button}})
+//     instead of onPress (gap unit 9, audit #12) — a right-click is
+//     a menu gesture, never a tap, so it never fires onPress and
+//     never starts a text drag-select. It still focuses the hit view
+//     (a right-click on a TextInput puts the caret at the end —
+//     pinned by the unit-3 test). Views without onContextMenu ignore
+//     it. The reusable menu itself lives in ./context-menu.js
+//     (ContextMenu): an anchored, clamped popup with click-away /
+//     Esc / selection dismiss and arrow-key navigation, driven by
+//     the setContextMenuKeyHandler slot below.
 //   Sevyn.onKey(ev)      ev = {key: <linux keycode>, pressed: bool,
 //                               shift: bool, ctrl: bool, alt: bool,
 //                               super: bool, meta: bool}
@@ -1307,11 +1320,33 @@ function handleTextInputKey(inst, ev) {
   }
 }
 
+// Context-menu key handler (gap unit 9, audit #12): at most one
+// menu is open at a time, so this is a single slot, not a listener
+// set. The open ContextMenu component (./context-menu.js) registers
+// a handler that owns Up/Down/Left/Right, Enter/Space, Tab, and
+// Escape while it is mounted; handleKey offers the event to it
+// before the TextInput / focus keys, so arrows navigate the menu
+// instead of moving the caret or the focus ring. A handler returns
+// true when it consumed the key. Unregister with null (or a
+// non-function) on dismiss/unmount.
+let contextMenuKeyHandler = null;
+function setContextMenuKeyHandler(fn) {
+  contextMenuKeyHandler = typeof fn === "function" ? fn : null;
+}
+
 // Linux keycodes (evdev): Enter 28, Space 57, Tab 15, Left 105,
 // Right 106, Up 103, Down 108, Escape 1, Home 102, End 107,
 // Delete 111.
 function handleKey(ev) {
   if (!ev.pressed) return;
+  // An open context menu owns the navigation keys first: without
+  // this, Down would move the focus ring (and, in a focused input,
+  // the caret) while the menu is up.
+  if (contextMenuKeyHandler && contextMenuKeyHandler(ev)) {
+    SevynReconciler.flushSyncWork();
+    presentRoot();
+    return;
+  }
   // Typing into the focused TextInput takes precedence over the
   // focus keys below (Space types a space here; Enter submits).
   if (focusedInstance && focusedInstance.type === "TextInput") {
@@ -1358,6 +1393,13 @@ let textDrag = null;
 // treated as a left press, matching the old tap behaviour.
 function isLeftButton(ev) {
   return ev.button === 0x110 || ev.button === 1 || ev.button === undefined;
+}
+
+// Right button (gap unit 9, audit #12): Linux 0x111, or 2 in the
+// headless/mock convention (1 is left there). A right press is a
+// context-menu gesture, not a tap — see handlePointer.
+function isRightButton(ev) {
+  return ev.button === 0x111 || ev.button === 2;
 }
 
 function handlePointer(ev) {
@@ -1439,24 +1481,42 @@ function handlePointer(ev) {
     textDrag = null;
     return;
   }
-  focusInstance(inst);
-  if (inst.type === "TextInput" && isLeftButton(ev)) {
-    // Left press on a TextInput starts a drag-select: the anchor is
-    // the char under the pointer (click-to-place — a press with no
-    // motion leaves the caret there, replacing the old tap-focus
-    // behaviour that always put the caret at the end).
-    const off = offsetAtPoint(inst, ev.x, ev.y);
-    textDrag = { inst, anchor: off };
-    setSelectionState(inst, off, off);
-  } else {
+  if (isRightButton(ev)) {
+    // Right-click (gap unit 9, audit #12): dispatch the hit view's
+    // onContextMenu with the pointer position instead of firing
+    // onPress — the menu consumer anchors on (x, y). It still
+    // focuses the hit view (the unit-3 test pins this: a right-click
+    // on a TextInput puts the caret at the end) but it never starts
+    // a text drag-select and never fires onPress. Before this, a
+    // right-click acted as a left-click. A view without
+    // onContextMenu ignores the gesture entirely.
+    focusInstance(inst);
     textDrag = null;
-  }
-  if (inst.props && inst.props.onPress) {
-    inst.props.onPress();
-    // Pinpoint a stuck tap: if the loop wedges inside the navigation,
-    // the "onPress returned" line never appears; if it wedges in the
-    // flush (the go-live mount render), only that line appears.
-    Sevyn.log("POINTER onPress returned nodeId " + ev.nodeId);
+    if (inst.props && inst.props.onContextMenu) {
+      inst.props.onContextMenu({
+        nativeEvent: { x: ev.x, y: ev.y, button: ev.button },
+      });
+    }
+  } else {
+    focusInstance(inst);
+    if (inst.type === "TextInput" && isLeftButton(ev)) {
+      // Left press on a TextInput starts a drag-select: the anchor is
+      // the char under the pointer (click-to-place — a press with no
+      // motion leaves the caret there, replacing the old tap-focus
+      // behaviour that always put the caret at the end).
+      const off = offsetAtPoint(inst, ev.x, ev.y);
+      textDrag = { inst, anchor: off };
+      setSelectionState(inst, off, off);
+    } else {
+      textDrag = null;
+    }
+    if (inst.props && inst.props.onPress) {
+      inst.props.onPress();
+      // Pinpoint a stuck tap: if the loop wedges inside the navigation,
+      // the "onPress returned" line never appears; if it wedges in the
+      // flush (the go-live mount render), only that line appears.
+      Sevyn.log("POINTER onPress returned nodeId " + ev.nodeId);
+    }
   }
   // Force the state update out now (see handleKey) and present, so the
   // press result is visible on the very next frame.
@@ -2156,6 +2216,7 @@ module.exports = {
   subscribePointerMove,
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
+  setContextMenuKeyHandler,
   // Exposed for tests: the live instance map and present pass.
   _instancesByYogaId: instancesByYogaId,
   _presentRoot: presentRoot,
