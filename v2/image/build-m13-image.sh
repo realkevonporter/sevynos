@@ -413,7 +413,9 @@ gcc -O2 -Wall -Wextra -Werror -o "$BUILD_TMP/sevyn-camd" \
 # build host (the CI apt lists carry it); the header check fails
 # loudly with an actionable message instead of a bare gcc error.
 # Staged below via copy-closure (binary + libasound.so.2 closure,
-# ~1 MB) and started by init after commsd.
+# ~1 MB) plus the ALSA config tree (see the staging section — the
+# closure stages binaries + .so files only, never /usr/share/alsa),
+# and started by init after commsd.
 [ -f "$SYSROOT/usr/include/alsa/asoundlib.h" ] || { echo "error: missing $SYSROOT/usr/include/alsa/asoundlib.h (install libasound2-dev)" >&2; exit 1; }
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-audiod" \
   "$ROOT/audio/audiod.c" "$ROOT/audio/audio-decode.c" \
@@ -682,6 +684,19 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$BUILD_TMP/sevyn-rn-host:/usr/local/bin/sevyn-rn-host" \
   "$CODE_SERVER_DIR/lib/node:/usr/share/sevyn/code-server/lib/node" \
   "$CHROMIUM_DIR/chrome:/usr/share/sevyn/chromium/chrome"
+
+# ALSA config (audiod): libasound reads /usr/share/alsa/alsa.conf at
+# runtime — it defines the "default" PCM audiod probes at startup
+# (v2/audio/audiod.c probe_device: snd_pcm_open("default")). The
+# copy-closure above stages binaries + .so files only, so the config
+# tree (libasound2-data) never landed in the image; on the GF65 the
+# probe failed with "Unknown PCM default" and audiod reported
+# available:false, so no sound at all. Stage the whole tree —
+# alsa.conf pulls in cards/*.conf and pcm/*.conf — and fail loudly
+# if it is absent, same pattern as the asoundlib.h header check.
+[ -f "$SYSROOT/usr/share/alsa/alsa.conf" ] || { echo "error: missing $SYSROOT/usr/share/alsa/alsa.conf (install libasound2-data)" >&2; exit 1; }
+cp -a "$SYSROOT/usr/share/alsa" "$STAGE/usr/share/alsa"
+[ -f "$STAGE/usr/share/alsa/alsa.conf" ] || { echo "error: ALSA config not staged in the image" >&2; exit 1; }
 
 # M11: the bootloader files the installer stages onto the new ESP.
 # (The .signed names are the signed binaries; the installer expects
