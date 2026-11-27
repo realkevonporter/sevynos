@@ -4,8 +4,9 @@ canonical feed serializer.
 
 Builds the daemon, the CLI and a canonical-printing test main with
 the host gcc, then drives the daemon against a local HTTP server
-serving signed update feeds (real wget, real Ed25519 via the repo's
-sign-feed.mjs — the same tooling the nightly uses).
+serving signed update feeds (real in-daemon OpenSSL fetch, real
+Ed25519 via the repo's sign-feed.mjs — the same tooling the
+nightly uses).
 
 Coverage:
   - canonical byte parity with tools/update-signing/canonical.mjs
@@ -13,8 +14,14 @@ Coverage:
   - STATUS / CHECK / APPLY / CHANNEL / URL over the socket and the
     control serial (pty); the URL verb persists a feed-URL override
     (http/https only) and STATUS shows it
-  - download retry: a wget that fails once, then works — the apply
-    lands instead of dying on the transient failure
+  - download retry: a feed fetch that fails once (HTTP 500), then
+    works — the apply lands instead of dying on the transient
+    failure
+  - HTTPS feed: the feed served over TLS from a local server (cert
+    signed by a test CA the daemon trusts) — CHECK returns the
+    available version, a 302 redirect is followed, APPLY downloads
+    the artifacts; a feed with an untrusted cert is refused
+    (fail-closed)
   - big preserved grub.cfg: ~1.6 KiB of other-OS entries no longer
     refuse the update (the menu is built on the heap, not a fixed
     2048-byte buffer); every other entry survives verbatim
@@ -39,6 +46,7 @@ import os
 import pty
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -240,7 +248,8 @@ def main():
     builds = [
         (["gcc", "-O2", "-Wall", "-Wextra", "-o", str(daemon_bin),
           str(HERE / "sevyn-updated.c"), str(HERE / "canonical.c"),
-          str(LOADER / "json.c"), str(LOADER / "verify.c"), "-lcrypto"],
+          str(LOADER / "json.c"), str(LOADER / "verify.c"), "-lssl",
+          "-lcrypto"],
          "daemon"),
         (["gcc", "-O2", "-Wall", "-Wextra", "-o", str(cli_bin),
           str(HERE / "sevyn.c"), "-lcrypto"], "cli"),
@@ -311,6 +320,17 @@ def main():
         def log_message(self, *a):
             pass
 
+        def do_GET(self):
+            # Case 5 hook: fail the first feed fetch with HTTP 500.
+            if getattr(server, "fail_feed_once", False) and \
+                    self.path == "/updates.json":
+                server.fail_feed_once = False
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            return super().do_GET()
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -330,14 +350,15 @@ def main():
         {"channel": "nightly", "url": feed_url}, indent=2) + "\n")
     (tmp / "health.log").write_text("")
 
-    def artifacts_for(kern, init):
+    def artifacts_for(kern, init, base=None):
+        base = base or f"http://127.0.0.1:{port}"
         return [
             {"kind": "vmlinuz",
-             "url": f"http://127.0.0.1:{port}/{kern.name}",
+             "url": f"{base}/{kern.name}",
              "sha256": sha256_file(kern),
              "sizeBytes": kern.stat().st_size},
             {"kind": "initramfs",
-             "url": f"http://127.0.0.1:{port}/{init.name}",
+             "url": f"{base}/{init.name}",
              "sha256": sha256_file(init),
              "sizeBytes": init.stat().st_size},
         ]
@@ -1228,22 +1249,15 @@ def main():
     shutil.rmtree(gd4)
     shutil.rmtree(gesp4)
 
-    # Case 5 — transient download failure: a wget that fails its
-    # first call, then works. The old single attempt killed the
-    # whole apply; the retry wrapper (3 attempts, 1 s apart) lands
-    # the update and logs the failed attempt.
-    real_wget = shutil.which("wget")
-    assert real_wget, "wget missing"
-    wget_marker = tmp / "wget-failed-once"
-    (tmp / "bin" / "wget").write_text(
-        "#!/bin/sh\n"
-        "# Fail the first wget call, then behave normally.\n"
-        f"if [ ! -f \"{wget_marker}\" ]; then\n"
-        f"    touch \"{wget_marker}\"\n"
-        "    exit 1\n"
-        "fi\n"
-        f"exec {real_wget} \"$@\"\n")
-    (tmp / "bin" / "wget").chmod(0o755)
+    # Case 5 — transient download failure: the feed fetch fails
+    # once (HTTP 500), then works. The old single attempt killed
+    # the whole apply; the retry wrapper (3 attempts, 1 s apart)
+    # lands the update and logs the failed attempt. The failure is
+    # server-side (the handler 500s the first /updates.json
+    # fetch) — the old wget-wrapper hook died with the wget
+    # subprocess, and the retry must be proven against the
+    # transport, not against a shimmed binary.
+    server.fail_feed_once = True
     gd5, gesp5, kern_b5, init_b5 = geo_fixture("retry", 144 * 1024 * 1024)
     master7, slave7 = pty.openpty()
     env_geo5 = geo_env("retry", gd5, gesp5, 144 * 1024 * 1024)
@@ -1267,9 +1281,135 @@ def main():
     d_geo5.stop()
     os.close(master7)
     os.close(slave7)
-    (tmp / "bin" / "wget").unlink()
     shutil.rmtree(gd5)
     shutil.rmtree(gesp5)
+
+    # Case 6 — HTTPS feed: the in-daemon OpenSSL fetch.
+    #
+    # The GF65's BusyBox wget can never fetch HTTPS (its built-in
+    # TLS cannot handshake against a modern server), so the daemon
+    # fetches with OpenSSL and verifies the peer against a CA
+    # bundle. This serves the feed over TLS from a local server
+    # (cert signed by a test CA the daemon trusts): CHECK returns
+    # the available version, a 302 redirect is followed (the real
+    # nightly feed URL is a releases/download link that 302s to
+    # the asset host), and APPLY downloads the artifacts. A feed
+    # served with a cert from an untrusted CA is refused
+    # (fail-closed). The test shadows `wget` with the BusyBox
+    # binary for this section: the old daemon would then fail
+    # exactly like the GF65 (regression detection — the host's
+    # GNU wget would mask the bug); the new daemon never execs
+    # wget at all, so the shadow is inert for it.
+    assert shutil.which("openssl"), "openssl missing (test needs it)"
+
+    class TLSHandler(Handler):
+        def do_GET(self):
+            if self.path == "/redirect-feed.json":
+                self.send_response(302)
+                self.send_header("Location", "/updates.json")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            return super().do_GET()
+
+    def make_tls_certs(tag):
+        """CA + server cert (SAN IP:127.0.0.1) via the openssl CLI."""
+        d = tmp / f"tls-{tag}"
+        d.mkdir()
+
+        def run_openssl(*args):
+            r = subprocess.run(["openssl", *args], capture_output=True,
+                               text=True)
+            assert r.returncode == 0, \
+                f"openssl {' '.join(args[:2])} failed: {r.stderr}"
+
+        run_openssl("req", "-x509", "-newkey", "rsa:2048",
+                    "-keyout", str(d / "ca.key"), "-out", str(d / "ca.crt"),
+                    "-days", "2", "-nodes", "-subj", "/CN=sevyn-test-ca")
+        run_openssl("req", "-newkey", "rsa:2048",
+                    "-keyout", str(d / "server.key"),
+                    "-out", str(d / "server.csr"), "-nodes",
+                    "-subj", "/CN=127.0.0.1")
+        (d / "san.cnf").write_text("subjectAltName=IP:127.0.0.1\n")
+        run_openssl("x509", "-req", "-in", str(d / "server.csr"),
+                    "-CA", str(d / "ca.crt"), "-CAkey", str(d / "ca.key"),
+                    "-CAcreateserial", "-out", str(d / "server.crt"),
+                    "-days", "2", "-extfile", str(d / "san.cnf"))
+        return d / "ca.crt", d / "server.crt", d / "server.key"
+
+    def make_tls_server(cert, key):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert), str(key))
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), TLSHandler)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    ca_crt, srv_crt, srv_key = make_tls_certs("good")
+    tls_server = make_tls_server(srv_crt, srv_key)
+    tls_port = tls_server.server_address[1]
+    tls_feed = f"https://127.0.0.1:{tls_port}/updates.json"
+    tls_redirect = f"https://127.0.0.1:{tls_port}/redirect-feed.json"
+    bad_ca, bad_crt, bad_key = make_tls_certs("bad")
+    bad_server = make_tls_server(bad_crt, bad_key)
+    bad_port = bad_server.server_address[1]
+    bad_feed = f"https://127.0.0.1:{bad_port}/updates.json"
+
+    busybox = shutil.which("busybox")
+    if busybox:
+        (tmp / "bin" / "wget").symlink_to(busybox)
+
+    # Fresh daemon trusting only the test CA (geo fixture for the
+    # ESP the apply needs).
+    gd6, gesp6, kern_b6, init_b6 = geo_fixture("https", 144 * 1024 * 1024)
+    master8, slave8 = pty.openpty()
+    env_https = geo_env("https", gd6, gesp6, 144 * 1024 * 1024)
+    env_https["SEVYN_UPDATE_CTL"] = os.ttyname(slave8)
+    env_https["SEVYN_UPDATE_CA_BUNDLE"] = str(ca_crt)
+    d_https = Daemon(tmp, env_https)
+    check("https: daemon starts", d_https.start())
+    write_feed(server_dir, key_file, "geo-https-2", "nightly",
+               artifacts_for(kern_b6, init_b6,
+                             base=f"https://127.0.0.1:{tls_port}"))
+    check("https: URL verb accepts the TLS feed",
+          d_https.sock(f"URL {tls_feed}") == f"OK url {tls_feed}")
+    check("https: CHECK returns the available version",
+          d_https.sock("CHECK") == "OK available geo-https-2")
+    check("https: redirect is followed",
+          d_https.sock(f"URL {tls_redirect}") == f"OK url {tls_redirect}"
+          and d_https.sock("CHECK") == "OK available geo-https-2")
+    check("https: URL verb back to the TLS feed",
+          d_https.sock(f"URL {tls_feed}") == f"OK url {tls_feed}")
+    n_rb = geo_reboots()
+    check("https: APPLY accepted",
+          d_https.sock("APPLY") == "OK applying geo-https-2")
+    check("https: apply requested a reboot",
+          geo_wait_reboot(n_rb))
+    st_https = json.loads((gd6 / "slot-state.json").read_text())
+    check("https: apply flipped state to B",
+          st_https["active"] == "B" and st_https["good"] == "A" and
+          st_https["version"] == "geo-https-2", str(st_https))
+    # Negative control: an untrusted cert is refused, fail-closed.
+    check("https: untrusted cert refused",
+          d_https.sock(f"URL {bad_feed}") == f"OK url {bad_feed}" and
+          "verification failed" in d_https.sock("CHECK"))
+    st_https = json.loads((gd6 / "slot-state.json").read_text())
+    check("https: refused feed changed nothing",
+          st_https["version"] == "geo-https-2" and st_https["active"] == "B",
+          str(st_https))
+    # The daemon survives the refused attempt.
+    check("https: CHECK works after the refusal",
+          d_https.sock(f"URL {tls_feed}") == f"OK url {tls_feed}" and
+          d_https.sock("CHECK") == "OK available geo-https-2")
+    d_https.stop()
+    os.close(master8)
+    os.close(slave8)
+    tls_server.shutdown()
+    bad_server.shutdown()
+    if busybox:
+        (tmp / "bin" / "wget").unlink()
+    shutil.rmtree(gd6)
+    shutil.rmtree(gesp6)
 
     server.shutdown()
     os.close(master_fd)

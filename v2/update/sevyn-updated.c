@@ -121,8 +121,10 @@
  *   UPDATE APPLY STARTED|FAIL / UPDATE APPLIED <version> slot=<slot>
  *   UPDATE SLOT GOOD <slot> / UPDATE ready ...
  *
- * The daemon fetches with wget (busybox in the image); downloads are
- * verified by sha256 + size before anything is written to a slot.
+ * The daemon fetches with an in-daemon OpenSSL client (plain HTTP, or
+ * HTTPS verified against the staged CA bundle, failing closed);
+ * downloads are verified by sha256 + size before anything is written
+ * to a slot.
  * The apply child writes to temp names and renames, fsyncs files and
  * the slot dir, flips the state atomically, syncs, then reboots.
  *
@@ -135,7 +137,8 @@
  *   SEVYN_UPDATE_VERSION_FILE (default /usr/share/sevyn/os-version),
  *   SEVYN_UPDATE_TMP (default /tmp/sevyn-update),
  *   SEVYN_UPDATE_HEALTH_FILE (default /tmp/sevyn-host.log),
- *   SEVYN_UPDATE_WGET (default wget),
+ *   SEVYN_UPDATE_CA_BUNDLE (default
+ *     /etc/ssl/certs/ca-certificates.crt),
  *   SEVYN_UPDATE_SLOT (host-test hook: the booted slot when the
  *     kernel cmdline carries no sevyn.slot=),
  *   SEVYN_UPDATE_ESP_DIR (host-test hook: use this directory as the
@@ -161,14 +164,18 @@
  * also present). Without a PARTUUID (single-disk systems) the
  * entries are unchanged.
  *
- * Build: gcc, libc + libcrypto. Links json.c + verify.c + canonical.c.
+ * Build: gcc, libc + libssl + libcrypto. Links json.c + verify.c +
+ *   canonical.c.
  */
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -185,6 +192,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+
 #include "../loader/json.h"
 #include "../loader/verify.h"
 #include "canonical.h"
@@ -200,13 +210,13 @@
 #define DEFAULT_FEED_URL \
     "https://github.com/realkevonporter/sevynos/releases/download/" \
     "nightly/updates-v2.json"
-#define DEFAULT_WGET "wget"
+#define DEFAULT_CA_BUNDLE "/etc/ssl/certs/ca-certificates.crt"
 #define MAX_CLIENTS 16
 #define MAX_KEYS 8
 #define MAX_ARTIFACTS 4
 #define LINE_CAP 2048
-#define WGET_MANIFEST_TIMEOUT 30
-#define WGET_ARTIFACT_TIMEOUT 300
+#define FETCH_MANIFEST_TIMEOUT 30
+#define FETCH_ARTIFACT_TIMEOUT 300
 
 static const char *g_sock_path;
 static const char *g_ctl_path;
@@ -215,7 +225,7 @@ static const char *g_trusted_keys_path;
 static const char *g_version_file;
 static const char *g_tmp_dir;
 static const char *g_health_file;
-static const char *g_wget;
+static const char *g_ca_bundle; /* SEVYN_UPDATE_CA_BUNDLE, or NULL */
 static const char *g_esp_dir;    /* SEVYN_UPDATE_ESP_DIR, or NULL */
 static const char *g_esp_size;   /* SEVYN_UPDATE_ESP_SIZE_BYTES, or NULL */
 static const char *g_proc_mounts; /* SEVYN_UPDATE_PROC_MOUNTS, or NULL */
@@ -651,117 +661,633 @@ static int load_trusted_keys(struct trusted_key *keys, size_t cap)
     return n;
 }
 
-/* Last wget failure, for the error strings: exit code + wget's own
- * first stderr line (e.g. "exit 5: wget: unable to resolve host
- * address"). Without this the daemon could only say "download
- * failed" — the GF65's 2026-11-24 failure was a dead DNS server
- * and nothing on the device said so. */
-static char g_wget_detail[256] = "";
+/* Last fetch failure, for the error strings: the whole reason the
+ * download died (e.g. "TLS certificate verification failed:
+ * self-signed certificate", "HTTP 404", "connect to
+ * example.com:443 failed: Connection refused"). The old wget path
+ * kept only the first line of wget's stderr, which hid the real
+ * cause — the GF65's TLS failure showed only the benign "TLS
+ * certificate validation not implemented" note while the handshake
+ * error sat on the discarded lines. This buffer always carries
+ * the full reason. */
+static char g_fetch_detail[512] = "";
 
-/* First line of a small text file, for the wget stderr capture
- * below. Empty string when the file is missing or empty. */
-static void read_first_line(const char *path, char *out, size_t cap)
+static void set_fetch_detail(const char *fmt, ...)
 {
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        out[0] = '\0';
-        return;
-    }
-    if (!fgets(out, (int)cap, f))
-        out[0] = '\0';
-    fclose(f);
-    out[strcspn(out, "\r\n")] = '\0';
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_fetch_detail, sizeof(g_fetch_detail), fmt, ap);
+    va_end(ap);
 }
 
-/* Run wget (or $SEVYN_UPDATE_WGET) with a timeout, writing the
- * response body to out_path. Returns 0 when wget exits 0. On
- * failure g_wget_detail holds the exit code + wget's first stderr
- * line, so the caller can say why the download died instead of
- * just that it died. */
-static int run_wget_once(const char *url, const char *out_path,
-                         int timeout_s)
+/* --- in-daemon HTTP(S) fetch (replaces the wget subprocess) ---
+ *
+ * BusyBox wget can never fetch HTTPS on SevynOS: the image ships
+ * Ubuntu's busybox-static verbatim, wget first tries `openssl
+ * s_client` (absent from the image) and falls back to BusyBox's
+ * built-in TLS, which cannot handshake against a modern server.
+ * So the daemon fetches with OpenSSL directly: plain HTTP over a
+ * socket, HTTPS over TLS with the peer verified against the staged
+ * CA bundle, failing closed on any verification error. Follows up
+ * to 5 redirects (the GitHub releases/download feed URL 302s to
+ * the asset host). Streams the body to out_path; a failed fetch
+ * unlinks the partial file. */
+
+#define FETCH_MAX_REDIRECTS 5
+
+struct fetch_url {
+    int tls; /* 1 = https, 0 = http */
+    char host[256];
+    char port[8];
+    char path[1024];
+};
+
+/* Split scheme://host[:port][/path...]. IPv6 literals are refused
+ * (the feed and test URLs never use them); the host may be a name
+ * or an IPv4 address. */
+static int parse_fetch_url(const char *url, struct fetch_url *out)
 {
-    char timeout[16];
-    snprintf(timeout, sizeof(timeout), "%d", timeout_s);
-    /* Capture wget's stderr next to the output file instead of
-     * discarding it: on failure the first line is the diagnosis
-     * ("unable to resolve host address", "connection timed out",
-     * "server returned error: HTTP/1.1 404"). */
-    char err_path[PATH_MAX];
-    if (snprintf(err_path, sizeof(err_path), "%s.stderr",
-                 out_path) >= (int)sizeof(err_path))
-        err_path[0] = '\0';
-    pid_t pid = fork();
-    if (pid < 0) {
-        snprintf(g_wget_detail, sizeof(g_wget_detail), "fork failed");
+    const char *scheme_end = strstr(url, "://");
+    if (!scheme_end) {
+        set_fetch_detail("invalid URL (no scheme): %.200s", url);
         return -1;
     }
-    if (pid == 0) {
-        int errfd = -1;
-        if (err_path[0])
-            errfd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (errfd >= 0) {
-            dup2(errfd, STDERR_FILENO);
-            if (errfd > STDERR_FILENO)
-                close(errfd);
-        } else {
-            int devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDERR_FILENO);
-                if (devnull > STDERR_FILENO)
-                    close(devnull);
+    size_t scheme_len = (size_t)(scheme_end - url);
+    if (scheme_len == 5 && strncmp(url, "https", 5) == 0)
+        out->tls = 1;
+    else if (scheme_len == 4 && strncmp(url, "http", 4) == 0)
+        out->tls = 0;
+    else {
+        set_fetch_detail("unsupported URL scheme: %.200s", url);
+        return -1;
+    }
+    const char *rest = scheme_end + 3;
+    if (rest[0] == '[') {
+        set_fetch_detail("IPv6 URL literals are not supported: %.200s",
+                         url);
+        return -1;
+    }
+    const char *slash = strchr(rest, '/');
+    const char *host_end = slash ? slash : rest + strlen(rest);
+    const char *colon = memchr(rest, ':', (size_t)(host_end - rest));
+    const char *host_start = rest;
+    const char *host_stop = colon ? colon : host_end;
+    if (host_stop - host_start < 1 ||
+        host_stop - host_start >= (ptrdiff_t)sizeof(out->host)) {
+        set_fetch_detail("invalid URL host: %.200s", url);
+        return -1;
+    }
+    memcpy(out->host, host_start, (size_t)(host_stop - host_start));
+    out->host[host_stop - host_start] = '\0';
+    if (colon) {
+        const char *port_start = colon + 1;
+        if (port_start >= host_end ||
+            (size_t)(host_end - port_start) >= sizeof(out->port)) {
+            set_fetch_detail("invalid URL port: %.200s", url);
+            return -1;
+        }
+        memcpy(out->port, port_start, (size_t)(host_end - port_start));
+        out->port[host_end - port_start] = '\0';
+        for (const char *p = out->port; *p; p++)
+            if (*p < '0' || *p > '9') {
+                set_fetch_detail("invalid URL port: %.200s", url);
+                return -1;
+            }
+    } else {
+        snprintf(out->port, sizeof(out->port), "%d",
+                 out->tls ? 443 : 80);
+    }
+    if (slash) {
+        if (strlen(slash) >= sizeof(out->path)) {
+            set_fetch_detail("URL path too long: %.200s", url);
+            return -1;
+        }
+        snprintf(out->path, sizeof(out->path), "%s", slash);
+    } else {
+        snprintf(out->path, sizeof(out->path), "/");
+    }
+    return 0;
+}
+
+static int is_default_port(const struct fetch_url *u)
+{
+    return (u->tls && strcmp(u->port, "443") == 0) ||
+           (!u->tls && strcmp(u->port, "80") == 0);
+}
+
+/* "scheme://host[:port]" for the request line's Host header and for
+ * building redirect targets. */
+static void url_origin(const struct fetch_url *u, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s://%s%s%s", u->tls ? "https" : "http",
+             u->host, is_default_port(u) ? "" : ":",
+             is_default_port(u) ? "" : u->port);
+}
+
+static int connect_with_timeout(const char *host, const char *port,
+                                int timeout_s)
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    int gai = getaddrinfo(host, port, &hints, &res);
+    if (gai != 0) {
+        set_fetch_detail("cannot resolve host %s: %s", host,
+                         gai_strerror(gai));
+        return -1;
+    }
+    int fd = -1;
+    int last_err = ECONNREFUSED;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0)
+            continue;
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0) {
+            close(fd);
+            fd = -1;
+            continue;
+        }
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (rc != 0 && errno == EINPROGRESS) {
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            int pr = poll(&pfd, 1, timeout_s * 1000);
+            if (pr > 0) {
+                int soerr = 0;
+                socklen_t sl = sizeof(soerr);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) == 0 &&
+                    soerr == 0)
+                    rc = 0;
+                else {
+                    last_err = soerr ? soerr : ECONNREFUSED;
+                    close(fd);
+                    fd = -1;
+                    continue;
+                }
+            } else {
+                last_err = (pr == 0) ? ETIMEDOUT : errno;
+                close(fd);
+                fd = -1;
+                continue;
             }
         }
-        execlp(g_wget, g_wget, "-q", "-T", timeout, "-O", out_path,
-               url, (char *)NULL);
-        _exit(127);
+        if (rc != 0) {
+            last_err = errno;
+            close(fd);
+            fd = -1;
+            continue;
+        }
+        /* Connected: blocking again, with per-operation timeouts. */
+        fcntl(fd, F_SETFL, flags);
+        struct timeval tv;
+        tv.tv_sec = timeout_s;
+        tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        break;
     }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-        ;
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        if (err_path[0])
-            unlink(err_path);
-        g_wget_detail[0] = '\0';
+    freeaddrinfo(res);
+    if (fd < 0) {
+        if (last_err == ETIMEDOUT)
+            set_fetch_detail("connect to %s:%s timed out", host, port);
+        else
+            set_fetch_detail("connect to %s:%s failed: %s", host, port,
+                             strerror(last_err));
+    }
+    return fd;
+}
+
+static int is_ip_literal(const char *host)
+{
+    struct in_addr a4;
+    struct in6_addr a6;
+    return inet_pton(AF_INET, host, &a4) == 1 ||
+           inet_pton(AF_INET6, host, &a6) == 1;
+}
+
+/* Wrap a connected socket in TLS, verifying the peer against the
+ * staged CA bundle and failing closed on any error. On success
+ * *ctx_out owns the context (free it after SSL_free). */
+static SSL *tls_wrap(int fd, const struct fetch_url *u, SSL_CTX **ctx_out)
+{
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) {
+        set_fetch_detail("TLS setup failed: %s",
+                         ERR_error_string(ERR_get_error(), NULL));
+        return NULL;
+    }
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    if (SSL_CTX_load_verify_locations(ctx, g_ca_bundle, NULL) != 1) {
+        set_fetch_detail("cannot load CA bundle %s", g_ca_bundle);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl) {
+        set_fetch_detail("TLS setup failed: %s",
+                         ERR_error_string(ERR_get_error(), NULL));
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    SSL_set_fd(ssl, fd);
+    /* Hostname verification, fail closed: the handshake fails
+     * unless the certificate is valid for this host. No SNI for
+     * IP literals (the name is an address, not a hostname). */
+    if (SSL_set1_host(ssl, u->host) != 1) {
+        set_fetch_detail("TLS setup failed: hostname check");
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    if (!is_ip_literal(u->host) &&
+        SSL_set_tlsext_host_name(ssl, u->host) != 1) {
+        set_fetch_detail("TLS setup failed: SNI");
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    if (SSL_connect(ssl) != 1) {
+        /* A failed handshake can BE a verification failure: the
+         * verify result is set even when the handshake aborts on
+         * the cert, so report that precisely instead of the
+         * generic handshake error — "verification failed" tells
+         * the operator the cert was refused, not the network. */
+        long verify = SSL_get_verify_result(ssl);
+        if (verify != X509_V_OK) {
+            set_fetch_detail("TLS certificate verification failed: %s",
+                             X509_verify_cert_error_string(verify));
+        } else {
+            unsigned long e = ERR_get_error();
+            set_fetch_detail("TLS handshake failed: %s",
+                             e ? ERR_error_string(e, NULL) : "unknown error");
+        }
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    long verify = SSL_get_verify_result(ssl);
+    if (verify != X509_V_OK) {
+        set_fetch_detail("TLS certificate verification failed: %s",
+                         X509_verify_cert_error_string(verify));
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    *ctx_out = ctx;
+    return ssl;
+}
+
+struct fetch_stream {
+    int fd;
+    SSL *ssl; /* NULL for plain HTTP */
+    unsigned char buf[8192];
+    size_t len;
+    size_t pos;
+};
+
+/* Fill the buffer; returns bytes available (>0), 0 on clean EOF,
+ * -1 on error. */
+static int stream_fill(struct fetch_stream *s)
+{
+    if (s->pos < s->len)
+        return (int)(s->len - s->pos);
+    ssize_t n;
+    if (s->ssl)
+        n = SSL_read(s->ssl, s->buf, (int)sizeof(s->buf));
+    else
+        n = recv(s->fd, s->buf, sizeof(s->buf), 0);
+    if (n <= 0)
+        return (int)n; /* 0 = EOF, <0 = error */
+    s->len = (size_t)n;
+    s->pos = 0;
+    return (int)n;
+}
+
+/* Read exactly n bytes into out (buffered). 0 = ok, -1 = EOF/error. */
+static int stream_read_exact(struct fetch_stream *s, void *out, size_t n)
+{
+    unsigned char *dst = out;
+    while (n > 0) {
+        if (s->pos >= s->len) {
+            if (stream_fill(s) <= 0)
+                return -1;
+        }
+        size_t avail = s->len - s->pos;
+        size_t take = avail < n ? avail : n;
+        memcpy(dst, s->buf + s->pos, take);
+        s->pos += take;
+        dst += take;
+        n -= take;
+    }
+    return 0;
+}
+
+/* Read one CRLF-terminated line (without the terminator). 0 = ok,
+ * -1 = EOF/error/line too long. */
+static int stream_read_line(struct fetch_stream *s, char *out, size_t cap)
+{
+    size_t n = 0;
+    for (;;) {
+        if (s->pos >= s->len) {
+            if (stream_fill(s) <= 0)
+                return -1;
+        }
+        unsigned char c = s->buf[s->pos++];
+        if (c == '\n')
+            break;
+        if (c == '\r')
+            continue;
+        if (n + 1 >= cap)
+            return -1;
+        out[n++] = (char)c;
+    }
+    out[n] = '\0';
+    return 0;
+}
+
+/* Write all bytes (plain or TLS). 0 = ok, -1 = error. */
+static int stream_write_all(struct fetch_stream *s, const void *buf, size_t n)
+{
+    const unsigned char *p = buf;
+    while (n > 0) {
+        int w;
+        if (s->ssl)
+            w = SSL_write(s->ssl, p, (int)n);
+        else
+            w = (int)send(s->fd, p, n, 0);
+        if (w <= 0)
+            return -1;
+        p += (size_t)w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+static int stream_body_length(struct fetch_stream *st, FILE *out,
+                              unsigned long long remaining)
+{
+    unsigned char buf[65536];
+    while (remaining > 0) {
+        size_t want = remaining < sizeof(buf) ? (size_t)remaining : sizeof(buf);
+        if (stream_read_exact(st, buf, want) != 0) {
+            set_fetch_detail("download truncated");
+            return -1;
+        }
+        if (fwrite(buf, 1, want, out) != want) {
+            set_fetch_detail("write failed: %s", strerror(errno));
+            return -1;
+        }
+        remaining -= want;
+    }
+    return 0;
+}
+
+static int stream_body_eof(struct fetch_stream *st, FILE *out)
+{
+    for (;;) {
+        int n = stream_fill(st);
+        if (n < 0) {
+            set_fetch_detail("download failed: %s",
+                             errno ? strerror(errno) : "connection closed");
+            return -1;
+        }
+        if (n == 0)
+            return 0;
+        if (fwrite(st->buf + st->pos, 1, (size_t)n, out) != (size_t)n) {
+            set_fetch_detail("write failed: %s", strerror(errno));
+            return -1;
+        }
+        st->pos += (size_t)n;
+    }
+}
+
+static int stream_body_chunked(struct fetch_stream *st, FILE *out)
+{
+    char line[256];
+    for (;;) {
+        if (stream_read_line(st, line, sizeof(line)) != 0) {
+            set_fetch_detail("truncated chunked body");
+            return -1;
+        }
+        char *semi = strchr(line, ';');
+        if (semi)
+            *semi = '\0';
+        unsigned long chunk = strtoul(line, NULL, 16);
+        if (chunk == 0) {
+            /* Trailers until an empty line. */
+            for (;;) {
+                if (stream_read_line(st, line, sizeof(line)) != 0) {
+                    set_fetch_detail("truncated chunked trailer");
+                    return -1;
+                }
+                if (line[0] == '\0')
+                    return 0;
+            }
+        }
+        if (stream_body_length(st, out, (unsigned long long)chunk) != 0)
+            return -1;
+        /* Chunk terminator CRLF. */
+        if (stream_read_line(st, line, sizeof(line)) != 0) {
+            set_fetch_detail("truncated chunked body");
+            return -1;
+        }
+    }
+}
+
+/* Resolve a Location value against the fetched URL (absolute URL,
+ * absolute path, or relative path). */
+static int resolve_redirect(const struct fetch_url *u, const char *loc,
+                            char *out, size_t cap)
+{
+    if (strncmp(loc, "http://", 7) == 0 || strncmp(loc, "https://", 8) == 0) {
+        if (snprintf(out, cap, "%s", loc) >= (int)cap) {
+            set_fetch_detail("redirect URL too long");
+            return -1;
+        }
         return 0;
     }
-    int code = WIFEXITED(status) ? WEXITSTATUS(status)
-                                 : (WIFSIGNALED(status)
-                                        ? 128 + WTERMSIG(status)
-                                        : -1);
-    char first[192] = "";
-    if (err_path[0])
-        read_first_line(err_path, first, sizeof(first));
-    if (err_path[0])
-        unlink(err_path);
-    if (first[0])
-        snprintf(g_wget_detail, sizeof(g_wget_detail),
-                 "wget exit %d: %.180s", code, first);
-    else if (code == 127)
-        snprintf(g_wget_detail, sizeof(g_wget_detail),
-                 "wget not found (exit 127)");
+    char origin[512];
+    url_origin(u, origin, sizeof(origin));
+    if (loc[0] == '/') {
+        if (snprintf(out, cap, "%s%s", origin, loc) >= (int)cap) {
+            set_fetch_detail("redirect URL too long");
+            return -1;
+        }
+        return 0;
+    }
+    /* Relative to the current path's directory. */
+    const char *last_slash = strrchr(u->path, '/');
+    size_t dir_len = last_slash ? (size_t)(last_slash - u->path) + 1 : 1;
+    if (snprintf(out, cap, "%s%.*s%s", origin, (int)dir_len, u->path, loc) >=
+        (int)cap) {
+        set_fetch_detail("redirect URL too long");
+        return -1;
+    }
+    return 0;
+}
+
+/* One request/response exchange on an already-connected stream.
+ * Returns 0 = body written to out_path, 1 = redirect (next URL in
+ * next_url), -1 = failed (detail set). */
+static int fetch_exchange(struct fetch_stream *st, const struct fetch_url *u,
+                          const char *out_path,
+                          char *next_url, size_t next_cap)
+{
+    char req[2048];
+    int n = snprintf(req, sizeof(req),
+                     "GET %s HTTP/1.1\r\n"
+                     "Host: %s%s%s\r\n"
+                     "User-Agent: sevyn-updated\r\n"
+                     "Accept: */*\r\n"
+                     "Connection: close\r\n\r\n",
+                     u->path, u->host,
+                     is_default_port(u) ? "" : ":",
+                     is_default_port(u) ? "" : u->port);
+    if (n < 0 || n >= (int)sizeof(req)) {
+        set_fetch_detail("request too long");
+        return -1;
+    }
+    if (stream_write_all(st, req, (size_t)n) != 0) {
+        set_fetch_detail("request failed: %s",
+                         errno ? strerror(errno) : "connection closed");
+        return -1;
+    }
+    char line[4096];
+    if (stream_read_line(st, line, sizeof(line)) != 0) {
+        set_fetch_detail("no response from %s", u->host);
+        return -1;
+    }
+    int status = 0;
+    if (sscanf(line, "HTTP/%*d.%*d %d", &status) != 1) {
+        set_fetch_detail("bad HTTP response: %.120s", line);
+        return -1;
+    }
+    /* Headers. */
+    long content_length = -1;
+    int chunked = 0;
+    char location[2048] = "";
+    size_t header_bytes = 0;
+    for (;;) {
+        if (stream_read_line(st, line, sizeof(line)) != 0) {
+            set_fetch_detail("truncated HTTP headers");
+            return -1;
+        }
+        header_bytes += strlen(line) + 2;
+        if (header_bytes > 65536) {
+            set_fetch_detail("HTTP headers too large");
+            return -1;
+        }
+        if (line[0] == '\0')
+            break;
+        /* Header names are case-insensitive. */
+        if (strncasecmp(line, "Content-Length:", 15) == 0) {
+            content_length = strtol(line + 15, NULL, 10);
+            if (content_length < 0)
+                content_length = -1;
+        } else if (strncasecmp(line, "Transfer-Encoding:", 18) == 0) {
+            if (strcasestr(line + 18, "chunked") != NULL)
+                chunked = 1;
+        } else if (strncasecmp(line, "Location:", 9) == 0) {
+            const char *v = line + 9;
+            while (*v == ' ' || *v == '\t')
+                v++;
+            snprintf(location, sizeof(location), "%.2047s", v);
+        }
+    }
+    if ((status == 301 || status == 302 || status == 303 ||
+         status == 307 || status == 308) && location[0]) {
+        if (resolve_redirect(u, location, next_url, next_cap) != 0)
+            return -1;
+        return 1;
+    }
+    if (status == 301 || status == 302 || status == 303 ||
+        status == 307 || status == 308) {
+        set_fetch_detail("redirect without Location (HTTP %d)", status);
+        return -1;
+    }
+    if (status != 200) {
+        set_fetch_detail("HTTP %d", status);
+        return -1;
+    }
+    FILE *out = fopen(out_path, "wb");
+    if (!out) {
+        set_fetch_detail("cannot write %s: %s", out_path, strerror(errno));
+        return -1;
+    }
+    int ok = 0;
+    if (chunked)
+        ok = stream_body_chunked(st, out);
+    else if (content_length >= 0)
+        ok = stream_body_length(st, out, (unsigned long long)content_length);
     else
-        snprintf(g_wget_detail, sizeof(g_wget_detail), "wget exit %d",
-                 code);
+        ok = stream_body_eof(st, out);
+    if (fclose(out) != 0)
+        ok = -1;
+    if (ok != 0) {
+        unlink(out_path);
+        return -1;
+    }
+    return 0;
+}
+
+static int fetch_once(const char *url, const char *out_path, int timeout_s)
+{
+    char cur[2048];
+    if (snprintf(cur, sizeof(cur), "%s", url) >= (int)sizeof(cur)) {
+        set_fetch_detail("URL too long: %.200s", url);
+        return -1;
+    }
+    for (int hop = 0; hop <= FETCH_MAX_REDIRECTS; hop++) {
+        struct fetch_url u;
+        if (parse_fetch_url(cur, &u) != 0)
+            return -1;
+        int fd = connect_with_timeout(u.host, u.port, timeout_s);
+        if (fd < 0)
+            return -1;
+        SSL_CTX *ctx = NULL;
+        SSL *ssl = NULL;
+        if (u.tls) {
+            ssl = tls_wrap(fd, &u, &ctx);
+            if (!ssl) {
+                close(fd);
+                return -1;
+            }
+        }
+        struct fetch_stream st = { .fd = fd, .ssl = ssl, .len = 0, .pos = 0 };
+        int rc = fetch_exchange(&st, &u, out_path, cur, sizeof(cur));
+        /* fetch_exchange returns: 0 done, 1 redirect (cur updated),
+         * -1 failed. */
+        if (ssl) {
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+        }
+        close(fd);
+        if (rc == 0)
+            return 0;
+        if (rc == 1)
+            continue;
+        return -1;
+    }
+    set_fetch_detail("too many redirects (over %d)", FETCH_MAX_REDIRECTS);
     return -1;
 }
 
-/* Retry a download: one transient failure (a dropped connection
- * partway through a ~450 MiB initramfs, a 300 s timeout on a slow
- * link) must not kill the whole apply — the next attempt overwrites
- * the previous attempt's partial file. 3 attempts, 1 s apart;
- * every failed attempt is logged so a flaky link is visible, not
- * silent. Covers both the manifest fetch and the artifact
- * downloads, which both go through here. */
-#define WGET_ATTEMPTS 3
-static int run_wget(const char *url, const char *out_path, int timeout_s)
+/* Retry a download: one transient failure (flaky wifi, a dropped
+ * connection, a server blip) must not strand the device on a stale
+ * build. Each attempt logs its reason; the caller keeps the whole
+ * reason text, so a future failure shows its real cause. */
+#define FETCH_ATTEMPTS 3
+static int run_fetch(const char *url, const char *out_path, int timeout_s)
 {
-    for (int attempt = 1; attempt <= WGET_ATTEMPTS; attempt++) {
-        if (run_wget_once(url, out_path, timeout_s) == 0)
+    for (int attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+        if (fetch_once(url, out_path, timeout_s) == 0)
             return 0;
         log_line("UPDATE download attempt %d/%d failed: %s (%s)", attempt,
-                 WGET_ATTEMPTS, url, g_wget_detail);
-        if (attempt < WGET_ATTEMPTS)
+                 FETCH_ATTEMPTS, url, g_fetch_detail);
+        if (attempt < FETCH_ATTEMPTS)
             sleep(1);
     }
     return -1;
@@ -782,9 +1308,9 @@ static int fetch_feed(struct feed *feed, char *err, size_t errcap)
     char manifest_path[PATH_MAX];
     snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.%ld.json",
              g_tmp_dir, (long)getpid());
-    if (run_wget(g_url, manifest_path, WGET_MANIFEST_TIMEOUT) != 0) {
-        snprintf(err, errcap, "download failed: %.400s (%.90s)", g_url,
-                 g_wget_detail);
+    if (run_fetch(g_url, manifest_path, FETCH_MANIFEST_TIMEOUT) != 0) {
+        snprintf(err, errcap, "download failed: %.400s (%.400s)", g_url,
+                 g_fetch_detail);
         unlink(manifest_path);
         return -1;
     }
@@ -977,9 +1503,9 @@ static const struct feed_artifact *feed_find(const struct feed *feed,
 static int download_verified(const struct feed_artifact *fa,
                              const char *out_path, char *err, size_t errcap)
 {
-    if (run_wget(fa->url, out_path, WGET_ARTIFACT_TIMEOUT) != 0) {
-        snprintf(err, errcap, "download failed: %.400s (%.90s)", fa->url,
-                 g_wget_detail);
+    if (run_fetch(fa->url, out_path, FETCH_ARTIFACT_TIMEOUT) != 0) {
+        snprintf(err, errcap, "download failed: %.400s (%.400s)", fa->url,
+                 g_fetch_detail);
         unlink(out_path);
         return -1;
     }
@@ -2010,7 +2536,7 @@ static void apply_child(int listen_fd, int ctl_fd)
         close(listen_fd);
     if (ctl_fd >= 0)
         close(ctl_fd);
-    char err[512];
+    char err[1024];
     struct feed feed;
     if (fetch_feed(&feed, err, sizeof(err)) != 0) {
         log_line("UPDATE APPLY FAIL %s", err);
@@ -2267,7 +2793,7 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
     }
     if (strcmp(line, "CHECK") == 0) {
         struct feed feed;
-        char err[512];
+        char err[1024];
         if (fetch_feed(&feed, err, sizeof(err)) != 0) {
             snprintf(g_available, sizeof(g_available), "%s", "");
             if (from_ctl)
@@ -2318,7 +2844,7 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
          * up-to-date system is refused with a clear error before
          * anything is forked. The child re-fetches and re-verifies. */
         struct feed feed;
-        char err[512];
+        char err[1024];
         if (fetch_feed(&feed, err, sizeof(err)) != 0) {
             if (from_ctl)
                 log_line("UPDATE APPLY FAIL %s", err);
@@ -2580,9 +3106,9 @@ int main(int argc, char **argv)
     g_health_file = getenv("SEVYN_UPDATE_HEALTH_FILE");
     if (!g_health_file || !*g_health_file)
         g_health_file = DEFAULT_HEALTH_FILE;
-    g_wget = getenv("SEVYN_UPDATE_WGET");
-    if (!g_wget || !*g_wget)
-        g_wget = DEFAULT_WGET;
+    g_ca_bundle = getenv("SEVYN_UPDATE_CA_BUNDLE");
+    if (!g_ca_bundle || !*g_ca_bundle)
+        g_ca_bundle = DEFAULT_CA_BUNDLE;
     g_esp_dir = getenv("SEVYN_UPDATE_ESP_DIR");
     g_esp_size = getenv("SEVYN_UPDATE_ESP_SIZE_BYTES");
     g_proc_mounts = getenv("SEVYN_UPDATE_PROC_MOUNTS");
@@ -2753,7 +3279,7 @@ int main(int argc, char **argv)
         }
         flush_clients();
         compact_clients();
-        /* Reap the apply child (wget runs are synchronous, so the
+        /* Reap the apply child (fetches are synchronous, so the
          * reaper can never steal one's status). */
         if (g_apply_pid > 0) {
             int status = 0;

@@ -67,6 +67,7 @@ jobs:
             g++ \
             cmake \
             ninja-build \
+            openssl \
             pkg-config \
             libwayland-dev \
             wayland-protocols \

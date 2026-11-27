@@ -219,7 +219,7 @@ cp "$BUILD_TMP/cargo-target/release/sevyn-relay" "$BUILD_TMP/sevyn-relay"
 # Ed25519 relay keypair generation).
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
   "$ROOT/update/sevyn-updated.c" "$ROOT/update/canonical.c" \
-  "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lcrypto
+  "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lssl -lcrypto
 # The CLI links -lcrypto (Phase 2): `sevyn ai relay on` generates
 # the device Ed25519 keypair with OpenSSL EVP. libcrypto.so.3 is
 # already staged (muse-ai's closure), so no new runtime dep.

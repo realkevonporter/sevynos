@@ -146,7 +146,7 @@ gcc -O2 -Wall -Wextra -o "$BUILD_TMP/ed25519-sign" \
 # verification.
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
   "$ROOT/update/sevyn-updated.c" "$ROOT/update/canonical.c" \
-  "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lcrypto
+  "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lssl -lcrypto
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
   "$ROOT/update/sevyn.c" -lcrypto
 
