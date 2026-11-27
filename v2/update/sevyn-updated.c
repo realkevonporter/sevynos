@@ -985,11 +985,18 @@ static int stream_read_exact(struct fetch_stream *s, void *out, size_t n)
     return 0;
 }
 
-/* Read one CRLF-terminated line (without the terminator). 0 = ok,
- * -1 = EOF/error/line too long. */
+/* Read one CRLF-terminated line (without the terminator).
+ * Returns 0 = ok, -1 = EOF/error, -2 = line too long. A too-long
+ * line is consumed through its newline (out holds its first cap-1
+ * bytes), so the stream is positioned at the next line and the
+ * caller can skip it instead of failing: the fetch only needs
+ * Content-Length, Transfer-Encoding and Location, and real servers
+ * send headers this parser must not choke on — GitHub's
+ * Content-Security-Policy on the releases/download 302 is ~4.2 KiB. */
 static int stream_read_line(struct fetch_stream *s, char *out, size_t cap)
 {
     size_t n = 0;
+    int too_long = 0;
     for (;;) {
         if (s->pos >= s->len) {
             if (stream_fill(s) <= 0)
@@ -1000,12 +1007,16 @@ static int stream_read_line(struct fetch_stream *s, char *out, size_t cap)
             break;
         if (c == '\r')
             continue;
-        if (n + 1 >= cap)
-            return -1;
+        if (too_long)
+            continue;
+        if (n + 1 >= cap) {
+            too_long = 1;
+            continue;
+        }
         out[n++] = (char)c;
     }
     out[n] = '\0';
-    return 0;
+    return too_long ? -2 : 0;
 }
 
 /* Write all bytes (plain or TLS). 0 = ok, -1 = error. */
@@ -1155,8 +1166,15 @@ static int fetch_exchange(struct fetch_stream *st, const struct fetch_url *u,
                          errno ? strerror(errno) : "connection closed");
         return -1;
     }
-    char line[4096];
-    if (stream_read_line(st, line, sizeof(line)) != 0) {
+    /* 16 KiB: GitHub's Content-Security-Policy header on the
+     * releases/download 302 is ~4.2 KiB, over the old 4 KiB cap. */
+    char line[16384];
+    int sr = stream_read_line(st, line, sizeof(line));
+    if (sr == -2) {
+        set_fetch_detail("HTTP response line too long");
+        return -1;
+    }
+    if (sr != 0) {
         set_fetch_detail("no response from %s", u->host);
         return -1;
     }
@@ -1171,9 +1189,24 @@ static int fetch_exchange(struct fetch_stream *st, const struct fetch_url *u,
     char location[2048] = "";
     size_t header_bytes = 0;
     for (;;) {
-        if (stream_read_line(st, line, sizeof(line)) != 0) {
+        int hr = stream_read_line(st, line, sizeof(line));
+        if (hr == -1) {
             set_fetch_detail("truncated HTTP headers");
             return -1;
+        }
+        if (hr == -2) {
+            /* Overlong header line (GitHub's Content-Security-Policy
+             * on the 302 is ~4.2 KiB). Only Content-Length,
+             * Transfer-Encoding and Location matter here, so skip it
+             * and keep parsing. Count a full buffer against the
+             * total-headers cap so a flood of giant lines still
+             * trips it. */
+            header_bytes += sizeof(line);
+            if (header_bytes > 65536) {
+                set_fetch_detail("HTTP headers too large");
+                return -1;
+            }
+            continue;
         }
         header_bytes += strlen(line) + 2;
         if (header_bytes > 65536) {

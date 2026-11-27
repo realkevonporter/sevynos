@@ -1293,7 +1293,10 @@ def main():
     # (cert signed by a test CA the daemon trusts): CHECK returns
     # the available version, a 302 redirect is followed (the real
     # nightly feed URL is a releases/download link that 302s to
-    # the asset host), and APPLY downloads the artifacts. A feed
+    # the asset host), and APPLY downloads the artifacts. A 302
+    # carrying overlong headers (GitHub's Content-Security-Policy
+    # is ~4.2 KiB) must not fail the fetch — the daemon skips
+    # header lines it does not need. A feed
     # served with a cert from an untrusted CA is refused
     # (fail-closed). The test shadows `wget` with the BusyBox
     # binary for this section: the old daemon would then fail
@@ -1307,6 +1310,22 @@ def main():
             if self.path == "/redirect-feed.json":
                 self.send_response(302)
                 self.send_header("Location", "/updates.json")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path == "/long-headers.json":
+                # GitHub's releases/download 302 carries a ~4.2 KiB
+                # Content-Security-Policy header; the old 4 KiB
+                # header-line cap made the daemon fail the fetch as
+                # "truncated HTTP headers". The 5 KiB CSP below
+                # mimics it; the 20 KiB junk header exercises the
+                # skip path for lines over even the enlarged 16 KiB
+                # buffer.
+                self.send_response(302)
+                self.send_header("Location", "/updates.json")
+                self.send_header("Content-Security-Policy",
+                                 "default-src 'none'; " + "x" * 5000)
+                self.send_header("X-Long-Junk", "y" * 20000)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
@@ -1401,6 +1420,30 @@ def main():
     check("https: CHECK works after the refusal",
           d_https.sock(f"URL {tls_feed}") == f"OK url {tls_feed}" and
           d_https.sock("CHECK") == "OK available geo-https-2")
+    # Long headers: the GF65's update check failed on GitHub's 302
+    # because its Content-Security-Policy header (~4.2 KiB) exceeded
+    # the daemon's 4 KiB header-line cap ("truncated HTTP headers").
+    # The 302 below carries a 5 KiB CSP plus a 20 KiB junk header;
+    # CHECK must still return the new version and APPLY must work.
+    write_feed(server_dir, key_file, "geo-https-3", "nightly",
+               artifacts_for(kern_b6, init_b6,
+                             base=f"https://127.0.0.1:{tls_port}"))
+    long_headers = f"https://127.0.0.1:{tls_port}/long-headers.json"
+    check("https: long-header 302 is followed",
+          d_https.sock(f"URL {long_headers}") == f"OK url {long_headers}"
+          and d_https.sock("CHECK") == "OK available geo-https-3")
+    n_rb = geo_reboots()
+    check("https: APPLY through long headers accepted",
+          d_https.sock("APPLY") == "OK applying geo-https-3")
+    check("https: apply through long headers requested a reboot",
+          geo_wait_reboot(n_rb))
+    st_https = json.loads((gd6 / "slot-state.json").read_text())
+    # NB: "good" stays A — APPLY never moves it; only a booted
+    # health READY marks a slot good (cf. "health READY marks slot
+    # B good" above). The new image in A is unproven until boot.
+    check("https: apply through long headers flipped state to A",
+          st_https["active"] == "A" and st_https["good"] == "A" and
+          st_https["version"] == "geo-https-3", str(st_https))
     d_https.stop()
     os.close(master8)
     os.close(slave8)
