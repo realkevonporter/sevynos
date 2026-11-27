@@ -24,7 +24,10 @@
 //     never starts a text drag-select. It still focuses the hit view
 //     (a right-click on a TextInput puts the caret at the end —
 //     pinned by the unit-3 test). Views without onContextMenu ignore
-//     it. The reusable menu itself lives in ./context-menu.js
+//     it. A ScrollView with onContextMenu is hit-testable through its
+//     background rect (emitInstance), so empty list space can open a
+//     menu — without one it emits no hit rect at all (unit 10).
+//     The reusable menu itself lives in ./context-menu.js
 //     (ContextMenu): an anchored, clamped popup with click-away /
 //     Esc / selection dismiss and arrow-key navigation, driven by
 //     the setContextMenuKeyHandler slot below.
@@ -362,6 +365,15 @@ function emitInstance(inst, ox, oy, ops, clip) {
     // Clip to the viewport; children shift by the scroll offset.
     ops.push({ type: "pushClip", x, y, w, h });
     if (st.backgroundColor) {
+      // A ScrollView that declares onContextMenu (gap unit 10, audit
+      // #13: the Files list) is hit-testable: its background rect
+      // carries its yogaId, so a right-click on empty list space
+      // dispatches onContextMenu instead of hitting nothing (only
+      // Pressable / onPress views emit hit rects, and a ScrollView is
+      // neither). Without onContextMenu the rect stays nodeId -1, as
+      // before — no other ScrollView changes behaviour. Children are
+      // emitted after this rect, so a row still wins the hit-test
+      // where it overlaps the list surface.
       ops.push({
         type: "rect",
         x,
@@ -370,7 +382,7 @@ function emitInstance(inst, ox, oy, ops, clip) {
         h,
         color: st.backgroundColor,
         radius: st.borderRadius || 0,
-        nodeId: -1,
+        nodeId: inst.props && inst.props.onContextMenu ? inst.yogaId : -1,
       });
     }
     // Content size = max descendant extent (for scroll clamping).
