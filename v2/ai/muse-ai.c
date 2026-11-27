@@ -89,6 +89,7 @@
 #define DEFAULT_API_BASE "https://api.meta.ai/v1"
 #define DEFAULT_MODEL "muse-spark-1.3"
 #define DEFAULT_KEY_FILE "/data/ai/muse-key"
+#define DEFAULT_CA_BUNDLE "/etc/ssl/certs/ca-certificates.crt"
 #define DEFAULT_GRANT "/usr/share/sevyn/ai/grant.json"
 #define DEFAULT_SETTINGS "/data/settings.json"
 #define DEFAULT_REGISTRY "/var/lib/sevyn/apps/registry.json"
@@ -864,13 +865,20 @@ static int http_post(const char *url, const char *body, const char *api_key,
         }
         /* Verify the server's certificate against the system CA
          * bundle (/etc/ssl/certs/ca-certificates.crt, staged in the
-         * image): the backend sends a Bearer API key, so an
+         * image) — loaded EXPLICITLY, as the updater does: OpenSSL's
+         * compiled-in default paths do not exist in the image, so
+         * SSL_CTX_set_default_verify_paths found no CA and every
+         * handshake failed ("TLS handshake failed" on-device,
+         * 2026-11-27). SEVYN_AI_CA_BUNDLE overrides the bundle
+         * path (tests). The backend sends a Bearer API key, so an
          * unverified connection would hand the key to whoever
          * answers. A verification failure aborts the handshake —
          * fail-closed, never an insecure transport. The loopback
          * mock in tests is plain HTTP, so this never applies there. */
         SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-        if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
+        if (SSL_CTX_load_verify_locations(
+                ctx, env_or("SEVYN_AI_CA_BUNDLE", DEFAULT_CA_BUNDLE),
+                NULL) != 1) {
             snprintf(resp->err, sizeof(resp->err),
                      "cannot load CA bundle");
             SSL_CTX_free(ctx);
