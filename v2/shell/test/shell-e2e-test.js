@@ -343,6 +343,62 @@ check("wallpaper: default variant paints the #06080F base + auras", () => {
   );
 });
 
+check("wallpaper: frost variant paints the bundled image full-screen", () => {
+  // The asset ships in the tree with the shell.
+  assert.ok(
+    fs.existsSync(path.join(__dirname, "..", "wallpapers", "frost.png")),
+    "frost.png staged in v2/shell/wallpapers",
+  );
+  // The shell reads the style on every render, so swapping the
+  // canned setting and dispatching an app event (which re-renders
+  // the shell through its apps snapshot) presents it as frost. A
+  // status push does NOT re-render the shell — it only re-renders
+  // the tray — so it cannot drive this check. Calculator is the
+  // trigger because no other check launches it.
+  const prev = Sevyn._execHandler;
+  Sevyn._execHandler = (cmd) => {
+    if (cmd === "sevyn settings get wallpaperStyle") return "0\nwallpaperStyle=frost\n";
+    return prev(cmd);
+  };
+  Sevyn._handlers.appEvent("EVENT LAUNCHED calculator");
+  const last = lastPresent();
+  const images = last.ops.filter((o) => o.type === "image");
+  assert.ok(
+    images.some((a) => a.asset.endsWith("wallpapers/frost.png")),
+    "frost image op present, images=" + JSON.stringify(images),
+  );
+  const frost = images.find((a) => a.asset.endsWith("wallpapers/frost.png"));
+  assert.equal(frost.w, 1024, "frost image covers the surface width");
+  // Height is 0 in the mock — the mock lays the main area out at
+  // height 0 (its flex quirk; the desktop surface rect is 1024x0
+  // for the same reason), so the 100% height resolves to 0 here.
+  // The real host lays the surface out full-height (proven
+  // on-device for the wallpaper layer), so the image covers it
+  // there. The width above proves the percentage sizing works.
+  assert.equal(frost.h, 0, "frost image height is 0 in the mock quirk");
+  // No procedural auras under the photo (the macos violet aura is
+  // the canary — frost shares its midnight base, so the base stays).
+  const colors = last.ops.filter((o) => o.type === "rect").map((o) => o.color);
+  assert.ok(colors.includes("#0c0a26"), "frost base present");
+  assert.ok(
+    !colors.includes("rgba(139, 92, 246, 0.24)"),
+    "no aura under the frost photo",
+  );
+  // Restore the default setting and stop calculator, and
+  // re-present, so the checks after this one see the default
+  // wallpaper and no running calculator again.
+  Sevyn._execHandler = prev;
+  Sevyn._handlers.appEvent("EVENT STOPPED calculator signal 15");
+  const back = lastPresent();
+  assert.ok(
+    back.ops
+      .filter((o) => o.type === "rect")
+      .map((o) => o.color)
+      .includes("#06080F"),
+    "default base back after restore",
+  );
+});
+
 check("desktop icons: /data/Desktop entries render as tiles", () => {
   const last = lastPresent();
   const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);

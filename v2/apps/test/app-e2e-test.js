@@ -834,7 +834,7 @@ check("settings: channel switch applies and logs", () => {
   // Sync Now, Timezone, Apply, echo-ai, plan-ai, key input, Save
   // key, Clear key, God toggle, login server, auth key, Join,
   // Agent toggle, Forget, Shut Down, Restart, Default, Solid,
-  // Cosmic, Minimal, macOS, macOS Light] — 28. (The enable,
+  // Cosmic, Minimal, macOS, macOS Light, Frost] — 29. (The enable,
   // pairing, and revoke dialogs' buttons exist only while open, so
   // they never shift the count.)
   pressTab(6); // —, ▢, X, Scan, Nightly, Stable
@@ -853,13 +853,13 @@ check("settings: channel switch applies and logs", () => {
   // Timezone, Apply, echo-ai, plan-ai, key input, Save key, Clear key,
   // God toggle, login server, auth key, Join, Agent toggle, Forget,
   // Shut Down, Restart, Default, Solid, Cosmic, Minimal, macOS,
-  // macOS Light]: Stable -> Sync Now -> Timezone -> Apply -> echo-ai
+  // macOS Light, Frost]: Stable -> Sync Now -> Timezone -> Apply -> echo-ai
   // -> plan-ai -> key input -> Save key -> Clear key -> God toggle ->
   // login server -> auth key -> Join -> Agent toggle -> Forget ->
   // Shut Down -> Restart -> Default -> Solid -> Cosmic -> Minimal ->
-  // macOS -> macOS Light -> — -> ▢ -> X -> Scan -> Nightly. Stable
-  // is 6th, Nightly 5th, so 27 Tabs wrap back to Nightly.
-  pressTab(27);
+  // macOS -> macOS Light -> Frost -> — -> ▢ -> X -> Scan -> Nightly. Stable
+  // is 6th, Nightly 5th, so 28 Tabs wrap back to Nightly.
+  pressTab(28);
   pressEnter();
   assert.ok(Sevyn._logs.includes("SETTINGS channel=nightly"), "channel switched back");
   // Nightly -> Stable -> Sync Now -> Timezone -> Apply -> echo-ai ->
@@ -980,6 +980,7 @@ check("settings: wallpaper style + color apply and log", () => {
   assert.ok(texts.includes("Minimal"), "minimal style button shown");
   assert.ok(texts.includes("macOS"), "macos style button shown");
   assert.ok(texts.includes("macOS Light"), "macos-light style button shown");
+  assert.ok(texts.includes("Frost"), "frost style button shown");
   assert.ok(
     texts.some((t) => t.includes("Uploading your own photo is not supported yet")),
     "no-custom-image note shown under the Appearance intro",
@@ -1003,9 +1004,9 @@ check("settings: wallpaper style + color apply and log", () => {
     texts.some((t) => t.includes("Color: Sevyn Night")),
     "current color shown once solid is picked",
   );
-  // Swatches join the focus order after macOS Light: Solid -> Cosmic ->
-  // Minimal -> macOS -> macOS Light -> Sevyn Night -> Slate.
-  pressTab(6);
+  // Swatches join the focus order after Frost: Solid -> Cosmic ->
+  // Minimal -> macOS -> macOS Light -> Frost -> Sevyn Night -> Slate.
+  pressTab(7);
   pressEnter();
   assert.ok(
     Sevyn._logs.includes("SETTINGS wallpaperColor=#1E293B"),

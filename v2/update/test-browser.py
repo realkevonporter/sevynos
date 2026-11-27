@@ -1055,7 +1055,7 @@ def main():
     finally:
         fake.close()
 
-    # --- settings: wallpaperStyle (macos / macos-light) ---
+    # --- settings: wallpaperStyle (macos / macos-light / frost) ---
     # The Settings UI lists macOS and macOS Light, but the validator
     # only accepted default|solid|cosmic|minimal, so tapping either
     # never stuck — and read_settings repaired a hand-edited "macos"
@@ -1076,7 +1076,7 @@ def main():
           r.stdout + r.stderr)
     # Every style the UI lists sets and survives a read-back.
     for style in ("default", "solid", "cosmic", "minimal",
-                  "macos", "macos-light"):
+                  "macos", "macos-light", "frost"):
         r = run_cli(binary, ["settings", "set", "wallpaperStyle", style],
                     settings_env)
         check(f"settings set: {style} exits 0",
@@ -1092,12 +1092,12 @@ def main():
     r = run_cli(binary, ["settings", "set", "wallpaperStyle", "neon"],
                 settings_env)
     check("settings set: invalid style exits 1", r.returncode == 1)
-    check("settings set: invalid style names the six accepted styles",
-          "default|solid|cosmic|minimal|macos|macos-light" in r.stderr,
+    check("settings set: invalid style names the seven accepted styles",
+          "default|solid|cosmic|minimal|macos|macos-light|frost" in r.stderr,
           r.stderr)
     r = run_cli(binary, ["settings", "get", "wallpaperStyle"], settings_env)
     check("settings get: refused set leaves the stored style alone",
-          r.stdout.strip() == "wallpaperStyle=macos-light",
+          r.stdout.strip() == "wallpaperStyle=frost",
           r.stdout + r.stderr)
     # A hand-edited file with "macos" is honoured, not repaired back
     # to default (the read path gates on the same validator).

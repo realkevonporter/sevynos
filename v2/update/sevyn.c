@@ -1490,7 +1490,8 @@ static int valid_wallpaper_style(const char *v)
 {
     return strcmp(v, "default") == 0 || strcmp(v, "solid") == 0 ||
            strcmp(v, "cosmic") == 0 || strcmp(v, "minimal") == 0 ||
-           strcmp(v, "macos") == 0 || strcmp(v, "macos-light") == 0;
+           strcmp(v, "macos") == 0 || strcmp(v, "macos-light") == 0 ||
+           strcmp(v, "frost") == 0;
 }
 
 static int valid_wallpaper_color(const char *v)
@@ -1559,7 +1560,7 @@ static int cmd_settings_set(const char *key, const char *value)
     if (strcmp(key, "wallpaperStyle") == 0) {
         if (!valid_wallpaper_style(value)) {
             fprintf(stderr,
-                    "error: wallpaperStyle must be default|solid|cosmic|minimal|macos|macos-light\n");
+                    "error: wallpaperStyle must be default|solid|cosmic|minimal|macos|macos-light|frost\n");
             return 1;
         }
     } else if (!valid_wallpaper_color(value)) {

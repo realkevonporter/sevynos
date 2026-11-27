@@ -12,12 +12,17 @@
 // spirit of the Sonoma / Sequoia default wallpapers.
 // "macos-light" is its light twin: the same auras, softened,
 // over a pale sky base.
-// Custom image wallpapers are not supported (same call as #123:
-// the image loader only accepts http(s), data URIs, or files under
-// the app asset roots, and there is no binary read for user files).
+// "frost" is the first bundled photographic wallpaper — a frosty
+// blue forest aerial (winding road, mist) over the same midnight
+// base as "macos", as a PNG staged under
+// /usr/share/sevyn/shell/wallpapers/.
+// Bundled image wallpapers ARE supported: a variant may name an
+// asset PNG staged with the shell. User files are still not
+// supported — there is no binary read for user files, so only
+// assets shipped in the image can be wallpapers.
 
 export type WallpaperStyle =
-  "default" | "solid" | "cosmic" | "minimal" | "macos" | "macos-light";
+  "default" | "solid" | "cosmic" | "minimal" | "macos" | "macos-light" | "frost";
 
 export const WALLPAPER_STYLES: readonly { label: string; value: WallpaperStyle }[] = [
   { label: "Default", value: "default" },
@@ -26,6 +31,7 @@ export const WALLPAPER_STYLES: readonly { label: string; value: WallpaperStyle }
   { label: "Minimal", value: "minimal" },
   { label: "macOS", value: "macos" },
   { label: "macOS Light", value: "macos-light" },
+  { label: "Frost", value: "frost" },
 ];
 
 /** Flat colors offered for the solid wallpaper style. */
@@ -52,7 +58,8 @@ export function isWallpaperStyle(
     value === "cosmic" ||
     value === "minimal" ||
     value === "macos" ||
-    value === "macos-light"
+    value === "macos-light" ||
+    value === "frost"
   );
 }
 
@@ -89,12 +96,20 @@ export interface WallpaperAuraSpec {
 }
 
 export interface WallpaperVariantSpec {
-  /** Flat base color behind the auras. */
+  /** Flat base color behind the auras (and behind the image, if any). */
   readonly background: string;
   readonly auras: readonly WallpaperAuraSpec[];
   readonly horizon: boolean;
   readonly grain: boolean;
+  /** Bundled image asset for this variant, if any: an absolute
+   * on-device path to a PNG the host painter decodes. Painted over
+   * `background`, so a missing file still leaves the base color. */
+  readonly image?: string | undefined;
 }
+
+// Bundled image wallpapers: staged into the image under
+// /usr/share/sevyn/shell/wallpapers/ (see build-m13-image.sh).
+export const FROST_WALLPAPER_PATH = "/usr/share/sevyn/shell/wallpapers/frost.png";
 
 export function wallpaperVariantFor(
   style: WallpaperStyle | undefined,
@@ -209,6 +224,14 @@ export function wallpaperVariantFor(
         ]),
         horizon: true,
         grain: true,
+      });
+    case "frost":
+      return Object.freeze({
+        background: "#0c0a26",
+        auras: Object.freeze([]),
+        horizon: false,
+        grain: false,
+        image: FROST_WALLPAPER_PATH,
       });
     case "minimal":
       return Object.freeze({

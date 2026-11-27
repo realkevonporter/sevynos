@@ -60,6 +60,7 @@ const WALLPAPER_STYLES = [
   { label: "Minimal", value: "minimal" },
   { label: "macOS", value: "macos" },
   { label: "macOS Light", value: "macos-light" },
+  { label: "Frost", value: "frost" },
 ] as const;
 
 /** Flat colors offered for the solid wallpaper style. */
@@ -1995,7 +1996,7 @@ export function Settings(): React.ReactElement {
           </Text>
           <Text style={{ fontSize: 14, color: "#374151", marginTop: 8 }}>
             Uploading your own photo is not supported yet — pick one of the built-in
-            styles below.
+            styles below, including the Frost photo.
           </Text>
           <View style={{ flexDirection: "row", marginTop: 12 }}>
             {WALLPAPER_STYLES.map((s) => wallpaperStyleButton(s.label, s.value))}
