@@ -6,12 +6,19 @@
 // function of style + color; the shell re-reads the setting on
 // render, so picking a new style applies when Settings closes.
 //
+// An image variant paints its bundled PNG full-screen over the
+// base color (the base still shows if the asset file is missing —
+// the host painter silently skips an unloadable image). The
+// image stretches to the desktop size; the painter bilinear-samples,
+// so a 1920x1080 asset stays crisp at 1080p and soft at most
+// one notch down.
+//
 // Deviation from #123: the horizon band is unrotated. The old
 // wallpaper rotated it -6deg; the v2 host has no transform style
 // prop, so the band renders straight.
 
 import * as React from "react";
-import { View } from "./host";
+import { View, Image } from "./host";
 import { wallpaperVariantFor, type WallpaperStyle } from "./wallpaper-variants";
 
 export interface WallpaperProps {
@@ -32,6 +39,22 @@ export function Wallpaper(props: WallpaperProps): React.ReactElement {
         backgroundColor: variant.background,
       }}
     >
+      {variant.image ? (
+        <Image
+          source={variant.image}
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            // Images have no intrinsic size in M2: they must carry
+            // width/height in style, or the node measures 0x0 (the
+            // absolute insets alone do not size it). 100% of the
+            // full-screen parent is the desktop size.
+            width: "100%",
+            height: "100%",
+          }}
+        />
+      ) : null}
       {variant.auras.map((aura, index) => (
         <View
           key={index}

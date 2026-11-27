@@ -735,6 +735,17 @@ cp "$ROOT/shell/icons/hero/"*.png "$STAGE/usr/share/sevyn/shell/icons/hero/"
 cp "$ROOT/shell/icons/small/"*.png "$STAGE/usr/share/sevyn/shell/icons/small/"
 cp "$ROOT/shell/icons/title/"*.png "$STAGE/usr/share/sevyn/shell/icons/title/"
 cp "$ROOT/shell/icons/symbols/"*.png "$STAGE/usr/share/sevyn/shell/icons/symbols/"
+# Bundled image wallpapers (v2/shell/wallpapers/): the shell's
+# Wallpaper renders them by absolute path, so they are staged with
+# the shell. A missing file must fail the build — the wallpaper
+# would silently fall back to its base color and hide a broken
+# asset, the same failure mode as the icons above.
+if [ ! -f "$ROOT/shell/wallpapers/frost.png" ]; then
+  echo "error: missing wallpaper $ROOT/shell/wallpapers/frost.png" >&2
+  exit 1
+fi
+mkdir -p "$STAGE/usr/share/sevyn/shell/wallpapers"
+cp "$ROOT/shell/wallpapers/frost.png" "$STAGE/usr/share/sevyn/shell/wallpapers/"
 # --- commsd (M10) ---------------------------------------------------------
 # The Matrix daemon + its node_modules (npm ci --omit=dev; the SDK
 # has no runtime dev deps), the Chromium media-bridge page, and the
