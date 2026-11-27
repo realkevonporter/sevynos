@@ -5,6 +5,10 @@
 //   main area (flex 1): welcome view, or "Starting <app>…" after a launch
 //   dock: floating Liquid Glass pill, centered, sized to its apps
 //         (see Dock.tsx — macOS 27 style, no magnification)
+//   right-clicking a dock tile opens that app's context menu
+//         (gap unit 12, audit #15): Open / Show / Open New Window,
+//         each backed by a real appd verb — no Close (no such verb
+//         yet) and no pin/unpin (no pin concept).
 //
 // The dock renders from appd's app list (the renderer's app store,
 // useSyncExternalStore): the installed stock apps, with a running dot
@@ -27,6 +31,9 @@ import {
   wallpaperVariantFor,
 } from "./wallpaper-variants";
 import { subscribeApps, getAppsSnapshot } from "../../rn/renderer/sevyn-renderer";
+import type { ContextMenuEvent } from "../../rn/renderer/sevyn-renderer";
+import { ContextMenu } from "../../rn/renderer/context-menu";
+import type { ContextMenuItem } from "../../rn/renderer/context-menu";
 
 // One `sevyn settings get` field: the CLI prints `key=value` (the
 // same shape `sevyn update status` prints, read with parseField in
@@ -43,6 +50,13 @@ function readSetting(key: string): string | null {
 export function Shell(): React.ReactElement {
   const [launching, setLaunching] = React.useState<string | null>(null);
   const [powerMenu, setPowerMenu] = React.useState(false);
+  // Dock right-click menu (gap unit 12, audit #15): which app's
+  // menu is open, and where the pointer was. Null when closed.
+  const [dockMenu, setDockMenu] = React.useState<{
+    app: ShellApp;
+    x: number;
+    y: number;
+  } | null>(null);
   // AI sidebar (DESIGN.md §2.8, phase 1): the corner button opens
   // it; the sidebar closes itself. Opening it closes the power
   // menu — the two panels overlap in the top-right corner.
@@ -108,8 +122,8 @@ export function Shell(): React.ReactElement {
     if (running.has(appId)) {
       // Already running: a single-instance app is focused (its
       // window is raised above the shell); a multi-instance app
-      // opens a new window. There is no dock path to focus a hidden
-      // multi-instance window — click the window itself.
+      // opens a new window. Focusing a running multi-instance app
+      // is the dock menu's Show item (gap unit 12), not the click.
       if (app && app.singleInstance) {
         Sevyn.focusApp(appId);
       } else if (Sevyn.launchApp(appId)) {
@@ -120,6 +134,56 @@ export function Shell(): React.ReactElement {
     // Only claim "Starting…" when appd accepted the launch.
     if (Sevyn.launchApp(appId)) setLaunching(appId);
   };
+
+  // Dock right-click menu (gap unit 12, audit #15): the items are
+  // only actions that exist today for the app, backed by real
+  // appd verbs (LAUNCH / FOCUS via Sevyn.launchApp / focusApp).
+  // There is no Close item: `sevyn app close <id>` does not exist
+  // yet as a CLI verb (queued separately after Stage 5), and the
+  // shell's Sevyn.closeApp() closes the shell itself, not another
+  // app — so nothing here can close an app. There is no pin/unpin
+  // either: the dock has no pin concept (every installed app is
+  // always in the dock).
+  //   - not running: Open — launches it (same as a dock click).
+  //   - running, single-instance: Show — focuses its window.
+  //     (A dock click does the same; the menu names the verb.)
+  //   - running, multi-instance: Show — focuses the newest window
+  //     — plus Open New Window, which launches another instance
+  //     (the dock click's behaviour for a running multi-instance
+  //     app, split out so both verbs are reachable).
+  function dockMenuItems(app: ShellApp): ContextMenuItem[] {
+    if (!running.has(app.id)) {
+      return [
+        {
+          id: "open",
+          label: "Open " + app.name,
+          onSelect: () => onLaunch(app.id),
+        },
+      ];
+    }
+    const show: ContextMenuItem = {
+      id: "show",
+      label: "Show " + app.name,
+      onSelect: () => {
+        Sevyn.focusApp(app.id);
+      },
+    };
+    if (app.singleInstance) return [show];
+    return [
+      show,
+      {
+        id: "new-window",
+        label: "Open New Window",
+        onSelect: () => onLaunch(app.id),
+      },
+    ];
+  }
+
+  function onDockTileContextMenu(appId: string, ev: ContextMenuEvent): void {
+    const app = apps.find((a) => a.id === appId);
+    if (!app) return;
+    setDockMenu({ app, x: ev.nativeEvent.x, y: ev.nativeEvent.y });
+  }
 
   const app = launching ? apps.find((a) => a.id === launching) : undefined;
   // "Starting…" is derived, not cleared: it shows while the launch
@@ -198,7 +262,12 @@ export function Shell(): React.ReactElement {
             : "Pick an app from the dock to begin."}
         </Text>
       </View>
-      <Dock apps={apps} running={running} onLaunch={onLaunch} />
+      <Dock
+        apps={apps}
+        running={running}
+        onLaunch={onLaunch}
+        onTileContextMenu={onDockTileContextMenu}
+      />
       {/* Power menu: last child, so it paints over the desktop. The
           backdrop closes it on a tap outside; the rows run `sevyn
           poweroff` / `sevyn reboot` through the shell's trusted exec
@@ -274,6 +343,18 @@ export function Shell(): React.ReactElement {
         />
       )}
       {aiOpen ? <AiSidebar onClose={() => setAiOpen(false)} /> : null}
+      {/* Dock right-click menu (gap unit 12): last child, so it
+          draws (and hit-tests) above everything else. A right-click
+          on empty dock space offers nothing — only tiles forward
+          onContextMenu — so there is no empty-space menu here. */}
+      {dockMenu ? (
+        <ContextMenu
+          x={dockMenu.x}
+          y={dockMenu.y}
+          items={dockMenuItems(dockMenu.app)}
+          onDismiss={() => setDockMenu(null)}
+        />
+      ) : null}
     </View>
   );
 }

@@ -14,6 +14,12 @@
 //   - no magnification: tiles stay flat at their resting size, even
 //     under the pointer — the hover grow effect was removed;
 //   - a white dot under each running app;
+//   - right-clicking a tile opens a context menu for that app (gap
+//     unit 12, audit #15): the menu itself lives in Shell.tsx — the
+//     dock only forwards the tile's onContextMenu event, because
+//     the menu must render as a last child of the shell's root view
+//     to draw (and hit-test) above everything else. A right-click
+//     never fires the tile's onPress, so it never launches.
 //   - icons come from /usr/share/sevyn/shell/icons/<id>.png (the icons
 //     PR's contract), stacked over the monogram tile — a missing file
 //     draws nothing, so the monogram shows. The icon PNGs carry their
@@ -27,6 +33,7 @@
 import * as React from "react";
 import { View, Text, Pressable, Image } from "./host";
 import { type ShellApp } from "./apps";
+import type { ContextMenuEvent } from "../../rn/renderer/sevyn-renderer";
 import {
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
@@ -36,6 +43,10 @@ export interface DockProps {
   apps: ShellApp[];
   running: Set<string>;
   onLaunch(appId: string): void;
+  // Right-click on a tile (gap unit 12): the shell opens the dock
+  // context menu for that app. The dock does not own the menu —
+  // see the header comment — it only forwards the event.
+  onTileContextMenu(appId: string, ev: ContextMenuEvent): void;
 }
 
 // --- geometry (pure; exercised by the shell e2e test) ---
@@ -144,6 +155,12 @@ export function Dock(props: DockProps): React.ReactElement {
               >
                 <Pressable
                   onPress={() => props.onLaunch(app.id)}
+                  // A right-click dispatches onContextMenu, not
+                  // onPress (renderer, unit 9), so this never
+                  // launches the app — the shell opens the menu.
+                  onContextMenu={(ev: ContextMenuEvent) =>
+                    props.onTileContextMenu(app.id, ev)
+                  }
                   style={{
                     width: ts,
                     height: ts,
