@@ -1310,11 +1310,31 @@ async function main() {
     shellFocus === "layer=sevyn-shell",
     shellFocus === null ? "no POINTER FOCUS" : `surface=${shellFocus}`,
   );
+  // Capture the line count before this click: its press is the
+  // real keyboard-focus change (Terminal -> Shell layer), and
+  // the move-away assertion below reads the marker it fired.
+  const shellBefore = logLines(b.logPath).length;
   const shellClick = await clickReaches(shellPt);
   check(
     "input: click on the AI button reaches the Shell surface",
     shellClick === shellFocus,
     `button surface=${shellClick}, expected ${shellFocus}`,
+  );
+  // Move-away marker: the AI-button press moved keyboard focus
+  // to the Shell layer, so Genesis logged FOCUS KEYBOARD
+  // surface=layer=sevyn-shell during the press. Asserting it
+  // here keeps a future failure diagnostic: if this fails, the
+  // move-away never happened; if only the Terminal focus
+  // assertion below fails, the wait window missed the marker.
+  const shellKeyFocusLine = findLog(
+    b.logPath,
+    /SEVYN FOCUS KEYBOARD surface=layer=sevyn-shell/,
+    shellBefore,
+  );
+  check(
+    "focus: clicking the AI button moves keyboard focus to the Shell layer",
+    !!shellKeyFocusLine,
+    shellKeyFocusLine ? "" : "no FOCUS KEYBOARD surface=layer=sevyn-shell",
   );
   const keyReaches = async (pt, qcode) => {
     const before = logLines(b.logPath).length;
@@ -1377,6 +1397,10 @@ async function main() {
     termFocus !== null && termFocus !== shellFocus,
     `shell surface=${shellFocus}, terminal surface=${termFocus}`,
   );
+  // Capture the line count before this click: its press is the
+  // real keyboard-focus change (Shell layer -> Terminal), and
+  // the focus assertion below reads the marker it fired.
+  const termBefore = logLines(b.logPath).length;
   const termClick = await clickReaches(termPt);
   check(
     "input: click in the Terminal reaches the Terminal surface",
@@ -1384,23 +1408,19 @@ async function main() {
     `button surface=${termClick}, expected ${termFocus}`,
   );
   // Focus: clicking the Terminal moves keyboard focus to it.
-  // Keyboard focus is on the Shell layer now (the sidebar-close
-  // press kept it there), so this click is a real focus change
-  // and the marker must fire — the old block waited for a change
-  // marker while focus was already on the Terminal, which can
-  // never fire (set_keyboard_focus early-returns unchanged).
-  const focusLine = await (async () => {
-    const before = logLines(b.logPath).length;
-    await moveTo(termPt.x, termPt.y, W, H);
-    await sleep(300);
-    await click();
-    return waitForLog(
-      b.logPath,
-      new RegExp(`SEVYN FOCUS KEYBOARD surface=${termFocus}`),
-      10000,
-      before,
-    );
-  })();
+  // The press inside clickReaches(termPt) above IS the change:
+  // keyboard focus was on the Shell layer (the sidebar-close
+  // press kept it there), so the press moved it to the Terminal
+  // and Genesis logged FOCUS KEYBOARD surface=<termFocus> then.
+  // A second click here would be a non-change — set_keyboard_focus
+  // early-returns unchanged and no marker can fire — so assert
+  // the marker the clickReaches press already fired, since the
+  // line count captured before it (termBefore).
+  const focusLine = findLog(
+    b.logPath,
+    new RegExp(`SEVYN FOCUS KEYBOARD surface=${termFocus}`),
+    termBefore,
+  );
   check(
     "focus: clicking the Terminal moves keyboard focus to it",
     !!focusLine,
