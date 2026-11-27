@@ -983,6 +983,53 @@ check(
   },
 );
 
+check(
+  "Terminal interrupt: Ctrl+Shift+C copies the line, plain Ctrl+C still interrupts",
+  () => {
+    // State from the interrupt check: two interrupts, value
+    // "shell status", clipboard "sentinel", input still focused.
+    assert.ok(caret(), "interrupt input still focused");
+    keyShiftCtrl(46); // Ctrl+Shift+C — copy, not interrupt
+    assert.deepEqual(
+      interruptRequests,
+      ["interrupt", "interrupt"],
+      "Ctrl+Shift+C did not fire onInterruptRequest",
+    );
+    assert.equal(
+      Sevyn.clipboardRead(),
+      "shell status",
+      "Ctrl+Shift+C copied the whole line (no selection)",
+    );
+    assert.equal(interruptValue, "shell status", "copy changed nothing");
+    // A selection copies the selection, not the whole line.
+    key(102); // Home — caret to the start
+    const keyShift = (code) =>
+      Sevyn._handlers.key({ key: code, pressed: true, shift: true });
+    for (let i = 0; i < 5; i++) keyShift(106); // Shift+Right x5: "shell"
+    keyShiftCtrl(46); // Ctrl+Shift+C — copy the selection
+    assert.equal(Sevyn.clipboardRead(), "shell", "Ctrl+Shift+C copied the selection");
+    // Cut the selection, then paste it back with Ctrl+Shift+V.
+    keyCtrl(45); // Ctrl+X — cut
+    assert.equal(interruptValue, " status", "cut removed the selection");
+    assert.equal(Sevyn.clipboardRead(), "shell", "cut copied the selection");
+    keyShiftCtrl(47); // Ctrl+Shift+V — paste at the caret
+    assert.equal(interruptValue, "shell status", "paste restored the line");
+    // Plain Ctrl+C still interrupts and copies nothing.
+    keyCtrl(46); // Ctrl+C
+    assert.deepEqual(
+      interruptRequests,
+      ["interrupt", "interrupt", "interrupt"],
+      "plain Ctrl+C still interrupts",
+    );
+    assert.equal(
+      Sevyn.clipboardRead(),
+      "shell",
+      "plain Ctrl+C copied nothing (clipboard still holds the copy)",
+    );
+    assert.equal(interruptValue, "shell status", "interrupt typed nothing");
+  },
+);
+
 // Restore the shell tree for a clean end state.
 renderer.update(h(App));
 

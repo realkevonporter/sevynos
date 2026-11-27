@@ -1186,11 +1186,16 @@ function handleTextInputKey(inst, ev) {
         redoEdit(inst);
         return true;
       case 46: // C — interrupt (gap unit 8) when the input opts in
-        // with onInterruptRequest: the Terminal owns Ctrl+C as
-        // interrupt, so the callback fires and nothing is copied
-        // or typed. Without the prop it is copy (gap unit 2):
-        // the selection (whole value when collapsed).
-        if (typeof props.onInterruptRequest === "function") {
+        // with onInterruptRequest: the Terminal owns plain Ctrl+C
+        // as interrupt, so the callback fires and nothing is
+        // copied or typed. Ctrl+Shift+C is copy even there — the
+        // Terminal has no other copy chord (and on-device its
+        // clipboard is otherwise never filled, so paste can never
+        // work from it), and Shift is the standard modifier that
+        // keeps Ctrl+C free, as in every terminal. Without the
+        // prop it is copy (gap unit 2): the selection (whole value
+        // when collapsed).
+        if (typeof props.onInterruptRequest === "function" && !ev.shift) {
           props.onInterruptRequest();
           return true;
         }
@@ -1210,6 +1215,13 @@ function handleTextInputKey(inst, ev) {
       case 47: {
         // V — paste: replace the selection with the clipboard text.
         const text = clipboardRead();
+        if (text === "") {
+          // Diagnostic, never contents: the clipboard text is
+          // never logged (gap unit 2). On-device this line says
+          // the key reached the app but there was nothing to
+          // paste — its absence says the key never arrived.
+          Sevyn.log("paste: clipboard empty");
+        }
         if (text !== "") {
           const { start, end } = selectionRangeFor(inst);
           // A single-line input cannot hold a newline: strip it (a
