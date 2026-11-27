@@ -1031,9 +1031,16 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
              // region to the shell's own interactive rects — the
              // hit-test list just rebuilt (every Pressable and
              // TextInput; the renderer already marks exactly those
-             // with a nodeId, sevyn-renderer.js emitInstance) — plus
-             // the opaque top bar (Shell.tsx, 48px), whose only
-             // pressable is the Power button. A click on empty
+             // with a nodeId, sevyn-renderer.js emitInstance) — and
+             // nothing else. The opaque top bar (Shell.tsx, 48px)
+             // is NOT added as a whole: its only pressable, the
+             // tray Power button, is already in the hit list, and
+             // the bar's empty stretch is non-interactive chrome,
+             // so a click there falls through like a desktop click
+             // instead of raising the shell. (Adding the whole bar
+             // was the M9 top-bar failure: a click at (960,24)
+             // still reached the shell and raised it over the app
+             // window.) A click on empty
              // desktop then falls through to the window below
              // instead of raising the shell. App windows keep the
              // default whole-surface region; headless runs have no
@@ -1069,8 +1076,6 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
                  r.h = (int)std::ceil(y1) - r.y;
                  region.push_back(r);
                }
-               region.push_back(
-                   Wayland::InputRect{0, 0, wayland_->width(), 48});
                wayland_->setInputRegion(region);
              }
              if (headless_) {
