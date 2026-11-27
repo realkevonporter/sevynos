@@ -56,6 +56,39 @@ export interface PointerMoveEvent {
 export function subscribePointerMove(
   fn: (ev: PointerMoveEvent) => boolean | void,
 ): () => void;
+// Context-menu key handler (gap unit 9, audit #12). The open
+// ContextMenu (./context-menu.js) registers a handler that owns the
+// navigation keys while it is mounted; handleKey offers each pressed
+// key to it before the TextInput / focus keys. The handler receives
+// the raw key event ({key: <linux keycode>, pressed: bool, ...}) and
+// returns true when it consumed the key. Pass null (or a
+// non-function) to unregister.
+export interface ContextMenuKeyEvent {
+  key: number;
+  pressed: boolean;
+  shift?: boolean;
+  ctrl?: boolean;
+  alt?: boolean;
+  super?: boolean;
+  meta?: boolean;
+}
+export function setContextMenuKeyHandler(
+  fn: ((ev: ContextMenuKeyEvent) => boolean) | null,
+): void;
+// A view's right-click handler (gap unit 9, audit #12). The renderer
+// calls it — instead of onPress — on a right-button press on the hit
+// view, with the pointer position the menu anchors on. Views without
+// it ignore a right-click. Declared here so TSX consumers get the
+// event shape; the JSX intrinsics themselves are `any` (see
+// apps/src/jsx.d.ts and shell/src/jsx.d.ts).
+export interface ContextMenuEvent {
+  nativeEvent: {
+    x: number;
+    y: number;
+    button: number;
+  };
+}
+export type ContextMenuHandler = (ev: ContextMenuEvent) => void;
 // Surface-size store for useSyncExternalStore (the dock's
 // shrink-to-fit); the snapshot is replaced on host resize.
 export interface SurfaceSizeSnapshot {

@@ -1077,6 +1077,258 @@ check("ScrollView: a point outside it does not scroll it", () => {
 // Restore the shell tree for a clean end state.
 renderer.update(h(App));
 
+// --- Context menu (gap unit 9, audit #12) -----------------------------
+const { ContextMenu } = require("../context-menu");
+const ctxEvents = [];
+const ctxSelected = [];
+let menuOpen = false;
+function MenuApp() {
+  const [menu, setMenu] = React.useState(null);
+  menuOpen = menu !== null;
+  const items = [
+    {
+      id: "open",
+      label: "Open",
+      icon: "O",
+      onSelect: () => ctxSelected.push("open"),
+    },
+    { id: "rename", label: "Rename", onSelect: () => ctxSelected.push("rename") },
+    { id: "sep", separator: true },
+    {
+      id: "delete",
+      label: "Delete",
+      disabled: true,
+      onSelect: () => ctxSelected.push("delete"),
+    },
+    { id: "info", label: "Properties", onSelect: () => ctxSelected.push("info") },
+  ];
+  return h(
+    "View",
+    { style: { width: 1024, height: 768, backgroundColor: "#0b0b0f" } },
+    h(
+      "Pressable",
+      {
+        testID: "menu-target",
+        onPress: () => ctxEvents.push("press"),
+        onContextMenu: (ev) => {
+          ctxEvents.push("context:" + ev.nativeEvent.x + "," + ev.nativeEvent.y);
+          setMenu({ x: ev.nativeEvent.x, y: ev.nativeEvent.y });
+        },
+        style: { width: 200, height: 100, backgroundColor: "#1f2937" },
+      },
+      h("Text", { style: { fontSize: 14, color: "#fff" } }, "Target"),
+    ),
+    h(
+      "Pressable",
+      {
+        testID: "plain-target",
+        onPress: () => ctxEvents.push("plain-press"),
+        style: { width: 200, height: 100, backgroundColor: "#312e81" },
+      },
+      h("Text", { style: { fontSize: 14, color: "#fff" } }, "Plain"),
+    ),
+    menu
+      ? h(ContextMenu, {
+          x: menu.x,
+          y: menu.y,
+          items,
+          onDismiss: () => {
+            ctxEvents.push("dismiss");
+            setMenu(null);
+          },
+        })
+      : null,
+  );
+}
+
+function pressButton(x, y, button, nodeId) {
+  Sevyn._handlers.pointer({ type: "button", x, y, button, pressed: true, nodeId });
+}
+function panelRect() {
+  return lastPresent().ops.find(
+    (o) => o.type === "rect" && o.color === "#1f2937" && o.w === 220,
+  );
+}
+function highlightRect() {
+  return lastPresent().ops.find((o) => o.type === "rect" && o.color === "#3b82f6");
+}
+function overlayOp() {
+  return lastPresent().ops.find(
+    (o) => o.type === "rect" && o.color === "#00000000" && o.w === 1024,
+  );
+}
+function openMenuAt(x, y) {
+  const target = lastPresent().ops.find(
+    (o) => o.type === "rect" && o.color === "#1f2937" && o.w === 200,
+  );
+  assert.ok(target, "menu target hit op exists");
+  pressButton(x, y, 0x111, target.nodeId);
+  assert.ok(menuOpen, "menu opened");
+}
+function closeMenuIfOpen() {
+  if (menuOpen) Sevyn._handlers.key({ key: 1, pressed: true }); // Esc
+  assert.ok(!menuOpen, "menu closed");
+}
+
+renderer.update(h(MenuApp));
+
+check("context menu: right-click fires onContextMenu, not onPress", () => {
+  ctxEvents.length = 0;
+  openMenuAt(1, 1);
+  assert.ok(
+    ctxEvents.includes("context:1,1"),
+    "onContextMenu fired with the pointer position",
+  );
+  assert.ok(!ctxEvents.includes("press"), "right-click did not fire onPress");
+  const panel = panelRect();
+  assert.ok(panel, "menu panel presented");
+  assert.equal(panel.x, 1, "panel anchored at the pointer x");
+  assert.equal(panel.y, 1, "panel anchored at the pointer y");
+  assert.ok(
+    lastTexts().includes("Open") && lastTexts().includes("Properties"),
+    "menu items presented",
+  );
+  assert.ok(
+    lastPresent().ops.some(
+      (o) => o.type === "rect" && o.color === "#4b5563" && o.h === 1,
+    ),
+    "separator row presented",
+  );
+  const hl = highlightRect();
+  assert.ok(hl, "first enabled item highlighted on open");
+  assert.equal(hl.y, panel.y + 4, "highlight starts on Open");
+});
+
+check("context menu: left-click still fires onPress, opens no menu", () => {
+  closeMenuIfOpen();
+  ctxEvents.length = 0;
+  const target = lastPresent().ops.find(
+    (o) => o.type === "rect" && o.color === "#1f2937" && o.w === 200,
+  );
+  pressButton(1, 1, 1, target.nodeId);
+  assert.ok(ctxEvents.includes("press"), "left-click fired onPress");
+  assert.ok(!menuOpen, "left-click opened no menu");
+});
+
+check("context menu: right-click on a view without onContextMenu is a no-op", () => {
+  ctxEvents.length = 0;
+  const plain = lastPresent().ops.find((o) => o.type === "rect" && o.color === "#312e81");
+  assert.ok(plain, "plain target hit op exists");
+  pressButton(10, 110, 0x111, plain.nodeId);
+  assert.ok(!ctxEvents.includes("plain-press"), "no onPress from a right-click");
+  assert.ok(!menuOpen, "no menu without onContextMenu");
+});
+
+check("context menu: menu clamps to the surface", () => {
+  // 5 rows: 32 + 32 + 9 (separator) + 32 + 32 + 8 padding = 145 tall.
+  openMenuAt(1000, 750);
+  const panel = panelRect();
+  assert.equal(panel.x, 1024 - 220, "panel clamped off the right edge");
+  assert.equal(panel.y, 768 - 145, "panel clamped off the bottom edge");
+  closeMenuIfOpen();
+});
+
+check("context menu: click-away dismisses", () => {
+  openMenuAt(1, 1);
+  const overlay = overlayOp();
+  assert.ok(overlay, "click-away overlay presented");
+  ctxEvents.length = 0;
+  pressButton(10, 700, 1, overlay.nodeId);
+  assert.ok(ctxEvents.includes("dismiss"), "overlay press dismissed");
+  assert.ok(!menuOpen, "menu closed after click-away");
+  assert.ok(!panelRect(), "panel gone after dismiss");
+});
+
+check("context menu: Esc dismisses and unregisters the key handler", () => {
+  openMenuAt(1, 1);
+  ctxEvents.length = 0;
+  Sevyn._handlers.key({ key: 1, pressed: true }); // Esc
+  assert.ok(ctxEvents.includes("dismiss"), "Esc dismissed");
+  assert.ok(!menuOpen, "menu closed after Esc");
+  // No handler left behind: Down now moves focus, not a menu.
+  Sevyn._handlers.key({ key: 108, pressed: true }); // Down
+  assert.ok(!menuOpen, "no menu reopened by a stray key");
+});
+
+check("context menu: arrows skip disabled/separator, wrap, Enter activates", () => {
+  openMenuAt(1, 1);
+  const panel = panelRect();
+  assert.equal(highlightRect().y, panel.y + 4, "highlight starts on Open");
+  Sevyn._handlers.key({ key: 108, pressed: true }); // Down -> Rename
+  assert.equal(highlightRect().y, panel.y + 4 + 32, "Down moved to Rename");
+  Sevyn._handlers.key({ key: 108, pressed: true }); // Down skips sep + disabled
+  assert.equal(
+    highlightRect().y,
+    panel.y + 4 + 32 + 32 + 9 + 32,
+    "Down skipped the separator and the disabled Delete",
+  );
+  Sevyn._handlers.key({ key: 108, pressed: true }); // Down wraps to Open
+  assert.equal(highlightRect().y, panel.y + 4, "Down wrapped to Open");
+  Sevyn._handlers.key({ key: 103, pressed: true }); // Up wraps to Properties
+  assert.equal(
+    highlightRect().y,
+    panel.y + 4 + 32 + 32 + 9 + 32,
+    "Up wrapped to Properties",
+  );
+  ctxSelected.length = 0;
+  ctxEvents.length = 0;
+  Sevyn._handlers.key({ key: 28, pressed: true }); // Enter
+  assert.ok(ctxSelected.includes("info"), "Enter selected Properties");
+  assert.ok(ctxEvents.includes("dismiss"), "selection dismissed the menu");
+  assert.ok(!menuOpen, "menu closed after selection");
+});
+
+check("context menu: clicking a disabled row does nothing", () => {
+  openMenuAt(1, 1);
+  const panel = panelRect();
+  // Delete row: after Open (32) + Rename (32) + separator (9), at
+  // panel top + 4 padding + 73.
+  const disabled = lastPresent().ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.color === "#00000000" &&
+      o.w === 212 &&
+      o.y === panel.y + 4 + 73,
+  );
+  assert.ok(disabled, "disabled row hit op exists");
+  ctxSelected.length = 0;
+  pressButton(disabled.x + 1, disabled.y + 1, 1, disabled.nodeId);
+  assert.equal(ctxSelected.length, 0, "disabled row selected nothing");
+  assert.ok(menuOpen, "menu stayed open after a disabled click");
+  closeMenuIfOpen();
+});
+
+check("context menu: clicking an enabled row selects and dismisses", () => {
+  openMenuAt(1, 1);
+  const panel = panelRect();
+  const rename = lastPresent().ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.color === "#00000000" &&
+      o.w === 212 &&
+      o.y === panel.y + 4 + 32,
+  );
+  assert.ok(rename, "Rename row hit op exists");
+  ctxSelected.length = 0;
+  ctxEvents.length = 0;
+  pressButton(rename.x + 1, rename.y + 1, 1, rename.nodeId);
+  assert.ok(ctxSelected.includes("rename"), "row click selected Rename");
+  assert.ok(ctxEvents.includes("dismiss"), "row click dismissed the menu");
+  assert.ok(!menuOpen, "menu closed after row click");
+});
+
+check("context menu: right-click outside the panel dismisses", () => {
+  openMenuAt(1, 1);
+  const overlay = overlayOp();
+  ctxEvents.length = 0;
+  pressButton(10, 700, 0x111, overlay.nodeId);
+  assert.ok(ctxEvents.includes("dismiss"), "right-click-away dismissed");
+  assert.ok(!menuOpen, "menu closed after right-click-away");
+});
+
+// Restore the shell tree for a clean end state.
+renderer.update(h(App));
+
 // --- App store: first-boot race (M9) -----------------------------------
 // appd seeds the registry before its socket listens, so the shell's
 // first listApps() can return [] while appd is still seeding. The
