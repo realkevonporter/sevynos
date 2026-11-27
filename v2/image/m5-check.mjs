@@ -1395,8 +1395,19 @@ function findTitlePeekPoint(known, img, W, H) {
       if (!m && s >= 0) {
         const len = x - s;
         const cx = Math.round((s + x - 1) / 2);
+        // Round 10 (M5 run 45870060146): the visible title sliver
+        // can be as narrow as 11px — the Browser window's left edge
+        // (x122) leaves only x103-113 of exact #111827, the rest
+        // fading through an ~8px edge gradient — so a 20px minimum
+        // misses it and the raise never runs. 8px keeps the run well
+        // above single-pixel noise while tol=2 still excludes the
+        // wallpaper gradient (blue off by 3); the scan is confined
+        // to the known Terminal rect, and a full-band scan of the
+        // crash frame shows the 11px sliver is the ONLY run >=6px
+        // in the band, so the only exact-#111827 surface here is
+        // the Terminal header itself.
         if (
-          len >= 20 &&
+          len >= 8 &&
           cx < known.right - 120 &&
           (!best ||
             len > best.len ||
