@@ -1326,6 +1326,99 @@ check("context menu: right-click outside the panel dismisses", () => {
   assert.ok(!menuOpen, "menu closed after right-click-away");
 });
 
+// --- View hit rect for onContextMenu (gap unit 11, audit #14) --------
+// A plain View has the same no-hit-rect shape as a ScrollView: only
+// Pressable / onPress views emit one. A View that declares
+// onContextMenu must emit a hit rect — transparent when it has no
+// background, carrying its yogaId on the background rect when it has
+// one — so a right-click on empty desktop space reaches it; a View
+// without onContextMenu must still emit none.
+const viewMenuEvents = [];
+function ViewMenuApp() {
+  return h(
+    "View",
+    { style: { width: 1024, height: 768, backgroundColor: "#0b0b0f" } },
+    h("View", {
+      testID: "bare-view",
+      onContextMenu: (ev) => {
+        viewMenuEvents.push("context:" + ev.nativeEvent.x + "," + ev.nativeEvent.y);
+      },
+      style: { width: 200, height: 100 },
+    }),
+    h("View", {
+      testID: "plain-view",
+      style: { width: 200, height: 100 },
+    }),
+    h("View", {
+      testID: "painted-view",
+      onContextMenu: (ev) => {
+        viewMenuEvents.push("painted:" + ev.nativeEvent.x + "," + ev.nativeEvent.y);
+      },
+      style: { width: 200, height: 100, backgroundColor: "#312e81" },
+    }),
+  );
+}
+
+renderer.update(h(ViewMenuApp));
+
+check("context menu: a plain View with onContextMenu emits a hit rect", () => {
+  const ops = lastPresent().ops;
+  // No background, so the rect is transparent — but it carries a
+  // nodeId, which is what makes the right-click dispatch.
+  const bare = ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.color === "#00000000" &&
+      o.w === 200 &&
+      o.h === 100 &&
+      o.y === 0 &&
+      o.nodeId != null &&
+      o.nodeId >= 0,
+  );
+  assert.ok(bare, "bare View hit rect exists");
+  // The sibling View without onContextMenu emits nothing: no hit op
+  // covers its centre (10, 150).
+  const plainHit = ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      10 >= o.x &&
+      10 < o.x + o.w &&
+      150 >= o.y &&
+      150 < o.y + o.h,
+  );
+  assert.equal(plainHit, undefined, "plain View emits no hit rect");
+  // The root background rect still carries nodeId -1: no
+  // onContextMenu, no change.
+  const root = ops.find((o) => o.type === "rect" && o.color === "#0b0b0f");
+  assert.ok(root, "root rect exists");
+  assert.equal(root.nodeId, -1, "root View without onContextMenu stays unhittable");
+  // Right-clicking the bare View fires onContextMenu, not onPress.
+  viewMenuEvents.length = 0;
+  pressButton(10, 10, 0x111, bare.nodeId);
+  assert.ok(
+    viewMenuEvents.includes("context:10,10"),
+    "bare View onContextMenu fired with the pointer position",
+  );
+  // And a View with a background carries its yogaId on that rect.
+  const painted = ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.color === "#312e81" &&
+      o.w === 200 &&
+      o.h === 100 &&
+      o.nodeId != null &&
+      o.nodeId >= 0,
+  );
+  assert.ok(painted, "painted View hit rect exists");
+  pressButton(10, 210, 0x111, painted.nodeId);
+  assert.ok(
+    viewMenuEvents.includes("painted:10,210"),
+    "painted View onContextMenu fired with the pointer position",
+  );
+});
+
 // Restore the shell tree for a clean end state.
 renderer.update(h(App));
 

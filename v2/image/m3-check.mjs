@@ -590,21 +590,18 @@ async function main() {
   // keyboard focus at boot but no activation until a pointer button
   // press lands on it, so click the main area first (it has no
   // pressable, so nothing launches and focus stays unset).
-  // Tab FOUR times: the renderer's focus list is the tree order, and
-  // the tray POWER button is focusable list[0] (shutdown fix) — the
-  // shell's two desktop actions ("New folder", "New text file") sit
-  // before the dock, so the Browser tile is list[3], not list[1].
-  // One Tab + Enter would land on the power button; two would land
-  // on "New folder" and launch Files.
+  // Tab TWICE: the renderer's focus list is the tree order, and the
+  // tray POWER button is focusable list[0] (shutdown fix) — the
+  // shell's two desktop actions ("New folder", "New text file") used
+  // to sit before the dock, so the Browser tile was list[3]; they
+  // moved into the desktop right-click menu (gap unit 11), so the
+  // Browser tile is list[1] now. One Tab + Enter would land on the
+  // power button; three would overshoot to the second tile.
   {
     const before = logLines().length;
     await moveTo(512, 300, W, H); // main area (welcome text), no pressable
     await sleep(300);
     await click();
-    await sleep(300);
-    await key("tab");
-    await sleep(300);
-    await key("tab");
     await sleep(300);
     await key("tab");
     await sleep(300);
