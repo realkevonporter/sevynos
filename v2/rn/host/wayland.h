@@ -119,9 +119,11 @@ class Wayland {
   // (Weston 13) the shell is a fullscreen xdg_toplevel, so any
   // pointer hit on it raises it above the app windows. The shell
   // host calls this on every present with the shell's interactive
-  // rects (its Pressables + TextInputs, plus the opaque top bar), so
-  // a click on empty desktop falls through to the window below
-  // instead of raising the shell. App windows never call it — their
+  // rects (its Pressables + TextInputs only — the opaque top bar
+  // is NOT added as a whole, only its own pressables such as the
+  // tray Power button are in the list), so a click on empty
+  // desktop or on the bar's empty stretch falls through to the
+  // window below instead of raising the shell. App windows never call it — their
   // region stays the whole surface. A no-op when the rects are
   // unchanged since the last call (presents run every frame); an
   // empty list leaves the region untouched. No commit here: the

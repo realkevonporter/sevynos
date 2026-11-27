@@ -24,25 +24,30 @@
 //      Terminal up and idle, <= 200 MB (from the GENESIS RSS console
 //      line — see the builder contract below).
 //   4. Pointer/keyboard routing: the pointer focus token follows
-//      the pointer between the Shell top bar and the Terminal window
+//      the pointer between the Shell and the Terminal window
 //      (two distinct surfaces: the shell layer reports
 //      `layer=sevyn-shell`, the Terminal its registry id). The
-//      Shell point must lie OUTSIDE the Terminal window — the first
-//      window is placed at (0,0) 800x500, so it covers the top bar's
-//      left half; a point inside the window is on the Terminal, not
-//      the shell. Clicks and keys land on the surface under the
-//      pointer (SEVYN POINTER BUTTON / SEVYN KEY with the matching
-//      focus); a key over the shell reports focus=(none) (the KEY
-//      marker only prints the numeric registry id, which is None
-//      for layer focus). Typing `net status` in the Terminal
-//      produces its EXEC line (the prompt already supplies the
-//      `sevyn` prefix — typing it doubles it and the command fails).
+//      Shell point is the AI button (a Pressable, so inside the
+//      shell surface's input region); the bare top bar is the
+//      opposite case — the host deliberately leaves it out of
+//      the region (#179), so a point on the bar's empty stretch
+//      hits no surface at all and is asserted as fall-through
+//      (no POINTER FOCUS, click reaches (none)). Clicks and keys
+//      land on the surface under the pointer (SEVYN POINTER
+//      BUTTON / SEVYN KEY with the matching focus); a key over
+//      the shell reports focus=(none) (the KEY marker only
+//      prints the numeric registry id, which is None for layer
+//      focus). Typing `net status` in the Terminal produces its
+//      EXEC line (the prompt already supplies the `sevyn`
+//      prefix — typing it doubles it and the command fails).
 //   5. Focus + close: clicking the Terminal moves keyboard focus to
-//      it (SEVYN FOCUS KEYBOARD); appd CLOSE ends its session
-//      (SEVYN SESSION STOPPED reason=disconnected — appd only
-//      SIGTERMs the app, so Genesis drops the record on client
-//      disconnect, never reason=closed), its window leaves the
-//      screen, and the Shell survives.
+//      it (SEVYN FOCUS KEYBOARD); keyboard focus is moved to the
+//      Shell first, so the click is a real change and the marker
+//      must fire — it only fires on change. appd CLOSE ends its
+//      session (SEVYN SESSION STOPPED reason=disconnected — appd
+//      only SIGTERMs the app, so Genesis drops the record on
+//      client disconnect, never reason=closed), its window leaves
+//      the screen, and the Shell survives.
 //   6. Move/resize follow: dragging the Terminal title bar moves
 //      its window (measured header rect before/after, dragged back
 //      after); dragging its right edge resizes it (header width +
@@ -1179,21 +1184,37 @@ async function main() {
   );
 
   // 1e. Pointer/keyboard routing: the focus token follows the
-  // pointer between the Shell top bar and the Terminal window, and
-  // clicks + keys land on the surface under the pointer.
+  // pointer between the Shell and the Terminal window, and clicks
+  // + keys land on the surface under the pointer.
   //
-  // The Terminal window covers the top bar's left half (it is
-  // placed at (0,0) 800x500), so the Shell point must lie OUTSIDE
-  // the window — right of its right edge, still on the top bar.
-  // The old midpoint point (W/2, 12) is inside the window, so both
-  // points were on surface 1 and the "two distinct surfaces"
-  // premise was impossible. Focus ids are tokens, not numbers: a
-  // toplevel reports its registry id ("1"), the shell layer reports
-  // "layer=sevyn-shell". A key over the shell reports
-  // focus=(none) — the KEY marker only prints the numeric registry
-  // id, which is None for layer focus (input.rs keyboard_key) —
-  // so the shell key expectation is "(none)", not the layer token.
-  const shellPt =
+  // The Shell point is the AI button, bottom-right (AiButton.tsx:
+  // 56px disc, right:16, bottom:16 — centre W-44, H-44). It is a
+  // Pressable, so it is inside the shell surface's input region —
+  // the host builds that region from Pressables + TextInputs only
+  // (#179: the bare top bar is deliberately NOT in it, so a point
+  // on the bar's empty stretch hits no surface at all). The old
+  // shell point (termRect.right + 100, y=12) was exactly that
+  // bare chrome, so the "Shell top bar is a focusable surface"
+  // premise was false and the focus/click/key assertions on it
+  // could never pass. The top-bar point is kept here as a
+  // fall-through assertion instead: no surface, by design. A
+  // desktop icon would be the other interactive Shell point, but
+  // /data/Desktop is not seeded in this image, so no icon exists
+  // to point at; the dock tiles all launch apps, and the tray
+  // Power button opens the power menu (whose fullscreen backdrop
+  // would swallow the next click) — the AI button is the only
+  // Shell Pressable whose click is harmless here. Its click opens
+  // the AI sidebar; the sidebar is closed again before the
+  // Terminal assertions, so the desktop is restored for the EXEC
+  // / move / resize steps. Focus ids are tokens, not numbers: a
+  // toplevel reports its registry id ("1"), the shell layer
+  // reports "layer=sevyn-shell". A key over the shell reports
+  // focus=(none) — the KEY marker only prints the numeric
+  // registry id, which is None for layer focus (input.rs
+  // keyboard_key) — so the shell key expectation is "(none)",
+  // not the layer token.
+  const shellPt = { x: W - 44, y: H - 44 };
+  const topBarPt =
     termRect.right + 100 < W - 20
       ? { x: termRect.right + 100, y: 12 }
       : { x: Math.floor(W / 2), y: termRect.bottom + 100 };
@@ -1201,6 +1222,20 @@ async function main() {
     x: termRect.left + 200,
     y: termRect.top + Math.min(100, Math.max(50, termH - 50)),
   };
+  // Guard: the AI button really is the violet disc at shellPt.
+  // The disc is #5B5BD6; the pixel 22px above the centre is
+  // inside the disc (radius 28) and clear of the white "AI"
+  // monogram. If the dock ever grows over the button, this fails
+  // loudly here instead of producing a confusing focus failure.
+  const AI_BUTTON_RGB = [91, 91, 214];
+  {
+    const guardFrame = await shot(b.qmp, join(OUT, "genesis-shot-shell-point.ppm"));
+    check(
+      "input: AI button visible at the Shell point (violet disc)",
+      pixelMatches(guardFrame, shellPt.x, shellPt.y - 22, ...AI_BUTTON_RGB),
+      `no violet pixel at (${shellPt.x}, ${shellPt.y - 22}) — the dock may cover the button`,
+    );
+  }
   const focusAfterMove = async (pt) => {
     const before = logLines(b.logPath).length;
     await moveTo(pt.x, pt.y, W, H);
@@ -1226,17 +1261,29 @@ async function main() {
     }
     return line ? line.match(/surface=(\S+)/)[1] : null;
   };
-  const shellFocus = await focusAfterMove(shellPt);
+  // Fresh-marker variant, no fallback to the last marker: the
+  // fall-through point must produce NO new marker at all, and the
+  // fallback would hand back the previous surface's marker.
+  const freshFocusAfterMove = async (pt) => {
+    const before = logLines(b.logPath).length;
+    await moveTo(pt.x, pt.y, W, H);
+    await sleep(500);
+    const line = await waitForLog(
+      b.logPath,
+      /SEVYN POINTER FOCUS surface=(\S+)/,
+      10000,
+      before,
+    );
+    return line ? line.match(/surface=(\S+)/)[1] : null;
+  };
+  // Fall-through first, while pointer focus has never been set:
+  // the bare top bar hits no surface (the #179 design), so no
+  // POINTER FOCUS marker may fire and the click reports (none).
+  const topBarFocus = await freshFocusAfterMove(topBarPt);
   check(
-    "input: pointer over the Shell top bar focuses the Shell layer",
-    shellFocus === "layer=sevyn-shell",
-    shellFocus === null ? "no POINTER FOCUS" : `surface=${shellFocus}`,
-  );
-  const termFocus = await focusAfterMove(termPt);
-  check(
-    "input: pointer over the Terminal focuses a different surface",
-    termFocus !== null && termFocus !== shellFocus,
-    `shell surface=${shellFocus}, terminal surface=${termFocus}`,
+    "input: pointer over the bare top bar focuses no surface (fall-through)",
+    topBarFocus === null,
+    topBarFocus === null ? "" : `surface=${topBarFocus}`,
   );
   const clickReaches = async (pt) => {
     const before = logLines(b.logPath).length;
@@ -1251,17 +1298,23 @@ async function main() {
     );
     return line ? line.match(/surface=(\S+)/)[1] : null;
   };
+  const topBarClick = await clickReaches(topBarPt);
+  check(
+    "input: click on the bare top bar reaches no surface (fall-through)",
+    topBarClick === "(none)",
+    `button surface=${topBarClick}, expected (none)`,
+  );
+  const shellFocus = await focusAfterMove(shellPt);
+  check(
+    "input: pointer over the AI button focuses the Shell layer",
+    shellFocus === "layer=sevyn-shell",
+    shellFocus === null ? "no POINTER FOCUS" : `surface=${shellFocus}`,
+  );
   const shellClick = await clickReaches(shellPt);
   check(
-    "input: click on the Shell top bar reaches the Shell surface",
+    "input: click on the AI button reaches the Shell surface",
     shellClick === shellFocus,
     `button surface=${shellClick}, expected ${shellFocus}`,
-  );
-  const termClick = await clickReaches(termPt);
-  check(
-    "input: click in the Terminal reaches the Terminal surface",
-    termClick === termFocus,
-    `button surface=${termClick}, expected ${termFocus}`,
   );
   const keyReaches = async (pt, qcode) => {
     const before = logLines(b.logPath).length;
@@ -1278,19 +1331,64 @@ async function main() {
     );
     return line ? line.match(/focus=(\S+)/)[1] : null;
   };
-  const shellKey = await keyReaches(shellPt, "a");
+  // The AI-button click opened the sidebar, and the pointer is
+  // still over it — but the button hid, so the point is now over
+  // the sidebar's input row. Do not move or click again: keyboard
+  // focus is already the layer (the button press moved it), so
+  // type in place and read where the key lands.
+  const keyAtFocus = async (qcode) => {
+    const before = logLines(b.logPath).length;
+    await key(qcode);
+    const line = await waitForLog(
+      b.logPath,
+      /SEVYN KEY .* state=pressed focus=(\S+)/,
+      10000,
+      before,
+    );
+    return line ? line.match(/focus=(\S+)/)[1] : null;
+  };
+  const shellKey = await keyAtFocus("a");
   check(
     "input: key 'a' over the Shell reaches the Shell (not the Terminal)",
     shellKey === "(none)",
     `key focus=${shellKey}, expected (none) — layer focus has no registry id`,
   );
-  const termKey = await keyReaches(termPt, "b");
+  // Close the sidebar to restore the desktop: its Close button is
+  // the right-most item in the 48px header (right padding 12),
+  // vertically centred — x W-28, y 72. The click is a press on
+  // the shell surface, so keyboard focus stays on the layer.
+  // Verify by the AI button's violet coming back at shellPt.
+  {
+    const closePt = { x: W - 28, y: 72 };
+    await moveTo(closePt.x, closePt.y, W, H);
+    await sleep(300);
+    await click();
+    await sleep(500);
+    const closedFrame = await shot(b.qmp, join(OUT, "genesis-shot-shell-closed.ppm"));
+    check(
+      "input: AI sidebar closes again (AI button back)",
+      pixelMatches(closedFrame, shellPt.x, shellPt.y - 22, ...AI_BUTTON_RGB),
+      "no violet pixel after closing — the sidebar may still be open",
+    );
+  }
+  const termFocus = await focusAfterMove(termPt);
   check(
-    "input: key 'b' in the Terminal reaches the Terminal surface",
-    termKey === termFocus,
-    `key focus=${termKey}, expected ${termFocus}`,
+    "input: pointer over the Terminal focuses a different surface",
+    termFocus !== null && termFocus !== shellFocus,
+    `shell surface=${shellFocus}, terminal surface=${termFocus}`,
+  );
+  const termClick = await clickReaches(termPt);
+  check(
+    "input: click in the Terminal reaches the Terminal surface",
+    termClick === termFocus,
+    `button surface=${termClick}, expected ${termFocus}`,
   );
   // Focus: clicking the Terminal moves keyboard focus to it.
+  // Keyboard focus is on the Shell layer now (the sidebar-close
+  // press kept it there), so this click is a real focus change
+  // and the marker must fire — the old block waited for a change
+  // marker while focus was already on the Terminal, which can
+  // never fire (set_keyboard_focus early-returns unchanged).
   const focusLine = await (async () => {
     const before = logLines(b.logPath).length;
     await moveTo(termPt.x, termPt.y, W, H);
@@ -1307,6 +1405,12 @@ async function main() {
     "focus: clicking the Terminal moves keyboard focus to it",
     !!focusLine,
     focusLine ? "" : `no FOCUS KEYBOARD surface=${termFocus}`,
+  );
+  const termKey = await keyReaches(termPt, "b");
+  check(
+    "input: key 'b' in the Terminal reaches the Terminal surface",
+    termKey === termFocus,
+    `key focus=${termKey}, expected ${termFocus}`,
   );
 
   // The Terminal really got the keys: type a sevyn command into its
