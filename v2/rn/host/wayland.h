@@ -95,6 +95,8 @@ class Wayland {
   bool ok() const { return ok_; }
   int width() const { return width_; }
   int height() const { return height_; }
+  // True for the fullscreen shell surface (false for app windows).
+  bool isFullscreen() const { return fullscreen_; }
 
   // Painter used for text measurement (fonts are shared by both buffers).
   Painter& painter() { return *painters_[0]; }
@@ -103,6 +105,28 @@ class Wayland {
   // are busy, the frame is remembered and presented on the next frame
   // callback or buffer release instead.
   void present(const std::vector<DrawOp>& ops, uint32_t bg);
+
+  // One input-region rect, in surface pixels.
+  struct InputRect {
+    int x, y, w, h;
+    bool operator==(const InputRect& o) const {
+      return x == o.x && y == o.y && w == o.w && h == o.h;
+    }
+  };
+
+  // Restrict this surface's pointer input region to `rects`
+  // (window-raise fix, #158 follow-up): with no layer-shell global
+  // (Weston 13) the shell is a fullscreen xdg_toplevel, so any
+  // pointer hit on it raises it above the app windows. The shell
+  // host calls this on every present with the shell's interactive
+  // rects (its Pressables + TextInputs, plus the opaque top bar), so
+  // a click on empty desktop falls through to the window below
+  // instead of raising the shell. App windows never call it — their
+  // region stays the whole surface. A no-op when the rects are
+  // unchanged since the last call (presents run every frame); an
+  // empty list leaves the region untouched. No commit here: the
+  // caller's present commits the surface in the same frame.
+  void setInputRegion(const std::vector<InputRect>& rects);
 
   // Non-blocking dispatch round. Returns false if the display is gone.
   bool dispatch(int timeoutMs);
@@ -175,6 +199,12 @@ class Wayland {
   // fullscreen xdg_toplevel otherwise; app windows always use the
   // toplevel path.
   void createSurface();
+
+  // Input-region plumbing for setInputRegion (see above): applies
+  // `rects` to the current surface, clamping each rect to the
+  // surface and dropping zero-area ones. A no-op on an empty list
+  // (the region stays as it was) and without a surface/compositor.
+  void applyInputRegion(const std::vector<InputRect>& rects);
 
   // Text clipboard (gap unit 2): bind the seat's data device once
   // both the manager global and the seat exist. A no-op when either
@@ -306,6 +336,11 @@ class Wayland {
 
   int width_, height_;
   bool fullscreen_;
+  // Last input region applied by setInputRegion (empty until the
+  // first present): re-applied when the surface is recreated, and
+  // compared against so a present that changes nothing re-applies
+  // nothing. Only ever non-empty for the shell surface.
+  std::vector<InputRect> lastInputRects_;
   std::string title_;
   std::string appId_;
   bool ok_ = false;

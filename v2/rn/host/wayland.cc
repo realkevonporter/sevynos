@@ -1,6 +1,7 @@
 // SevynOS v2 M3 — Wayland client (see wayland.h).
 #include "wayland.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <poll.h>
@@ -127,6 +128,10 @@ void Wayland::createSurface() {
       wl_surface_commit(surface_);
       // Collect the initial configure before the caller presents.
       wl_display_roundtrip(display_);
+      // A recreated surface starts with the default (whole-surface)
+      // input region — restore the restricted one, if a present has
+      // already stored it (a no-op on first construction).
+      applyInputRegion(lastInputRects_);
       return;
     }
     // get_layer_surface only fails on OOM/protocol error; fall back
@@ -145,6 +150,44 @@ void Wayland::createSurface() {
   wl_surface_commit(surface_);
   // Collect the initial configure before the caller presents.
   wl_display_roundtrip(display_);
+  // As in the layer branch above: restore the restricted input
+  // region on a recreated surface (a no-op on first construction).
+  applyInputRegion(lastInputRects_);
+}
+
+// Window-raise fix: restrict the surface's pointer input region to
+// the shell's interactive rects (see wayland.h). The region is set
+// with wl_surface_set_input_region — core Wayland, honored by
+// Weston 13 and by Genesis alike — and takes effect with the
+// present's commit in the same frame, so no extra commit is needed
+// here. The compositor copies the region on set, so the wl_region
+// is destroyed right after.
+void Wayland::setInputRegion(const std::vector<InputRect>& rects) {
+  if (!surface_ || !compositor_)
+    return;
+  if (rects == lastInputRects_)
+    return;
+  applyInputRegion(rects);
+  lastInputRects_ = rects;
+}
+
+void Wayland::applyInputRegion(const std::vector<InputRect>& rects) {
+  if (!surface_ || !compositor_ || rects.empty())
+    return;
+  wl_region* region = wl_compositor_create_region(compositor_);
+  if (!region)
+    return;
+  for (const auto& r : rects) {
+    int x = std::max(0, r.x);
+    int y = std::max(0, r.y);
+    int w = std::min(r.w, width_ - x);
+    int h = std::min(r.h, height_ - y);
+    if (w <= 0 || h <= 0)
+      continue;
+    wl_region_add(region, x, y, w, h);
+  }
+  wl_surface_set_input_region(surface_, region);
+  wl_region_destroy(region);
 }
 
 void Wayland::remap() {
