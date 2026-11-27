@@ -33,6 +33,7 @@ import os
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -882,6 +883,103 @@ def main():
         check("SIGHUP restores the standard grant", wait_for(
             "sighup reload back",
             lambda: reloads(4) > before))
+
+        # 14k. TLS CA bundle: the backend verifies the Model API
+        #     against the CA bundle loaded EXPLICITLY (the updater's
+        #     pattern). On-device 2026-11-27 the backend loaded the
+        #     bundle from OpenSSL's default paths, which do not exist
+        #     in the image, so every handshake failed. The fake API
+        #     is served over TLS from a local server with a cert from
+        #     a test CA; SEVYN_AI_CA_BUNDLE points at that CA.
+        assert shutil.which("openssl"), "openssl missing (test needs it)"
+
+        def make_tls_certs(tag):
+            """CA + server cert (SAN IP:127.0.0.1) via the openssl CLI."""
+            d = tmp / f"tls-{tag}"
+            d.mkdir()
+
+            def run_openssl(*args):
+                r = subprocess.run(["openssl", *args], capture_output=True,
+                                   text=True)
+                assert r.returncode == 0, \
+                    f"openssl {' '.join(args[:2])} failed: {r.stderr}"
+
+            run_openssl("req", "-x509", "-newkey", "rsa:2048",
+                        "-keyout", str(d / "ca.key"), "-out", str(d / "ca.crt"),
+                        "-days", "2", "-nodes", "-subj", "/CN=sevyn-test-ca")
+            run_openssl("req", "-newkey", "rsa:2048",
+                        "-keyout", str(d / "server.key"),
+                        "-out", str(d / "server.csr"), "-nodes",
+                        "-subj", "/CN=127.0.0.1")
+            (d / "san.cnf").write_text("subjectAltName=IP:127.0.0.1\n")
+            run_openssl("x509", "-req", "-in", str(d / "server.csr"),
+                        "-CA", str(d / "ca.crt"), "-CAkey", str(d / "ca.key"),
+                        "-CAcreateserial", "-out", str(d / "server.crt"),
+                        "-days", "2", "-extfile", str(d / "san.cnf"))
+            return d / "ca.crt", d / "server.crt", d / "server.key"
+
+        def tls_api(cert, key):
+            """The fake Muse API served over TLS (same handler)."""
+            api = FakeMuseAPI()
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(str(cert), str(key))
+            api.server.socket = ctx.wrap_socket(api.server.socket,
+                                                server_side=True)
+            api.start()
+            return api
+
+        def muse_tls_direct(env_extra):
+            return subprocess.run(
+                [str(muse_bin)], input="hello\n", capture_output=True,
+                text=True,
+                env={**os.environ,
+                     "SEVYN_AI_KEY_FILE": str(key_file),
+                     **env_extra},
+                timeout=15)
+
+        good_ca, good_crt, good_key = make_tls_certs("good")
+        tls_good = tls_api(good_crt, good_key)
+        tls_url = f"https://127.0.0.1:{tls_good.port}/v1"
+        # 14k-a. Good CA: the handshake verifies against the
+        #     explicitly-loaded bundle and the model call succeeds.
+        #     (With the old default-paths load this fails: the test
+        #     CA is in no default location.)
+        tls_good.set_scenario([resp_tool_calls(
+            [("call_1", "launch", {"id": "files"})])])
+        ok = muse_tls_direct({"MUSE_API_BASE": tls_url,
+                              "SEVYN_AI_CA_BUNDLE": str(good_ca)})
+        check("muse-ai TLS, good CA -> LAUNCH + END",
+              "LAUNCH files" in ok.stdout and
+              ok.stdout.strip().endswith("END"), ok.stdout)
+        check("muse-ai TLS, good CA -> API saw the request",
+              len(tls_good.requests) == 1)
+        # 14k-b. Wrong CA: the server's cert is from another CA, so
+        #     verification fails — fail-closed, no actions.
+        bad_ca, bad_crt, bad_key = make_tls_certs("bad")
+        tls_bad = tls_api(bad_crt, bad_key)
+        bad_url = f"https://127.0.0.1:{tls_bad.port}/v1"
+        tls_bad.set_scenario([resp_tool_calls(
+            [("call_1", "launch", {"id": "files"})])])
+        refused = muse_tls_direct({"MUSE_API_BASE": bad_url,
+                                   "SEVYN_AI_CA_BUNDLE": str(good_ca)})
+        check("muse-ai TLS, wrong CA -> handshake fails, no actions",
+              "ERR Muse API unreachable: TLS handshake failed"
+              in refused.stdout and
+              refused.stdout.strip().endswith("END") and
+              "LAUNCH" not in refused.stdout, refused.stdout)
+        check("muse-ai TLS, wrong CA -> no API request seen",
+              len(tls_bad.requests) == 0)
+        tls_bad.stop()
+        # 14k-c. Missing bundle: the explicit load fails closed.
+        missing = muse_tls_direct(
+            {"MUSE_API_BASE": tls_url,
+             "SEVYN_AI_CA_BUNDLE": str(tmp / "no-such-ca.crt")})
+        check("muse-ai TLS, missing CA bundle -> clear ERR + END",
+              "ERR Muse API unreachable: cannot load CA bundle"
+              in missing.stdout and
+              missing.stdout.strip().endswith("END") and
+              "LAUNCH" not in missing.stdout, missing.stdout)
+        tls_good.stop()
 
         # 15. P1: WRITE (+ .sevyn-bak undo), UPDATE, session
         #     protocol. The widened grant names file.write +
