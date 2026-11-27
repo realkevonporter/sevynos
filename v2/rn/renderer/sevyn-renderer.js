@@ -34,7 +34,7 @@
 // in gap unit 3, audit #9/#24): a controlled input, single-line by
 // default. Props: value, onChangeText, onSubmitEditing, placeholder,
 // autoFocus, multiline, secureTextEntry, onSelectionChange, selection,
-// onFindRequest, onSaveRequest, onEscape. The focused input eats printable keys (US
+// onFindRequest, onSaveRequest, onInterruptRequest, onEscape. The focused input eats printable keys (US
 // keycode map below, Shift-aware), Backspace, Delete, and Enter (submit
 // — or a newline when multiline); Tab moves focus, Escape blurs (or
 // calls onEscape when the input has one — the app owns Escape then).
@@ -48,7 +48,10 @@
 // Backspace/Delete/typing replace it. Copy/paste/cut (gap unit 2):
 // Ctrl+C/X/V through the host clipboard (Sevyn.clipboardRead/Write),
 // operating on the selection — a collapsed selection copies/cuts the
-// whole value. A Ctrl+letter that is not C/X/V/A/Z/Y/F/S is swallowed,
+// whole value. An input with onInterruptRequest owns Ctrl+C instead
+// (gap unit 8): the Terminal's prompt — Ctrl+C is interrupt there,
+// not copy, so the callback fires and nothing is copied or typed.
+// A Ctrl+letter that is not C/X/V/A/Z/Y/F/S is swallowed,
 // never typed.
 //
 // Save (gap unit 6, audit #7): Ctrl+S on an input with
@@ -1077,7 +1080,9 @@ const KEYMAP = {
 // (gap unit 4); Ctrl+F calls props.onFindRequest when the input has
 // one (gap unit 5 — the app opens its find field); Ctrl+S calls
 // props.onSaveRequest when the input has one (gap unit 6 — the app
-// saves); any other Ctrl+printable is swallowed, never typed.
+// saves); Ctrl+C calls props.onInterruptRequest when the input has
+// one (gap unit 8 — the Terminal owns Ctrl+C as interrupt, not copy);
+// any other Ctrl+printable is swallowed, never typed.
 function handleTextInputKey(inst, ev) {
   const props = inst.props || {};
   const value = textInputValue(inst);
@@ -1139,7 +1144,15 @@ function handleTextInputKey(inst, ev) {
       case 21: // Y — redo.
         redoEdit(inst);
         return true;
-      case 46: // C — copy the selection (whole value when collapsed).
+      case 46: // C — interrupt (gap unit 8) when the input opts in
+        // with onInterruptRequest: the Terminal owns Ctrl+C as
+        // interrupt, so the callback fires and nothing is copied
+        // or typed. Without the prop it is copy (gap unit 2):
+        // the selection (whole value when collapsed).
+        if (typeof props.onInterruptRequest === "function") {
+          props.onInterruptRequest();
+          return true;
+        }
         clipboardWrite(selectionTextFor(inst));
         return true;
       case 45: {

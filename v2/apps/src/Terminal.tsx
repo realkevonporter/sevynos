@@ -69,6 +69,7 @@ const HELP_LINES: string[] = [
   "  sevyn browser status        Chromium + CDP + tab count",
   "  sevyn net status            link, address, gateway, DNS",
   "  sevyn net dns <host>        resolve a name",
+  "  Ctrl+C                      cancel the line you are typing",
   "",
   "Type a command below and press Enter.",
 ];
@@ -218,10 +219,7 @@ export function Terminal(): React.ReactElement {
     // scrollTo would clamp against the stale one). scrollTo clamps,
     // so a huge Y lands exactly at the bottom. Scheduled here so
     // even an empty command (echo only) scrolls.
-    setTimeout(() => {
-      const inst = scrollRef.current;
-      if (inst) scrollTo(inst, 0, 1000000);
-    }, 0);
+    scrollToBottom();
     if (!trimmed) return;
     const { out } = runCli("sevyn " + trimmed);
     const outLines = out.split("\n");
@@ -229,6 +227,31 @@ export function Terminal(): React.ReactElement {
     if (outLines.length > 0 && outLines[outLines.length - 1] === "") outLines.pop();
     append(outLines);
     logMarkers(trimmed, out);
+  }
+
+  function scrollToBottom(): void {
+    setTimeout(() => {
+      const inst = scrollRef.current;
+      if (inst) scrollTo(inst, 0, 1000000);
+    }, 0);
+  }
+
+  // Ctrl+C — line-cancel (gap unit 8, audit #10). The Terminal
+  // runs commands one-shot through the synchronous Sevyn.exec
+  // bridge (runCli), so there is no foreground child to signal,
+  // and no key event can even arrive mid-command — the JS thread
+  // is inside exec until the command returns. What Ctrl+C can
+  // cancel is the line being typed: the partial line is echoed
+  // with ^C, like a real terminal, and the prompt comes back
+  // fresh. At an empty prompt the echo is just `sevyn> ^C`.
+  // A process interrupt is a follow-up for when exec grows a
+  // cancellable path; it cannot be built on this bridge. In
+  // Terminal Ctrl+C is interrupt, never copy (the renderer's
+  // onInterruptRequest opt-in) and never a typed 'c'.
+  function interrupt(): void {
+    append(["sevyn> " + input + "^C"]);
+    setInput("");
+    scrollToBottom();
   }
 
   function submit(): void {
@@ -308,6 +331,7 @@ export function Terminal(): React.ReactElement {
           value={input}
           onChangeText={setInput}
           onSubmitEditing={submit}
+          onInterruptRequest={interrupt}
           placeholder="type a sevyn command"
           autoFocus
           style={{

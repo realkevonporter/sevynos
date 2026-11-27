@@ -926,6 +926,63 @@ check("Save: Ctrl+S without onSaveRequest types nothing", () => {
   assert.equal(findQueryValue, "wq", "no 's' typed into the find field");
 });
 
+// --- Terminal interrupt (gap unit 8, audit #10) ---------------------
+// A prompt-like input with onInterruptRequest: Ctrl+C fires the
+// callback instead of copying, and types nothing. Without the prop
+// Ctrl+C still copies (proven by the clipboard checks above).
+const interruptRequests = [];
+let interruptValue = "";
+function InterruptApp() {
+  const [value, setValue] = React.useState("shell status");
+  interruptValue = value;
+  return h(
+    "View",
+    { style: { width: 800, height: 500, backgroundColor: "#111827" } },
+    h("TextInput", {
+      value,
+      onChangeText: setValue,
+      onInterruptRequest: () => interruptRequests.push("interrupt"),
+      placeholder: "type a sevyn command",
+      autoFocus: true,
+      style: {
+        height: 32,
+        backgroundColor: "#1f2937",
+        fontSize: 16,
+        color: "#ffffff",
+      },
+    }),
+  );
+}
+
+renderer.update(h(InterruptApp));
+// Same present-after-mount dance as the find checks: the flush's
+// own present predates the commitMount focus.
+renderer._presentRoot();
+
+check(
+  "Terminal interrupt: Ctrl+C calls onInterruptRequest, copies nothing, types nothing",
+  () => {
+    assert.ok(caret(), "interrupt input focused on mount (autoFocus)");
+    Sevyn.clipboardWrite("sentinel");
+    keyCtrl(46); // Ctrl+C
+    assert.deepEqual(interruptRequests, ["interrupt"], "onInterruptRequest fired");
+    assert.equal(
+      Sevyn.clipboardRead(),
+      "sentinel",
+      "Ctrl+C copied nothing to the clipboard",
+    );
+    assert.equal(interruptValue, "shell status", "no 'c' typed into the input");
+    keyCtrl(46); // Ctrl+C again — still interrupt, still no copy
+    assert.deepEqual(
+      interruptRequests,
+      ["interrupt", "interrupt"],
+      "a second Ctrl+C fires again",
+    );
+    assert.equal(Sevyn.clipboardRead(), "sentinel", "still nothing copied");
+    assert.equal(interruptValue, "shell status", "still nothing typed");
+  },
+);
+
 // Restore the shell tree for a clean end state.
 renderer.update(h(App));
 
