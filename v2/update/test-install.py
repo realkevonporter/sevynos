@@ -25,6 +25,8 @@ Run: python3 v2/update/test-install.py
 """
 import hashlib
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -122,6 +124,23 @@ def main():
     ws.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=ws) as td:
         td = Path(td)
+        # The fixtures are ~17 GiB per run and TemporaryDirectory
+        # only removes them when the process exits normally (or via
+        # an exception) — a killed process (job cancel, job timeout,
+        # runner shutdown) never reaches __exit__, and the dir is
+        # orphaned. Six orphaned dirs (104 GiB) filled the CI box's
+        # disk on 2026-11-27 and took all six runners offline. Catch
+        # SIGTERM/SIGINT (what the runner sends on cancel/timeout)
+        # so the fixtures are removed and the process still dies by
+        # the signal; the workflow's always() sweep is the backstop
+        # for SIGKILL and anything else.
+        def _cleanup_and_die(signum, _frame):
+            shutil.rmtree(td, ignore_errors=True)
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        signal.signal(signal.SIGTERM, _cleanup_and_die)
+        signal.signal(signal.SIGINT, _cleanup_and_die)
         sevyn = td / "sevyn"
         r = subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-o",
                             str(sevyn), str(SEVYN_C), "-lcrypto"],

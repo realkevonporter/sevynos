@@ -230,3 +230,17 @@ jobs:
             v2/image/build/m11-usbstick.img
             v2/image/build/m11-empty.img
           if-no-files-found: warn
+
+      - name: Remove installer-test temp dirs
+        if: always()
+        run: |
+          # test-install.py builds ~17 GiB of mock-disk fixtures per
+          # run under ~/workspace (mkdtemp tmp* dirs) and removes them
+          # on exit — but a killed run (cancel, timeout, runner
+          # shutdown) never reaches cleanup. Six orphaned dirs
+          # (104 GiB) filled this box's disk on 2026-11-27 and took
+          # all six runners offline. Sweep dirs older than two hours:
+          # a live test-install.py run is minutes old, and the dirs
+          # are shared across runners, so a bare rm -rf tmp* could
+          # delete a sibling job's live fixtures.
+          find /home/runner/workspace -maxdepth 1 -name 'tmp*' -mmin +120 -print -exec rm -rf {} + || true
