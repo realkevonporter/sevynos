@@ -96,4 +96,44 @@ class KeyModifiers {
   bool metaRight_ = false;
 };
 
+// Quit chords (gap build unit 7, audit #8): Alt+F4 and Super+Q.
+// Super is the Cmd key on SevynOS, and Meta is the same evdev
+// state (see above), so Super+Q and Meta+Q are one chord. The
+// chord fires on the press only — a release never quits — and
+// extra modifiers do not block it (Alt+Shift+F4 still quits, like
+// every desktop OS). A plain F4, a plain Q, Alt+Q, Super+F4 and
+// Ctrl+F4 are NOT quit chords: Alt+Tab (window switching, a later
+// unit) must keep working, and Ctrl+Q is not a SevynOS chord.
+inline constexpr uint32_t kQuitF4Key = 62;  // KEY_F4 (linux/input-event-codes.h)
+inline constexpr uint32_t kQuitQKey = 16;   // KEY_Q
+
+inline bool isQuitShortcut(uint32_t key, bool pressed,
+                           const KeyModifiers& modifiers) {
+  if (!pressed)
+    return false;
+  if (key == kQuitF4Key && modifiers.alt())
+    return true;
+  if (key == kQuitQKey && modifiers.super())
+    return true;
+  return false;
+}
+
+// What the host does with a key event. kQuit sets exitRequested_ —
+// the same flag Sevyn.closeApp() sets and the compositor's close
+// request sets, so the main loop exits 0 and appd reports STOPPED.
+// kSwallow is the shell (not closable: appId_ empty, the same
+// condition closeApp() uses to refuse): the chord does nothing,
+// exactly like the shell's missing title-bar X — and it is NOT
+// forwarded to JS, so it cannot type a 'q' into a focused shell
+// input. kForward is every other key.
+enum class QuitAction { kForward, kQuit, kSwallow };
+
+inline QuitAction quitShortcutAction(uint32_t key, bool pressed,
+                                     const KeyModifiers& modifiers,
+                                     bool closable) {
+  if (!isQuitShortcut(key, pressed, modifiers))
+    return QuitAction::kForward;
+  return closable ? QuitAction::kQuit : QuitAction::kSwallow;
+}
+
 } // namespace sevyn

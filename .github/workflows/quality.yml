@@ -131,6 +131,11 @@ jobs:
           g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
           -o /tmp/test-text-clipboard v2/rn/host/test-text-clipboard.cc
           && /tmp/test-text-clipboard
+      - name: Compile + run the quit-shortcut unit test (no Wayland, no Hermes)
+        run: >-
+          g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
+          -o /tmp/test-quit-shortcut v2/rn/host/test-quit-shortcut.cc
+          && /tmp/test-quit-shortcut
       - name: Build the Rust workspace
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
