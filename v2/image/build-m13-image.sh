@@ -32,6 +32,14 @@
 #   (1738523 = 159.0.8150.0), as are the staging, weston.ini, and the
 #   Genesis GPU present path.
 #
+# - Sample media on the data partition: the 7 test WAVs (generated
+#   at build time by v2/audio/gen-test-media.py) land at the /data
+#   root and the 7 sample JPEGs (v2/image/sample-media/photos) land
+#   in /data/photos, so a fresh install has something for Music and
+#   the Camera gallery to play and view. Seeded by
+#   make-data-disk.py --seed-dir; existing installs are untouched
+#   (the updater only manages slots, never user files in /data).
+#
 # M12 changes over M11:
 # - Genesis: Weston runs its GL renderer (was --renderer=pixman) with
 #   a pixman fallback in init if the GL renderer cannot start, and
@@ -1634,12 +1642,25 @@ chmod +x "$STAGE/init"
 # rootless by make-disk-image.py from the kernel + initramfs just
 # produced. make-data-disk.py builds the data partition's ext4
 # (A/B slots + slot-state) inside it.
+# Sample media: stage the seed dir — the 7 test WAVs generated at
+# build time (plain sine tones at the exact durations the audiod
+# harness checks) at the seed root, the 7 committed sample JPEGs in
+# photos/. The seed lands in /data via --seed-dir: WAVs at the /data
+# root (audiod's SCAN is flat and Music scans /data) and photos in
+# /data/photos (the Camera gallery's PHOTOS_DIR). set -eu fails the
+# build if the generator or the copy fails, so a silent empty
+# library can never ship.
+SAMPLE_MEDIA="$BUILD_TMP/sample-media"
+mkdir -p "$SAMPLE_MEDIA/photos"
+python3 "$ROOT/audio/gen-test-media.py" "$SAMPLE_MEDIA"
+cp "$ROOT/image/sample-media/photos/"*.jpg "$SAMPLE_MEDIA/photos/"
 python3 "$ROOT/image/make-disk-image.py" \
   --kernel "$OUT/vmlinuz" \
   --initramfs "$OUT/initramfs.cpio.gz" \
   --version "$os_version" \
   --make-data-disk "$ROOT/image/make-data-disk.py" \
   --sysroot "$SYSROOT" \
+  --seed-dir "$SAMPLE_MEDIA" \
   --out "$OUT/sevynos.img" \
   || { echo "error: disk image build failed" >&2; exit 1; }
 
