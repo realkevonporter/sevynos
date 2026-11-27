@@ -880,13 +880,30 @@ def main():
         [str(tmp / "sevyn-updated")],
         stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, env={
             **dict(os.environ), **env_fb})
-    try:
-        rc_fb = proc_fb.wait(timeout=15)
-        fb_log = proc_fb.stderr.read().decode("utf-8", "replace")
-    except subprocess.TimeoutExpired:
+    # Same forked-stub race as the ESP apply poll above: the
+    # fallback does the heaviest synchronous work before the
+    # reboot (full ESP restore sync + grub.cfg rewrite, then a
+    # system-wide sync()), and its reboot was seen >15 s late
+    # under load on the KVM runners (M9 rounds 7-8: the restore
+    # landed but the daemon had not reached the reboot stub when
+    # the 15 s wait expired — rc=None, empty log). Poll 60 s;
+    # the loop exits early on success. The stderr watcher (not a
+    # post-wait read) keeps the daemon's log available on a
+    # timeout too, so the next failure is diagnosable from the
+    # log alone instead of an empty string.
+    watcher_fb = LogWatcher(proc_fb.stderr)
+    watcher_fb.start()
+    rc_fb = None
+    for _ in range(600):
+        rc_fb = proc_fb.poll()
+        if rc_fb is not None:
+            break
+        time.sleep(0.1)
+    if rc_fb is None:
         proc_fb.kill()
         proc_fb.wait(timeout=5)
-        rc_fb, fb_log = None, ""
+    watcher_fb.join(timeout=5)
+    fb_log = watcher_fb.text()
     check("fallback daemon exits via the reboot stub", rc_fb == 0,
           f"rc={rc_fb} log={fb_log[:300]}")
     check("fallback restore logged",

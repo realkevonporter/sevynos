@@ -9,10 +9,12 @@
 # - Chromium becomes a chromeless app-mode content window paired with
 #   the Browser app window: the Browser app (tabs + address bar) is
 #   the only chrome; Chromium itself runs --app=<url> with no browser
-#   UI, sized to the Browser window's content rect (800x348). The
-#   content window sits beside the Browser window, not inside it —
-#   true in-window embedding is impossible without a compositor
-#   placement protocol or a frame transport (see BROWSER_PLAN.md).
+#   UI. Stage 5: no --window-size is passed any more — the
+#   compositor configures Chromium's size on first map, and the
+#   Browser host adopts it into the content rect (0, 152, W, H-152)
+#   through the Genesis bridge. The content window sits beside the
+#   Browser window under Weston, not inside it — true in-window
+#   embedding needs the Genesis compositor (see BROWSER_PLAN.md).
 # - `sevyn browser` launch tries the GPU first and falls back to
 #   software rendering when the GPU path cannot start, so a GPU
 #   failure can never leave the browser dead (the M13 check proves

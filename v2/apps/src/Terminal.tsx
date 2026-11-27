@@ -157,11 +157,17 @@ function logMarkers(cmd: string, out: string): void {
         ids.join("|"),
     );
   } else if (cmd === "browser status" || cmd.startsWith("browser status ")) {
+    // Stage 5: the echo carries the adopted state too, so the
+    // harness can assert `embedded: no` in the Weston guest
+    // (no compositor socket there) and `embedded: yes <rect>`
+    // on the GF65. "unknown" when the CLI predates the line.
     Sevyn.log(
       "TERMINAL browser-status running=" +
         (parseField(out, "running") ?? "unknown") +
         " tabs=" +
-        (parseField(out, "tabs") ?? "?"),
+        (parseField(out, "tabs") ?? "?") +
+        " embedded=" +
+        (parseField(out, "embedded") ?? "unknown"),
     );
   } else if (cmd === "net status" || cmd.startsWith("net status ")) {
     Sevyn.log(

@@ -110,6 +110,7 @@ g++ -O2 -std=c++17 -Wall -Wextra -DSEVYN_HAVE_EGL=1 \
   -o "$OUT" \
   "$HOST_DIR/common.cc" "$HOST_DIR/painter.cc" \
   "$HOST_DIR/genesis-presenter.cc" \
+  "$HOST_DIR/compositor-bridge.cc" "$HOST_DIR/runtime-control.cc" \
   "$HOST_DIR/wayland.cc" "$HOST_DIR/status.cc" \
   "$HOST_DIR/appclient.cc" \
   "$HOST_DIR/audiod-client.cc" \

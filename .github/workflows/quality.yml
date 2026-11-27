@@ -142,3 +142,32 @@ jobs:
           cargo build --manifest-path v2/rn/host-rs/Cargo.toml
           cargo test -p sevyn-relay --manifest-path v2/rn/host-rs/Cargo.toml
           cargo fmt --check --manifest-path v2/rn/host-rs/Cargo.toml
+
+  # browser-embed: the Stage 5 host bridge + CLI embed verbs. No
+  # Genesis, no Wayland, no Hermes here: the C++ test drives the
+  # real bridge client + control server against a fake compositor
+  # (adopt + configure resize, idempotent re-embed, chromium_died,
+  # already-adopted recovery, dead-compositor failure), and
+  # test-browser.py drives the CLI against a fake runtime socket.
+  # The host-compile job above proves the new modules link into
+  # the real host binary; the guest proof (real adoption pixels)
+  # is GF65-only, and the m13 check proves the failure path in
+  # the Weston guest (no compositor socket there).
+  browser-embed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          gcc g++ libssl-dev
+      - name: Compile + run the bridge/control test (fake compositor)
+        run: >-
+          g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
+          -o /tmp/test-compositor-bridge
+          v2/rn/host/compositor-bridge.cc v2/rn/host/runtime-control.cc
+          v2/rn/host/common.cc v2/rn/host/test-compositor-bridge.cc
+          -lpthread && /tmp/test-compositor-bridge
+      - name: Run the CLI browser tests (fake runtime socket)
+        run: python3 v2/update/test-browser.py

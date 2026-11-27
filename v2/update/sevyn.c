@@ -34,6 +34,12 @@
  *                               answers, "launched:" when Chromium is
  *                               still starting (poll `browser status`
  *                               / `browser tabs` for readiness).
+ *   sevyn browser embed <x> <y> <w> <h>
+ *                               adopt Chromium into the Browser
+ *                               window's content rect (Stage 5: via
+ *                               the Browser host's control socket;
+ *                               the host is the only process that
+ *                               talks to the compositor).
  *   sevyn browser tabs          list open tabs (CDP)
  *   sevyn browser activate <id> bring a tab forward
  *   sevyn browser close <id>    close a tab
@@ -42,6 +48,7 @@
  *                               scan; idempotent — ok when not
  *                               running)
  *   sevyn browser status        Chromium running? CDP answering? tabs?
+ *                               embedded? (the adopted rect)
  *   sevyn net status            link, address, gateway, DNS, wifi
  *   sevyn net dns <host>        resolve a name through the guest DNS
  *   sevyn net announce          announce the link state to statusd
@@ -218,11 +225,15 @@ static void print_usage(FILE *f)
             "                              if it is not running; prints\n"
             "                              \"opened:\" + tab, or \"launched:\"\n"
             "                              while Chromium is starting)\n"
+            "  sevyn browser embed <x> <y> <w> <h>\n"
+            "                              adopt Chromium into the Browser\n"
+            "                              window's content rect\n"
             "  sevyn browser tabs          list open tabs\n"
             "  sevyn browser activate <id> bring a tab forward\n"
             "  sevyn browser close <id>    close a tab\n"
             "  sevyn browser quit          stop Chromium (idempotent)\n"
-            "  sevyn browser status        Chromium + CDP + tab count\n"
+            "  sevyn browser status        Chromium + CDP + tab count +\n"
+            "                              embedded state\n"
             "  sevyn comms [--socket <path>] <verb>\n"
             "                              talk to a commsd other than the\n"
             "                              system one (the M10 check runs a\n"
@@ -3947,15 +3958,17 @@ static int wait_for_cdp(int wait_s)
  * when even the fork failed. Whether Chromium actually came up is
  * observable via `browser status` (running: yes + cdp: yes) and
  * via /data/chromium.log (Chromium's stdout/stderr).
- * M13: with a URL Chromium launches chromeless (--app=<url>, no
- * tabs/omnibox) as the content window paired with the Browser app
- * window, sized 800x348 (the app window is 800x500 and its chrome
- * is 152px: title 44 + tabs 36 + address 44 + status 28). Without
- * a URL (NULL, empty, or about:blank) it opens about:blank at
- * 800x500, as before. The URL is never passed positionally with
- * --app. The intermediate child records the grandchild pid + gpu
- * mode in /data/chromium.state ("yes" here, "fallback" when
- * disable_gpu is set — the fallback relaunch in `browser open`).
+ * Stage 5: NO --window-size is passed any more. Chromium's initial
+ * size is whatever the compositor configures on first map — the
+ * M13 guess (800x348 with a URL, 800x500 without) is gone, and
+ * the content rect is set by `browser embed` after launch: the
+ * host adopts Chromium into the Browser window's content rect
+ * (0, 152, W, H-152) and configures its surface to that size
+ * through the compositor. The URL is never passed positionally
+ * with --app. The intermediate child records the grandchild pid
+ * + gpu mode in /data/chromium.state ("yes" here, "fallback"
+ * when disable_gpu is set — the fallback relaunch in
+ * `browser open`).
  * Live resize sync is out of scope for M13 (it would need a CDP
  * WebSocket in this CLI): the window keeps its launch size. */
 static int browser_launch(const char *url, int disable_gpu)
@@ -4017,9 +4030,10 @@ static int browser_launch(const char *url, int disable_gpu)
         char datadir[512];
         snprintf(datadir, sizeof(datadir), "--user-data-dir=%s",
                  CHROMIUM_PROFILE);
-        /* --window-size: 800x348 with a URL (the content rect under
-         * the Browser app's 152px of chrome), 800x500 without one
-         * (plain about:blank launch, as before). */
+        /* Stage 5: no --window-size. The compositor configures
+         * Chromium's size on first map, and `browser embed`
+         * configures it to the content rect after launch — the
+         * CLI no longer guesses the geometry. */
         /* GPU (M13): the first attempt runs WITHOUT --disable-gpu —
          * Weston now uses the GL renderer and Mesa DRI drivers are
          * staged, so the GPU process may start. The M5 --disable-gpu
@@ -4057,9 +4071,6 @@ static int browser_launch(const char *url, int disable_gpu)
         if (has_url) {
             snprintf(app, sizeof(app), "--app=%s", url);
             args[n++] = app;
-            args[n++] = "--window-size=800,348";
-        } else {
-            args[n++] = "--window-size=800,500";
         }
         args[n++] = port;
         args[n++] = datadir;
@@ -4350,15 +4361,121 @@ static int cmd_camera(int argc, char **argv)
  * exit 0 either way (the Browser app calls this on close
  * unconditionally). */
 
+/* Runtime control socket (Stage 5): the Browser host listens on
+ * /run/sevyn-runtime-browser.sock (see v2/rn/host/runtime-control.h).
+ * The CLI never talks to the compositor directly — the host is the
+ * only process that issues bridge ops, so `browser embed` and the
+ * `embedded:` line in `browser status` both go through this socket.
+ * SEVYN_RUNTIME_SOCK overrides the path for the host-side test
+ * (the same env-override shape as SEVYN_CHROMIUM_STATE). */
+#define RUNTIME_SOCK "/run/sevyn-runtime-browser.sock"
+
+static int connect_runtime(void)
+{
+    return connect_sock("SEVYN_RUNTIME_SOCK", RUNTIME_SOCK);
+}
+
+/* One control-socket round-trip: send one line, read one reply
+ * line. Returns 1 when a reply line arrived, 0 on connect/send/
+ * read failure. The 5 s receive timeout bounds a host that
+ * accepted and never replies — the host's bridge op itself times
+ * out at 3 s, so a healthy round-trip is far under this, and the
+ * CLI stays well inside the host exec's 10 s kill. */
+static int runtime_roundtrip(const char *cmd, char *reply, size_t cap)
+{
+    int fd = connect_runtime();
+    if (fd < 0)
+        return 0;
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    int ok = 0;
+    if (send_line(fd, cmd) == 0 && read_line(fd, reply, cap) > 0)
+        ok = 1;
+    close(fd);
+    return ok;
+}
+
+/* The Runtime's adopted state as one line ("embedded: yes
+ * <x>,<y>,<w>x<h>" / "embedded: no"). Best effort: when the
+ * Browser host is not listening (app not running) the answer is
+ * "embedded: no" — the CLI reports the state, it does not fail
+ * the whole status over it. Returns 1 when the host answered. */
+static int browser_embedded_line(char *buf, size_t cap)
+{
+    if (runtime_roundtrip("browser-embedded-status", buf, cap) &&
+        strncmp(buf, "embedded:", 9) == 0)
+        return 1;
+    snprintf(buf, cap, "embedded: no");
+    return 0;
+}
+
+/* Strict decimal parse: the whole token must be a number. */
+static int parse_cli_int(const char *s, int *out)
+{
+    char *end;
+    long v;
+    if (!s || !*s)
+        return 0;
+    v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v > 2147483647L || v < -2147483648L)
+        return 0;
+    *out = (int)v;
+    return 1;
+}
+
+/* `browser embed <x> <y> <w> <h>` (Stage 5): adopt Chromium into
+ * the Browser window's content rect. Reads the Chromium pid from
+ * /data/chromium.state, sends the embed to the Browser host's
+ * control socket, and prints the host's answer ("embedded: yes
+ * <rect>" / "error: <msg>"). Idempotent in the host: adopt when
+ * nothing is adopted, `move` for the same size, `resize` for a
+ * new size. Exit 0 only when the host confirms the adoption —
+ * the app treats any other outcome as a failure to show, not a
+ * blank content area. */
+static int cmd_browser_embed(int argc, char **argv)
+{
+    int x, y, w, h;
+    pid_t pid;
+    char cmd[128];
+    char reply[256];
+    if (argc != 7 || !parse_cli_int(argv[3], &x) ||
+        !parse_cli_int(argv[4], &y) || !parse_cli_int(argv[5], &w) ||
+        !parse_cli_int(argv[6], &h) || x < 0 || y < 0 || w <= 0 || h <= 0) {
+        fprintf(stderr,
+                "error: usage: sevyn browser embed <x> <y> <w> <h>\n");
+        return 1;
+    }
+    pid = browser_state_pid();
+    if (pid <= 0 || browser_pid_gone(pid)) {
+        fprintf(stderr, "error: Chromium is not running\n");
+        return 1;
+    }
+    snprintf(cmd, sizeof(cmd), "browser-embed %d %d %d %d %d", (int)pid, x,
+             y, w, h);
+    if (!runtime_roundtrip(cmd, reply, sizeof(reply))) {
+        fprintf(stderr,
+                "error: Browser app is not running (no runtime socket)\n");
+        return 1;
+    }
+    printf("%s\n", reply);
+    return strncmp(reply, "embedded: yes", 13) == 0 ? 0 : 1;
+}
+
 static int cmd_browser_status(void)
 {
     if (!browser_running()) {
+        char embedded[128];
+        browser_embedded_line(embedded, sizeof(embedded));
         printf("running: no\n");
+        printf("%s\n", embedded);
         return 1;
     }
     char body[262144];
     char ver[4096];
     char gpu[32];
+    char embedded[128];
     int tabs = 0;
     char *version = NULL;
     if (cdp_request("GET", "/json/list", body, sizeof(body)) == 200) {
@@ -4368,11 +4485,13 @@ static int cmd_browser_status(void)
     }
     if (cdp_request("GET", "/json/version", ver, sizeof(ver)) == 200)
         version = json_string_after(ver, NULL, "\"Browser\"");
+    browser_embedded_line(embedded, sizeof(embedded));
     printf("running: yes\n");
     printf("cdp: yes\n");
     printf("tabs: %d\n", tabs);
     printf("version: %s\n", version ? version : "unknown");
     printf("gpu: %s\n", browser_state_gpu(gpu, sizeof(gpu)));
+    printf("%s\n", embedded);
     free(version);
     return 0;
 }
@@ -4736,6 +4855,9 @@ static int cmd_browser(int argc, char **argv)
             return usage();
         return cmd_browser_status();
     }
+    if (strcmp(verb, "embed") == 0) {
+        return cmd_browser_embed(argc, argv);
+    }
     if (strcmp(verb, "tabs") == 0) {
         if (argc != 3)
             return usage();
@@ -4777,16 +4899,20 @@ static int cmd_browser(int argc, char **argv)
              * user had a full second Chrome instead of the paired
              * chromeless content window (GF65, 6b3689a). Relaunching
              * with --app=<url> keeps every navigation chromeless.
-             * (The window lands where labwc cascades it — no
-             * --window-position is passed, so the pair does NOT
-             * re-align on every Go; the content window's position
-             * is the compositor's, not the CLI's. That is the
-             * known limitation: windows don't follow live while
-             * dragging.) A WebSocket Page.navigate
-             * would avoid the restart — and is the follow-up for
-             * instant navigation — but the CLI speaks CDP over
-             * HTTP only. M13 stays single-tab by design: the
-             * relaunch leaves exactly ONE tab, the new one. */
+             * (Stage 5: the fresh Chromium is adopted into the
+             * Browser window's content rect by `browser embed`
+             * after launch, so the pair DOES re-align on every Go
+             * — the compositor places the adopted window at the
+             * Browser window's live position plus the rect, in the
+             * same frame. The pre-Stage-5 limitation — windows
+             * not following live while dragging — is gone under
+             * Genesis; under Weston there is no adoption and the
+             * content window still cascades.) A WebSocket
+             * Page.navigate would avoid the restart — and is the
+             * follow-up for instant navigation — but the CLI
+             * speaks CDP over HTTP only. M13 stays single-tab by
+             * design: the relaunch leaves exactly ONE tab, the
+             * new one. */
             /* Idempotent open: the running tab already shows this
              * URL — return it. A re-go / retry must not relaunch:
              * the tab is already there, and a relaunch while the

@@ -1164,6 +1164,16 @@ const TERMINAL_WINDOW_HEIGHT_PX = 499;
 const DOCK_BAND_TOP_Y = 700;
 const DOCK_ICON_TOP_Y = 740;
 const MIN_DOCK_ICON_RUN_PX = 20;
+// Stage 5: a run longer than a dock icon can be is a window
+// sliver, not the icon — the Terminal's own bottom rows show
+// below Chromium in the dock band (a 864px run at y=791 in the
+// M5 IDE-refocus crash frames, run 45803769258), and the merge
+// below centres on the longest run, so the sliver dragged the
+// "icon" point to (731,746), inside Chromium — a no-op click
+// that raised nothing. Dock icons are ~64px wide (measured
+// runs up to 64px); 100px caps the icon with margin while
+// excluding any window sliver.
+const MAX_DOCK_ICON_RUN_PX = 100;
 // The input row's background colour (#1f2937): the neighbourhood
 // check in refocusInputPointSafe counts it around the click point.
 const TERMINAL_INPUT_RGB = [31, 41, 55];
@@ -1292,11 +1302,16 @@ function findTerminalDockIcon(img, known) {
       const m = !inWindow && pixelMatches(img, x, y, 17, 24, 39);
       if (m && s < 0) s = x;
       if (!m && s >= 0) {
-        if (x - s >= MIN_DOCK_ICON_RUN_PX) runs.push({ x0: s, x1: x - 1, y });
+        // Stage 5: drop over-long runs — a window sliver, not an
+        // icon (see MAX_DOCK_ICON_RUN_PX above). Without the cap
+        // the sliver becomes the longest run and the bbox merge
+        // centres on it instead of on the icon.
+        if (x - s >= MIN_DOCK_ICON_RUN_PX && x - s <= MAX_DOCK_ICON_RUN_PX)
+          runs.push({ x0: s, x1: x - 1, y });
         s = -1;
       }
     }
-    if (s >= 0 && W - s >= MIN_DOCK_ICON_RUN_PX) {
+    if (s >= 0 && W - s >= MIN_DOCK_ICON_RUN_PX && W - s <= MAX_DOCK_ICON_RUN_PX) {
       runs.push({ x0: s, x1: W - 1, y });
     }
   }
@@ -1330,14 +1345,89 @@ function findTerminalDockIcon(img, known) {
 // (left..right, top..top+499 — the true bottom, not
 // findWindowHeader's band end) and inside the frame, AND at least
 // half the pixels in a 41x11 box around it must be the input-row
-// background colour. That last clause is what makes the dock-band
-// overlap safe: the input row sits in the dock's y-band, so a
-// blind click there would hit a dock icon (this run's (303,768)
-// is the red C icon when the Terminal is hidden — measured 0/451
-// input-row pixels there, vs 0.82-0.92 when the row is present).
-// When the Terminal is absent the frame shows the dock icon, not
-// input-row pixels, so the guard refuses and the caller fails
-// fast instead of launching an app. Returns {x, y} or null.
+// background colour OR the Terminal body colour. That last clause
+// is what makes the dock-band overlap safe: the input row sits in
+// the dock's y-band, so a blind click there would hit a dock icon
+// (this run's (303,768) is the red C icon when the Terminal is
+// hidden — measured 0/451 input-row pixels there, vs 0.82-0.92
+// when the row is present). When the Terminal is absent the frame
+// shows the dock icon, not input-row pixels, so the guard refuses
+// and the caller fails fast instead of launching an app.
+// Stage 5: the input row counts the body colour too. The
+// unfocused input row renders as the window body colour
+// (#111827), not #1f2937 — the M5 crash frames (runs 45803769258
+// + 45811879516) measure 0/451 #1f2937 in the guard box but
+// 301-342/451 #111827 when the row is present, and 0/451 #111827
+// on the bare desktop (the point lands on the red C icon there),
+// so the body colour discriminates just as well. Returns
+// {x, y} or null.
+// Visible fragment of the Terminal's TITLE BAR within the known
+// window rect (round 7, M5 run 45833879589). When Chromium covers
+// the header the strict scan returns null, but the bar still peeks
+// out where Chromium does not overlap in x — in the crash run, a
+// solid 79px run of #111827 at x103-181 over y286-332. The scan
+// covers the header band (top..top+43, the band
+// refocusFirstAttemptSafe uses) and returns the centre of the
+// longest run of header-colour pixels, preferring the row closest
+// to the band's vertical centre among the longest runs (the title
+// text splits some rows). Runs whose centre falls in the window
+// controls zone (within 120px of the right edge) are rejected —
+// the peek must never click minimize/maximize/close. Returns null
+// when no run reaches 20px. The point is always above the dock
+// band, so the click reaches the Terminal, never the dock.
+function findTitlePeekPoint(known, img, W, H) {
+  if (!known) return null;
+  const y0 = Math.max(known.top, 48);
+  const y1 = Math.min(known.top + 43, known.bottom, H - 1);
+  const x0 = Math.max(known.left, 0);
+  const x1 = Math.min(known.right, W - 1);
+  if (y0 > y1 || x0 > x1) return null;
+  const midY = (y0 + y1) / 2;
+  let best = null;
+  for (let y = y0; y <= y1; y++) {
+    let s = -1;
+    for (let x = x0; x <= x1 + 1; x++) {
+      // tol=2: the title bar is exactly #111827; the wallpaper
+      // gradient reads (17,24,42) — blue off by 3 — and must not
+      // count as a peek (verified on the run-7 frames).
+      const m = x <= x1 && pixelMatches(img, x, y, 17, 24, 39, 2);
+      if (m && s < 0) s = x;
+      if (!m && s >= 0) {
+        const len = x - s;
+        const cx = Math.round((s + x - 1) / 2);
+        // Round 10 (M5 run 45870060146): the visible title sliver
+        // can be as narrow as 11px — the Browser window's left edge
+        // (x122) leaves only x103-113 of exact #111827, the rest
+        // fading through an ~8px edge gradient — so a 20px minimum
+        // misses it and the raise never runs. 8px keeps the run well
+        // above single-pixel noise while tol=2 still excludes the
+        // wallpaper gradient (blue off by 3); the scan is confined
+        // to the known Terminal rect, and a full-band scan of the
+        // crash frame shows the 11px sliver is the ONLY run >=6px
+        // in the band, so the only exact-#111827 surface here is
+        // the Terminal header itself.
+        if (
+          len >= 8 &&
+          cx < known.right - 120 &&
+          (!best ||
+            len > best.len ||
+            (len === best.len && Math.abs(y - midY) < Math.abs(best.y - midY)))
+        ) {
+          best = { x0: s, x1: x - 1, y, len };
+        }
+        s = -1;
+      }
+    }
+  }
+  if (!best) return null;
+  const cx = Math.round((best.x0 + best.x1) / 2);
+  const cy = best.y;
+  if (cx < known.left || cx > known.right || cy < known.top || cy > known.bottom)
+    return null;
+  if (cy >= DOCK_ICON_TOP_Y) return null;
+  return { x: cx, y: cy };
+}
+
 function refocusInputPointSafe(known, img, W, H) {
   if (!known) return null;
   const x = known.left + 200;
@@ -1367,7 +1457,8 @@ function refocusInputPointSafe(known, img, W, H) {
           TERMINAL_INPUT_RGB[0],
           TERMINAL_INPUT_RGB[1],
           TERMINAL_INPUT_RGB[2],
-        )
+        ) ||
+        pixelMatches(img, xx, yy, 17, 24, 39)
       ) {
         n++;
       }
@@ -1668,6 +1759,10 @@ async function main() {
   // below).
   let termPos = null;
   const refocusTerminal = async () => {
+    // Round 4 (M5 run 45817659596): refocus decisions are logged
+    // so the next failure is diagnosable from the job log alone —
+    // no 365 MB artifact download to see which branch ran.
+    const diag = (msg) => console.log(`refocus: ${msg}`);
     const shotNow = await shot(b.qmp, join(OUT, "m5-shot-refocus.ppm"));
     const termFresh = findWindowHeader(shotNow, 17, 24, 39);
     if (termFresh) {
@@ -1694,6 +1789,9 @@ async function main() {
         // is a covered fragment, not the window.
       }
     }
+    diag(
+      `start fresh=${termFresh ? `${termFresh.left},${termFresh.top}-${termFresh.right},${termFresh.bottom}` : "null"} known=${termPos ? `${termPos.left},${termPos.top}-${termPos.right},${termPos.bottom}` : "null"} gate=${refocusFirstAttemptSafe(termFresh, termPos, shotNow.width, shotNow.height)}`,
+    );
     if (!termPos) {
       throw new Error(
         "HARNESS FAILURE: refocus failed — no Terminal header detected in the current frame and no known window position; the Terminal never regained focus, so no typed command can run",
@@ -1756,14 +1854,43 @@ async function main() {
     // fails fast instead of burning 120 s per step. If a future
     // run shows an EXEC later than 25 s, that is new evidence
     // for a late-EXEC re-check, not for another blind extension.
+    // Round 6 (M5 run 45829947853): the probe is `net status`,
+    // not `browser status`. The refocus must prove FOCUS, and
+    // `browser status` on this branch is the slowest CLI call in
+    // the harness: 2 CDP requests + the new Stage 5 runtime
+    // roundtrip, against the host's 10 s exec kill — ~3 s when
+    // Chromium is idle, over budget after the warm-open relaunch
+    // + page load (SIGKILL, exit 124, which the [01] pattern
+    // rejects). `net status` is local (no CDP, no runtime socket)
+    // and Terminal-scoped (see terminalEchoRe), so a failed verify
+    // now means the input never ran, not that the browser CLI was
+    // slow. On failure the discriminator below tells the two
+    // apart directly: a Terminal-scoped EXEC with ANY exit code
+    // means the command ran (focus worked) and was killed/slow;
+    // no such line means the command was never typed (focus
+    // broken). The Browser app never runs `net status`, so the
+    // EXEC line is Terminal-specific even before scoping.
     const verifyFocus = async () => {
+      const before = logLines(b.logPath).length;
       const { exec } = await termCmd(
-        "browser status",
+        "net status",
         null,
-        /EXEC sevyn browser status -> [01]/,
+        /EXEC sevyn net status -> [01]/,
         25000,
       );
-      return !!exec;
+      if (!exec) {
+        const ran = await waitForTerminalExec(
+          b.logPath,
+          /EXEC sevyn net status -> \d+/,
+          /JS TERMINAL net-status/,
+          2000,
+          before,
+        );
+        diag(`verify exec=false ran=${ran ? ran.trim() : "no-exec-line"}`);
+        return false;
+      }
+      diag(`verify exec=true`);
+      return true;
     };
     // Round 8 (m13 run 43715706248, head 0f82d7d9 — same refocus
     // code here): wait for a Terminal RELAUNCHED from the dock
@@ -1855,19 +1982,96 @@ async function main() {
     // frame itself proves the input row is on screen at that
     // point (see refocusInputPointSafe). Anything else fails fast
     // with HARNESS FAILURE, as before.
+    // Round 9 (M5 run 45842258167): a guarded input click that
+    // failed its verify proves the guarded point does not focus
+    // the Terminal in this call — the toggle-hide guard below
+    // must not keep treating that point as "the Terminal is
+    // visible". Set wherever a guarded click + verify fails.
+    let guardedClickFailed = false;
     const shotRecovery = await shot(b.qmp, join(OUT, "m5-shot-refocus-recovery.ppm"));
-    const guardedNow = refocusInputPointSafe(
+    let guardedNow = refocusInputPointSafe(
       termPos,
       shotRecovery,
       shotRecovery.width,
       shotRecovery.height,
     );
+    diag(`recovery guard=${guardedNow ? `${guardedNow.x},${guardedNow.y}` : "null"}`);
+    // Round 7 (M5 run 45833879589): title-peek raise. The guarded
+    // input click NEVER produced an EXEC — not in this run, not in
+    // runs 45817659596 / 45824409192 / 45829947853 — although the
+    // guard proves Terminal pixels at the point: the click sits in
+    // the dock band (y768) where the dock pill swallows it (the
+    // boot log shows zero pointer lines after the browser open,
+    // and all four refocus frames are pixel-identical). Title
+    // clicks ABOVE the dock band are the proven path (the
+    // first-attempt verifies pass on them). When Chromium covers
+    // the header, the title bar still peeks out where Chromium
+    // does not overlap in x — in the crash run, a solid 79px run
+    // of #111827 at x103-181, y286-332. Click the peek: it raises
+    // the window, then the title+input clicks below run on the
+    // known rect (the window did not move — only its stacking
+    // changed). If the raise did not take, the title click lands
+    // on Chromium (harmless) and the verify fails, and the
+    // recovery below runs as before.
+    // Round 9 (M5 run 45842258167): the peek is a single-frame
+    // read — the title bar's visible fragment can be absent in
+    // one frame (Chromium mid-move, a redraw tearing under TCG
+    // load) and present in the next. The peek worked 3 of 4
+    // attempts in that run and the single null skipped the raise
+    // path and crashed the harness. Re-shot once after a settle
+    // and retry the peek before giving up on it — a null peek is
+    // not proof the fragment is gone. The guard is refreshed
+    // from the retry frame too: the shotRecovery guard is stale
+    // by the time the peek + its 25 s verify finish.
+    let peekPoint = findTitlePeekPoint(
+      termPos,
+      shotRecovery,
+      shotRecovery.width,
+      shotRecovery.height,
+    );
+    diag(`title peek=${peekPoint ? `${peekPoint.x},${peekPoint.y}` : "null"}`);
+    let peekFrame = shotRecovery;
+    if (!peekPoint) {
+      await sleep(2000);
+      const shotPeekRetry = await shot(
+        b.qmp,
+        join(OUT, "m5-shot-refocus-peek-retry.ppm"),
+      );
+      peekPoint = findTitlePeekPoint(
+        termPos,
+        shotPeekRetry,
+        shotPeekRetry.width,
+        shotPeekRetry.height,
+      );
+      diag(`title peek retry=${peekPoint ? `${peekPoint.x},${peekPoint.y}` : "null"}`);
+      if (peekPoint) {
+        peekFrame = shotPeekRetry;
+        guardedNow = refocusInputPointSafe(
+          termPos,
+          shotPeekRetry,
+          shotPeekRetry.width,
+          shotPeekRetry.height,
+        );
+        diag(
+          `recovery guard retry=${guardedNow ? `${guardedNow.x},${guardedNow.y}` : "null"}`,
+        );
+      }
+    }
+    if (peekPoint) {
+      await moveTo(peekPoint.x, peekPoint.y, peekFrame.width, peekFrame.height);
+      await sleep(300);
+      await click();
+      await sleep(300);
+      await clickTitleAndInput();
+      if (await verifyFocus()) return true;
+    }
     if (guardedNow) {
-      await moveTo(guardedNow.x, guardedNow.y, shotRecovery.width, shotRecovery.height);
+      await moveTo(guardedNow.x, guardedNow.y, peekFrame.width, peekFrame.height);
       await sleep(300);
       await click();
       await sleep(300);
       if (await verifyFocus()) return true;
+      guardedClickFailed = true;
       // A failed verify after a guarded click is NOT proof of
       // lost focus (round-5 slow-EXEC) — fall through to the
       // raise below, which re-clicks with a fresh window.
@@ -1891,6 +2095,9 @@ async function main() {
         shotNow.width,
         shotNow.height,
       );
+    diag(
+      `raise point=${raisePoint ? `${raisePoint.x},${raisePoint.y}` : "null"} partial=${termPartial ? `${termPartial.left},${termPartial.top}-${termPartial.right},${termPartial.bottom}` : "null"}`,
+    );
     if (raisePoint) {
       await moveTo(raisePoint.x, raisePoint.y, shotNow.width, shotNow.height);
       await sleep(300);
@@ -1899,6 +2106,7 @@ async function main() {
       raised = true;
     } else {
       const dockIcon = findTerminalDockIcon(shotNow, termPos);
+      diag(`dock icon=${dockIcon ? `${dockIcon.x},${dockIcon.y}` : "null"}`);
       if (dockIcon) {
         // Round 8: record the log position BEFORE the click, so
         // the code below can tell a RELAUNCH (a fresh `APPD
@@ -1918,27 +2126,21 @@ async function main() {
           5000,
           dockClickLines,
         ));
+        diag(`dock click relaunched=${relaunched}`);
       }
     }
-    if (raised) {
-      // Round 8: when the dock click relaunched Terminal, do
-      // NOT enter the attempt loop yet — the fresh app is still
-      // booting, and the loop's two attempts + 25 s verify
-      // windows would expire before it paints. Wait for
-      // readiness first (up to 30 s); the 25 s verify window in
-      // verifyFocus then starts FRESH, after the window is
-      // frame-proven ready. A readiness timeout fails fast with
-      // its own message, not the generic refocus one.
-      if (relaunched) {
-        const readyFrame = await waitForRelaunchedTerminal();
-        if (!readyFrame) {
-          throw new Error(
-            "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
-          );
-        }
-      }
-      // The window needs a moment to come forward; re-shot once
-      // if the first fresh frame still shows no header.
+    // The post-raise attempt loop, shared by the primary raise and
+    // the fix-v3 dock fallback below: re-derive the header from a
+    // fresh frame (the raise changes what is on top) and accept it
+    // only when it is consistent with the known window; then click
+    // title + input and re-verify. Only if the header is STILL
+    // undetectable after the raise does the guarded last-known-good
+    // input click run — and only when the fresh frame itself proves
+    // the input row is on screen at that point (see
+    // refocusInputPointSafe). Returns true when focus is verified.
+    // The window needs a moment to come forward; re-shot once if
+    // the first fresh frame still shows no header.
+    const tryRefocusAttempts = async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const shotFresh = await shot(b.qmp, join(OUT, "m5-shot-refocus-fresh.ppm"));
         const fresh2 = findWindowHeader(shotFresh, 17, 24, 39);
@@ -1966,14 +2168,105 @@ async function main() {
           shotFresh.width,
           shotFresh.height,
         );
+        diag(
+          `attempt ${attempt} fresh=${fresh2 ? `${fresh2.left},${fresh2.top}-${fresh2.right},${fresh2.bottom}` : "null"} guard=${guarded ? `${guarded.x},${guarded.y}` : "null"}`,
+        );
         if (guarded) {
           await moveTo(guarded.x, guarded.y, shotFresh.width, shotFresh.height);
           await sleep(300);
           await click();
           await sleep(300);
           if (await verifyFocus()) return true;
+          guardedClickFailed = true;
         }
         if (attempt === 0) await sleep(2000);
+      }
+      return false;
+    };
+    // Round 8: when the dock click relaunched Terminal, do NOT
+    // enter the attempt loop yet — the fresh app is still booting,
+    // and the loop's two attempts + 25 s verify windows would
+    // expire before it paints. Wait for readiness first (up to
+    // 30 s); the 25 s verify window in verifyFocus then starts
+    // FRESH, after the window is frame-proven ready. A readiness
+    // timeout fails fast with its own message, not the generic
+    // refocus one.
+    const waitForRelaunchReady = async () => {
+      const readyFrame = await waitForRelaunchedTerminal();
+      if (!readyFrame) {
+        throw new Error(
+          "HARNESS FAILURE: refocus failed — Terminal relaunched from the dock but its window never became ready within 30s (no header the first-attempt gate accepts and no guarded input row); the relaunched Terminal never became focusable, so no typed command can run",
+        );
+      }
+    };
+    if (raised) {
+      if (relaunched) await waitForRelaunchReady();
+      if (await tryRefocusAttempts()) return true;
+    }
+    // Fix v3 (m13 run 45000107835) + round 5 (M5 run
+    // 45824409192): the fragment raise demonstrably does not
+    // always raise — in the m13 run the click landed on a verified
+    // Terminal body pixel (751,495) and the stacking did not change
+    // (frame diff: only the cursor moved). And the primary dock
+    // raise can HIDE the Terminal instead: the round-5 diagnostics
+    // show the guarded input click focused it (guard=303,768) and
+    // the dock click then hid it (relaunched=false, both loop
+    // verifies false) — the fix-v3 fallback never ran because it
+    // was gated on raisedViaFragment while the raise came from the
+    // dock. Last resort: the Terminal's dock icon, tried on a
+    // FRESH frame. It runs whenever the Terminal is STILL
+    // undetectable on that fresh frame — no header AND no guarded
+    // input row — regardless of which path raised first. The
+    // undetectable check IS the toggle-hide guard: when the
+    // Terminal is visible a dock click could hide a focused window,
+    // so the fallback never fires; when nothing is visible the
+    // icon can only raise or re-show it (or no-op). A hide (no
+    // APPD launched line) falls through to the same throw below;
+    // a raise re-enters the attempt loop, and a relaunch waits
+    // for readiness first.
+    {
+      const dockFrame = await shot(b.qmp, join(OUT, "m5-shot-refocus-dock.ppm"));
+      const dockFresh = findWindowHeader(dockFrame, 17, 24, 39);
+      const dockGuarded = refocusInputPointSafe(
+        termPos,
+        dockFrame,
+        dockFrame.width,
+        dockFrame.height,
+      );
+      diag(
+        `dock fallback check fresh=${dockFresh ? `${dockFresh.left},${dockFresh.top}-${dockFresh.right},${dockFresh.bottom}` : "null"} guard=${dockGuarded ? `${dockGuarded.x},${dockGuarded.y}` : "null"}`,
+      );
+      // Round 9 (M5 run 45842258167): the old gate refused the
+      // fallback whenever the guarded point existed — but that
+      // point sits in the dock band (y768), where the dock pill
+      // swallows the click (round 7: it NEVER produced an EXEC),
+      // so "guarded point exists" is not proof the Terminal is
+      // focusable. When a guarded click already failed its verify
+      // in this call, the Terminal provably did not receive the
+      // typed command, so a dock click cannot hide a focused
+      // window — it can only raise or re-show it — and the
+      // fallback is allowed to run.
+      if (!dockFresh && (!dockGuarded || guardedClickFailed)) {
+        const dockIcon2 = findTerminalDockIcon(dockFrame, termPos);
+        diag(
+          `dock fallback icon=${dockIcon2 ? `${dockIcon2.x},${dockIcon2.y}` : "null"}`,
+        );
+        if (dockIcon2) {
+          const dockClickLines = logLines(b.logPath).length;
+          await moveTo(dockIcon2.x, dockIcon2.y, dockFrame.width, dockFrame.height);
+          await sleep(300);
+          await click();
+          await sleep(1000);
+          const relaunched2 = !!(await waitForLog(
+            b.logPath,
+            /APPD launched terminal \(pid \d+\)/,
+            5000,
+            dockClickLines,
+          ));
+          diag(`dock fallback click relaunched=${relaunched2}`);
+          if (relaunched2) await waitForRelaunchReady();
+          if (await tryRefocusAttempts()) return true;
+        }
       }
     }
     throw new Error(
@@ -2719,9 +3012,30 @@ async function main() {
     x1: imgFinal.width,
     y1: 768,
   });
+  // The shell-liveness signal at the end is the TOP BAR only.
+  // (Round 11, M5 run 45946754239, head 191b95a8): this check
+  // failed on the dock half (topBar=26985 dockBg=993) while the
+  // shell was provably alive — the refocus just before verified
+  // exec=true and the top bar is visible. The dock is covered by
+  // the test's own end state: the adopted Chromium viewport
+  // (1018x657 at x148-1165) spans the dock band, and the Terminal
+  // raised by the final refocus covers the rest of the pill, so
+  // only its right end (x1166-1200) shows. The dock count is
+  // cascade-dependent (the Browser window's cascade offset moves
+  // its right edge), so no absolute dock threshold is stable
+  // here — on main the same check passes with dockBg=4220 only
+  // because the standalone Chromium window ends up hidden behind
+  // the Terminal (green=678px at the end) and leaves the pill's
+  // right end clear. The top bar and the dock are the same shell
+  // surface, so the top bar alone proves the shell is alive and
+  // no window went fullscreen; the dock count is still recorded
+  // in the detail so a shell that loses its dock entirely stays
+  // visible in the log. The boot-time screenSettled thresholds
+  // above are untouched — there the desktop is bare and the full
+  // pill is visible.
   check(
     "screen: shell still visible at end",
-    fTop > 10000 && fDock > 2000,
+    fTop > 10000,
     `topBar=${fTop} dockBg=${fDock}`,
   );
   b.ctl.write("POWEROFF\n");
