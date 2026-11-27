@@ -72,7 +72,25 @@ function isImageName(name: string): boolean {
 }
 
 function readStatus(): CamStatus {
-  const { code, out } = runCli("sevyn camera status");
+  let code: number;
+  let out: string;
+  try {
+    ({ code, out } = runCli("sevyn camera status"));
+  } catch (e) {
+    // A throw here used to blank the whole window: the reconciler
+    // swallows a first-render throw and mounts an empty tree (the
+    // GF65 blank Camera — the poll never ran because mount never
+    // finished). Degrade to the honest no-camera state instead, and
+    // log the throw so the host log names it.
+    Sevyn.log(
+      "CAMERA status read failed: " + (e instanceof Error ? e.message : String(e)),
+    );
+    return {
+      available: false,
+      device: null,
+      message: "Could not reach the camera daemon.",
+    };
+  }
   if (code !== 0)
     return {
       available: false,
@@ -106,7 +124,18 @@ function readStatus(): CamStatus {
 }
 
 function readPhotos(): Photo[] {
-  const { code, out } = runCli("sevyn files list " + PHOTOS_DIR);
+  let code: number;
+  let out: string;
+  try {
+    ({ code, out } = runCli("sevyn files list " + PHOTOS_DIR));
+  } catch (e) {
+    // See readStatus: a throw at mount used to blank the window.
+    // An empty gallery is the safe degradation — the app still paints.
+    Sevyn.log(
+      "CAMERA photos read failed: " + (e instanceof Error ? e.message : String(e)),
+    );
+    return [];
+  }
   if (code !== 0) return [];
   const photos: Photo[] = [];
   for (const line of out.split("\n")) {
@@ -122,7 +151,19 @@ function readPhotos(): Photo[] {
 }
 
 function readConsent(): boolean {
-  const { code, out } = runCli("sevyn files list " + CAMERA_DIR);
+  let code: number;
+  let out: string;
+  try {
+    ({ code, out } = runCli("sevyn files list " + CAMERA_DIR));
+  } catch (e) {
+    // See readStatus: a throw at mount used to blank the window.
+    // No consent is the safe degradation — the app shows the Allow
+    // screen instead of nothing.
+    Sevyn.log(
+      "CAMERA consent read failed: " + (e instanceof Error ? e.message : String(e)),
+    );
+    return false;
+  }
   if (code !== 0) return false;
   for (const line of out.split("\n")) {
     if (line === "f " + CONSENT_FILE) return true;

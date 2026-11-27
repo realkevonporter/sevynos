@@ -1782,6 +1782,30 @@ check("camera (no device): honest no-camera state + Retry", () => {
   );
 });
 
+// Regression: GF65 Camera rendered fully blank (white) and never
+// asked camd for a frame. A throw during the first render — any of
+// the mount-time reads throwing — made the reconciler swallow the
+// whole tree (render error, 0 ops) so the poll effect never ran.
+// The reads now degrade to safe defaults and log the throw, so the
+// app must still paint a screen instead of blanking.
+check("camera (exec throws at mount): still paints, no blank window", () => {
+  loadCameraAs(() => {
+    throw new Error("exec exploded");
+  });
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  assert.ok(present.ops.length > 0, "mount still paints ops");
+  const texts = textsOf(present);
+  assert.ok(texts.includes("Camera"), "header paints");
+  assert.ok(
+    texts.some((t) => t.includes("Allow Camera to use your camera?")),
+    "consent screen shown (safe degradation), texts=" + JSON.stringify(texts),
+  );
+  assert.ok(
+    Sevyn._logs.some((l) => l.startsWith("CAMERA status read failed")),
+    "throw logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+});
+
 // --- Music ---------------------------------------------------------------
 // The library comes from the mock's fake audiod (Sevyn._audio): the
 // scan returns 2 tracks (01-sunrise-acoustic.wav 21.5 s, song.mp3
