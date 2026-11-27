@@ -101,17 +101,22 @@ jobs:
       - name: Prepare v2 nightly artifacts
         run: |
           cd v2/image/build
-          # sevynos.img.gz is the durable answer to the 2 GiB release-asset
-          # cap: the raw image sits at its partition-layout floor and only
-          # grows from here, while the gzip is ~950 MB. Keep publishing the
-          # raw .img too while it fits under the cap.
+          # sevynos.img.gz is the only published image: the raw image
+          # sits at its partition-layout floor (2 GiB) and only grows
+          # from here, while the gzip is ~950 MB — and the raw .img is
+          # past GitHub's 2 GiB release-asset cap, so it can no longer
+          # be published at all. The .gz is the durable answer: the
+          # updater never downloads the image (only vmlinuz +
+          # initramfs), and the manual flash flow already works from
+          # the .gz (Etcher writes it directly; with dd, gunzip first).
           gzip -9 -k sevynos.img
-          sha256sum vmlinuz initramfs.cpio.gz sevynos.img sevynos.img.gz > v2-SHA256SUMS
+          sha256sum vmlinuz initramfs.cpio.gz sevynos.img.gz > v2-SHA256SUMS
           cat > v2-BOOT-NOTES.txt <<'EOF'
           SevynOS v2 (M13 browser embed) — bootable image
           ==============================================
-          Kernel + initramfs for QEMU (x86_64), plus sevynos.img — a
-          GPT USB-boot disk image for real hardware. Boots to the
+          Kernel + initramfs for QEMU (x86_64), plus sevynos.img.gz —
+          the GPT USB-boot disk image for real hardware, compressed
+          (gunzip it, or let Etcher write it directly). Boots to the
           SevynOS shell: top bar with live status, main area, dock
           with 12 apps — and dock clicks open the app in its own
           window (one sandboxed Hermes runtime per app). Stock apps
@@ -183,14 +188,14 @@ jobs:
               -device usb-tablet -nic user,model=virtio-net-pci
 
           Boot it on real hardware (MSI GF65 Thin 9SD and friends):
+            Download sevynos.img.gz — the disk image is published
+            compressed only (the raw .img is past GitHub's 2 GiB
+            release-asset cap). Etcher writes it directly; with dd,
+            gunzip it first (`gunzip sevynos.img.gz`), then:
             dd if=sevynos.img of=/dev/sdX bs=4M status=progress
             (sdX is the USB stick — NOT the internal disk), then
             boot from USB. It does not touch the internal disk;
             M7 is "boot", not "install".
-            sevynos.img.gz is the same image compressed (about half
-            the download): Etcher writes it directly; with dd,
-            gunzip it first (`gunzip sevynos.img.gz`), then dd the
-            .img as above.
 
           Verify the download with v2-SHA256SUMS.
           This is a development snapshot, not a stable release.
@@ -231,7 +236,7 @@ jobs:
           import os, sys
           CAP = 2147483648
           bad = []
-          for name in ("vmlinuz", "initramfs.cpio.gz", "sevynos.img", "sevynos.img.gz"):
+          for name in ("vmlinuz", "initramfs.cpio.gz", "sevynos.img.gz"):
               p = os.path.join("v2/image/build", name)
               size = os.path.getsize(p)
               print(f"{name}: {size} bytes")
@@ -255,7 +260,7 @@ jobs:
             This is a development snapshot, not a stable release.
             Verify the download with the attached SHA256SUMS.
 
-            SevynOS v2 (M13 browser embed) image: vmlinuz + initramfs.cpio.gz + sevynos.img
+            SevynOS v2 (M13 browser embed) image: vmlinuz + initramfs.cpio.gz + sevynos.img.gz
             (see v2-BOOT-NOTES.txt). Boots to the shell — top bar, live
             status tray, dock with 12 apps — and dock clicks open apps
             in their own windows. Terminal, Settings, Files, and the
@@ -265,8 +270,9 @@ jobs:
             AI in (echo-ai and plan-ai ship as stubs) and drives the
             system through permissions; pick the AI in Settings.
             M7: the image boots on
-            real hardware — sevynos.img is a GPT USB-boot disk image
-            (UEFI, Secure Boot) for the MSI GF65 Thin 9SD and friends.
+            real hardware — sevynos.img.gz is a GPT USB-boot disk image
+            (UEFI, Secure Boot, compressed — gunzip or Etcher to flash)
+            for the MSI GF65 Thin 9SD and friends.
             M9: full-screen desktop, wifi in Settings, movable and
             resizable windows, real app content, and in-place updates
             that sync the ESP (no USB re-flash).
@@ -293,4 +299,4 @@ jobs:
           # fail the build loudly instead.
           artifactErrorsFailBuild: true
           # The v2-* files are the M13 browser-embed image (kernel + initramfs + GPT disk image).
-          artifacts: "v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img,v2/image/build/sevynos.img.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"
+          artifacts: "v2/image/build/vmlinuz,v2/image/build/initramfs.cpio.gz,v2/image/build/sevynos.img.gz,v2/image/build/v2-SHA256SUMS,v2/image/build/v2-BOOT-NOTES.txt,v2/image/build/updates-v2.json"
