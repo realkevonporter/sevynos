@@ -8,10 +8,15 @@
 // successful listing, which is what the harness asserts on. Files are
 // shown, not opened — opening is a later milestone.
 //
-// Cut/copy/paste (no right-click in v2 — the renderer dispatches any
-// pressed pointer button to onPress and there is no onContextMenu):
-// tap an entry to select it, then Cut / Copy / Paste / Delete on the
-// toolbar. The clipboard lives in /data/.files-clipboard.json via
+// Right-click (gap unit 10, audit #13) opens the unit-9 context
+// menu on the hit row — Cut / Copy / Paste / Delete, the toolbar's
+// actions, operating on the right-clicked entry (it is selected
+// first when it isn't already); Paste is disabled with an empty
+// file clipboard. Right-click on empty list space offers Paste
+// alone when the clipboard holds an item, and nothing when it
+// doesn't. A right-click never fires the row's onPress, so it never
+// selects-again-to-open a directory. No Open / Rename / Trash /
+// multi-select here — those are later gap units.
 // `sevyn files clipboard` so it survives an app restart. Paste
 // resolves collisions to `name (1)` and a cross-device move falls
 // back to copy + delete in the CLI. The Devices sidebar lists the
@@ -23,6 +28,8 @@
 import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView } from "./host";
 import { WindowButtons } from "./window-buttons";
+import { ContextMenu } from "../../rn/renderer/context-menu";
+import type { ContextMenuEvent } from "../../rn/renderer/sevyn-renderer";
 import { runCli } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
 import {
@@ -93,6 +100,13 @@ export function Files(): React.ReactElement {
   const [selected, setSelected] = React.useState<string | null>(null);
   const [status, setStatus] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  // Open context menu: {x, y} is the pointer position it anchors on;
+  // target is the right-clicked entry, or null for empty list space.
+  const [menu, setMenu] = React.useState<{
+    x: number;
+    y: number;
+    target: string | null;
+  } | null>(null);
   const seenMounts = React.useRef<Set<string>>(new Set(volumes.map((v) => v.mountPoint)));
   const color = Sevyn.appColor;
 
@@ -134,6 +148,25 @@ export function Files(): React.ReactElement {
     }
     setSelected(e.name);
     setStatus("Selected " + e.name);
+  }
+
+  // Right-click on a row: select the entry first (when it isn't
+  // already) so the menu actions — which operate on the selection,
+  // exactly like the toolbar — act on it. This never navigates: a
+  // right-click dispatches onContextMenu, not onPress, so the
+  // select-again-to-open rule in pressEntry cannot fire.
+  function contextMenuForEntry(e: Entry, ev: ContextMenuEvent): void {
+    setSelected(e.name);
+    setStatus("Selected " + e.name);
+    setMenu({ x: ev.nativeEvent.x, y: ev.nativeEvent.y, target: e.name });
+  }
+
+  // Right-click on empty list space: only Paste makes sense here, and
+  // only when the file clipboard holds an item. With an empty
+  // clipboard there is nothing to offer, so no menu opens at all.
+  function contextMenuForEmptySpace(ev: ContextMenuEvent): void {
+    if (!clipboard) return;
+    setMenu({ x: ev.nativeEvent.x, y: ev.nativeEvent.y, target: null });
   }
 
   function cutOrCopy(kind: "cut" | "copy"): void {
@@ -222,6 +255,26 @@ export function Files(): React.ReactElement {
   const clipboardLabel = clipboard
     ? "Clipboard: " + clipboard.kind + " " + clipboard.sourceName
     : "Clipboard empty";
+
+  // The open menu's items: the toolbar's actions on a row (Paste
+  // disabled with an empty file clipboard), Paste alone on empty
+  // space. No Open / Rename / Trash — those are later gap units.
+  const menuItems =
+    menu === null
+      ? []
+      : menu.target !== null
+        ? [
+            { id: "cut", label: "Cut", onSelect: () => cutOrCopy("cut") },
+            { id: "copy", label: "Copy", onSelect: () => cutOrCopy("copy") },
+            {
+              id: "paste",
+              label: "Paste",
+              disabled: clipboard === null,
+              onSelect: paste,
+            },
+            { id: "delete", label: "Delete", onSelect: deleteSelected },
+          ]
+        : [{ id: "paste", label: "Paste", onSelect: paste }];
 
   function toolbarButton(label: string, onPress: () => void, active: boolean) {
     return (
@@ -381,8 +434,21 @@ export function Files(): React.ReactElement {
           })}
         </View>
         {/* GF65 scroll fix: the listing scrolls when it outgrows the
-            window. Header + path bar stay fixed; only entries scroll. */}
-        <ScrollView style={{ flex: 1, paddingLeft: 12, paddingRight: 12, paddingTop: 8 }}>
+            window. Header + path bar stay fixed; only entries scroll.
+            The list surface carries the background color so the
+            renderer's hit-test sees it (a ScrollView with
+            onContextMenu is hit-testable through its background rect)
+            — right-click on empty list space opens the Paste menu. */}
+        <ScrollView
+          onContextMenu={(ev: ContextMenuEvent) => contextMenuForEmptySpace(ev)}
+          style={{
+            flex: 1,
+            backgroundColor: "#f9fafb",
+            paddingLeft: 12,
+            paddingRight: 12,
+            paddingTop: 8,
+          }}
+        >
           {path !== "/" ? (
             <Pressable
               onPress={() => navigate(parentOf(path))}
@@ -404,6 +470,7 @@ export function Files(): React.ReactElement {
               <Pressable
                 key={e.name}
                 onPress={() => pressEntry(e)}
+                onContextMenu={(ev: ContextMenuEvent) => contextMenuForEntry(e, ev)}
                 style={{
                   height: 36,
                   justifyContent: "center",
@@ -464,6 +531,16 @@ export function Files(): React.ReactElement {
           {status ? " — " + status : ""}
         </Text>
       </View>
+      {/* Context menu (gap unit 10): last child so it draws and
+          hit-tests above everything else. */}
+      {menu ? (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          onDismiss={() => setMenu(null)}
+        />
+      ) : null}
     </View>
   );
 }

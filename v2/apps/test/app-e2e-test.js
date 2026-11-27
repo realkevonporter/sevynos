@@ -1228,6 +1228,312 @@ check("files: select, copy, paste, delete via the toolbar", () => {
   );
 });
 
+// Files right-click (gap unit 10, audit #13): drive a right-button
+// press (0x111) at a presented rect, and read the menu back from
+// the presented ops. The menu panel is the 220-wide #1f2937 rect;
+// its item rows are the smallest hit rects under their labels (the
+// full-surface click-away overlay is larger, so "smallest" picks
+// the row, not the overlay).
+function rightClickRect(rect, x, y) {
+  Sevyn._handlers.pointer({
+    type: "button",
+    x,
+    y,
+    button: 0x111,
+    pressed: true,
+    nodeId: rect.nodeId,
+  });
+}
+function smallestRectAt(x, y) {
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  let best = null;
+  for (const o of present.ops) {
+    if (o.type !== "rect" || o.nodeId == null || o.nodeId < 0) continue;
+    if (x < o.x || x >= o.x + o.w || y < o.y || y >= o.y + o.h) continue;
+    if (!best || o.w * o.h < best.w * best.h) best = o;
+  }
+  assert.ok(best, `hit rect at (${x},${y}) found`);
+  return best;
+}
+// The rect of a file row, found from its name text.
+function fileRowRect(name) {
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  const text = present.ops.find((o) => o.type === "text" && o.text === name);
+  assert.ok(text, `file row text ${JSON.stringify(name)} found`);
+  const cx = text.x + text.w / 2;
+  const cy = text.y + text.h / 2;
+  const rect = smallestRectAt(cx, cy);
+  assert.equal(rect.h, 36, `row for ${name} is 36 tall`);
+  return { rect, cx, cy };
+}
+// The Files list surface (the ScrollView's background rect): the only
+// #f9fafb hit rect taller than a row.
+function listSurfaceRect() {
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  const rect = present.ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      o.color === "#f9fafb" &&
+      o.h > 100,
+  );
+  assert.ok(rect, "list surface hit rect found");
+  return rect;
+}
+function findMenuPanel() {
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  return present.ops.find(
+    (o) => o.type === "rect" && o.color === "#1f2937" && o.w === 220,
+  );
+}
+function menuPanelRect() {
+  const panel = findMenuPanel();
+  assert.ok(panel, "menu panel presented");
+  return panel;
+}
+// Item labels inside the panel, in row order.
+function menuTexts() {
+  const panel = menuPanelRect();
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  return present.ops
+    .filter(
+      (o) =>
+        o.type === "text" &&
+        o.x >= panel.x &&
+        o.x < panel.x + panel.w &&
+        o.y >= panel.y &&
+        o.y < panel.y + panel.h,
+    )
+    .map((o) => o.text);
+}
+function tapMenuItem(label) {
+  const panel = menuPanelRect();
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  const text = present.ops.find(
+    (o) =>
+      o.type === "text" &&
+      o.text === label &&
+      o.x >= panel.x &&
+      o.x < panel.x + panel.w &&
+      o.y >= panel.y &&
+      o.y < panel.y + panel.h,
+  );
+  assert.ok(text, `menu item ${JSON.stringify(label)} found`);
+  const cx = text.x + text.w / 2;
+  const cy = text.y + text.h / 2;
+  const rect = smallestRectAt(cx, cy);
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: cx,
+    y: cy,
+    button: 1,
+    pressed: true,
+    nodeId: rect.nodeId,
+  });
+}
+function menuItemColor(label) {
+  const panel = menuPanelRect();
+  const present = Sevyn._presents[Sevyn._presents.length - 1];
+  const text = present.ops.find(
+    (o) =>
+      o.type === "text" &&
+      o.text === label &&
+      o.x >= panel.x &&
+      o.x < panel.x + panel.w &&
+      o.y >= panel.y &&
+      o.y < panel.y + panel.h,
+  );
+  assert.ok(text, `menu item ${JSON.stringify(label)} found`);
+  return text.color;
+}
+
+check(
+  "files: right-click a row selects it and opens the menu; Copy and Delete act on it",
+  () => {
+    const handler = (cmd) => {
+      if (cmd === "sevyn files list /data")
+        return "0\nd m4-files-test\nf slot-state.json\n";
+      if (cmd === "sevyn files volumes")
+        return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+      if (cmd === "sevyn files clipboard") return "0\nempty\n";
+      if (
+        cmd ===
+        "sevyn files clipboard set copy /data/m4-files-test m4-files-test directory"
+      )
+        return "0\nclipboard set: copy m4-files-test\n";
+      if (cmd === "sevyn files delete /data/slot-state.json")
+        return "0\ndeleted /data/slot-state.json\n";
+      return "1\nerror: no such directory\n";
+    };
+    loadAs(
+      {
+        id: "files",
+        name: "Files",
+        color: "#3b82f6",
+        glyph: "F",
+        permissions: ["cli.exec"],
+      },
+      filesBundle,
+      handler,
+    );
+    // Right-click the directory row: selects it, opens the menu with
+    // the toolbar's actions — and does NOT navigate into it (no onPress
+    // from a right-click, so the select-again-to-open rule cannot fire).
+    const dir = fileRowRect("m4-files-test");
+    rightClickRect(dir.rect, dir.cx, dir.cy);
+    let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("Selected m4-files-test")),
+      "right-click selected the row",
+    );
+    assert.ok(
+      !Sevyn._logs.includes("FILES listed /data/m4-files-test (1)"),
+      "right-click did not navigate into the directory",
+    );
+    assert.deepEqual(
+      menuTexts(),
+      ["Cut", "Copy", "Paste", "Delete"],
+      "menu offers the toolbar's actions",
+    );
+    assert.equal(
+      menuItemColor("Paste"),
+      "#6b7280",
+      "Paste dimmed with an empty file clipboard",
+    );
+    // Keyboard: Down once highlights Copy, Enter copies the directory.
+    Sevyn._handlers.key({ key: 108, pressed: true }); // Down
+    Sevyn._handlers.key({ key: 28, pressed: true }); // Enter
+    assert.ok(
+      Sevyn._logs.includes(
+        "EXEC sevyn files clipboard set copy /data/m4-files-test m4-files-test directory",
+      ),
+      "menu Copy copies the right-clicked entry, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("Copied m4-files-test")),
+      "copy status shown",
+    );
+    assert.equal(findMenuPanel(), undefined, "menu dismissed after selection");
+    // Reopen: Paste is enabled now that the clipboard holds the copy,
+    // and Esc dismisses the menu.
+    const dir2 = fileRowRect("m4-files-test");
+    rightClickRect(dir2.rect, dir2.cx, dir2.cy);
+    assert.deepEqual(menuTexts(), ["Cut", "Copy", "Paste", "Delete"], "menu reopened");
+    assert.equal(
+      menuItemColor("Paste"),
+      "#ffffff",
+      "Paste enabled once the clipboard holds an item",
+    );
+    Sevyn._handlers.key({ key: 1, pressed: true }); // Esc
+    assert.equal(findMenuPanel(), undefined, "Esc dismissed the menu");
+    // Right-click the file row, click Delete in the menu.
+    const file = fileRowRect("slot-state.json");
+    rightClickRect(file.rect, file.cx, file.cy);
+    assert.deepEqual(
+      menuTexts(),
+      ["Cut", "Copy", "Paste", "Delete"],
+      "menu offers the actions for the file",
+    );
+    tapMenuItem("Delete");
+    assert.ok(
+      Sevyn._logs.includes("EXEC sevyn files delete /data/slot-state.json"),
+      "menu Delete deletes the right-clicked file, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    assert.ok(
+      texts.some((t) => t.includes("Deleted slot-state.json")),
+      "delete status shown",
+    );
+    assert.equal(findMenuPanel(), undefined, "menu dismissed after Delete");
+  },
+);
+
+check(
+  "files: right-click on empty list space opens nothing with an empty clipboard",
+  () => {
+    const handler = (cmd) => {
+      if (cmd === "sevyn files list /data")
+        return "0\nd m4-files-test\nf slot-state.json\n";
+      if (cmd === "sevyn files volumes")
+        return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+      if (cmd === "sevyn files clipboard") return "0\nempty\n";
+      return "1\nerror: no such directory\n";
+    };
+    loadAs(
+      {
+        id: "files",
+        name: "Files",
+        color: "#3b82f6",
+        glyph: "F",
+        permissions: ["cli.exec"],
+      },
+      filesBundle,
+      handler,
+    );
+    const surface = listSurfaceRect();
+    // Below the last row, inside the list surface.
+    rightClickRect(surface, surface.x + 100, surface.y + surface.h - 20);
+    assert.equal(
+      findMenuPanel(),
+      undefined,
+      "no menu on empty space with an empty clipboard",
+    );
+  },
+);
+
+check("files: right-click on empty list space offers Paste alone and pastes", () => {
+  let pasted = false;
+  const handler = (cmd) => {
+    if (cmd === "sevyn files list /data")
+      return pasted
+        ? "0\nd m4-files-test\nd m4-files-test (1)\nf slot-state.json\n"
+        : "0\nd m4-files-test\nf slot-state.json\n";
+    if (cmd === "sevyn files volumes")
+      return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+    if (cmd === "sevyn files clipboard")
+      return (
+        '0\n{"kind":"copy","sourcePath":"/data/m4-files-test",' +
+        '"sourceName":"m4-files-test","sourceKind":"directory"}\n'
+      );
+    if (cmd === "sevyn files copy /data/m4-files-test /data/m4-files-test (1)") {
+      pasted = true;
+      return "0\ncopied /data/m4-files-test to /data/m4-files-test (1)\n";
+    }
+    return "1\nerror: no such directory\n";
+  };
+  loadAs(
+    {
+      id: "files",
+      name: "Files",
+      color: "#3b82f6",
+      glyph: "F",
+      permissions: ["cli.exec"],
+    },
+    filesBundle,
+    handler,
+  );
+  const surface = listSurfaceRect();
+  rightClickRect(surface, surface.x + 100, surface.y + surface.h - 20);
+  assert.deepEqual(menuTexts(), ["Paste"], "empty-space menu offers Paste alone");
+  tapMenuItem("Paste");
+  assert.ok(
+    Sevyn._logs.includes(
+      "EXEC sevyn files copy /data/m4-files-test /data/m4-files-test (1)",
+    ),
+    "empty-space Paste pastes into the current directory, logs=" +
+      JSON.stringify(Sevyn._logs),
+  );
+  const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.some((t) => t.includes("Pasted m4-files-test (1)")),
+    "paste status shown",
+  );
+  assert.ok(texts.includes("m4-files-test (1)"), "pasted entry listed");
+  assert.equal(findMenuPanel(), undefined, "menu dismissed after Paste");
+});
+
 check("browser: tabs on mount, address-bar navigation opens a page", () => {
   let tabCalls = 0;
   const handler = (cmd) => {
