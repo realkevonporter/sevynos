@@ -594,6 +594,167 @@ check("desktop right-click: click-away dismisses the menu", () => {
   );
 });
 
+check(
+  "dock right-click: a tile right-click opens the menu and launches nothing by itself",
+  () => {
+    const last = lastPresent();
+    // Files is running (multi-instance) at this point: LAUNCHED in
+    // the desktop-icon check and never stopped since.
+    const filesTile = tiles(last.ops)[0];
+    const before = Sevyn._logs.filter((l) => l === "LAUNCH files").length;
+    rightClickRect(filesTile, filesTile.x + 2, filesTile.y + 2);
+    const after = lastPresent();
+    assert.deepEqual(
+      menuTexts(after.ops),
+      ["Show Files", "Open New Window"],
+      "running multi-instance tile offers Show + Open New Window",
+    );
+    assert.equal(
+      Sevyn._logs.filter((l) => l === "LAUNCH files").length,
+      before,
+      "no launch from the right-click itself",
+    );
+    const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+    assert.ok(
+      !texts.some((t) => t.includes("Starting Files")),
+      "no Starting… from the right-click itself",
+    );
+    Sevyn._handlers.key({ key: 1, pressed: true }); // Esc
+    assert.equal(findMenuPanel(lastPresent().ops), undefined, "menu dismissed by Esc");
+  },
+);
+
+check("dock right-click: Show focuses a running multi-instance app", () => {
+  const last = lastPresent();
+  const filesTile = tiles(last.ops)[0];
+  const launchesBefore = Sevyn._logs.filter((l) => l === "LAUNCH files").length;
+  rightClickRect(filesTile, filesTile.x + 2, filesTile.y + 2);
+  tapMenuItem("Show Files");
+  assert.ok(
+    Sevyn._logs.some((l) => l === "FOCUS files"),
+    "FOCUS files logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.equal(
+    Sevyn._logs.filter((l) => l === "LAUNCH files").length,
+    launchesBefore,
+    "Show focuses without launching",
+  );
+  assert.equal(
+    findMenuPanel(lastPresent().ops),
+    undefined,
+    "menu dismissed after selection",
+  );
+});
+
+check("dock right-click: Open New Window launches another instance", () => {
+  const last = lastPresent();
+  const filesTile = tiles(last.ops)[0];
+  const before = Sevyn._logs.filter((l) => l === "LAUNCH files").length;
+  rightClickRect(filesTile, filesTile.x + 2, filesTile.y + 2);
+  tapMenuItem("Open New Window");
+  assert.equal(
+    Sevyn._logs.filter((l) => l === "LAUNCH files").length,
+    before + 1,
+    "one more LAUNCH files, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.equal(
+    findMenuPanel(lastPresent().ops),
+    undefined,
+    "menu dismissed after selection",
+  );
+  // Clear the launch again so later checks start clean.
+  Sevyn._handlers.appEvent("EVENT LAUNCHED files");
+});
+
+check(
+  "dock right-click: a not-running tile offers Open only; choosing it launches",
+  () => {
+    const last = lastPresent();
+    // Tile order follows the mock app list: files, terminal, browser,
+    // settings, music, … — music (index 4) has never launched.
+    const musicTile = tiles(last.ops)[4];
+    rightClickRect(musicTile, musicTile.x + 2, musicTile.y + 2);
+    assert.deepEqual(
+      menuTexts(lastPresent().ops),
+      ["Open Music"],
+      "not-running tile offers Open only",
+    );
+    tapMenuItem("Open Music");
+    assert.ok(
+      Sevyn._logs.some((l) => l === "LAUNCH music"),
+      "LAUNCH music logged, logs=" + JSON.stringify(Sevyn._logs),
+    );
+    const after = lastPresent();
+    const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+    assert.ok(
+      texts.some((t) => t.includes("Starting Music")),
+      "Starting… state shown",
+    );
+    assert.equal(findMenuPanel(after.ops), undefined, "menu dismissed after selection");
+    Sevyn._handlers.appEvent("EVENT LAUNCHED music");
+  },
+);
+
+check("dock right-click: a running single-instance tile offers Show only", () => {
+  const last = lastPresent();
+  // Settings (index 3) is single-instance: launch it first so it
+  // is running, then its menu must offer Show and nothing else.
+  const settingsTile = tiles(last.ops)[3];
+  tap(settingsTile);
+  assert.ok(
+    Sevyn._logs.some((l) => l === "LAUNCH settings"),
+    "LAUNCH settings logged",
+  );
+  Sevyn._handlers.appEvent("EVENT LAUNCHED settings");
+  const launchesBefore = Sevyn._logs.filter((l) => l === "LAUNCH settings").length;
+  const tile = tiles(lastPresent().ops)[3];
+  rightClickRect(tile, tile.x + 2, tile.y + 2);
+  assert.deepEqual(
+    menuTexts(lastPresent().ops),
+    ["Show Settings"],
+    "running single-instance tile offers Show only",
+  );
+  tapMenuItem("Show Settings");
+  assert.ok(
+    Sevyn._logs.some((l) => l === "FOCUS settings"),
+    "FOCUS settings logged, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.equal(
+    Sevyn._logs.filter((l) => l === "LAUNCH settings").length,
+    launchesBefore,
+    "Show focuses without launching",
+  );
+  assert.equal(
+    findMenuPanel(lastPresent().ops),
+    undefined,
+    "menu dismissed after selection",
+  );
+});
+
+check("dock right-click: click-away dismisses the menu", () => {
+  const last = lastPresent();
+  // Music is running (single-instance) now, so its menu is one item.
+  const musicTile = tiles(last.ops)[4];
+  rightClickRect(musicTile, musicTile.x + 2, musicTile.y + 2);
+  assert.ok(findMenuPanel(lastPresent().ops), "menu open");
+  const overlay = lastPresent().ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.color === "#00000000" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      o.w === 1024 &&
+      o.h === 768,
+  );
+  assert.ok(overlay, "click-away overlay presented");
+  tap(overlay);
+  assert.equal(
+    findMenuPanel(lastPresent().ops),
+    undefined,
+    "menu dismissed by click-away",
+  );
+});
+
 check("status push re-renders the tray", () => {
   Sevyn._status.battery = "42";
   Sevyn._status.volume = "10";

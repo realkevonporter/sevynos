@@ -15,7 +15,9 @@ const logs = [];
 // The 12 stock apps, as appd's LIST would return them (id|name|
 // version|color|glyph|...). The shell falls back to its built-in list
 // when listApps() is empty; the mock returns the full set so the
-// shell renders from the appd path.
+// shell renders from the appd path. singleInstance follows
+// v2/shell/src/apps.ts (Kevon, 2026-11-10): Files, Terminal, Notes
+// and Browser are multi-instance; the rest single-instance.
 const MOCK_APPS = [
   {
     id: "files",
@@ -25,6 +27,7 @@ const MOCK_APPS = [
     glyph: "F",
     system: false,
     protected: false,
+    singleInstance: false,
     permissions: ["status.read"],
   },
   {
@@ -35,6 +38,7 @@ const MOCK_APPS = [
     glyph: ">",
     system: true,
     protected: true,
+    singleInstance: false,
     permissions: [],
   },
   {
@@ -45,6 +49,7 @@ const MOCK_APPS = [
     glyph: "B",
     system: false,
     protected: false,
+    singleInstance: false,
     permissions: [],
   },
   {
@@ -55,6 +60,7 @@ const MOCK_APPS = [
     glyph: "S",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
   {
@@ -65,6 +71,7 @@ const MOCK_APPS = [
     glyph: "M",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
   {
@@ -75,6 +82,7 @@ const MOCK_APPS = [
     glyph: "P",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
   {
@@ -85,6 +93,7 @@ const MOCK_APPS = [
     glyph: "C",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
   {
@@ -95,6 +104,7 @@ const MOCK_APPS = [
     glyph: "N",
     system: false,
     protected: false,
+    singleInstance: false,
     permissions: [],
   },
   {
@@ -105,6 +115,7 @@ const MOCK_APPS = [
     glyph: "=",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
   {
@@ -115,6 +126,7 @@ const MOCK_APPS = [
     glyph: "O",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
   {
@@ -125,6 +137,7 @@ const MOCK_APPS = [
     glyph: "M",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
   {
@@ -135,6 +148,7 @@ const MOCK_APPS = [
     glyph: "S",
     system: false,
     protected: false,
+    singleInstance: true,
     permissions: [],
   },
 ];
@@ -679,6 +693,12 @@ const Sevyn = {
   },
   launchApp(appId) {
     logs.push("LAUNCH " + appId);
+    return true;
+  },
+  // Dock right-click menu (gap unit 12): the Show item focuses a
+  // running app (appd FOCUS). Mirrors launchApp above.
+  focusApp(appId) {
+    logs.push("FOCUS " + appId);
     return true;
   },
   log(msg) {
