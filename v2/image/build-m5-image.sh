@@ -220,7 +220,7 @@ cp "$BUILD_TMP/cargo-target/release/sevyn-relay" "$BUILD_TMP/sevyn-relay"
 # for Ed25519 feed verification.
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn-updated" \
   "$ROOT/update/sevyn-updated.c" "$ROOT/update/canonical.c" \
-  "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lcrypto
+  "$ROOT/loader/json.c" "$ROOT/loader/verify.c" -lssl -lcrypto
 gcc -O2 -Wall -Wextra -o "$BUILD_TMP/sevyn" \
   "$ROOT/update/sevyn.c" -lcrypto
 
