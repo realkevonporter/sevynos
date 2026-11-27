@@ -12,20 +12,29 @@
 //     deep-link channel that opens a folder directly is a
 //     follow-up, not this port); a file tap opens its parent in
 //     Files, which is /data for anything on the desktop.
-//   - "New folder" / "New text file" create through the existing
-//     `sevyn files mkdir` / `sevyn files write` verbs, with a
-//     numbered suffix when the name is taken.
+//   - right-click on empty desktop space opens a context menu
+//     (gap unit 11, audit #14) with "New folder" / "New text file"
+//     — those actions used to be always-visible buttons at the top
+//     of the desktop (left 24/164, top 22) and moved into the menu
+//     here, per Kevon's direction (2026-11-26): create actions
+//     belong in the right-click popup, not on the surface. Both
+//     create through the existing `sevyn files mkdir` /
+//     `sevyn files write` verbs, with a numbered suffix when the
+//     name is taken. A right-click on a desktop icon does nothing
+//     yet (no icon actions exist — Open/Rename/Trash are later
+//     gap units) and never fires the icon's tap.
 //   - the listing is re-read on every shell render (app LAUNCHED /
 //     STOPPED events re-render the shell), so a change made from
 //     Files shows up the next time the shell re-renders — there is
 //     no 1s live re-list in this port.
 //
-// NOT in this port: right-click context menus (the renderer has
-// no onContextMenu), rename / delete / cut / copy / paste (no CLI
-// verbs for them, and no menu trigger to hang them on).
+// NOT in this port: rename / delete / cut / copy / paste (no CLI
+// verbs for them, and no icon menu trigger to hang them on).
 
 import * as React from "react";
 import { View, Text, Pressable } from "./host";
+import { ContextMenu } from "../../rn/renderer/context-menu";
+import type { ContextMenuEvent } from "../../rn/renderer/sevyn-renderer";
 import {
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
@@ -37,9 +46,10 @@ const ITEM_WIDTH = 104;
 const ITEM_HEIGHT = 92;
 const HORIZONTAL_GAP = 18;
 const VERTICAL_GAP = 16;
-const ACTION_TOP = 22;
-const ACTION_HEIGHT = 34;
-const ACTION_WIDTH = 132;
+// Icons start 22px from the top — the old always-visible action
+// buttons used to sit here (top 22, 34 tall); they moved into the
+// right-click menu (gap unit 11), so the grid takes their place.
+const ICON_TOP = 22;
 
 export type DesktopTileKind =
   "folder" | "image" | "video" | "audio" | "code" | "document" | "archive" | "file";
@@ -147,10 +157,12 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
   // Re-render trigger only: the listing is read fresh on every
   // render, so bumping this after a create re-lists immediately.
   const [, setRefresh] = React.useState(0);
+  // Right-click menu anchor (gap unit 11): null when closed.
+  const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
   const entries = listDesktopEntries();
   const taken = new Set(entries.map((e) => e.name));
   const columns = desktopColumns(size.width);
-  const iconTop = ACTION_TOP + ACTION_HEIGHT + 18;
+  const iconTop = ICON_TOP;
 
   function openInFiles(entry: DesktopEntry): void {
     // Files always opens at /data root — the parent of any desktop
@@ -175,6 +187,16 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
 
   return (
     <View
+      // The desktop surface is a plain View: the renderer (gap unit
+      // 11) emits a hit rect for a View that declares onContextMenu,
+      // so a right-click on empty desktop space reaches this
+      // handler. Icons are emitted after the surface rect, so they
+      // still win the hit-test where they overlap it — a right-click
+      // on an icon hits the icon (which has no onContextMenu) and
+      // does nothing, never launching Files.
+      onContextMenu={(ev: ContextMenuEvent) =>
+        setMenu({ x: ev.nativeEvent.x, y: ev.nativeEvent.y })
+      }
       style={{
         position: "absolute",
         left: 0,
@@ -183,42 +205,6 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
         bottom: 0,
       }}
     >
-      <Pressable
-        onPress={newFolder}
-        style={{
-          position: "absolute",
-          left: 24,
-          top: ACTION_TOP,
-          width: ACTION_WIDTH,
-          height: ACTION_HEIGHT,
-          backgroundColor: "rgba(255, 255, 255, 0.08)",
-          borderRadius: 8,
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
-        <Text style={{ fontSize: 13, fontWeight: "500", color: "#ffffff" }}>
-          New folder
-        </Text>
-      </Pressable>
-      <Pressable
-        onPress={newTextFile}
-        style={{
-          position: "absolute",
-          left: 24 + ACTION_WIDTH + 8,
-          top: ACTION_TOP,
-          width: ACTION_WIDTH,
-          height: ACTION_HEIGHT,
-          backgroundColor: "rgba(255, 255, 255, 0.08)",
-          borderRadius: 8,
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
-        <Text style={{ fontSize: 13, fontWeight: "500", color: "#ffffff" }}>
-          New text file
-        </Text>
-      </Pressable>
       {entries.map((entry, index) => {
         const row = Math.floor(index / columns);
         const column = index % columns;
@@ -274,6 +260,20 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
           </Pressable>
         );
       })}
+      {/* Context menu (gap unit 11): last child so it draws and
+          hit-tests above everything else. The desktop offers only
+          the two create actions today — nothing is invented here. */}
+      {menu ? (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={[
+            { id: "new-folder", label: "New folder", onSelect: newFolder },
+            { id: "new-text-file", label: "New text file", onSelect: newTextFile },
+          ]}
+          onDismiss={() => setMenu(null)}
+        />
+      ) : null}
     </View>
   );
 }

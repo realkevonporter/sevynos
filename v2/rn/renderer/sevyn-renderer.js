@@ -26,7 +26,10 @@
 //     pinned by the unit-3 test). Views without onContextMenu ignore
 //     it. A ScrollView with onContextMenu is hit-testable through its
 //     background rect (emitInstance), so empty list space can open a
-//     menu — without one it emits no hit rect at all (unit 10).
+//     menu — without one it emits no hit rect at all (unit 10). A
+//     plain View with onContextMenu is hit-testable the same way
+//     (unit 11, audit #14: the shell desktop surface, which has no
+//     background) — without one it still emits no hit rect.
 //     The reusable menu itself lives in ./context-menu.js
 //     (ContextMenu): an anchored, clamped popup with click-away /
 //     Esc / selection dismiss and arrow-key navigation, driven by
@@ -419,6 +422,18 @@ function emitInstance(inst, ox, oy, ops, clip) {
   }
 
   if (inst.type === "View" || inst.type === "Pressable") {
+    // A View that declares onContextMenu (gap unit 11, audit #14:
+    // the shell desktop surface) is hit-testable: its rect carries
+    // its yogaId, so a right-click on empty desktop space dispatches
+    // onContextMenu instead of hitting nothing (only Pressable /
+    // onPress views emit hit rects, and a plain View is neither).
+    // Without onContextMenu the rect stays nodeId -1 — or is not
+    // emitted at all when there is no background — as before, so no
+    // other View changes behaviour. Children are emitted after this
+    // rect, so an icon still wins the hit-test where it overlaps
+    // the desktop surface.
+    const menuId = inst.props && inst.props.onContextMenu ? inst.yogaId : -1;
+    const hitId = nodeId >= 0 ? nodeId : menuId;
     if (st.backgroundColor) {
       ops.push({
         type: "rect",
@@ -428,11 +443,12 @@ function emitInstance(inst, ox, oy, ops, clip) {
         h,
         color: st.backgroundColor,
         radius: st.borderRadius || 0,
-        nodeId,
+        nodeId: hitId,
       });
-    } else if (pressable) {
-      // Pressable with no background still needs a hit rect.
-      ops.push({ type: "rect", x, y, w, h, color: "#00000000", nodeId });
+    } else if (pressable || menuId >= 0) {
+      // Pressable with no background still needs a hit rect — and
+      // so does a View with onContextMenu and no background.
+      ops.push({ type: "rect", x, y, w, h, color: "#00000000", nodeId: hitId });
     }
   } else if (inst.type === "Text") {
     const font = fontOf(inst);

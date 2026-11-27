@@ -182,8 +182,10 @@ function type(text) {
 function pressEnter() {
   Sevyn._handlers.key({ key: 28, pressed: true });
 }
-// Desktop icon pressables (104x92) and desktop action pressables
-// (132x34), left to right.
+// Desktop icon pressables (104x92), left to right. The old desktop
+// action pressables (132x34, "New folder" / "New text file") are
+// gone — gap unit 11 moved them into the right-click menu — so
+// desktopActions now only ever asserts their absence.
 const desktopItems = (ops) =>
   ops
     .filter(
@@ -210,6 +212,85 @@ const desktopActions = (ops) =>
 // transparent 6x6 spacer so columns stay aligned.
 const runningDots = (ops) =>
   ops.filter((o) => o.type === "rect" && o.w === 6 && o.h === 6 && o.color === "#ffffff");
+
+// Desktop right-click (gap unit 11, audit #14): drive a right-button
+// press (0x111) at a presented rect, and read the menu back from the
+// presented ops. The menu panel is the 220-wide #1f2937 rect; its
+// item rows are the smallest hit rects under their labels (the
+// full-surface click-away overlay is larger, so "smallest" picks the
+// row, not the overlay).
+// The desktop surface is the plain View behind the icons — its
+// transparent hit rect spans the surface width (1024). The mock
+// lays the main area out at height 0 (its flex quirk — see the
+// hover check), so the rect is 1024x0 here; the renderer still
+// dispatches by nodeId, which is what this test proves, and the
+// real host lays the surface out full-height (proven on-device).
+const desktopSurfaceRect = (ops) => {
+  const rect = ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.color === "#00000000" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      o.w === 1024,
+  );
+  assert.ok(rect, "desktop surface hit rect found");
+  return rect;
+};
+const rightClickRect = (rect, x, y) => {
+  Sevyn._handlers.pointer({
+    type: "button",
+    x,
+    y,
+    button: 0x111,
+    pressed: true,
+    nodeId: rect.nodeId,
+  });
+};
+const findMenuPanel = (ops) =>
+  ops.find((o) => o.type === "rect" && o.color === "#1f2937" && o.w === 220);
+const menuTexts = (ops) => {
+  const panel = findMenuPanel(ops);
+  assert.ok(panel, "menu panel presented");
+  return ops
+    .filter(
+      (o) =>
+        o.type === "text" &&
+        o.x >= panel.x &&
+        o.x < panel.x + panel.w &&
+        o.y >= panel.y &&
+        o.y < panel.y + panel.h,
+    )
+    .map((o) => o.text);
+};
+const smallestRectAt = (ops, x, y) => {
+  let best = null;
+  for (const o of ops) {
+    if (o.type !== "rect" || o.nodeId == null || o.nodeId < 0) continue;
+    if (x < o.x || x >= o.x + o.w || y < o.y || y >= o.y + o.h) continue;
+    if (!best || o.w * o.h < best.w * best.h) best = o;
+  }
+  assert.ok(best, `hit rect at (${x},${y}) found`);
+  return best;
+};
+const tapMenuItem = (label) => {
+  const ops = lastPresent().ops;
+  const panel = findMenuPanel(ops);
+  assert.ok(panel, "menu panel presented");
+  const text = ops.find(
+    (o) =>
+      o.type === "text" &&
+      o.text === label &&
+      o.x >= panel.x &&
+      o.x < panel.x + panel.w &&
+      o.y >= panel.y &&
+      o.y < panel.y + panel.h,
+  );
+  assert.ok(text, `menu item ${JSON.stringify(label)} found`);
+  const cx = text.x + text.w / 2;
+  const cy = text.y + text.h / 2;
+  tap(smallestRectAt(lastPresent().ops, cx, cy));
+};
 
 vm.runInThisContext(bundle, { filename: "shell.js" });
 
@@ -267,8 +348,12 @@ check("desktop icons: /data/Desktop entries render as tiles", () => {
   const texts = last.ops.filter((o) => o.type === "text").map((o) => o.text);
   assert.ok(texts.includes("Photos"), "folder entry shown");
   assert.ok(texts.includes("Notes.txt"), "file entry shown");
-  assert.ok(texts.includes("New folder"), "new-folder action shown");
-  assert.ok(texts.includes("New text file"), "new-text-file action shown");
+  // Gap unit 11: the always-visible "New folder" / "New text file"
+  // buttons are gone — those actions live in the right-click menu
+  // now, so neither label is on the surface with the menu closed.
+  assert.ok(!texts.includes("New folder"), "no always-visible new-folder button");
+  assert.ok(!texts.includes("New text file"), "no always-visible new-text-file button");
+  assert.equal(desktopActions(last.ops).length, 0, "no 132x34 action buttons");
   const items = desktopItems(last.ops);
   assert.equal(items.length, 2, "2 desktop icons, got " + items.length);
   // Direction-C tile colors: folder amber, document blue.
@@ -410,27 +495,102 @@ check("desktop icons: tapping one launches Files", () => {
   Sevyn._handlers.appEvent("EVENT LAUNCHED files");
 });
 
-check("desktop icons: New folder runs sevyn files mkdir", () => {
+check("desktop right-click: empty space opens the menu; Esc dismisses", () => {
   const last = lastPresent();
-  const actions = desktopActions(last.ops);
-  assert.equal(actions.length, 2, "2 desktop actions, got " + actions.length);
-  const newFolder = actions[0];
-  Sevyn._handlers.pointer({
-    type: "button",
-    x: newFolder.x + 2,
-    y: newFolder.y + 2,
-    button: 1,
-    pressed: true,
-    nodeId: newFolder.nodeId,
-  });
+  // (500, 300) is empty desktop: clear of the icons (top 22..114)
+  // and of the dock band at the bottom.
+  rightClickRect(desktopSurfaceRect(last.ops), 500, 300);
+  const after = lastPresent();
+  assert.deepEqual(
+    menuTexts(after.ops),
+    ["New folder", "New text file"],
+    "menu offers the two moved create actions",
+  );
+  Sevyn._handlers.key({ key: 1, pressed: true }); // Esc
+  assert.equal(findMenuPanel(lastPresent().ops), undefined, "menu dismissed by Esc");
+});
+
+check("desktop right-click: New folder in the menu runs sevyn files mkdir", () => {
+  const last = lastPresent();
+  rightClickRect(desktopSurfaceRect(last.ops), 500, 300);
+  tapMenuItem("New folder");
   assert.ok(
     Sevyn._logs.some((l) => l === 'EXEC sevyn files mkdir "/data/Desktop/New folder"'),
     "mkdir run, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.equal(
+    findMenuPanel(lastPresent().ops),
+    undefined,
+    "menu dismissed after selection",
   );
   // The create re-renders (and re-lists) the desktop.
   assert.ok(
     Sevyn._logs.filter((l) => l === "EXEC sevyn files list /data/Desktop").length >= 2,
     "desktop re-listed after create",
+  );
+});
+
+check("desktop right-click: New text file in the menu runs sevyn files write", () => {
+  const last = lastPresent();
+  rightClickRect(desktopSurfaceRect(last.ops), 500, 300);
+  tapMenuItem("New text file");
+  assert.ok(
+    Sevyn._logs.some(
+      (l) => l === 'EXEC sevyn files write "/data/Desktop/New text file.txt" ""',
+    ),
+    "write run, logs=" + JSON.stringify(Sevyn._logs),
+  );
+  assert.equal(
+    findMenuPanel(lastPresent().ops),
+    undefined,
+    "menu dismissed after selection",
+  );
+});
+
+check(
+  "desktop right-click: an icon right-click does nothing — no menu, no launch",
+  () => {
+    const last = lastPresent();
+    const items = desktopItems(last.ops);
+    assert.equal(items.length, 2, "2 desktop icons");
+    const before = Sevyn._logs.filter((l) => l === "LAUNCH files").length;
+    const photos = items[0];
+    rightClickRect(photos, photos.x + 2, photos.y + 2);
+    assert.equal(
+      findMenuPanel(lastPresent().ops),
+      undefined,
+      "no menu from an icon right-click",
+    );
+    assert.equal(
+      Sevyn._logs.filter((l) => l === "LAUNCH files").length,
+      before,
+      "no launch from an icon right-click",
+    );
+  },
+);
+
+check("desktop right-click: click-away dismisses the menu", () => {
+  const last = lastPresent();
+  rightClickRect(desktopSurfaceRect(last.ops), 500, 300);
+  assert.ok(findMenuPanel(lastPresent().ops), "menu open");
+  // The click-away overlay is the full-surface transparent
+  // Pressable (1024x768); the desktop surface rect is 1024x0 in
+  // the mock, so the height is what tells them apart.
+  const overlay = lastPresent().ops.find(
+    (o) =>
+      o.type === "rect" &&
+      o.color === "#00000000" &&
+      o.nodeId != null &&
+      o.nodeId >= 0 &&
+      o.w === 1024 &&
+      o.h === 768,
+  );
+  assert.ok(overlay, "click-away overlay presented");
+  tap(overlay);
+  assert.equal(
+    findMenuPanel(lastPresent().ops),
+    undefined,
+    "menu dismissed by click-away",
   );
 });
 
