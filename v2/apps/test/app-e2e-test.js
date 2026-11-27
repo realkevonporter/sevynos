@@ -165,6 +165,9 @@ function type(text) {
 function pressEnter() {
   Sevyn._handlers.key({ key: 28, pressed: true });
 }
+function pressCtrlC() {
+  Sevyn._handlers.key({ key: 46, pressed: true, ctrl: true });
+}
 function pressTab(n) {
   for (let i = 0; i < n; i++) Sevyn._handlers.key({ key: 15, pressed: true });
 }
@@ -675,6 +678,58 @@ check("terminal: without cli.exec the command is refused", () => {
     texts.some((t) => t.includes("permission denied")),
     "refusal shown in the scrollback",
   );
+});
+
+check("terminal: Ctrl+C cancels the typed line, empty-prompt Ctrl+C is harmless", () => {
+  loadAs(
+    {
+      id: "terminal",
+      name: "Terminal",
+      color: "#111827",
+      glyph: ">",
+      permissions: ["cli.exec"],
+    },
+    terminalBundle,
+    (cmd) => {
+      if (cmd === "sevyn shell status") return "0\nshell: running (pid 123)\n";
+      return "0\n";
+    },
+  );
+  // Clipboard sentinel: Ctrl+C in Terminal is interrupt, never copy.
+  Sevyn.clipboardWrite("sentinel");
+  type("shell status");
+  pressCtrlC();
+  let texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(
+    texts.includes("sevyn> shell status^C"),
+    "interrupted line echoed with ^C, texts=" + JSON.stringify(texts),
+  );
+  assert.ok(!texts.includes("shell status"), "input cleared by the interrupt");
+  assert.equal(Sevyn.clipboardRead(), "sentinel", "Ctrl+C copied nothing");
+  assert.ok(
+    !Sevyn._logs.some((l) => l.startsWith("EXEC ")),
+    "no command ran for the cancelled line",
+  );
+  // The prompt is fresh: a normal command still runs to completion.
+  type("shell status");
+  pressEnter();
+  assert.ok(
+    Sevyn._logs.includes("EXEC sevyn shell status"),
+    "fresh command runs after the interrupt",
+  );
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("shell: running (pid 123)"), "command output shown");
+  // Ctrl+C at an empty prompt: harmless — echoes ^C, runs nothing.
+  const execsBefore = Sevyn._logs.filter((l) => l.startsWith("EXEC ")).length;
+  pressCtrlC();
+  texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+  assert.ok(texts.includes("sevyn> ^C"), "empty-prompt interrupt echoed");
+  assert.equal(
+    Sevyn._logs.filter((l) => l.startsWith("EXEC ")).length,
+    execsBefore,
+    "empty-prompt Ctrl+C ran no command",
+  );
+  assert.equal(Sevyn.clipboardRead(), "sentinel", "still nothing copied");
 });
 
 check("settings: channel switch applies and logs", () => {
