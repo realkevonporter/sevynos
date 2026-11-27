@@ -1,0 +1,218 @@
+# SevynOS v2 Genesis — the standalone Genesis image (Stage 3).
+#
+# Runs on pushes and PRs touching v2/ (the fresh build). The job builds
+# the native deps (Hermes + Yoga, cached), the shell + app bundles, the
+# loader + app daemon + update daemon + CLI + AI daemon, and the
+# Genesis image (the M13 image with Weston removed: sevyn-compositor
+# is the only compositor, running standalone on DRM/KMS), then runs
+# the genesis-check harness (forked from m1/m13-check):
+#   1. Standalone boot: SEVYN READY backend=drm renderer=gles, one
+#      output in native mode, socket up <= 2 s, first frame <= 3 s.
+#   2. Shell + one real RN app (Terminal) inside Genesis: the shell
+#      mounts, the desktop paints, frames flow, the Terminal
+#      launches and its window is on screen; compositor RSS with
+#      Shell + Terminal up and idle <= 200 MB.
+#   3. Pointer/keyboard routing to the right surface, focus + close,
+#      move/resize follow, clean poweroff.
+#   4. Recovery console boot (sevyn.recovery=1): the recovery marker,
+#      no SEVYN READY, and the sevyn CLI answers.
+#   5. Pixman fallback boot (sevyn.pixman=1): attempted and recorded
+#      honestly — on the virtual DRM devices in CI it is NOT PROVEN
+#      (an explicit WARN in the check, never a silent pass); real-GPU
+#      proof is owed (GF65).
+# The m12 regression does NOT run as a separate script on this image:
+# m12-check.mjs asserts the Weston stack (weston renderer=gl, host
+# EGL init, GPU present path), which this image intentionally has no
+# longer; the m12 behaviours that survive the switch (shell mounts,
+# desktop paints, frames flow, a real app launches) are re-proven by
+# the genesis check itself. Boot logs, screendumps and the JSON result
+# are kept as artifacts. sevynos.img itself is NOT uploaded here —
+# the nightly publishes it on merge.
+#
+# This workflow does NOT switch the nightly: the nightly keeps
+# shipping the M13 image until the standalone Genesis image passes
+# this check AND the GF65 proves 60 fps (COMPOSITOR_PLAN.md).
+#
+# QEMU has no GPU: the guest init forces Mesa's software driver
+# (LIBGL_ALWAYS_SOFTWARE=1 → swrast/llvmpipe) so the compositor's
+# GLES renderer runs in software into virtio-gpu dumb buffers — the
+# CPU-only product path, not a CI workaround. The fps sample is a
+# liveness signal only — the check asserts the line exists, never its
+# value. Real-hardware behaviour (60 fps on the GF65) is Kevon's GF65
+# verification after merge — the PR body says so.
+name: SevynOS v2 Genesis
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-genesis.yml"
+  pull_request:
+    paths:
+      - "v2/**"
+      - ".github/workflows/v2-genesis.yml"
+
+jobs:
+  genesis-check:
+    runs-on: [self-hosted, sevynos-kvm]
+    env:
+      SEVYN_V2_ACCEL: kvm
+    timeout-minutes: 300
+    steps:
+      - name: Reclaim workspace from a previous sudo build
+        # The image build runs under sudo, so a previous job killed
+        # before its end-of-job chown can leave root-owned files in
+        # the workspace; checkout cannot clean them (EACCES) and dies
+        # before any later chown can run. Reclaim first.
+        run: sudo chown -R "$USER" "$GITHUB_WORKSPACE" || true
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          # No package-manager cache here: this job installs deps
+          # with npm ci directly. The Hermes/Yoga deps cache is
+          # handled by the actions/cache step below.
+          package-manager-cache: false
+
+      - name: Install build + boot dependencies
+        run: |
+          # Several self-hosted runners share this box, so concurrent
+          # apt runs fight over the dpkg lock — retry a few times.
+          apt_ok=0
+          for attempt in 1 2 3 4 5 6; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            linux-image-generic \
+            busybox-static \
+            cpio \
+            zstd \
+            gcc \
+            g++ \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwayland-dev \
+            libegl-dev \
+            libgles-dev \
+            wayland-protocols \
+            libfreetype-dev \
+            libpng-dev \
+            libjpeg-turbo8-dev \
+            libssl-dev \
+            seatd \
+            libseat-dev \
+            libxkbcommon-dev \
+            libudev-dev \
+            libinput-dev \
+            libgbm-dev \
+            libdrm-dev \
+            libpixman-1-dev \
+            udev \
+            libgl1-mesa-dri \
+            adwaita-icon-theme \
+            fonts-dejavu-core \
+            xkb-data \
+            e2fsprogs \
+            curl \
+            unzip \
+            ca-certificates \
+            fontconfig \
+            libnss3 \
+            libnspr4 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libatspi2.0-0 \
+            libcups2 \
+            libasound2t64 \
+            libasound2-dev \
+            libpango-1.0-0 \
+            libcairo2 \
+            libdbus-1-3 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libxfixes3 \
+            libgbm1 \
+            libdrm2 \
+            libxkbcommon0 \
+            libexpat1 \
+            libxcb1 \
+            libxext6 \
+            libfontconfig1 \
+            libfreetype6 \
+            libharfbuzz0b \
+            libudev1 \
+            libglib2.0-0 \
+            libx11-6 \
+            libxi6 \
+            libxrender1 \
+            libxtst6 \
+            libxss1 \
+            ovmf \
+            wpasupplicant \
+            iw \
+            grub-efi-amd64-signed \
+            grub-efi-amd64 \
+            shim-signed \
+            dosfstools \
+            gdisk \
+            mtools \
+            efibootmgr \
+            ntfs-3g; then
+              # UVC camera modules (videobuf2-core et al.) ship in
+              # linux-modules-extra, not the base linux-modules package —
+              # without them the image build fails at stage-modules.py
+              # with "module videobuf2-core not found". There is no
+              # linux-modules-extra-generic metapackage in noble (apt
+              # cannot locate it), so install the -extra package for the
+              # newest generic kernel in /boot — the same kernel
+              # build-genesis-image.sh picks.
+              KVER="$(basename "$(ls /boot/vmlinuz-*-generic | sort -V | tail -n 1)" | sed 's/^vmlinuz-//')"
+              if sudo apt-get install -y -qq "linux-modules-extra-${KVER}"; then
+                apt_ok=1
+                break
+              fi
+            fi
+            sleep 20
+          done
+          [ "$apt_ok" = 1 ]
+
+      - name: Cache native deps (Hermes + Yoga)
+        uses: actions/cache@v4
+        with:
+          path: v2/rn/host/deps
+          key: sevynos-v2-deps-${{ hashFiles('v2/rn/host/build-deps.sh') }}-hermes-0.13.0-yoga-41118bd
+          restore-keys: |
+            sevynos-v2-deps-
+
+      - name: Build native deps
+        run: sh v2/rn/host/build-deps.sh
+
+      - name: Build the Genesis image
+        run: |
+          # The harness boots the built image as version genesis-test-1,
+          # so the image and the check agree on the version string.
+          sudo env SEVYN_V2_VERSION=genesis-test-1 sh v2/image/build-genesis-image.sh
+
+      - name: Run the Genesis check in QEMU
+        run: |
+          # The build step runs under sudo, so v2/image/build/ is
+          # root-owned; hand it back to the runner first, or the check
+          # cannot create genesis-boot-*.log (EACCES — the M1 failure mode).
+          sudo chown -R "$USER" v2/image/build
+          node v2/image/genesis-check.mjs
+
+      - name: Upload Genesis artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sevynos-v2-genesis
+          path: |
+            v2/image/build/genesis-boot-*.log
+            v2/image/build/genesis-check.json
+            v2/image/build/genesis-shot-*.ppm
+            v2/image/build/genesis-data.img
+          if-no-files-found: warn
