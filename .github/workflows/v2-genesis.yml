@@ -29,9 +29,10 @@
 # are kept as artifacts. sevynos.img itself is NOT uploaded here —
 # the nightly publishes it on merge.
 #
-# This workflow does NOT switch the nightly: the nightly keeps
-# shipping the M13 image until the standalone Genesis image passes
-# this check AND the GF65 proves 60 fps (COMPOSITOR_PLAN.md).
+# The nightly ships this image (switched from M13 in the Genesis
+# nightly switch, on Kevon's word). This workflow keeps proving it
+# on every push to main: the shipped image must stay the checked
+# one. The GF65 60 fps proof is still owed (COMPOSITOR_PLAN.md).
 #
 # QEMU has no GPU: the guest init forces Mesa's software driver
 # (LIBGL_ALWAYS_SOFTWARE=1 → swrast/llvmpipe) so the compositor's

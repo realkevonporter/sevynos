@@ -38,11 +38,11 @@
 #   milestone 8). The console is busybox sh + the `sevyn` CLI on
 #   /dev/console, with /tmp/genesis.log preserved to /data/logs/.
 #   Marker on the console: SEVYN RECOVERY READY.
-# - The nightly still ships the M13 image. This builder does NOT
-#   switch it — that is a separate decision, gated on Stage 3 +
-#   Stage 5 proof (COMPOSITOR_PLAN.md, acceptance bar). Its output
-#   is sevynos-genesis.img, never sevynos.img, so the two images
-#   cannot be confused.
+# - The nightly ships THIS image (switched from M13 in the Genesis
+#   nightly switch, on Kevon's word): public-build.yml builds it and
+#   publishes it as sevynos.img.gz. Its output is still
+#   sevynos-genesis.img, never sevynos.img, so the two images cannot
+#   be confused; the workflow renames it for the release.
 # - genesis-check.mjs (forked from m13-check) proves this image in
 #   QEMU: Genesis-live set, adoption geometry, pointer/keyboard
 #   routing, move/resize, close killing Chromium, Chromium death,
@@ -55,6 +55,10 @@
 #   media and no Weston; the build fails loudly if
 #   sevynos-genesis.img reaches the cap, and warns within 47 MiB of
 #   it, so growth is visible before the next addition pushes it over.
+#   ALSA config + the frost wallpaper ARE staged (parity with M13 —
+#   the fork predates #177/#192, so they were missing); sample media
+#   stays out — the raw image has ~30 MiB of headroom and the seed is
+#   ~32.9 MiB (see the disk-image tail for the numbers).
 #
 # M12 changes over M11:
 # - Genesis: Weston runs its GL renderer (was --renderer=pixman) with
@@ -792,6 +796,21 @@ python3 "$ROOT/image/copy-closure.py" "$SYSROOT" "$STAGE" \
   "$CODE_SERVER_DIR/lib/node:/usr/share/sevyn/code-server/lib/node" \
   "$CHROMIUM_DIR/chrome:/usr/share/sevyn/chromium/chrome"
 
+# ALSA config (audiod): libasound reads /usr/share/alsa/alsa.conf at
+# runtime — it defines the "default" PCM audiod probes at startup
+# (v2/audio/audiod.c probe_device: snd_pcm_open("default")). The
+# copy-closure above stages binaries + .so files only, so the config
+# tree (libasound2-data) never landed in the image; on the GF65 the
+# probe failed with "Unknown PCM default" and audiod reported
+# available:false, so no sound at all. Stage the whole tree —
+# alsa.conf pulls in cards/*.conf and pcm/*.conf — and fail loudly
+# if it is absent, same pattern as the asoundlib.h header check.
+# (Carried over from build-m13-image.sh in the Genesis nightly
+# switch — the fork predates #177, so this was missing.)
+[ -f "$SYSROOT/usr/share/alsa/alsa.conf" ] || { echo "error: missing $SYSROOT/usr/share/alsa/alsa.conf (install libasound2-data)" >&2; exit 1; }
+cp -a "$SYSROOT/usr/share/alsa" "$STAGE/usr/share/alsa"
+[ -f "$STAGE/usr/share/alsa/alsa.conf" ] || { echo "error: ALSA config not staged in the image" >&2; exit 1; }
+
 # M11: the bootloader files the installer stages onto the new ESP.
 # (The .signed names are the signed binaries; the installer expects
 # the plain names.)
@@ -827,6 +846,19 @@ cp "$ROOT/shell/icons/hero/"*.png "$STAGE/usr/share/sevyn/shell/icons/hero/"
 cp "$ROOT/shell/icons/small/"*.png "$STAGE/usr/share/sevyn/shell/icons/small/"
 cp "$ROOT/shell/icons/title/"*.png "$STAGE/usr/share/sevyn/shell/icons/title/"
 cp "$ROOT/shell/icons/symbols/"*.png "$STAGE/usr/share/sevyn/shell/icons/symbols/"
+# Bundled image wallpapers (v2/shell/wallpapers/): the shell's
+# Wallpaper renders them by absolute path, so they are staged with
+# the shell. A missing file must fail the build — the wallpaper
+# would silently fall back to its base color and hide a broken
+# asset, the same failure mode as the icons above.
+# (Carried over from build-m13-image.sh in the Genesis nightly
+# switch — the fork predates #192, so this was missing.)
+if [ ! -f "$ROOT/shell/wallpapers/frost.png" ]; then
+  echo "error: missing wallpaper $ROOT/shell/wallpapers/frost.png" >&2
+  exit 1
+fi
+mkdir -p "$STAGE/usr/share/sevyn/shell/wallpapers"
+cp "$ROOT/shell/wallpapers/frost.png" "$STAGE/usr/share/sevyn/shell/wallpapers/"
 # --- commsd (M10) ---------------------------------------------------------
 # The Matrix daemon + its node_modules (npm ci --omit=dev; the SDK
 # has no runtime dev deps), the Chromium media-bridge page, and the
@@ -1893,6 +1925,16 @@ echo "Genesis init verified: sevyn.recovery=1 entry + recovery console present"
 # rootless by make-disk-image.py from the kernel + initramfs just
 # produced. make-data-disk.py builds the data partition's ext4
 # (A/B slots + slot-state) inside it.
+# Sample media: NOT staged here, deliberately — no --seed-dir below.
+# The seed (7 test WAVs 30,842,658 bytes + 7 sample JPEGs 3,666,995
+# bytes = 34,509,653 bytes, ~32.9 MiB) does not fit the raw-image
+# budget: this image is 2,116,026,368 bytes at pin fcdf9c54 with
+# 31,457,280 bytes (~30.0 MiB) of headroom to the 2 GiB cap, so
+# staging it would fail the cap check below by ~3 MiB. It is test
+# seed content only (sine tones for the audiod harness + sample
+# photos); installer-made installs never receive it either (the
+# installer builds the data partition without a seed step). Fresh
+# flashes ship without demo media until the raw budget grows.
 python3 "$ROOT/image/make-disk-image.py" \
   --kernel "$OUT/vmlinuz" \
   --initramfs "$OUT/initramfs.cpio.gz" \
