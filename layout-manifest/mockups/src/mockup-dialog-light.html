@@ -1,0 +1,50 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html,body { width:1200px; height:760px; overflow:hidden; background:#E8E8EC;
+  font-family:DejaVu Sans, sans-serif; }
+.sheet { width:1200px; height:760px; padding:24px; }
+h1 { font:700 20px DejaVu Sans, sans-serif; color:#14141A; }
+.sub { font:400 13px DejaVu Sans, sans-serif; color:#6B7280; margin:6px 0 18px 0; }
+.panel-label { font:700 11px DejaVu Sans, sans-serif; letter-spacing:0.08em; color:#6B7280; margin-bottom:8px; }
+.row { display:flex; gap:24px; }
+</style></head><body><div class="sheet">
+<h1>Dialog boxes — light mode</h1><div class="sub">No modal dialog system exists today — alerts and sheets are new; the inline confirm survives as the third kind</div>
+
+<div class="panel-label">BEFORE — TODAY &nbsp;<span style="display:inline-block;background:#6B7280;color:#fff;font:700 11px DejaVu Sans, sans-serif;padding:3px 8px;border-radius:4px;letter-spacing:0.06em">CURRENT PATTERN, RE-RENDERED</span></div>
+
+<div style="width:520px;background:#F9FAFB;border-radius:12px;padding:20px;border:1px solid #E5E7EB">
+<div style="font:400 14px DejaVu Sans, sans-serif;color:#374151">God mode gives the AI full access to this device:</div>
+<div style="font:400 14px DejaVu Sans, sans-serif;color:#374151;margin-top:4px">– install and uninstall apps &nbsp;– reboot the device</div>
+<div style="display:flex;gap:12px;margin-top:12px">
+<div style="width:120px;height:36px;border-radius:8px;background:#B45309;display:flex;align-items:center;justify-content:center"><span style="font:700 15px DejaVu Sans, sans-serif;color:#fff">Confirm</span></div>
+<div style="width:120px;height:36px;border-radius:8px;background:#E5E7EB;display:flex;align-items:center;justify-content:center"><span style="font:400 15px DejaVu Sans, sans-serif;color:#111827">Cancel</span></div>
+</div></div>
+<div style="font:400 13px DejaVu Sans, sans-serif;color:#6B7280;margin-top:10px;width:520px">Inline expansion inside Settings. Confirm FIRST, Cancel second — reversed vs Apple. No overlay, no Esc, no modal.</div>
+
+<div class="panel-label" style="margin-top:20px">AFTER — MANIFEST &nbsp;<span style="display:inline-block;background:#5B5BD6;color:#fff;font:700 11px DejaVu Sans, sans-serif;padding:3px 8px;border-radius:4px;letter-spacing:0.06em">PROPOSAL</span></div>
+<div class="row">
+<div>
+<div style="width:360px;background:#FFFFFF;border-radius:12px;padding:20px;box-shadow:0 12px 32px rgba(0,0,0,0.18);border:1px solid #E5E7EB">
+<div style="width:48px;height:48px;border-radius:24px;background:#DC2626;display:flex;align-items:center;justify-content:center;margin:0 auto 12px auto"><span style="font:700 24px DejaVu Sans, sans-serif;color:#fff">!</span></div>
+<div style="font:700 16px DejaVu Sans, sans-serif;color:#14141A;text-align:center">Delete this file?</div>
+<div style="font:400 14px DejaVu Sans, sans-serif;color:#6B7280;text-align:center;margin-top:8px;line-height:1.4">Notes.txt will be permanently deleted. This cannot be undone.</div>
+<div style="display:flex;gap:12px;margin-top:20px;justify-content:flex-end">
+<div style="min-width:96px;height:36px;border-radius:6px;background:#F3F4F6;display:flex;align-items:center;justify-content:center;padding:0 16px"><span style="font:400 14px DejaVu Sans, sans-serif;color:#14141A">Cancel</span></div>
+<div style="min-width:96px;height:36px;border-radius:6px;background:#DC2626;display:flex;align-items:center;justify-content:center;padding:0 16px"><span style="font:700 14px DejaVu Sans, sans-serif;color:#fff">Delete</span></div>
+</div></div>
+<div style="font:400 13px DejaVu Sans, sans-serif;color:#6B7280;margin-top:10px;width:360px">Alert — 360 wide, radius 12, Cancel leading / Delete trailing, Esc = Cancel, Return = default.</div></div>
+<div>
+<div style="width:520px;border-radius:10px 10px 0 0;overflow:hidden;box-shadow:0 12px 32px rgba(0,0,0,0.18)">
+<div style="height:40px;background:#F9FAFB;display:flex;align-items:center;padding:0 16px;border-bottom:1px solid #E5E7EB"><span style="font:700 16px DejaVu Sans, sans-serif;color:#14141A">Files</span></div>
+<div style="background:#FFFFFF;padding:16px 20px 20px 20px">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+<span style="font:400 14px DejaVu Sans, sans-serif;color:#6B7280">Cancel</span>
+<span style="font:700 16px DejaVu Sans, sans-serif;color:#14141A">New Folder</span>
+<span style="font:700 14px DejaVu Sans, sans-serif;color:#5B5BD6">Done</span></div>
+<div style="height:36px;border-radius:6px;background:#F2F2F7;display:flex;align-items:center;padding:0 12px"><span style="font:400 14px DejaVu Sans, sans-serif;color:#9CA3AF">Folder name</span></div>
+</div></div>
+<div style="font:400 13px DejaVu Sans, sans-serif;color:#6B7280;margin-top:10px;width:520px">Sheet — attached to the parent window, Cancel leading / Done trailing. Esc = Cancel.</div>
+</div>
+</div>
+
+</div></body></html>
