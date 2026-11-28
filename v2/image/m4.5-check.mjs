@@ -1210,6 +1210,148 @@ async function main() {
     );
   }
 
+  // 7.5 Chat transport (phase 3, B1) via the Terminal: the daemon
+  //    holds the conversation and passes the history to muse-ai
+  //    each turn; the model's prose comes back as the turn's TEXT.
+  //    Turn 1 lists the apps (the mock answers in prose — 3
+  //    messages, no history yet); turn 2 asks which ones play
+  //    music (the mock's answer only makes sense if it saw turn
+  //    1 — 5 messages); turn 3 launches Music (the mock's LAUNCH
+  //    — 7 messages) and appd confirms the launch. The mock is
+  //    already up and muse-ai is already selected (§6/§7); the
+  //    chat id is chat-1 (a fresh daemon, the first CHAT NEW in
+  //    the guest). The turns avoid "?" (typeText has no QKeyCode
+  //    for it).
+  {
+    // Re-focus the Terminal input first (same as §7: a typed
+    // command that goes nowhere fails silently).
+    const shotTerm6 = await shot(b.qmp, join(OUT, "m4.5-shot-terminal-6.ppm"));
+    const termHeader6 = findWindowHeader(shotTerm6, 17, 24, 39);
+    check("chat: Terminal window still up", !!termHeader6);
+    if (termHeader6) {
+      await moveTo(
+        termHeader6.left + 200,
+        termHeader6.top + 482,
+        shotTerm6.width,
+        shotTerm6.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
+    }
+  }
+  {
+    const beforeChat = logLines(b.logPath).length;
+    const { exec: newExec } = await termCmd("ai chat new");
+    check("chat: `ai chat new` runs (EXEC 0)", !!newExec, newExec || "");
+    const newOk = await waitForLog(
+      b.logPath,
+      /AID CHAT NEW chat=chat-1/,
+      15000,
+      beforeChat,
+    );
+    check("chat: daemon opened chat-1", !!newOk, newOk || "");
+  }
+  {
+    const beforeTurn1 = logLines(b.logPath).length;
+    const { exec, hit } = await termCmd(
+      "ai chat chat-1 list all installed apps",
+      /AID CHAT TEXT You have 15 apps installed/,
+    );
+    check("chat turn 1: `ai chat chat-1 ...` runs (EXEC 0)", !!exec, exec || "");
+    check("chat turn 1: prose TEXT returned (15 apps)", !!hit, hit || "");
+    const mock1 = await waitForLog(
+      b.logPath,
+      /MUSE-MOCK POST \/v1\/chat\/completions .*messages=3 roles=system,system,user/,
+      15000,
+      beforeTurn1,
+    );
+    check("chat turn 1: API saw 3 messages (no history yet)", !!mock1, mock1 || "");
+  }
+  {
+    const beforeTurn2 = logLines(b.logPath).length;
+    const { exec, hit } = await termCmd(
+      "ai chat chat-1 which ones can play music",
+      /AID CHAT TEXT Just Music/,
+    );
+    check("chat turn 2: `ai chat chat-1 ...` runs (EXEC 0)", !!exec, exec || "");
+    check("chat turn 2: memory-aware prose TEXT returned", !!hit, hit || "");
+    const mock2 = await waitForLog(
+      b.logPath,
+      /MUSE-MOCK POST \/v1\/chat\/completions .*messages=5 roles=system,system,user,assistant,user/,
+      15000,
+      beforeTurn2,
+    );
+    check(
+      "chat turn 2: API saw 5 messages (turn 1 in the history)",
+      !!mock2,
+      mock2 || "",
+    );
+  }
+  {
+    const beforeTurn3 = logLines(b.logPath).length;
+    const { exec } = await termCmd("ai chat chat-1 launch the Music app");
+    check("chat turn 3: `ai chat chat-1 ...` runs (EXEC 0)", !!exec, exec || "");
+    const mock3 = await waitForLog(
+      b.logPath,
+      /MUSE-MOCK POST \/v1\/chat\/completions .*messages=7 roles=system,system,user,assistant,user,assistant,user/,
+      15000,
+      beforeTurn3,
+    );
+    check(
+      "chat turn 3: API saw 7 messages (both turns in the history)",
+      !!mock3,
+      mock3 || "",
+    );
+    const launched = await waitForLog(
+      b.logPath,
+      /APPD launched music \(pid \d+\)/,
+      15000,
+      beforeTurn3,
+    );
+    check("chat turn 3: Music launched", !!launched, launched || "");
+    const chatOk = await waitForLog(
+      b.logPath,
+      /AID CHAT backend=muse-ai chat=chat-1 .*allowed=1 denied=0 failed=0/,
+      15000,
+      beforeTurn3,
+    );
+    check("chat turn 3: daemon logged the turn (allowed=1)", !!chatOk, chatOk || "");
+  }
+  {
+    // Turn 3's launch put the Music window on top of the Terminal
+    // and covered its header — the Terminal is unfocusable by the
+    // header-anchored click §8 uses (findWindowHeader would read
+    // the body's dark band as the header and click off-screen),
+    // and typing would go to Music, not the Terminal. Close Music
+    // via appd, like §6 closes Files after its launch check, so
+    // the Terminal is the top window again.
+    const closed = await appdCmd(b, "CLOSE music", /APPD CLOSE OK music/);
+    check("chat turn 3: CLOSE music accepted", !!closed, closed || "");
+  }
+  {
+    // Re-focus the Terminal input now that it is on top again
+    // (same as §7: without this the typed command goes nowhere).
+    const shotTerm7 = await shot(b.qmp, join(OUT, "m4.5-shot-terminal-7.ppm"));
+    const termHeader7 = findWindowHeader(shotTerm7, 17, 24, 39);
+    check("chat: Terminal window still up after closing Music", !!termHeader7);
+    if (termHeader7) {
+      await moveTo(
+        termHeader7.left + 200,
+        termHeader7.top + 482,
+        shotTerm7.width,
+        shotTerm7.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
+    }
+  }
+  {
+    const { exec } = await termCmd("ai chat end chat-1");
+    check("chat: `ai chat end chat-1` runs (EXEC 0)", !!exec, exec || "");
+  }
+
   // 8. God Mode (P2) via the Terminal: the two-step confirm, the
   //    god grant, the protected-apps guard, and the audit log. The
   //    guest never executes a REBOOT (the host test proves that

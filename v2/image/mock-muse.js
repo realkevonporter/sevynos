@@ -15,6 +15,15 @@
 // prove the session protocol (read -> fix -> re-check) and the
 // grant gate in the guest. Every other task gets the LAUNCH reply,
 // so the P0 ASK check is unaffected.
+//
+// Phase 3 (B1): the mock routes on the LAST user message (the task
+// when history is present) and logs the message count + roles, so
+// the check can prove the history reached the API. A request that
+// already carries a tool result gets no-tools (the model has seen
+// the outcome). The CHAT turns get prose answers — "list all
+// installed apps" (15 apps) and "which ones can play music" (Just
+// Music, which only makes sense if the model saw the first turn) —
+// and "launch the Music app" gets a Music LAUNCH.
 const http = require("node:http");
 
 const PORT = 7071;
@@ -69,6 +78,31 @@ const NO_TOOLS_REPLY = {
   ],
 };
 
+// The CHAT replies (phase 3, B1): the model answers in prose, and
+// the daemon carries the prose as the turn's TEXT. The two prose
+// answers are unique so the guest check can tell them apart — and
+// the second one only makes sense if the model saw the first turn
+// (memory across turns).
+function proseReply(content) {
+  return {
+    choices: [
+      {
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+      },
+    ],
+  };
+}
+const PROSE_15_APPS_REPLY = proseReply(
+  "You have 15 apps installed — Terminal, Files, Music, and 12 more.",
+);
+const PROSE_JUST_MUSIC_REPLY = proseReply(
+  "Just Music — it’s the only audio player installed.",
+);
+
+// The CHAT launch reply: the model "decides" to launch Music.
+const LAUNCH_MUSIC_REPLY = toolReply("call_1", "launch", { id: "music" });
+
 const server = http.createServer((req, res) => {
   let body = "";
   req.on("data", (chunk) => {
@@ -77,26 +111,49 @@ const server = http.createServer((req, res) => {
   req.on("end", () => {
     let model = "(unparsed)";
     let task = "";
+    let messageCount = 0;
+    let roles = "";
+    let hasToolResult = false;
     try {
       const parsed = JSON.parse(body);
       model = parsed.model || "(no model)";
-      const userMsg = (parsed.messages || []).find((m) => m.role === "user");
-      task = (userMsg && userMsg.content) || "";
+      const messages = parsed.messages || [];
+      messageCount = messages.length;
+      roles = messages.map((m) => m.role).join(",");
+      hasToolResult = messages.some((m) => m.role === "tool");
+      // Route on the LAST user message: the first is the task when
+      // there is no history, the last is the task when there is —
+      // so P0/P1 (no history) route exactly as before.
+      const userMsgs = messages.filter((m) => m.role === "user");
+      const lastUser = userMsgs[userMsgs.length - 1];
+      task = (lastUser && lastUser.content) || "";
     } catch {}
-    console.log(`MUSE-MOCK ${req.method} ${req.url} model=${model}`);
+    console.log(
+      `MUSE-MOCK ${req.method} ${req.url} model=${model} ` +
+        `messages=${messageCount} roles=${roles}`,
+    );
     if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: "not found" } }));
       return;
     }
-    // The session task gets the session sequence (one reply per
-    // request, then no-tools); every other task gets LAUNCH. The
-    // sequence resets once exhausted: the m4.5 check runs the same
-    // "session fix" task twice (Terminal muse-ai session, then the
-    // relay session), and a single-use script would hand the relay
-    // session no-tools on its first request (allowed=0 — the §9
-    // failure on PR #167's fix head). Resetting on exhaustion keeps
-    // each session's sequence identical.
+    // Routing (phase 3, B1), in order:
+    // 1. The session task gets the session sequence (one reply per
+    //    request, then no-tools); every other task gets LAUNCH. The
+    //    sequence resets once exhausted: the m4.5 check runs the same
+    //    "session fix" task twice (Terminal muse-ai session, then the
+    //    relay session), and a single-use script would hand the relay
+    //    session no-tools on its first request (allowed=0 — the §9
+    //    failure on PR #167's fix head). Resetting on exhaustion keeps
+    //    each session's sequence identical.
+    // 2. A request that already carries a tool result gets
+    //    no-tools: the model has seen the outcome, so re-issuing
+    //    LAUNCH every round (until the cap) would double-execute.
+    //    ASK mode never reaches this — it ends the loop after the
+    //    first tool call — so P0 is unaffected.
+    // 3. The CHAT prose branches (turn 1 lists, turn 2 remembers)
+    //    and the CHAT music launch (turn 3).
+    // 4. Everything else gets the LAUNCH reply (P0 ASK).
     let reply;
     if (task.includes("session fix")) {
       if (sessionCount < SESSION_REPLIES.length) {
@@ -105,6 +162,14 @@ const server = http.createServer((req, res) => {
         reply = NO_TOOLS_REPLY;
         sessionCount = 0;
       }
+    } else if (hasToolResult) {
+      reply = NO_TOOLS_REPLY;
+    } else if (task.includes("launch the Music app")) {
+      reply = LAUNCH_MUSIC_REPLY;
+    } else if (task.includes("which ones can play music")) {
+      reply = PROSE_JUST_MUSIC_REPLY;
+    } else if (task.includes("list all installed apps")) {
+      reply = PROSE_15_APPS_REPLY;
     } else {
       reply = LAUNCH_REPLY;
     }

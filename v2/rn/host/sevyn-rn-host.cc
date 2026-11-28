@@ -172,15 +172,16 @@ std::string runSevyn(const std::string& cmdline) {
   // connect a 90 s deadline (30 s association + 20 s DHCP + margin).
   const bool isWifiConnect = tokens.size() >= 4 && tokens[1] == "net" &&
                              tokens[2] == "wifi" && tokens[3] == "connect";
-  // `sevyn ai ask` / `sevyn ai session` wait on the model: a
-  // round-trip routinely exceeds the 10 s exec deadline, so the host
-  // would SIGKILL it with exit 124 and the ask would never return
-  // (this hit the AI sidebar's one-shot asks, and Terminal asks too
-  // — only fast-failing asks ever returned). Give the AI verbs a
-  // 300 s deadline (matching muse-ai's own per-action budget, D8);
-  // every other command keeps the 10 s limit.
+  // `sevyn ai ask` / `sevyn ai session` / `sevyn ai chat` wait on the
+  // model: a round-trip routinely exceeds the 10 s exec deadline, so
+  // the host would SIGKILL it with exit 124 and the ask would never
+  // return (this hit the AI sidebar's one-shot asks, and Terminal
+  // asks too — only fast-failing asks ever returned). Give the AI
+  // verbs a 300 s deadline (matching muse-ai's own per-action
+  // budget, D8); every other command keeps the 10 s limit.
   const bool isAi = tokens.size() >= 3 && tokens[1] == "ai" &&
-                    (tokens[2] == "ask" || tokens[2] == "session");
+                    (tokens[2] == "ask" || tokens[2] == "session" ||
+                     tokens[2] == "chat");
   const int execTimeoutSec =
       isInstall ? 300 : (isAi ? 300 : (isWifiConnect ? 90 : 10));
   std::vector<char*> argv;

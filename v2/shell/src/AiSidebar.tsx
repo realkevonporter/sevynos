@@ -1,4 +1,4 @@
-// SevynOS v2 — the AI sidebar (DESIGN.md §2.8, phase 1).
+// SevynOS v2 — the AI sidebar (DESIGN.md §2.8, phase 3).
 //
 // Tap the corner button and the conversation opens as a right
 // sidebar: the desktop stays visible on the left, and the header
@@ -7,23 +7,36 @@
 // menu today; the overlay surface that floats it above windows is
 // a phase-4 follow-up).
 //
-// Phase 1 is one-shot: each turn sends `sevyn ai ask` through the
-// existing ASK path (same backend, same grant as Terminal — the
-// daemon enforces the grant, not the shell), and shows the action
-// receipt. No prose answer and no memory across turns yet: the
-// daemon's reply carries counts only, and the model keeps no
-// history. Both arrive with the conversation transport (phase 3,
-// CHAT verb). The receipt parser is tolerant of the future
-// `error=` field the ERR-surfacing fix adds — absent today, shown
-// when present.
+// Phase 3 is a conversation: the first send opens one with
+// `sevyn ai chat new`, later sends reuse its id (`sevyn ai chat
+// <id> <message>`), and closing ends it (`sevyn ai chat end <id>`,
+// fire-and-forget — the shell unmounts on close). The daemon holds
+// the history and passes it to muse-ai each turn, and muse-ai's
+// prose answer comes back as a TEXT line the daemon carries in the
+// reply. The sidebar shows the model's text turns and keeps the
+// action receipts (phase 1's one-shot `sevyn ai ask` is gone).
+//
+// Design: the layout-manifest AI chat mockup
+// (sevynos-layout-manifest/mockups/build_ai_chat_mockup.py —
+// "Perfect", Kevon 2026-11-28). 360px sidebar, top = top-bar
+// height, surface fill; header 48px (AI title + Standard/GOD mark
+// + Full screen + Close); user turns as right-aligned bubbles in
+// the accent tint; AI turns as rows with the violet AI monogram,
+// prose, and a receipt with a violet check when an action ran.
+// Values come from the shared tokens (v2/rn/renderer/tokens.js);
+// the mockup-only geometry with no token yet lives in named
+// constants below, citing the mockup builder, awaiting a `chat`
+// manifest section.
 //
 // The ask runs through Sevyn.execAsync (never sync: a muse-ai call
 // can take 300 s, and a sync exec would freeze the whole shell),
 // and through the host's 300 s carve-out for `ai ask` / `ai session`
-// (sevyn-rn-host.cc — the 10 s default would SIGKILL slow asks).
+// / `ai chat` (sevyn-rn-host.cc — the 10 s default would SIGKILL
+// slow turns).
 
 import * as React from "react";
 import { View, Text, Pressable, ScrollView, TextInput } from "./host";
+import { tokens } from "../../rn/renderer/tokens";
 import {
   scrollTo,
   subscribeStatus,
@@ -32,26 +45,61 @@ import {
   getSurfaceSizeSnapshot,
 } from "../../rn/renderer/sevyn-renderer";
 
+// Dark-first: no light/dark mode state exists in code yet (no
+// appearance setting; Settings → Appearance is wallpaper-only
+// today), so the sidebar reads the dark tokens. One alias at the
+// top flips the whole sidebar when the mode switch lands.
+const C = tokens.color.dark;
+const ACCENT_FILL = tokens.accent.accents.violet.dark;
+const ACCENT_ON_FILL = tokens.accent.accents.violet.onFill.dark;
+
+// Append an alpha byte to a #RRGGBB token (the manifest's accent
+// tint). 0.20 * 255 = 51 = 0x33; 0.15 * 255 = 38 = 0x26.
+function withAlpha(hex: string, alpha: number): string {
+  const n = Math.round(alpha * 255);
+  return hex + n.toString(16).padStart(2, "0");
+}
+
+// The user bubble's accent tint: 15% light / 20% dark violet —
+// dark-first, so 20% here. 8-digit hex flows through the ops to
+// the painter end to end.
+const BUBBLE_TINT = withAlpha(ACCENT_FILL, 0.2);
+
 // Sidebar width (the sketch's panel is ~a quarter of the screen).
 export const AI_SIDEBAR_WIDTH = 360;
-// The host tokenizer caps a command at 64 tokens (`sevyn ai ask`
-// leaves ~61 words for the task), so the input caps first and says
-// so — a longer question's tail would otherwise be dropped silently.
+// The host tokenizer caps a command at 64 tokens (`sevyn ai chat`
+// leaves ~60 words for the message), so the input caps first and
+// says so — a longer question's tail would otherwise be dropped
+// silently.
 const MAX_INPUT_CHARS = 300;
 // Render cap, mirroring Terminal's RENDERED_LINES: the buffer keeps
 // 100 messages, only the last 100 render.
 const MAX_MESSAGES = 100;
 
-type ChatMessage = { role: "user" | "ai"; text: string };
+// Mockup-locked geometry with no token yet (build_ai_chat_mockup.py):
+// the manifest has no `chat` section; these become tokens when it
+// gains one. 6/10/14 are off the 4pt scale — the mockup uses them.
+const HEADER_HEIGHT = 48;
+const BUBBLE_MAX_WIDTH = 280;
+const WELL_HEIGHT = 40;
+const SEND_HEIGHT = 32;
+const BUBBLE_PAD_Y = 10;
+const SEND_PAD_X = 14;
+const RECEIPT_GAP = 6;
+const AI_GAP = 10;
+
+type ChatMessage =
+  | { role: "user"; text: string }
+  | { role: "ai"; text: string | null; receipt: string | null };
 
 interface AiStatusSnapshot {
   "ai.god_mode"?: string;
 }
 
-// One `sevyn ai ask` round trip, off the JS thread. Returns the
-// CLI's "<exit-code>\n<output>" shape, parsed like the apps' runCli.
-async function runAiAsk(text: string): Promise<{ code: number; out: string }> {
-  const raw = await Sevyn.execAsync("sevyn ai ask " + text);
+// One `sevyn ...` round trip, off the JS thread. Returns the CLI's
+// "<exit-code>\n<output>" shape, parsed like the apps' runCli.
+async function runCli(cmd: string): Promise<{ code: number; out: string }> {
+  const raw = await Sevyn.execAsync(cmd);
   const nl = raw.indexOf("\n");
   if (nl < 0) return { code: -1, out: raw };
   const code = parseInt(raw.slice(0, nl), 10);
@@ -68,7 +116,10 @@ function parseCounts(out: string): {
     const m = out.match(new RegExp(key + "=(\\d+)"));
     return m ? parseInt(m[1], 10) : 0;
   };
-  const em = out.match(/error=(.*)$/);
+  // [^\n]*, not (.*)$: the CLI output ends with a newline, and $ does
+  // not match before it — the phase-1 (.*)$ never matched, so the
+  // error never displayed. Same shape as parseText below.
+  const em = out.match(/error=([^\n]*)/);
   return {
     allowed: num("allowed"),
     denied: num("denied"),
@@ -77,15 +128,35 @@ function parseCounts(out: string): {
   };
 }
 
-// The receipt line for a finished ask, plus the counts for the
-// harness marker. Code 124 is the host exec timeout (the carve-out
-// makes it unreachable for `ai ask` in practice — the daemon times
-// out first — but a hung CLI still reports it honestly).
-function receiptFor(
+// The daemon's reply carries the TEXT escaped on one line (\n for a
+// newline, \\ for a backslash, \t for a tab — the WRITE escaping);
+// the sidebar shows the real characters. A lone trailing backslash
+// (which the backend never emits — it never splits an escape) stays.
+function unescapeText(s: string): string {
+  return s.replace(/\\(\\|n|t)/g, (_m, e: string) =>
+    e === "n" ? "\n" : e === "t" ? "\t" : "\\",
+  );
+}
+
+function parseText(out: string): string | null {
+  const m = out.match(/text=([^\n]*)/);
+  if (!m) return null;
+  const text = unescapeText(m[1].trim());
+  return text === "" ? null : text;
+}
+
+// The AI turn for a finished chat turn: the model's prose (null when
+// it acted without answering) plus the receipt line (only when an
+// action ran — the mockup's third turn has prose and no receipt).
+// Code 124 is the host exec timeout (the carve-out makes it
+// unreachable for `ai chat` in practice — the daemon times out
+// first — but a hung CLI still reports it honestly).
+function aiTurnFor(
   code: number,
   out: string,
 ): {
-  text: string;
+  text: string | null;
+  receipt: string | null;
   allowed: number;
   denied: number;
   failed: number;
@@ -93,6 +164,7 @@ function receiptFor(
   if (code === 124)
     return {
       text: "The AI took too long — try a shorter task.",
+      receipt: null,
       allowed: 0,
       denied: 0,
       failed: 0,
@@ -104,17 +176,22 @@ function receiptFor(
       .find((l) => l !== "");
     return {
       text: first ? "Error: " + first : "The AI could not be reached.",
+      receipt: null,
       allowed: 0,
       denied: 0,
       failed: 0,
     };
   }
   const p = parseCounts(out);
-  if (p.error) return { text: "Error: " + p.error, ...p };
-  if (p.allowed === 0 && p.denied === 0 && p.failed === 0)
-    return { text: "The AI took no actions.", ...p };
+  if (p.error) return { text: "Error: " + p.error, receipt: null, ...p };
+  const prose = parseText(out);
+  const acted = p.allowed + p.denied + p.failed > 0;
+  if (!prose && !acted) return { text: "The AI took no actions.", receipt: null, ...p };
   return {
-    text: `Done — ${p.allowed} allowed, ${p.denied} denied, ${p.failed} failed.`,
+    text: prose,
+    receipt: acted
+      ? `Done — ${p.allowed} allowed, ${p.denied} denied, ${p.failed} failed.`
+      : null,
     ...p,
   };
 }
@@ -124,6 +201,7 @@ export function AiSidebar(props: { onClose(): void }): React.ReactElement {
   const [input, setInput] = React.useState("");
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [busy, setBusy] = React.useState(false);
+  const [chatId, setChatId] = React.useState<string | null>(null);
   const size = React.useSyncExternalStore(subscribeSurfaceSize, getSurfaceSizeSnapshot);
   const status = React.useSyncExternalStore(
     subscribeStatus,
@@ -151,26 +229,67 @@ export function AiSidebar(props: { onClose(): void }): React.ReactElement {
     const userMsg: ChatMessage = { role: "user", text };
     setMessages((prev) => [...prev, userMsg].slice(-MAX_MESSAGES));
     scrollToBottom();
-    void runAiAsk(text).then(({ code, out }) => {
-      const r = receiptFor(code, out);
-      const aiMsg: ChatMessage = { role: "ai", text: r.text };
-      setMessages((prev) => [...prev, aiMsg].slice(-MAX_MESSAGES));
-      // Harness marker, mirroring Terminal's TERMINAL ai-ask line.
-      if (code === 0) {
-        Sevyn.log(
-          "AI-SIDEBAR ask allowed=" +
-            r.allowed +
-            " denied=" +
-            r.denied +
-            " failed=" +
-            r.failed,
-        );
-      } else {
-        Sevyn.log("AI-SIDEBAR ask failed code=" + code);
+    // The first send opens the conversation (CHAT NEW); later sends
+    // reuse its id. The id is set before the turn runs, so a retry
+    // after a failed NEW opens a fresh conversation instead of
+    // reusing a dead id.
+    const open: Promise<string | null> =
+      chatId !== null
+        ? Promise.resolve(chatId)
+        : runCli("sevyn ai chat new").then(({ code, out }) => {
+            if (code !== 0) return null;
+            const m = out.match(/chat=([^\s\n]+)/);
+            return m ? m[1] : null;
+          });
+    void open.then((id) => {
+      if (id === null) {
+        const aiMsg: ChatMessage = {
+          role: "ai",
+          text: "The AI could not be reached.",
+          receipt: null,
+        };
+        setMessages((prev) => [...prev, aiMsg].slice(-MAX_MESSAGES));
+        Sevyn.log("AI-SIDEBAR chat open failed");
+        setBusy(false);
+        scrollToBottom();
+        return;
       }
-      setBusy(false);
-      scrollToBottom();
+      if (chatId === null) setChatId(id);
+      void runCli("sevyn ai chat " + id + " " + text).then(({ code, out }) => {
+        const r = aiTurnFor(code, out);
+        const aiMsg: ChatMessage = {
+          role: "ai",
+          text: r.text,
+          receipt: r.receipt,
+        };
+        setMessages((prev) => [...prev, aiMsg].slice(-MAX_MESSAGES));
+        // Harness marker, mirroring Terminal's TERMINAL ai-ask line.
+        if (code === 0) {
+          Sevyn.log(
+            "AI-SIDEBAR chat allowed=" +
+              r.allowed +
+              " denied=" +
+              r.denied +
+              " failed=" +
+              r.failed,
+          );
+        } else {
+          Sevyn.log("AI-SIDEBAR chat failed code=" + code);
+        }
+        setBusy(false);
+        scrollToBottom();
+      });
     });
+  };
+
+  // End the conversation first (fire-and-forget: the shell unmounts
+  // on close, so awaiting would never resolve) — the daemon drops
+  // the history. Then close.
+  const close = (): void => {
+    if (chatId !== null) {
+      void runCli("sevyn ai chat end " + chatId);
+    }
+    props.onClose();
   };
 
   return (
@@ -178,29 +297,29 @@ export function AiSidebar(props: { onClose(): void }): React.ReactElement {
       testID="ai-sidebar"
       style={{
         position: "absolute",
-        top: 48,
+        top: tokens.topbar.height,
         right: 0,
         bottom: 0,
         width,
-        backgroundColor: "#111827",
+        backgroundColor: C.surface,
         flexDirection: "column",
       }}
     >
       <View
         style={{
           flexDirection: "row",
-          height: 48,
-          backgroundColor: "#1f2937",
+          height: HEADER_HEIGHT,
+          backgroundColor: C.surface,
           alignItems: "center",
-          paddingLeft: 16,
-          paddingRight: 12,
+          paddingLeft: tokens.topbar.padX,
+          paddingRight: tokens.topbar.padX,
         }}
       >
         <Text
           style={{
-            fontSize: 16,
+            fontSize: tokens.type.windowTitle.size,
             fontWeight: "bold",
-            color: "#ffffff",
+            color: C.textPrimary,
             flex: 1,
           }}
         >
@@ -215,18 +334,30 @@ export function AiSidebar(props: { onClose(): void }): React.ReactElement {
               height: 28,
               marginRight: 12,
               paddingHorizontal: 8,
-              borderRadius: 6,
-              backgroundColor: "#b45309",
+              borderRadius: tokens.radii.button,
+              backgroundColor: tokens.color.fixed.godBackground,
               justifyContent: "center",
               alignItems: "center",
             }}
           >
-            <Text style={{ fontSize: 12, color: "#fef3c7", fontWeight: "bold" }}>
+            <Text
+              style={{
+                fontSize: tokens.type.caption.size,
+                color: tokens.color.fixed.godText,
+                fontWeight: "bold",
+              }}
+            >
               GOD
             </Text>
           </View>
         ) : (
-          <Text style={{ fontSize: 12, color: "#9ca3af", marginRight: 12 }}>
+          <Text
+            style={{
+              fontSize: tokens.type.secondary.size,
+              color: C.textSecondary,
+              marginLeft: 12,
+            }}
+          >
             Standard
           </Text>
         )}
@@ -235,58 +366,170 @@ export function AiSidebar(props: { onClose(): void }): React.ReactElement {
           onPress={() => setFullScreen(!fullScreen)}
           style={{
             height: 32,
-            marginRight: 12,
+            marginRight: 16,
             justifyContent: "center",
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 13, color: "#d1d5db" }}>
+          <Text
+            style={{
+              fontSize: tokens.type.secondary.size,
+              color: C.textSecondary,
+            }}
+          >
             {fullScreen ? "Exit full screen" : "Full screen"}
           </Text>
         </Pressable>
         <Pressable
           testID="ai-sidebar-close"
-          onPress={props.onClose}
+          onPress={close}
           style={{
             height: 32,
             justifyContent: "center",
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 13, color: "#d1d5db" }}>Close</Text>
+          <Text
+            style={{
+              fontSize: tokens.type.secondary.size,
+              color: C.textSecondary,
+            }}
+          >
+            Close
+          </Text>
         </Pressable>
       </View>
       <ScrollView
         ref={scrollRef}
-        style={{ flex: 1, paddingLeft: 12, paddingRight: 12, paddingTop: 8 }}
+        style={{
+          flex: 1,
+          paddingLeft: tokens.topbar.padX,
+          paddingRight: tokens.topbar.padX,
+          paddingTop: tokens.topbar.padX,
+          paddingBottom: tokens.topbar.padX,
+        }}
       >
         {messages.length === 0 ? (
-          <Text style={{ fontSize: 14, color: "#9ca3af" }}>
+          <Text style={{ fontSize: tokens.type.body.size, color: C.textMuted }}>
             Ask the AI to do something — launch an app, change a setting, find a file.
           </Text>
         ) : (
-          messages.slice(-MAX_MESSAGES).map((m, i) => (
-            <Text
-              key={i}
-              style={{
-                fontSize: 14,
-                color: m.role === "user" ? "#ffffff" : "#e5e7eb",
-                marginBottom: 8,
-              }}
-            >
-              {(m.role === "user" ? "You: " : "AI: ") + m.text}
-            </Text>
-          ))
+          messages.slice(-MAX_MESSAGES).map((m, i) =>
+            m.role === "user" ? (
+              <View
+                key={i}
+                style={{
+                  flexDirection: "row",
+                  justifyContent: "flex-end",
+                  marginBottom: tokens.topbar.padX,
+                }}
+              >
+                <View
+                  style={{
+                    maxWidth: BUBBLE_MAX_WIDTH,
+                    backgroundColor: BUBBLE_TINT,
+                    borderRadius: tokens.radii.card,
+                    paddingTop: BUBBLE_PAD_Y,
+                    paddingBottom: BUBBLE_PAD_Y,
+                    paddingLeft: 12,
+                    paddingRight: 12,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: tokens.type.body.size,
+                      color: C.textPrimary,
+                    }}
+                  >
+                    {m.text}
+                  </Text>
+                </View>
+              </View>
+            ) : (
+              <View
+                key={i}
+                style={{
+                  flexDirection: "row",
+                  marginBottom: tokens.topbar.padX,
+                }}
+              >
+                <View
+                  style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: tokens.radii.button,
+                    backgroundColor: ACCENT_FILL,
+                    justifyContent: "center",
+                    alignItems: "center",
+                    marginRight: AI_GAP,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: tokens.type.minimum,
+                      color: ACCENT_ON_FILL,
+                      fontWeight: "bold",
+                    }}
+                  >
+                    AI
+                  </Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  {m.text !== null ? (
+                    <Text
+                      style={{
+                        fontSize: tokens.type.body.size,
+                        color: C.textPrimary,
+                      }}
+                    >
+                      {m.text}
+                    </Text>
+                  ) : null}
+                  {m.receipt !== null ? (
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        marginTop: RECEIPT_GAP,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: tokens.type.caption.size,
+                          color: ACCENT_FILL,
+                        }}
+                      >
+                        ✓
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: tokens.type.caption.size,
+                          color: C.textMuted,
+                          marginLeft: 4,
+                        }}
+                      >
+                        {m.receipt}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </View>
+            ),
+          )
         )}
-        {busy ? <Text style={{ fontSize: 14, color: "#9ca3af" }}>Thinking…</Text> : null}
+        {busy ? (
+          <Text style={{ fontSize: tokens.type.body.size, color: C.textMuted }}>
+            Thinking…
+          </Text>
+        ) : null}
       </ScrollView>
       <View
         style={{
           flexDirection: "row",
           alignItems: "center",
-          paddingLeft: 8,
-          paddingRight: 8,
-          paddingBottom: 8,
+          paddingLeft: tokens.topbar.padX,
+          paddingRight: tokens.topbar.padX,
+          paddingTop: tokens.spacing.buttonGap,
+          paddingBottom: tokens.topbar.padX,
         }}
       >
         <TextInput
@@ -298,29 +541,38 @@ export function AiSidebar(props: { onClose(): void }): React.ReactElement {
           autoFocus
           style={{
             flex: 1,
-            height: 36,
-            backgroundColor: "#1f2937",
-            fontSize: 15,
-            color: "#e5e7eb",
-            paddingLeft: 8,
-            paddingRight: 8,
+            height: WELL_HEIGHT,
+            backgroundColor: C.sunken,
+            borderRadius: tokens.radii.window,
+            fontSize: tokens.type.body.size,
+            color: C.textPrimary,
+            paddingLeft: 12,
+            paddingRight: 12,
           }}
         />
         <Pressable
           testID="ai-sidebar-send"
           onPress={submit}
           style={{
-            marginLeft: 8,
-            height: 36,
-            paddingLeft: 12,
-            paddingRight: 12,
-            borderRadius: 6,
-            backgroundColor: "#5B5BD6",
+            marginLeft: tokens.spacing.controlGap,
+            height: SEND_HEIGHT,
+            paddingLeft: SEND_PAD_X,
+            paddingRight: SEND_PAD_X,
+            borderRadius: tokens.radii.menu,
+            backgroundColor: ACCENT_FILL,
             justifyContent: "center",
             alignItems: "center",
           }}
         >
-          <Text style={{ fontSize: 14, color: "#ffffff" }}>Send</Text>
+          <Text
+            style={{
+              fontSize: tokens.type.secondary.size,
+              color: ACCENT_ON_FILL,
+              fontWeight: "bold",
+            }}
+          >
+            Send
+          </Text>
         </Pressable>
       </View>
     </View>
