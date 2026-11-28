@@ -841,6 +841,30 @@ async function pointerClick(qmp, W, H, x, y) {
   await sleep(500);
 }
 
+// Double-click on the usb-tablet: move, press, release, press,
+// release, with ~100ms gaps. Two pointerClicks are ~1000ms apart
+// (move 300ms + press 200ms + release + sleep 500ms) — past the
+// host's 500ms double-click threshold — so a double-click needs
+// its own helper. The host toggles maximize on a title-bar
+// double-click (polish surface (b)).
+async function pointerDoubleClick(qmp, W, H, x, y) {
+  const ax = Math.max(0, Math.min(32767, Math.round((x / W) * 32767)));
+  const ay = Math.max(0, Math.min(32767, Math.round((y / H) * 32767)));
+  await qmp.input([
+    { type: "abs", data: { axis: "x", value: ax } },
+    { type: "abs", data: { axis: "y", value: ay } },
+  ]);
+  await sleep(300);
+  await qmp.input([{ type: "btn", data: { down: true, button: "left" } }]);
+  await sleep(100);
+  await qmp.input([{ type: "btn", data: { down: false, button: "left" } }]);
+  await sleep(100);
+  await qmp.input([{ type: "btn", data: { down: true, button: "left" } }]);
+  await sleep(100);
+  await qmp.input([{ type: "btn", data: { down: false, button: "left" } }]);
+  await sleep(500);
+}
+
 async function pointerDrag(qmp, W, H, x0, y0, x1, y1, steps = 12) {
   const ax = (x) => Math.max(0, Math.min(32767, Math.round((x / W) * 32767)));
   const ay = (y) => Math.max(0, Math.min(32767, Math.round((y / H) * 32767)));
@@ -1884,7 +1908,7 @@ async function main() {
   check("m9: calculator window header found", !!header0, JSON.stringify(header0));
   if (header0) {
     const fromX = header0.x + Math.round(header0.w / 2);
-    const fromY = header0.y + 22;
+    const fromY = header0.y + 20;
     const toX = fromX + 200;
     const toY = fromY + 100;
     await pointerDrag(b.qmp, calcShot0.width, calcShot0.height, fromX, fromY, toX, toY);
@@ -1911,7 +1935,7 @@ async function main() {
       // is measured from the shot (bottom edge via the body-colour
       // column scan), not guessed — the window's height is whatever
       // the host opened it at.
-      const bottom1 = windowBottom(calcShot1, header1.x + 8, header1.y + 44);
+      const bottom1 = windowBottom(calcShot1, header1.x + 8, header1.y + 40);
       const cornerX = header1.x + header1.w - 4;
       const cornerY = bottom1 - 4;
       await pointerDrag(
@@ -1931,7 +1955,7 @@ async function main() {
         x1: calcShot2.width,
         y1: calcShot2.height - 96, // above the dock (its icon is #8b5cf6 too)
       });
-      const grew = !!header2 && header2.w > header1.w + 100 && header2.h === 44;
+      const grew = !!header2 && header2.w > header1.w + 100 && header2.h === 40;
       check(
         "m9: window drags to resize (corner, header wider by ~150)",
         grew,
@@ -1940,7 +1964,7 @@ async function main() {
       if (header2) {
         // Minimum clamp: drag the corner far inward; the window
         // must stay >= 480 wide (the host clamps at 480x320).
-        const bottom2 = windowBottom(calcShot2, header2.x + 8, header2.y + 44);
+        const bottom2 = windowBottom(calcShot2, header2.x + 8, header2.y + 40);
         const c2x = header2.x + header2.w - 4;
         const c2y = bottom2 - 4;
         await pointerDrag(
@@ -1998,8 +2022,9 @@ async function main() {
   const win = {};
   // Find a window's header box by its title-bar colour, searching
   // only above the dock (the dock tile shares the colour). A real
-  // header is an 800x44 solid strip (~34000 pixels); a covered
-  // window shows only a few stray pixels, which is not "found".
+  // header is an 800x40 solid strip (~32000 pixels, minus the
+  // rounded corners); a covered window shows only a few stray
+  // pixels, which is not "found".
   const findHeader = async (tag, r, g, bl, tol = 12, y0 = 48) => {
     const img = await shot(b.qmp, join(OUT, `m9-shot-win-${tag}.ppm`));
     const box = colorBox(img, r, g, bl, tol, {
@@ -2023,8 +2048,10 @@ async function main() {
   // the reposition. Fixed in the host by deferring presents while a
   // maximize/unmaximize is in flight — see sizeChangePending_ in
   // v2/rn/host/wayland.h.) A maximized window's header sits at
-  // y=0..44, above findHeader's y0=48 band, so the maximize poll
-  // searches from y0=0.
+  // y=48..88 (below the shell's 48px top bar, polish surface (b)),
+  // so the maximize poll searches from y0=0: a misconfigured zone
+  // would put the header at y=0, and the predicate (y >= 48)
+  // rejects it instead of missing it.
   const waitHeader = async (tag, r, g, bl, pred, timeoutMs = 15000, y0 = 48) => {
     const deadline = Date.now() + timeoutMs;
     let last = null;
@@ -2206,7 +2233,7 @@ async function main() {
     // Minimize: the — button is the leftmost of the three title-bar
     // buttons (— ▢ ✕, each 28px, 12px right padding).
     const minX = win.calc.x + win.calc.w - 82;
-    const minY = win.calc.y + 22;
+    const minY = win.calc.y + 20;
     const stoppedBefore = countLog("APP STOPPED calculator");
     await pointerClick(b.qmp, 1920, 1080, minX, minY);
     await sleep(2000);
@@ -2243,29 +2270,35 @@ async function main() {
     check("window: dock click restores a minimized window", false, "no restored window");
   }
   if (win.calc) {
-    // Maximize: the ▢ button is the middle of the three (✕ is the
-    // rightmost 28px + 12px padding). Restore is the same spot.
-    const maxX = win.calc.x + win.calc.w - 54;
-    const maxY = win.calc.y + 22;
-    await pointerClick(b.qmp, 1920, 1080, maxX, maxY);
+    // Maximize (polish surface (b)): a title-bar double-click
+    // toggles maximize — the middle button is fullscreen now.
+    // This image runs WESTON, which has no layer-shell: there is
+    // no exclusive zone, so the work area IS the output and a
+    // maximized window fills it from y=0. (The below-the-top-bar
+    // proof — header at y=48 under the shell's 48px exclusive
+    // zone — lives in genesis-check, which runs the Genesis image.)
+    // Restore is the same double-click.
+    const dblX = win.calc.x + Math.round(win.calc.w / 2);
+    const dblY = win.calc.y + 20;
+    await pointerDoubleClick(b.qmp, 1920, 1080, dblX, dblY);
     const maxed = await waitHeader(
       "calc-max",
       139,
       92,
       246,
-      (box) => box.w >= 1800 && box.h === 44 && box.y <= 44,
+      (box) => box.w >= 1800 && box.h === 40 && box.y === 0,
       15000,
       0,
     );
     check(
-      "window: maximize fills the screen",
-      !!maxed.box && maxed.box.w >= 1800 && maxed.box.h === 44,
+      "window: maximize fills the output",
+      !!maxed.box && maxed.box.w >= 1800 && maxed.box.h === 40 && maxed.box.y === 0,
       JSON.stringify(maxed.box),
     );
     if (maxed.box) {
-      const resX = maxed.box.x + maxed.box.w - 54;
-      const resY = maxed.box.y + 22;
-      await pointerClick(b.qmp, 1920, 1080, resX, resY);
+      const resX = maxed.box.x + Math.round(maxed.box.w / 2);
+      const resY = maxed.box.y + 20;
+      await pointerDoubleClick(b.qmp, 1920, 1080, resX, resY);
       const restored2 = await waitHeader(
         "calc-restored2",
         139,
@@ -2279,12 +2312,72 @@ async function main() {
         JSON.stringify(restored2.box),
       );
       win.calc = restored2.box;
+      // Fullscreen (polish surface (b)): the middle button toggles
+      // fullscreen — the window covers the whole output including
+      // the top bar (header at y=0, 40px bar). A second press
+      // restores the windowed size.
+      if (restored2.box) {
+        const fsX = restored2.box.x + restored2.box.w - 54;
+        const fsY = restored2.box.y + 20;
+        await pointerClick(b.qmp, 1920, 1080, fsX, fsY);
+        const fsed = await waitHeader(
+          "calc-fs",
+          139,
+          92,
+          246,
+          (box) => box.w >= 1800 && box.h === 40 && box.y === 0,
+          15000,
+          0,
+        );
+        check(
+          "window: fullscreen covers the top bar",
+          !!fsed.box && fsed.box.w >= 1800 && fsed.box.h === 40 && fsed.box.y === 0,
+          JSON.stringify(fsed.box),
+        );
+        if (fsed.box) {
+          const fsRx = fsed.box.x + fsed.box.w - 54;
+          const fsRy = fsed.box.y + 20;
+          await pointerClick(b.qmp, 1920, 1080, fsRx, fsRy);
+          const restored3 = await waitHeader(
+            "calc-restored3",
+            139,
+            92,
+            246,
+            (box) => box.w < 1000 && box.w > 400,
+          );
+          check(
+            "window: fullscreen restores on second press",
+            !!restored3.box && restored3.box.w < 1000 && restored3.box.w > 400,
+            JSON.stringify(restored3.box),
+          );
+          win.calc = restored3.box;
+        } else {
+          check("window: fullscreen restores on second press", false, "not fullscreen");
+        }
+      } else {
+        check("window: fullscreen covers the top bar", false, "not restored");
+        check("window: fullscreen restores on second press", false, "not restored");
+      }
     } else {
       check("window: restore returns to a windowed size", false, "not maximized");
+      check(
+        "window: corners are rounded (corner pixel is not the header colour)",
+        false,
+        "not maximized",
+      );
+      check("window: fullscreen covers the top bar", false, "not maximized");
+      check("window: fullscreen restores on second press", false, "not maximized");
     }
   } else {
-    check("window: maximize fills the screen", false, "no restored window");
+    check("window: maximize fills below the top bar", false, "no restored window");
     check("window: restore returns to a windowed size", false, "no restored window");
+    check(
+      "window: corners are rounded (corner pixel is not the header colour)",
+      false,
+      "no restored window",
+    );
+    check("window: fullscreen covers the top bar", false, "no restored window");
+    check("window: fullscreen restores on second press", false, "no restored window");
   }
   // Multi-window: Files (multi-instance) + Calculator side by side,
   // then the single-instance rule (Settings) and the multi-instance
@@ -2300,7 +2393,7 @@ async function main() {
     // the calculator's; then each dock click must bring its own
     // window to the front.
     const fromX = filesH.box.x + Math.round(filesH.box.w / 2);
-    const fromY = filesH.box.y + 22;
+    const fromY = filesH.box.y + 20;
     await pointerDrag(
       b.qmp,
       filesH.img.width,

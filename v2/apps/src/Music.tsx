@@ -45,7 +45,8 @@
 
 import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView } from "./host";
-import { WindowButtons } from "./window-buttons";
+import { WindowButtons, useWindowActive } from "./window-buttons";
+import { tokens } from "../../rn/renderer/tokens";
 import { runCli } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
 import { AudiodError, SevynAudio } from "../../rn/renderer/sevyn-audio";
@@ -163,6 +164,9 @@ const EMPTY_LIBRARY: LibraryResult = { tracks: [], source: "files", error: "" };
 
 export function Music(): React.ReactElement {
   const color = Sevyn.appColor;
+  // Polish surface (b): the title bar dims when the window loses
+  // keyboard focus. header() below closes over this.
+  const windowActive = useWindowActive();
   const [library, setLibrary] = React.useState<LibraryResult>(EMPTY_LIBRARY);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [status, setStatus] = React.useState<PlaybackStatus>(IDLE_STATUS);
@@ -348,7 +352,7 @@ export function Music(): React.ReactElement {
       <View
         style={{
           flexDirection: "row",
-          height: 44,
+          height: tokens.window.titleBarHeight,
           backgroundColor: color,
           alignItems: "center",
           paddingLeft: 16,
@@ -359,7 +363,14 @@ export function Music(): React.ReactElement {
           source={appIconTitlePath("music")}
           style={{ width: 20, height: 20, marginRight: 8 }}
         />
-        <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
+        <Text
+          style={{
+            fontSize: 16,
+            fontWeight: "bold",
+            color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+            flex: 1,
+          }}
+        >
           {title}
         </Text>
         <WindowButtons />

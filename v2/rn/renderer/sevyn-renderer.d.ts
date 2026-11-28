@@ -41,9 +41,12 @@ export interface AppSnapshot {
 }
 export function subscribeApps(fn: () => void): () => void;
 export function getAppsSnapshot(): AppSnapshot;
-// Window state store for useSyncExternalStore (title-bar ▢ / ❐).
+// Window state store for useSyncExternalStore (title-bar ▢ / ❐,
+// fullscreen, and the active/inactive dimming).
 export interface WindowStateSnapshot {
   maximized: boolean;
+  fullscreen: boolean;
+  active: boolean;
 }
 export function subscribeWindowState(fn: () => void): () => void;
 export function getWindowStateSnapshot(): WindowStateSnapshot;

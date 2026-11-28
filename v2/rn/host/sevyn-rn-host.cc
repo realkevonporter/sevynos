@@ -391,8 +391,11 @@ class RnHost {
   void dispatchSize(int width, int height);
   // Window-state change: update windowState_, the Sevyn.windowState
   // property, and the JS onWindowState handler (the renderer's
-  // window-state store re-renders the title bar).
+  // window-state store re-renders the title bar). emitWindowStateEvent
+  // fires the handler with the full triple (state + fullscreen +
+  // active), deduped; setWindowState calls it after any string change.
   void setWindowState(const std::string& state);
+  void emitWindowStateEvent();
   void drainStatusQueue();
   void drainAppEventQueue();
   void drainExecCompletions(jsi::Runtime& rt);
@@ -526,6 +529,18 @@ class RnHost {
   // cleared by a focus remap. Published to JS as Sevyn.windowState
   // and to the renderer's window-state store via onWindowState.
   std::string windowState_ = "normal";
+  // Fullscreen + keyboard-focus flags, from the same Wayland state
+  // handler (configure states + keyboard enter/leave). They ride
+  // along with windowState_ in the onWindowState event (see
+  // emitWindowStateEvent) — the string alone cannot express them.
+  bool windowFullscreen_ = false;
+  bool windowActive_ = true;
+  // Last window-state event emitted to JS, for dedupe (the Wayland
+  // handler fires on any flag change; setWindowState fires on a
+  // string change; both funnel through emitWindowStateEvent).
+  std::string lastEmittedWindowState_ = "normal";
+  bool lastEmittedWindowFullscreen_ = false;
+  bool lastEmittedWindowActive_ = true;
   // Text clipboard (gap unit 2): the headless-mode clipboard. With
   // no Wayland connection there is no compositor selection, so the
   // clipboard is just this string; in Wayland mode the Wayland layer
@@ -1456,10 +1471,12 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            return jsi::Value(false);
          });
   // Window state (app windows only — the fullscreen shell has no
-  // minimize/maximize). minimizeApp hides the window; a dock click
-  // restores it through the focus path (remap). maximizeApp /
-  // unmaximizeApp ask the compositor; the new state is confirmed
-  // through the configure states array (see setWindowState).
+  // minimize/maximize/fullscreen). minimizeApp hides the window; a
+  // dock click restores it through the focus path (remap).
+  // maximizeApp / unmaximizeApp ask the compositor; fullscreenApp /
+  // unfullscreenApp do the same for fullscreen. The new state is
+  // confirmed through the configure states array (see
+  // setWindowState / emitWindowStateEvent).
   hostFn("minimizeApp", 0,
          [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*,
                 size_t) {
@@ -1483,6 +1500,22 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            if (appId_.empty() || !wayland_)
              return jsi::Value(false);
            wayland_->unmaximize();
+           return jsi::Value(true);
+         });
+  hostFn("fullscreenApp", 0,
+         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           if (appId_.empty() || !wayland_)
+             return jsi::Value(false);
+           wayland_->setFullscreen();
+           return jsi::Value(true);
+         });
+  hostFn("unfullscreenApp", 0,
+         [this](jsi::Runtime&, const jsi::Value&, const jsi::Value*,
+                size_t) {
+           if (appId_.empty() || !wayland_)
+             return jsi::Value(false);
+           wayland_->unsetFullscreen();
            return jsi::Value(true);
          });
   hostFn("onWindowState", 1,
@@ -1662,23 +1695,45 @@ void RnHost::dispatchSize(int width, int height) {
 }
 
 void RnHost::setWindowState(const std::string& state) {
-  if (state == windowState_)
+  if (state != windowState_) {
+    windowState_ = state;
+    if (runtime_ && !sevynValue_.isUndefined()) {
+      jsi::Runtime& rt = *runtime_;
+      try {
+        jsi::Object sevyn = sevynValue_.asObject(rt);
+        sevyn.setProperty(rt, "windowState", state.c_str());
+      } catch (const jsi::JSError& e) {
+        logLine("JS window-state handler failed: %s", e.getMessage().c_str());
+      }
+    }
+  }
+  emitWindowStateEvent();
+}
+
+// The onWindowState event carries the full triple: the "normal" |
+// "maximized" | "minimized" string (the renderer's initial value
+// and the minimize/restore logic) plus fullscreen + active, which
+// the string alone cannot express. Deduped on the triple — a
+// fullscreen toggle with no string change still emits, and a
+// repeated identical event never does.
+void RnHost::emitWindowStateEvent() {
+  if (!runtime_ || !hasWindowStateHandler_)
     return;
-  windowState_ = state;
-  if (!runtime_)
+  if (windowState_ == lastEmittedWindowState_ &&
+      windowFullscreen_ == lastEmittedWindowFullscreen_ &&
+      windowActive_ == lastEmittedWindowActive_)
     return;
+  lastEmittedWindowState_ = windowState_;
+  lastEmittedWindowFullscreen_ = windowFullscreen_;
+  lastEmittedWindowActive_ = windowActive_;
   jsi::Runtime& rt = *runtime_;
   try {
-    if (!sevynValue_.isUndefined()) {
-      jsi::Object sevyn = sevynValue_.asObject(rt);
-      sevyn.setProperty(rt, "windowState", state.c_str());
-    }
-    if (hasWindowStateHandler_) {
-      jsi::Object ev(rt);
-      ev.setProperty(rt, "state", state.c_str());
-      windowStateHandler_->call(rt, ev);
-      rt.drainMicrotasks();
-    }
+    jsi::Object ev(rt);
+    ev.setProperty(rt, "state", windowState_.c_str());
+    ev.setProperty(rt, "fullscreen", windowFullscreen_);
+    ev.setProperty(rt, "active", windowActive_);
+    windowStateHandler_->call(rt, ev);
+    rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
     logLine("JS window-state handler failed: %s", e.getMessage().c_str());
   }
@@ -2303,17 +2358,23 @@ int RnHost::run() {
   // re-lays out JS at the new size.
   wayland_->setSizeHandler(
       [this](int w, int h) { dispatchSize(w, h); });
-  // Window-focus fix: a configure that flips the maximized flag
-  // (maximize/unmaximize, or a title-bar drag restoring a maximized
-  // window) updates the window state for the title bar. A minimized
+  // Window-focus fix: a configure that flips the maximized or
+  // fullscreen flag (maximize/unmaximize, setFullscreen/
+  // unsetFullscreen, or a title-bar drag restoring a maximized
+  // window) updates the window state for the title bar; a keyboard
+  // enter/leave updates the active flag the same way. A minimized
   // window gets no configures, so its state is never overwritten
   // here — minimizeApp()/the focus remap own it.
-  wayland_->setWindowStateHandler([this](bool maximized) {
-    if (maximized)
-      setWindowState("maximized");
-    else if (windowState_ != "minimized")
-      setWindowState("normal");
-  });
+  wayland_->setWindowStateHandler(
+      [this](bool maximized, bool fullscreen, bool active) {
+        windowFullscreen_ = fullscreen;
+        windowActive_ = active;
+        if (maximized)
+          setWindowState("maximized");
+        else if (windowState_ != "minimized")
+          setWindowState("normal");
+        emitWindowStateEvent();
+      });
   }
 
   try {

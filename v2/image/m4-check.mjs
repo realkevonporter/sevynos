@@ -137,7 +137,7 @@ function countColor(img, r, g, b, tol = 10, box = null) {
   return n;
 }
 
-// Find an app window's header bar (a solid 44px band of the given
+// Find an app window's header bar (a solid 40px band of the given
 // colour, 800px wide) and return its bounds.
 function findWindowHeader(img, r, g, b) {
   const { width: W, pixels } = img;
@@ -866,7 +866,7 @@ async function main() {
   if (settingsHeader) {
     await moveTo(
       settingsHeader.left + 100,
-      settingsHeader.top + 22,
+      settingsHeader.top + 20,
       shotSettings.width,
       shotSettings.height,
     );
@@ -1006,7 +1006,7 @@ async function main() {
   if (filesHeader) {
     await moveTo(
       filesHeader.left + 100,
-      filesHeader.top + 22,
+      filesHeader.top + 20,
       shotFiles.width,
       shotFiles.height,
     );

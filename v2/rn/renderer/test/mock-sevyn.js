@@ -8,7 +8,14 @@
 const nodes = new Map();
 let nextId = 1;
 
-const handlers = { pointer: null, key: null, status: null, appEvent: null, scroll: null };
+const handlers = {
+  pointer: null,
+  key: null,
+  status: null,
+  appEvent: null,
+  scroll: null,
+  windowState: null,
+};
 const presents = []; // {ops, bg} per Sevyn.present call
 const logs = [];
 
@@ -479,6 +486,15 @@ const Sevyn = {
   onAppEvent(fn) {
     handlers.appEvent = fn;
   },
+  // Window state (polish surface (b)): the host reports the window
+  // state triple (state + fullscreen + active) via onWindowState.
+  // The mock stores the handler so tests can fire events; windowState
+  // is the host's tracked string ("normal" | "maximized" |
+  // "minimized"), the renderer's initial value for maximized.
+  windowState: "normal",
+  onWindowState(fn) {
+    handlers.windowState = fn;
+  },
   _status: { battery: "87", wifi: "on", volume: "43" },
   getStatus() {
     return Object.assign({}, Sevyn._status);
@@ -509,6 +525,14 @@ const Sevyn = {
   },
   unmaximizeApp() {
     logs.push("UNMAXIMIZEAPP");
+    return true;
+  },
+  fullscreenApp() {
+    logs.push("FULLSCREENAPP");
+    return true;
+  },
+  unfullscreenApp() {
+    logs.push("UNFULLSCREENAPP");
     return true;
   },
   // Text clipboard (gap unit 2): the host's in-memory selection.

@@ -322,7 +322,7 @@ function countColor(img, r, g, b, tol = 10, box = null) {
   return n;
 }
 
-// Find an app window's header bar (a solid 44px band of the given
+// Find an app window's header bar (a solid 40px band of the given
 // colour, 800px wide) and return its bounds. Copied from
 // m13-check.mjs (findWindowHeader, round 7): left/right come ONLY
 // from rows in the header band itself, with a longest-run median
@@ -464,13 +464,13 @@ function findWindowHeaderPartial(img, r, g, b, tol = 10) {
 }
 
 // A drag's start point, VERIFIED to be a header pixel (m13-check,
-// round 7). Prefer the usual start (left+200, top+22); fall back to
+// round 7). Prefer the usual start (left+200, top+20); fall back to
 // the centre of the longest run of header-colour pixels in the
 // header band; refuse (null) when no run reaches 20px, so the
 // caller never drags blind.
 function dragStartPoint(frame, rect, r, g, b, tol = 10) {
   const sx = rect.left + 200;
-  const sy = rect.top + 22;
+  const sy = rect.top + 20;
   if (pixelMatches(frame, sx, sy, r, g, b, tol)) return { x: sx, y: sy };
   let best = null;
   for (let y = rect.top; y <= rect.bottom; y++) {
@@ -1102,6 +1102,13 @@ async function main() {
     await sleep(120);
     await b.qmp.input([{ type: "btn", data: { button: "left", down: false } }]);
   };
+  // Two clicks with no pointer move between them: the host's
+  // double-click window is 500ms, and two click()s span ~240ms.
+  const doubleClick = async (x, y) => {
+    await moveTo(x, y, W, H);
+    await click();
+    await click();
+  };
   const dragPointer = async (x0, y0, x1, y1, w, h, steps = 12) => {
     const cx = (x) => Math.max(0, Math.min(x, w - 1));
     const cy = (y) => Math.max(0, Math.min(y, h - 1));
@@ -1607,7 +1614,179 @@ async function main() {
     }
   }
 
-  // 1h. Close: appd CLOSE ends the session, the window leaves the
+  // 1h. Maximize + rounded corners (polish surface (b)): a
+  // title-bar double-click toggles maximize. Under Genesis the
+  // shell's 48px exclusive zone makes the work area start below
+  // the top bar, so a maximized window's header sits at y=48
+  // (40px bar). The verdict is the band's TOP edge + width: top
+  // 48 + full width is maximized below the bar, top 0 is
+  // fullscreen, and a windowed header is only ~800 wide. The
+  // band's BOTTOM edge is NOT asserted: the Terminal's body
+  // shares the header's colour, so bottom is the window body's
+  // extent (~498 windowed), never the header's bottom edge —
+  // asserting bottom 88 failed on the first run even though the
+  // host had requested maximize. Restore is the same double-click.
+  // The corner verdict then proves the compositor rounds the
+  // corners (radius 10): the corner pixel is the wallpaper, a
+  // pixel 12px in is the header colour. The wallpaper is dark in
+  // places, so the verdict is only meaningful where the wallpaper
+  // next to the window differs from the header colour; if it does
+  // not, the window is dragged to a different patch and retried
+  // once, and if it still does not differ the corner is warned,
+  // not failed — unprovable, not square.
+  {
+    const frame0 = await shot(b.qmp, join(OUT, "genesis-shot-max-before.ppm"));
+    const before = findTermHeader(frame0);
+    let maxed = null;
+    if (before) {
+      await doubleClick(
+        before.left + Math.floor((before.right - before.left) / 2),
+        before.top + 20,
+      );
+      const deadline = Date.now() + 15000;
+      while (!maxed && Date.now() < deadline) {
+        try {
+          const frame = await shot(b.qmp, join(OUT, "genesis-shot-max.ppm"));
+          const band = findTermHeader(frame);
+          if (
+            band &&
+            band.right - band.left >= W - 80 &&
+            band.top >= 47 &&
+            band.top <= 49
+          ) {
+            maxed = band;
+          }
+        } catch {}
+        if (!maxed) await sleep(1000);
+      }
+    }
+    check(
+      "polish: maximize fills below the top bar (header top 48, full width)",
+      !!maxed,
+      maxed ? JSON.stringify(maxed) : "no maximized header found",
+    );
+    if (maxed) {
+      let restored = null;
+      let restoredFrame = null;
+      // The restore double-click's second press can be lost below
+      // Genesis (QMP -> virtio-input -> libinput): on the d47850fa
+      // run the second press never arrived (no POINTER BUTTON line
+      // in the boot log) and the unmaximize never fired, even
+      // though the identical maximize double-click worked in the
+      // same run. The Genesis-side restore path
+      // (manager_set_maximized(false) -> sizeless configure ->
+      // host restores the saved size) and the host-side saved size
+      // are both correct on inspection — the unmaximize simply
+      // never fired, so the saved size was never consulted. Retry
+      // the double-click (up to 3 attempts, re-reading the live
+      // header each time) before failing; a late restore from a
+      // previous attempt is taken, not re-clicked (a click on a
+      // windowed header would re-maximize).
+      for (let attempt = 0; attempt < 3 && !restored; attempt++) {
+        let cur = maxed;
+        let curFrame = null;
+        if (attempt > 0) {
+          try {
+            curFrame = await shot(b.qmp, join(OUT, "genesis-shot-max-restored.ppm"));
+            const bd = findTermHeader(curFrame);
+            if (bd) cur = bd;
+          } catch {}
+          if (cur.right - cur.left < 1000 && cur.right - cur.left > 400) {
+            restored = cur;
+            restoredFrame = curFrame;
+            break;
+          }
+        }
+        await doubleClick(
+          cur.left + Math.floor((cur.right - cur.left) / 2),
+          cur.top + 20,
+        );
+        const deadline = Date.now() + 5000;
+        while (!restored && Date.now() < deadline) {
+          try {
+            const frame = await shot(b.qmp, join(OUT, "genesis-shot-max-restored.ppm"));
+            const band = findTermHeader(frame);
+            if (band && band.right - band.left < 1000 && band.right - band.left > 400) {
+              restored = band;
+              restoredFrame = frame;
+            }
+          } catch {}
+          if (!restored) await sleep(1000);
+        }
+      }
+      check(
+        "polish: restore returns to a windowed size",
+        !!restored,
+        restored ? JSON.stringify(restored) : "no windowed header after restore",
+      );
+      if (restored && restoredFrame) {
+        let band = restored;
+        let frame = restoredFrame;
+        let cornerPass = false;
+        let cornerDetail = "";
+        let cornerDone = false;
+        for (let attempt = 0; attempt < 2 && !cornerDone; attempt++) {
+          const wx = band.left >= 5 ? band.left - 5 : band.right + 5;
+          const wallDiffers = !pixelMatches(
+            frame,
+            wx,
+            band.top,
+            ...TERM_HEADER_RGB,
+            TERM_MATCH_TOL,
+          );
+          if (wallDiffers) {
+            const cornerIsWall = !pixelMatches(
+              frame,
+              band.left,
+              band.top,
+              ...TERM_HEADER_RGB,
+              TERM_MATCH_TOL,
+            );
+            const innerIsHeader = pixelMatches(
+              frame,
+              band.left + 12,
+              band.top + 12,
+              ...TERM_HEADER_RGB,
+              TERM_MATCH_TOL,
+            );
+            cornerPass = cornerIsWall && innerIsHeader;
+            cornerDetail = `corner=${cornerIsWall ? "wallpaper" : "header"} inner=${innerIsHeader ? "header" : "other"} box=${JSON.stringify(band)}`;
+            cornerDone = true;
+          } else if (attempt === 0) {
+            const start = dragStartPoint(frame, band, ...TERM_HEADER_RGB, TERM_MATCH_TOL);
+            if (!start) break;
+            await dragPointer(start.x, start.y, start.x + 300, start.y + 300, W, H);
+            try {
+              const frame2 = await shot(
+                b.qmp,
+                join(OUT, "genesis-shot-corner-retry.ppm"),
+              );
+              const band2 = findTermHeader(frame2);
+              if (!band2) break;
+              band = band2;
+              frame = frame2;
+            } catch {
+              break;
+            }
+          }
+        }
+        if (cornerDone) {
+          check(
+            "polish: corners are rounded (corner pixel is not the header colour)",
+            cornerPass,
+            cornerDetail,
+          );
+        } else {
+          warn(
+            "polish: corners unprovable — wallpaper matches the header colour at both positions",
+            "",
+          );
+        }
+      }
+    }
+  }
+
+  // 1i. Close: appd CLOSE ends the session, the window leaves the
   // screen, the Shell survives.
   const closeOk = await appdCmd(b, "CLOSE terminal", /APPD CLOSE OK terminal/);
   check("close: appd CLOSE terminal accepted", !!closeOk, closeOk || "");
@@ -1657,7 +1836,7 @@ async function main() {
   } catch {}
   check("close: Shell still paints after the Terminal closes", shellAlive);
 
-  // 1i. Clean poweroff, no crash, no orphans.
+  // 1j. Clean poweroff, no crash, no orphans.
   const exited1 = await poweroff(b);
   check("shutdown: guest powers off on request", exited1);
   check(

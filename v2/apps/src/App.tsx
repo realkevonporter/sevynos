@@ -18,7 +18,8 @@
 
 import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView, TextInput } from "./host";
-import { WindowButtons } from "./window-buttons";
+import { WindowButtons, useWindowActive } from "./window-buttons";
+import { tokens } from "../../rn/renderer/tokens";
 import {
   subscribeStatus,
   getStatusSnapshot,
@@ -908,6 +909,9 @@ export function App(): React.ReactElement {
   const status = React.useSyncExternalStore(subscribeStatus, getStatusSnapshot);
   const name = Sevyn.appName;
   const color = Sevyn.appColor;
+  // Polish surface (b): the title bar dims when the window loses
+  // keyboard focus.
+  const windowActive = useWindowActive();
   const id = Sevyn.appId;
 
   let body: React.ReactElement;
@@ -1019,7 +1023,7 @@ export function App(): React.ReactElement {
       <View
         style={{
           flexDirection: "row",
-          height: 44,
+          height: tokens.window.titleBarHeight,
           backgroundColor: color,
           alignItems: "center",
           paddingLeft: 16,
@@ -1030,7 +1034,14 @@ export function App(): React.ReactElement {
           source={appIconTitlePath(Sevyn.appId)}
           style={{ width: 20, height: 20, marginRight: 8 }}
         />
-        <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
+        <Text
+          style={{
+            fontSize: 16,
+            fontWeight: "bold",
+            color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+            flex: 1,
+          }}
+        >
           {name}
         </Text>
         <WindowButtons />

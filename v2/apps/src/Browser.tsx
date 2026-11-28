@@ -24,11 +24,11 @@
 // (Chromium's window shows the page), not by this app.
 //
 // Stage 5 (embedding): after `browser open` the app reports its
-// content rect to the Browser host — `sevyn browser embed 0 152 <W>
-// <H-152>` — and the host adopts Chromium into that rect through
-// the Genesis compositor (bridge v1). The chrome is 152 px total
-// (title 44 + tabs 36 + address 44 + status 28), so the content
-// rect is (0, 152, W, H−152) with W/H from Sevyn.width/height
+// content rect to the Browser host — `sevyn browser embed 0 148 <W>
+// <H-148>` — and the host adopts Chromium into that rect through
+// the Genesis compositor (bridge v1). The chrome is 148 px total
+// (title 40 + tabs 36 + address 44 + status 28), so the content
+// rect is (0, 148, W, H−148) with W/H from Sevyn.width/height
 // (published by the host, M9). On resize the host re-lays out the
 // root, the app re-renders, and the size effect re-reports the
 // rect (the verb is idempotent: adopt, move for the same size,
@@ -38,7 +38,8 @@
 
 import * as React from "react";
 import { View, Text, Image, Pressable, TextInput } from "./host";
-import { WindowButtons } from "./window-buttons";
+import { WindowButtons, useWindowActive } from "./window-buttons";
+import { tokens } from "../../rn/renderer/tokens";
 import { runCli, parseField } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
 
@@ -79,12 +80,14 @@ function shortTitle(title: string): string {
 const SETTLE_ATTEMPTS = 20;
 const SETTLE_STEP_MS = 500;
 
-// The Browser window's chrome, in pixels: title 44 + tabs 36 +
-// address 44 + status 28. The content rect is (0, 152, W, H−152).
-const CHROME_HEIGHT = 152;
+// The Browser window's chrome, in pixels: title 40 + tabs 36 +
+// address 44 + status 28. The content rect is (0, 148, W, H−148).
+// The title bar is tokens.window.titleBarHeight (40, polish
+// surface (b)); the tabs/address/status rows keep their heights.
+const CHROME_HEIGHT = 148;
 
 // Parse an `embedded:` line from `browser status` / `browser
-// embed` output: "embedded: yes 0,152,800x348" or "embedded: no".
+// embed` output: "embedded: yes 0,148,800x352" or "embedded: no".
 // Null when the output carries no embedded line at all (an old
 // CLI, or a status that never reached the host) — the caller
 // leaves the state alone then, rather than inventing one.
@@ -119,6 +122,9 @@ export function Browser(): React.ReactElement {
   const [embedded, setEmbedded] = React.useState<string | null>(null);
   const [embedError, setEmbedError] = React.useState<string | null>(null);
   const color = Sevyn.appColor;
+  // Polish surface (b): the title bar dims when the window loses
+  // keyboard focus.
+  const windowActive = useWindowActive();
   // The last embedded state, for the yes→no transition in
   // refresh() (Chromium died): state alone cannot tell a fresh
   // "no" from a death.
@@ -172,7 +178,9 @@ export function Browser(): React.ReactElement {
     const w = Sevyn.width;
     const h = Sevyn.height - CHROME_HEIGHT;
     if (w <= 0 || h <= 0) return;
-    const { code, out } = runCli("sevyn browser embed 0 152 " + w + " " + h);
+    const { code, out } = runCli(
+      "sevyn browser embed 0 " + CHROME_HEIGHT + " " + w + " " + h,
+    );
     const emb = parseEmbedded(out);
     if (code === 0 && emb && emb.state === "yes") {
       setEmbedded("yes " + emb.rect);
@@ -300,7 +308,7 @@ export function Browser(): React.ReactElement {
       <View
         style={{
           flexDirection: "row",
-          height: 44,
+          height: tokens.window.titleBarHeight,
           backgroundColor: color,
           alignItems: "center",
           paddingLeft: 16,
@@ -311,7 +319,14 @@ export function Browser(): React.ReactElement {
           source={appIconTitlePath("browser")}
           style={{ width: 20, height: 20, marginRight: 8 }}
         />
-        <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
+        <Text
+          style={{
+            fontSize: 16,
+            fontWeight: "bold",
+            color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+            flex: 1,
+          }}
+        >
           Browser
         </Text>
         <WindowButtons />

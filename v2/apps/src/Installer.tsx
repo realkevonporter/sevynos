@@ -24,6 +24,8 @@
 
 import * as React from "react";
 import { View, Text, Pressable, ScrollView } from "./host";
+import { useWindowActive } from "./window-buttons";
+import { tokens } from "../../rn/renderer/tokens";
 import { runCliAsync, parseField } from "./cli";
 
 type DiskInfo = {
@@ -178,6 +180,9 @@ export function Installer(): React.ReactElement {
   const [message, setMessage] = React.useState<string>("");
   const [busy, setBusy] = React.useState<boolean>(false);
   const color = Sevyn.appColor;
+  // Polish surface (b): the title bar dims when the window loses
+  // keyboard focus.
+  const windowActive = useWindowActive();
 
   async function detect(): Promise<void> {
     setBusy(true);
@@ -284,17 +289,29 @@ export function Installer(): React.ReactElement {
     <View
       style={{
         flexDirection: "row",
-        height: 44,
+        height: tokens.window.titleBarHeight,
         backgroundColor: color,
         alignItems: "center",
         paddingLeft: 16,
         paddingRight: 12,
       }}
     >
-      <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
+      <Text
+        style={{
+          fontSize: 16,
+          fontWeight: "bold",
+          color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+          flex: 1,
+        }}
+      >
         Installer
       </Text>
-      <Text style={{ fontSize: 13, color: "#ffffff" }}>
+      <Text
+        style={{
+          fontSize: 13,
+          color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+        }}
+      >
         {step === "detect"
           ? "Detecting…"
           : step === "pick"

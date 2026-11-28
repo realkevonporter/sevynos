@@ -39,7 +39,8 @@
 
 import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView, TextInput } from "./host";
-import { WindowButtons } from "./window-buttons";
+import { WindowButtons, useWindowActive } from "./window-buttons";
+import { tokens } from "../../rn/renderer/tokens";
 import { runCli, runCliAsync, parseField } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
 
@@ -354,6 +355,9 @@ export function Settings(): React.ReactElement {
   );
   const [wallpaperMessage, setWallpaperMessage] = React.useState<string>("");
   const color = Sevyn.appColor;
+  // Polish surface (b): the title bar dims when the window loses
+  // keyboard focus.
+  const windowActive = useWindowActive();
 
   function setChannelTo(next: string): void {
     const { code } = runCli("sevyn update channel " + next);
@@ -955,7 +959,7 @@ export function Settings(): React.ReactElement {
       <View
         style={{
           flexDirection: "row",
-          height: 44,
+          height: tokens.window.titleBarHeight,
           backgroundColor: color,
           alignItems: "center",
           paddingLeft: 16,
@@ -966,7 +970,14 @@ export function Settings(): React.ReactElement {
           source={appIconTitlePath("settings")}
           style={{ width: 20, height: 20, marginRight: 8 }}
         />
-        <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
+        <Text
+          style={{
+            fontSize: 16,
+            fontWeight: "bold",
+            color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+            flex: 1,
+          }}
+        >
           Settings
         </Text>
         <WindowButtons />

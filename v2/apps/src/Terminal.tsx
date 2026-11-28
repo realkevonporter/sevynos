@@ -34,7 +34,8 @@
 import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView, TextInput } from "./host";
 import { scrollTo } from "../../rn/renderer/sevyn-renderer";
-import { WindowButtons } from "./window-buttons";
+import { WindowButtons, useWindowActive } from "./window-buttons";
+import { tokens } from "../../rn/renderer/tokens";
 import { runCli, parseField } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
 
@@ -212,6 +213,9 @@ export function Terminal(): React.ReactElement {
   const [lines, setLines] = React.useState<string[]>(HELP_LINES);
   const [input, setInput] = React.useState("");
   const color = Sevyn.appColor;
+  // Polish surface (b): the title bar dims when the window loses
+  // keyboard focus.
+  const windowActive = useWindowActive();
   const scrollRef = React.useRef<any>(null);
 
   function append(more: string[]): void {
@@ -282,7 +286,7 @@ export function Terminal(): React.ReactElement {
       <View
         style={{
           flexDirection: "row",
-          height: 44,
+          height: tokens.window.titleBarHeight,
           backgroundColor: color,
           alignItems: "center",
           paddingLeft: 16,
@@ -293,7 +297,14 @@ export function Terminal(): React.ReactElement {
           source={appIconTitlePath("terminal")}
           style={{ width: 20, height: 20, marginRight: 8 }}
         />
-        <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
+        <Text
+          style={{
+            fontSize: 16,
+            fontWeight: "bold",
+            color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+            flex: 1,
+          }}
+        >
           Terminal
         </Text>
         <WindowButtons />

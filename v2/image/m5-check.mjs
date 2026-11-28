@@ -262,7 +262,7 @@ function countColor(img, r, g, b, tol = 10, box = null) {
   return n;
 }
 
-// Find an app window's header bar (a solid 44px band of the given
+// Find an app window's header bar (a solid 40px band of the given
 // colour, 800px wide) and return its bounds.
 //
 // Round 7 (run 43709802164, dbdda2ae): `left`/`right` are taken
@@ -2860,12 +2860,12 @@ async function main() {
   const browserHeader = findWindowHeader(shotBrowser, 14, 165, 233);
   check("browser-app: window on screen (header found)", !!browserHeader);
   if (browserHeader) {
-    // Address input: header (44) + tab strip (36), input centred in
-    // its 44px row -> top + 44 + 36 + 22.
+    // Address input: header (40) + tab strip (36), input centred in
+    // its 44px row -> top + 40 + 36 + 22.
     const page2Url = `http://10.0.2.2:${HTTP_PORT}/m5-page2.html`;
     await moveTo(
       browserHeader.left + 200,
-      browserHeader.top + 102,
+      browserHeader.top + 98,
       shotBrowser.width,
       shotBrowser.height,
     );
@@ -2937,7 +2937,7 @@ async function main() {
         regoed = true;
         await moveTo(
           headerAgain.left + 200,
-          headerAgain.top + 102,
+          headerAgain.top + 98,
           shotAgain.width,
           shotAgain.height,
         );

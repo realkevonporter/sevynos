@@ -633,10 +633,10 @@ async function main() {
     check("app: browser window header found on screen", !!header);
     if (header) {
       // The X is 28x28, right-aligned with 12px padding: its centre
-      // is header.right - 12 - 14 horizontally, header.top + 22
-      // vertically (44px header).
+      // is header.right - 12 - 14 horizontally, header.top + 20
+      // vertically (40px header).
       const x = header.right - 26;
-      const y = header.top + 22;
+      const y = header.top + 20;
       const before = logLines().length;
       await moveTo(x, y, W, H);
       await sleep(300);

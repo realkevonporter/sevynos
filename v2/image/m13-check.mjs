@@ -732,7 +732,7 @@ function countColor(img, r, g, b, tol = 10, box = null) {
   return n;
 }
 
-// Find an app window's header bar (a solid 44px band of the given
+// Find an app window's header bar (a solid 40px band of the given
 // colour, 800px wide) and return its bounds.
 //
 // Round 7 (run 43709802164, dbdda2ae): `left`/`right` are taken
@@ -910,7 +910,7 @@ function findWindowHeaderPartial(img, r, g, b) {
 
 // A drag's start point, VERIFIED to be a header pixel (round 7,
 // m13 only). After Chromium is raised, part of the Browser header
-// is covered, so the usual start (left+200, top+22) can land
+// is covered, so the usual start (left+200, top+20) can land
 // inside Chromium — dragging from there would move Chromium, not
 // the Browser window. Prefer the usual start; fall back to the
 // centre of the longest run of header-colour pixels in the header
@@ -918,7 +918,7 @@ function findWindowHeaderPartial(img, r, g, b) {
 // never drags blind.
 function dragStartPoint(frame, rect, r, g, b) {
   const sx = rect.left + 200;
-  const sy = rect.top + 22;
+  const sy = rect.top + 20;
   if (pixelMatches(frame, sx, sy, r, g, b)) return { x: sx, y: sy };
   let best = null;
   for (let y = rect.top; y <= rect.bottom; y++) {
@@ -3190,7 +3190,7 @@ async function main() {
   // Drag the Browser app window by its title bar (round 6).
   // Returns { before, after } (findWindowHeader rects) or null
   // when the window is not on screen or the drag did not move
-  // it. The drag start (left+200, top+22) is empty header space
+  // it. The drag start (left+200, top+20) is empty header space
   // — the window controls sit at right-26 and must never be
   // dragged. `tag` names the diagnostic shots. The caller passes
   // the delta it wants; the window may move less (the pointer
@@ -4041,12 +4041,12 @@ async function main() {
   // The Browser window header is its registered colour #0ea5e9.
   check("browser-app: window on screen (header found)", !!browserHeader);
   if (browserHeader) {
-    // Address input: header (44) + tab strip (36), input centred in
-    // its 44px row -> top + 44 + 36 + 22.
+    // Address input: header (40) + tab strip (36), input centred in
+    // its 44px row -> top + 40 + 36 + 22.
     const page2Url = `http://10.0.2.2:${HTTP_PORT}/m5-page2.html`;
     await moveTo(
       browserHeader.left + 200,
-      browserHeader.top + 102,
+      browserHeader.top + 98,
       shotBrowser.width,
       shotBrowser.height,
     );
@@ -4109,7 +4109,7 @@ async function main() {
         regoed = true;
         await moveTo(
           headerAgain.left + 200,
-          headerAgain.top + 102,
+          headerAgain.top + 98,
           shotAgain.width,
           shotAgain.height,
         );
@@ -4724,10 +4724,10 @@ async function main() {
   // running=no. (The appd-CLOSE fallback kills Chromium via the
   // parallel appd fix; before it, closing by appd CLOSE left
   // Chromium running and this step failed.)
-  //   Close-button geometry: the header is 44px tall with 12px
+  //   Close-button geometry: the header is 40px tall with 12px
   //   right padding; the close Pressable is the last 28px button
   //   in the header row, so its centre is (right - 12 - 14,
-  //   top + 22) = (right - 26, top + 22). The header is derived
+  //   top + 20) = (right - 26, top + 20). The header is derived
   //   from a FRESH SETTLED frame immediately before the click —
   //   windows move mid-run, so a header found steps earlier can
   //   point at bare shell.
@@ -4742,7 +4742,7 @@ async function main() {
     if (browserHeader2) {
       await moveTo(
         browserHeader2.right - 26,
-        browserHeader2.top + 22,
+        browserHeader2.top + 20,
         settledClose.width,
         settledClose.height,
       );
