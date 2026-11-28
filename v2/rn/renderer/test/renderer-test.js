@@ -1598,6 +1598,77 @@ check("pointer-up: subscribers fire on release and on leave", () => {
   });
   assert.deepEqual(seen.length, 2, "unsubscribed listener stops firing");
 });
+// Drag-and-drop plumbing (gap unit 15, audit #18): the renderer
+// subscribes a drag-drop handler through Sevyn.onDragDrop, the
+// handler receives the events and returns whether it consumed
+// them (the host uses that for the protocol replies), and a
+// consuming listener re-presents. startFileDrag reaches the host
+// mock and reports its calls.
+check("drag-drop: subscribeDragDrop receives events, consumed re-presents", () => {
+  const seen = [];
+  const presentsBefore = Sevyn._presents.length;
+  const unsub = renderer.subscribeDragDrop((ev) => {
+    seen.push(ev);
+    return ev.type === "enter";
+  });
+  const consumed = Sevyn._handlers.dragDrop({
+    type: "enter",
+    x: 10,
+    y: 20,
+    mimes: ["text/uri-list"],
+  });
+  assert.equal(consumed, true, "enter consumed");
+  assert.equal(seen.length, 1, "listener saw the enter");
+  assert.equal(seen[0].type, "enter", "enter type");
+  assert.deepEqual(seen[0].mimes, ["text/uri-list"], "enter mimes");
+  assert.ok(Sevyn._presents.length > presentsBefore, "consuming listener re-presented");
+  const beforeDrop = Sevyn._presents.length;
+  const dropConsumed = Sevyn._handlers.dragDrop({
+    type: "drop",
+    x: 10,
+    y: 20,
+    paths: ["/data/a.txt"],
+  });
+  assert.equal(dropConsumed, false, "drop not consumed by the enter-only listener");
+  assert.equal(seen.length, 2, "listener saw the drop");
+  assert.deepEqual(seen[1].paths, ["/data/a.txt"], "drop paths");
+  assert.equal(
+    Sevyn._presents.length,
+    beforeDrop,
+    "non-consuming listener did not re-present",
+  );
+  unsub();
+  Sevyn._handlers.dragDrop({ type: "leave", x: 0, y: 0 });
+  assert.equal(seen.length, 2, "unsubscribed listener saw nothing more");
+});
+
+check("drag-drop: startFileDrag reaches the host and records its calls", () => {
+  assert.deepEqual(Sevyn._startFileDragCalls, [], "no calls yet");
+  assert.equal(
+    renderer.startFileDrag(["/data/a.txt", "/data/b.txt"]),
+    true,
+    "host starts the drag",
+  );
+  assert.deepEqual(Sevyn._startFileDragCalls, [["/data/a.txt", "/data/b.txt"]]);
+});
+
+// Pointer-up `left` (gap unit 15): a leave is not a release — the
+// listener can tell them apart, so a file drag hands off to the
+// compositor instead of committing a drop at the last position.
+check("pointer-up: leave carries left=true, release carries left=false", () => {
+  const seen = [];
+  const unsub = renderer.subscribePointerUp((ev) => {
+    seen.push(ev);
+    return false;
+  });
+  Sevyn._handlers.pointer({ type: "leave", x: 100, y: 200 });
+  Sevyn._handlers.pointer({ type: "button", x: 100, y: 200, button: 1, pressed: false });
+  unsub();
+  assert.deepEqual(seen, [
+    { x: 100, y: 200, left: true },
+    { x: 100, y: 200, left: false },
+  ]);
+});
 
 check("press: ScrollView with onPress is hit-testable, rows win the overlap", () => {
   const surface = pressModsRect("#f9fafb");

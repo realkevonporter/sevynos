@@ -1508,7 +1508,12 @@ function handlePointer(ev) {
     let upChanged = false;
     for (const fn of Array.from(pointerUpListeners)) {
       try {
-        if (fn({ x: ev.x, y: ev.y }) === true) upChanged = true;
+        // `left` (gap unit 15, audit #18): a leave is not a release —
+        // the file-drag hook hands the drag to the compositor instead
+        // of committing a drop at the last known position. A release
+        // carries left=false; the marquee ignores the field.
+        if (fn({ x: ev.x, y: ev.y, left: ev.type === "leave" }) === true)
+          upChanged = true;
       } catch (e) {
         Sevyn.log(
           "pointer-up listener failed: " + (e && e.message ? e.message : String(e)),
@@ -1846,6 +1851,52 @@ function subscribePointerMove(fn) {
   pointerMoveListeners.add(fn);
   return () => pointerMoveListeners.delete(fn);
 }
+// Drag-and-drop subscribers (gap unit 15, audit #18). The host
+// forwards Wayland data-device drag events through the single
+// onDragDrop handler (see handleDragDrop): enter/motion/leave while
+// another client's drag hovers this surface, drop with the file
+// paths when it lands, dragend when a drag this client started
+// finishes. A listener receives the event and returns true only when
+// it changed state — the renderer re-presents only then, the same
+// contract as the move/up listeners. handleDragDrop returns whether
+// any listener consumed the event, which the host uses for the
+// protocol replies (accept on enter, finish on drop).
+const dragDropListeners = new Set();
+function subscribeDragDrop(fn) {
+  dragDropListeners.add(fn);
+  return () => dragDropListeners.delete(fn);
+}
+function handleDragDrop(ev) {
+  let consumed = false;
+  for (const fn of Array.from(dragDropListeners)) {
+    try {
+      if (fn(ev) === true) consumed = true;
+    } catch (e) {
+      Sevyn.log("drag-drop listener failed: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+  if (consumed) {
+    SevynReconciler.flushSyncWork();
+    presentRoot();
+  }
+  return consumed;
+}
+// File drag handoff (gap unit 15, audit #18): start a Wayland DnD
+// drag carrying the given absolute paths. The host returns false
+// when there is no compositor drag to start (headless runs, or no
+// data device); the caller then just ends its local drag session
+// with no move.
+function startFileDrag(paths) {
+  if (typeof Sevyn.startFileDrag === "function") {
+    try {
+      return Sevyn.startFileDrag(paths) === true;
+    } catch (e) {
+      Sevyn.log("startFileDrag failed: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+  return false;
+}
+
 // Pointer-up subscribers. Release (and pointer-leave, which ends a
 // drag off-surface) notifies here; a listener returns true only when
 // it changed state — the renderer re-presents only then, the same
@@ -2115,6 +2166,7 @@ function render(element, options) {
   Sevyn.onPointer(handlePointer);
   Sevyn.onKey(handleKey);
   Sevyn.onStatus(handleStatus);
+  if (typeof Sevyn.onDragDrop === "function") Sevyn.onDragDrop(handleDragDrop);
   if (typeof Sevyn.onScroll === "function") Sevyn.onScroll(scrollAt);
   if (typeof Sevyn.onAppEvent === "function") Sevyn.onAppEvent(handleAppEvent);
   if (typeof Sevyn.onWindowState === "function") Sevyn.onWindowState(handleWindowState);
@@ -2337,6 +2389,8 @@ module.exports = {
   getWindowStateSnapshot,
   subscribePointerMove,
   subscribePointerUp,
+  subscribeDragDrop,
+  startFileDrag,
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
   setContextMenuKeyHandler,

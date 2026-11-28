@@ -62,6 +62,12 @@ declare global {
     ): { width: number; height: number };
     present(ops: any[], backgroundColor: string): void;
     onPointer(fn: (ev: any) => void): void;
+    // Drag-and-drop (gap unit 15, audit #18): the renderer
+    // subscribes in render(); startFileDrag starts a Wayland DnD
+    // drag carrying the given absolute paths, false when there is
+    // no compositor drag to start (headless runs).
+    onDragDrop(fn: (ev: any) => boolean | void): void;
+    startFileDrag(paths: string[]): boolean;
     onKey(fn: (ev: any) => void): void;
     onStatus(fn: (ev: any) => void): void;
     getStatus(): { [key: string]: string };

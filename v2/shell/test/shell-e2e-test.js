@@ -370,13 +370,12 @@ check("wallpaper: frost variant paints the bundled image full-screen", () => {
   );
   const frost = images.find((a) => a.asset.endsWith("wallpapers/frost.png"));
   assert.equal(frost.w, 1024, "frost image covers the surface width");
-  // Height is 0 in the mock — the mock lays the main area out at
-  // height 0 (its flex quirk; the desktop surface rect is 1024x0
-  // for the same reason), so the 100% height resolves to 0 here.
-  // The real host lays the surface out full-height (proven
-  // on-device for the wallpaper layer), so the image covers it
-  // there. The width above proves the percentage sizing works.
-  assert.equal(frost.h, 0, "frost image height is 0 in the mock quirk");
+  // Height is the full 768 now: the mock used to lay the main area
+  // out at height 0 (its flex quirk — an absolute child with both
+  // offsets set never stretched), so the 100% height resolved to 0.
+  // Gap unit 15 fixed the mock to Yoga parity, and the image covers
+  // the surface here exactly as it does on the real host.
+  assert.equal(frost.h, 768, "frost image covers the surface height");
   // No procedural auras under the photo (the macos violet aura is
   // the canary — frost shares its midnight base, so the base stays).
   const colors = last.ops.filter((o) => o.type === "rect").map((o) => o.color);
@@ -727,6 +726,90 @@ check("desktop marquee: drag selects both icons, one icon, click changes nothing
   drag(500, 300, 502, 302);
   assert.equal(selectedIconCount(), 1, "click without drag changes nothing");
 });
+
+// Desktop file drop (gap unit 15, audit #18): a file drag from
+// another client hovering the desktop lights the whole surface with
+// the violet hover tint, and a drop moves the files into
+// /data/Desktop — one `sevyn files move` per file, logged as
+// `DESKTOP drop moved <name> to /data/Desktop`. A drag offering no
+// files is ignored entirely. The hover is the full-surface
+// #5B5BD626 rect (1024x768 at the mock surface) — the same tint as
+// the marquee band, but the band is a small rect, never full-surface.
+check(
+  "desktop drop: file drag highlights the surface and drops into /data/Desktop",
+  () => {
+    // The overlay fills the desktop surface between the 48px top
+    // bar and the 56px dock: 1024 wide, 664 tall, at y=48.
+    function dropHoverPresent() {
+      return lastPresent().ops.some(
+        (o) =>
+          o.type === "rect" &&
+          o.color === "#5B5BD626" &&
+          o.w === 1024 &&
+          o.h === 664 &&
+          o.y === 48,
+      );
+    }
+    const moveBefore = Sevyn._logs.filter((l) =>
+      l.startsWith("EXEC sevyn files move "),
+    ).length;
+    // A non-file offer is ignored: no hover, no move.
+    Sevyn._handlers.dragDrop({ type: "enter", x: 100, y: 100, mimes: ["text/plain"] });
+    assert.ok(!dropHoverPresent(), "non-file offer highlights nothing");
+    // A file offer lights the surface; motion keeps it lit; leave clears it.
+    Sevyn._handlers.dragDrop({
+      type: "enter",
+      x: 100,
+      y: 100,
+      mimes: ["text/uri-list"],
+    });
+    assert.ok(dropHoverPresent(), "file drag lights the desktop");
+    Sevyn._handlers.dragDrop({ type: "motion", x: 200, y: 200 });
+    assert.ok(dropHoverPresent(), "motion keeps the hover");
+    Sevyn._handlers.dragDrop({ type: "leave", x: 200, y: 200 });
+    assert.ok(!dropHoverPresent(), "leave clears the hover");
+    // A drop moves the files into /data/Desktop and logs one line
+    // per file (the canned listing holds Photos + Notes.txt, so the
+    // name lands un-suffixed).
+    Sevyn._handlers.dragDrop({
+      type: "enter",
+      x: 100,
+      y: 100,
+      mimes: ["text/uri-list"],
+    });
+    Sevyn._handlers.dragDrop({
+      type: "drop",
+      x: 100,
+      y: 100,
+      paths: ["/data/drag-me.txt"],
+    });
+    assert.ok(!dropHoverPresent(), "drop clears the hover");
+    assert.ok(
+      Sevyn._logs.includes("DESKTOP drop moved drag-me.txt to /data/Desktop"),
+      "drop logged, logs=" + JSON.stringify(Sevyn._logs.slice(-6)),
+    );
+    assert.equal(
+      Sevyn._logs.filter((l) => l.startsWith("EXEC sevyn files move ")).length,
+      moveBefore + 1,
+      "one move ran",
+    );
+    assert.ok(
+      Sevyn._logs.includes(
+        'EXEC sevyn files move "/data/drag-me.txt" "/data/Desktop/drag-me.txt"',
+      ),
+      "move quoted the paths",
+    );
+    // A file already on the desktop is a no-op: no move, no log.
+    const logsBefore = Sevyn._logs.length;
+    Sevyn._handlers.dragDrop({
+      type: "drop",
+      x: 100,
+      y: 100,
+      paths: ["/data/Desktop/Notes.txt"],
+    });
+    assert.equal(Sevyn._logs.length, logsBefore, "already-here drop moves nothing");
+  },
+);
 
 check(
   "dock right-click: a tile right-click opens the menu and launches nothing by itself",

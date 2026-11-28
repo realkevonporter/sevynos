@@ -8,7 +8,14 @@
 const nodes = new Map();
 let nextId = 1;
 
-const handlers = { pointer: null, key: null, status: null, appEvent: null, scroll: null };
+const handlers = {
+  pointer: null,
+  key: null,
+  status: null,
+  appEvent: null,
+  scroll: null,
+  dragDrop: null,
+};
 const presents = []; // {ops, bg} per Sevyn.present call
 const logs = [];
 
@@ -183,6 +190,20 @@ function layoutNode(
   if (w == null && flexW != null) w = flexW;
   let h = dim(st.height, ph);
   if (h == null && flexH != null) h = flexH;
+  // Yoga parity: an absolute child with both offsets set and no
+  // explicit size stretches between them (real Yoga does this; the
+  // mock used to leave the size unresolved, so a top:0/bottom:0
+  // overlay measured 0 tall and never painted — gap unit 15).
+  if (st.position === "absolute") {
+    const left = dim(st.left, pw);
+    const right = dim(st.right, pw);
+    if (w == null && left != null && right != null && pw != null)
+      w = Math.max(0, pw - left - right);
+    const top = dim(st.top, ph);
+    const bottom = dim(st.bottom, ph);
+    if (h == null && top != null && bottom != null && ph != null)
+      h = Math.max(0, ph - top - bottom);
+  }
   if (w == null || h == null) {
     if (n.measure) {
       // widthMode: 0 undefined, 1 exactly, 2 at-most.
@@ -467,6 +488,19 @@ const Sevyn = {
   onPointer(fn) {
     handlers.pointer = fn;
   },
+  // Drag-and-drop (gap unit 15, audit #18): the renderer registers
+  // its handler here; tests drive cross-client drops by calling
+  // Sevyn._handlers.dragDrop(ev) directly. startFileDrag records its
+  // calls (the leave-handoff test asserts on them) and returns true,
+  // as the real host does when a compositor drag starts.
+  onDragDrop(fn) {
+    handlers.dragDrop = fn;
+  },
+  _startFileDragCalls: [],
+  startFileDrag(paths) {
+    Sevyn._startFileDragCalls.push(paths.slice());
+    return true;
+  },
   onKey(fn) {
     handlers.key = fn;
   },
@@ -732,6 +766,8 @@ const Sevyn = {
     handlers.status = null;
     handlers.appEvent = null;
     handlers.scroll = null;
+    handlers.dragDrop = null;
+    Sevyn._startFileDragCalls.length = 0;
   },
 };
 

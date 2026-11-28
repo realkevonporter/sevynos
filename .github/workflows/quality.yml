@@ -131,6 +131,11 @@ jobs:
           g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
           -o /tmp/test-text-clipboard v2/rn/host/test-text-clipboard.cc
           && /tmp/test-text-clipboard
+      - name: Compile + run the file-drag unit test (no Wayland, no Hermes)
+        run: >-
+          g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
+          -o /tmp/test-file-drag v2/rn/host/test-file-drag.cc
+          && /tmp/test-file-drag
       - name: Compile + run the quit-shortcut unit test (no Wayland, no Hermes)
         run: >-
           g++ -O2 -std=c++17 -Wall -Wextra -I v2/rn/host
