@@ -39,7 +39,8 @@
 
 import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView } from "./host";
-import { WindowButtons } from "./window-buttons";
+import { WindowButtons, useWindowActive } from "./window-buttons";
+import { tokens } from "../../rn/renderer/tokens";
 import { ContextMenu } from "../../rn/renderer/context-menu";
 import type {
   ContextMenuEvent,
@@ -121,7 +122,7 @@ function parentOf(p: string): string {
  * toolbar, next to the sidebar; rows are 36px tall in a list padded
  * 8px top, 12px sides; the status bar is 28px tall.
  */
-const TITLE_HEIGHT = 44;
+const TITLE_HEIGHT = tokens.window.titleBarHeight;
 const PATH_HEIGHT = 32;
 const TOOLBAR_HEIGHT = 36;
 const LIST_TOP = TITLE_HEIGHT + PATH_HEIGHT + TOOLBAR_HEIGHT;
@@ -209,6 +210,9 @@ export function Files(): React.ReactElement {
   } | null>(null);
   const seenMounts = React.useRef<Set<string>>(new Set(volumes.map((v) => v.mountPoint)));
   const color = Sevyn.appColor;
+  // Polish surface (b): the title bar dims when the window loses
+  // keyboard focus.
+  const windowActive = useWindowActive();
 
   function refreshVolumes(currentPath: string): void {
     const next = loadVolumes();
@@ -547,7 +551,14 @@ export function Files(): React.ReactElement {
           source={appIconTitlePath("files")}
           style={{ width: 20, height: 20, marginRight: 8 }}
         />
-        <Text style={{ fontSize: 16, fontWeight: "bold", color: "#ffffff", flex: 1 }}>
+        <Text
+          style={{
+            fontSize: 16,
+            fontWeight: "bold",
+            color: windowActive ? "#ffffff" : tokens.color.dark.textSecondary,
+            flex: 1,
+          }}
+        >
           Files
         </Text>
         <WindowButtons />

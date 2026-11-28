@@ -106,15 +106,22 @@ declare global {
     closeApp(): boolean;
     // Window state (app windows only): minimize hides the window
     // (a dock click restores it through the focus path); maximize /
-    // unmaximize ask the compositor. windowState is the host's
-    // tracked state ("normal" | "maximized" | "minimized"); the
-    // renderer subscribes via onWindowState and re-renders the
-    // title bar when it changes.
+    // unmaximize and fullscreen / unfullscreen ask the compositor.
+    // windowState is the host's tracked state ("normal" |
+    // "maximized" | "minimized"); the renderer subscribes via
+    // onWindowState and re-renders the title bar when it changes.
+    // The event carries the full triple: the string plus fullscreen
+    // (the compositor's FULLSCREEN state) and active (keyboard
+    // focus — false while another window or the shell has focus).
     minimizeApp(): boolean;
     maximizeApp(): boolean;
     unmaximizeApp(): boolean;
+    fullscreenApp(): boolean;
+    unfullscreenApp(): boolean;
     windowState: string;
-    onWindowState(fn: (ev: { state: string }) => void): void;
+    onWindowState(
+      fn: (ev: { state: string; fullscreen: boolean; active: boolean }) => void,
+    ): void;
     log(msg: string): void;
   };
 }

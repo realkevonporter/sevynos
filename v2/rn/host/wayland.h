@@ -179,16 +179,26 @@ class Wayland {
   void remap();
   // Window state (xdg_toplevel): minimize hides the window (a dock
   // click restores it via remap); maximize/unmaximize toggle the
-  // maximized state, which the compositor confirms through the
-  // configure states array (see maximized()).
+  // maximized state and setFullscreen/unsetFullscreen toggle the
+  // fullscreen state, both confirmed by the compositor through the
+  // configure states array (see maximized()/appFullscreen()).
   void minimize();
   void maximize();
   void unmaximize();
+  void setFullscreen();
+  void unsetFullscreen();
   bool maximized() const { return maximized_; }
-  // Fired when the compositor's configure changes the maximized
-  // flag (maximize/unmaximize, or a title-bar drag that restores
-  // a maximized window). The host forwards it to JS.
-  using WindowStateHandler = std::function<void(bool maximized)>;
+  bool appFullscreen() const { return appFullscreen_; }
+  // Fired when the compositor's configure changes the maximized or
+  // fullscreen flag (maximize/unmaximize, setFullscreen/
+  // unsetFullscreen, or a title-bar drag that restores a maximized
+  // window), and when keyboard focus enters/leaves the window (the
+  // active flag). The host forwards the full triple to JS, which
+  // renders the title bar from it (glyph, fullscreen, dimming).
+  // fullscreen_ (the shell's own fullscreen surface) is a different
+  // flag: this handler never fires for the shell.
+  using WindowStateHandler =
+      std::function<void(bool maximized, bool fullscreen, bool active)>;
   void setWindowStateHandler(WindowStateHandler h) {
     windowStateHandler_ = h;
   }
@@ -444,6 +454,23 @@ class Wayland {
   // (xdg_toplevel state MAXIMIZED). Set only by the configure
   // handler — never assumed from a maximize() call.
   bool maximized_ = false;
+  // Fullscreen state of an APP window, from the configure states
+  // array (xdg_toplevel state FULLSCREEN). Set only by the configure
+  // handler — never assumed from a setFullscreen() call. Distinct
+  // from fullscreen_ above, which marks the SHELL's own fullscreen
+  // surface (an app window is never fullscreen_).
+  bool appFullscreen_ = false;
+  // Keyboard focus: true while the compositor has given this window
+  // keyboard focus (onKeyboardEnter), false on leave. App windows
+  // only — the shell's focus never reaches JS. Starts true: a newly
+  // launched window is the foreground window, and a Leave dims it;
+  // starting false would render every title bar dimmed until the
+  // first Enter arrives.
+  bool active_ = true;
+  // Title-bar double-click (maximize toggle): timestamp of the last
+  // press in the move region, from the Wayland event clock.
+  uint32_t lastTitleBarPressMs_ = 0;
+  bool haveLastTitleBarPress_ = false;
   // While remap() recreates the surface, the new surface's initial
   // configure carries no states — suppress the state handler there
   // so a maximized window does not flicker to "restored" mid-remap.
@@ -509,16 +536,17 @@ class Wayland {
   CloseHandler closeHandler_;
   SizeHandler sizeHandler_;
 
-  // M9 window geometry: the title bar is 44px on every app surface
-  // (template + Settings/Terminal/Files/Browser), and the close X
-  // lives in the rightmost ~40px of it. The move region is the title
-  // bar minus the button zone; the resize zones are 8px strips on
-  // the right and bottom edges (+ the bottom-right corner). Minimum
-  // window size after a resize drag.
+  // M9 window geometry: the title bar is 40px on every app surface
+  // (template + Settings/Terminal/Files/Browser, polish surface (b);
+  // tokens.window.titleBarHeight), and the close X lives in the
+  // rightmost ~40px of it. The move region is the title bar minus
+  // the button zone; the resize zones are 8px strips on the right
+  // and bottom edges (+ the bottom-right corner). Minimum window
+  // size after a resize drag.
   // The button zone is 100px: three 28px buttons (minimize,
-  // maximize/restore, close) + 12px right padding. A press inside
-  // it must reach the JS Pressables, never start a move drag.
-  static constexpr int kTitleBarHeight = 44;
+  // fullscreen, close) + 12px right padding. A press inside it must
+  // reach the JS Pressables, never start a move drag.
+  static constexpr int kTitleBarHeight = 40;
   static constexpr int kCloseZoneWidth = 100;
   static constexpr int kResizeEdge = 8;
   static constexpr int kMinWidth = 480;

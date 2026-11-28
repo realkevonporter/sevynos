@@ -11,7 +11,7 @@
 #   the only chrome; Chromium itself runs --app=<url> with no browser
 #   UI. Stage 5: no --window-size is passed any more — the
 #   compositor configures Chromium's size on first map, and the
-#   Browser host adopts it into the content rect (0, 152, W, H-152)
+#   Browser host adopts it into the content rect (0, 148, W, H-148)
 #   through the Genesis bridge. The content window sits beside the
 #   Browser window under Weston, not inside it — true in-window
 #   embedding needs the Genesis compositor (see BROWSER_PLAN.md).

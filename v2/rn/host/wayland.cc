@@ -116,10 +116,22 @@ void Wayland::createSurface() {
                                      static_cast<uint32_t>(height_));
       zwlr_layer_surface_v1_set_anchor(
           layerSurface_, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-                             ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
                              ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
                              ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-      zwlr_layer_surface_v1_set_exclusive_zone(layerSurface_, -1);
+      // Polish surface (b): the shell reserves its 48px top bar, so
+      // a maximized window fills the work area below it (the
+      // compositor's non_exclusive_zone) instead of covering the bar.
+      // Surface (c) shrinks the bar to 32px and the zone follows.
+      // NOTE the anchor deliberately omits BOTTOM: Smithay's
+      // layer-map arrange() applies a surface's exclusive zone
+      // from the edge(s) it is anchored to, and a surface anchored
+      // TOP+BOTTOM hits the TOP&&BOTTOM arm, which reserves from
+      // the LEFT (work area {48,0,1232,800} — wrong). Anchored
+      // TOP|LEFT|RIGHT the LEFT&&RIGHT arm reserves from the top
+      // (work area {0,48,1280,752}). The surface geometry is
+      // unchanged either way: its size is explicit (1280x800 at
+      // (0,0)), the anchor only steers the zone computation.
+      zwlr_layer_surface_v1_set_exclusive_zone(layerSurface_, 48);
       zwlr_layer_surface_v1_set_keyboard_interactivity(
           layerSurface_,
           ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE);
@@ -232,17 +244,23 @@ void Wayland::remap() {
   // flushes a pending present (see present()).
   configured_ = false;
   bool wasMaximized = maximized_;
+  bool wasFullscreen = appFullscreen_;
   suppressWindowState_ = true;
   createSurface();
   suppressWindowState_ = false;
   if (!surface_)
     return;
-  // A maximized window comes back maximized on the new surface.
-  // (The initial configure carries no states, so restore the flag
-  // silently — the maximize configure that follows agrees with it.)
+  // A maximized/fullscreen window comes back maximized/fullscreen
+  // on the new surface. (The initial configure carries no states,
+  // so restore the flags silently — the configure that follows
+  // agrees with them.)
   if (wasMaximized && xdgToplevel_) {
     maximized_ = true;
     xdg_toplevel_set_maximized(xdgToplevel_);
+  }
+  if (wasFullscreen && xdgToplevel_) {
+    appFullscreen_ = true;
+    xdg_toplevel_set_fullscreen(xdgToplevel_, nullptr);
   }
   // Re-present the current content on the new surface. The last
   // present already cleared havePending_, so force it: pendingOps_
@@ -284,6 +302,30 @@ void Wayland::unmaximize() {
   // restore the same way.
   sizeChangePending_ = true;
   logLine("WAYLAND unmaximize: deferring presents until configure");
+}
+
+void Wayland::setFullscreen() {
+  if (!xdgToplevel_ || fullscreen_ || appFullscreen_)
+    return;
+  logLine("WAYLAND setFullscreen");
+  xdg_toplevel_set_fullscreen(xdgToplevel_, nullptr);
+  // Same gate as maximize(): a commit at the windowed size after
+  // this request but before the fullscreen configure would poison
+  // the compositor's reposition the same way.
+  sizeChangePending_ = true;
+  logLine("WAYLAND setFullscreen: deferring presents until configure");
+}
+
+void Wayland::unsetFullscreen() {
+  if (!xdgToplevel_ || fullscreen_ || !appFullscreen_)
+    return;
+  logLine("WAYLAND unsetFullscreen");
+  xdg_toplevel_unset_fullscreen(xdgToplevel_);
+  // Same gate as maximize(): a commit at the fullscreen size after
+  // this request but before the restore configure would poison the
+  // restore the same way.
+  sizeChangePending_ = true;
+  logLine("WAYLAND unsetFullscreen: deferring presents until configure");
 }
 
 Wayland::~Wayland() {
@@ -567,11 +609,13 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
   // flow again. resize() below (or the surface configure's
   // flushPending) replays any deferred present.
   self->sizeChangePending_ = false;
-  // Track the maximized flag from the states array (maximize /
-  // unmaximize, or a title-bar drag restoring a maximized window).
-  // The flag can change in a configure that carries no size, so
-  // parse it before the size early-return below.
+  // Track the maximized + fullscreen flags from the states array
+  // (maximize/unmaximize, setFullscreen/unsetFullscreen, or a
+  // title-bar drag restoring a maximized window). The flags can
+  // change in a configure that carries no size, so parse them before
+  // the size early-return below.
   bool maximized = false;
+  bool appFullscreen = false;
   if (states) {
     // wl_array_for_each does not compile in C++ (void* assignment),
     // so walk the array by hand.
@@ -581,20 +625,26 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
           static_cast<char*>(states->data) + i);
       if (s == XDG_TOPLEVEL_STATE_MAXIMIZED)
         maximized = true;
+      else if (s == XDG_TOPLEVEL_STATE_FULLSCREEN)
+        appFullscreen = true;
     }
   }
-  bool flagChanged = (maximized != self->maximized_);
-  if (flagChanged)
+  bool maxChanged = (maximized != self->maximized_);
+  bool fsChanged = (appFullscreen != self->appFullscreen_);
+  bool flagChanged = maxChanged || fsChanged;
+  if (maxChanged)
     self->maximized_ = maximized;
-  // Save the pre-maximize size (before resize() below runs) so an
-  // unmaximize configure that carries no size can restore to it.
-  // Arm the settle commit on either transition (see
-  // maximizeSettlePending_ in wayland.h): on the next frame
-  // callback after this configure, commit once more so the
-  // compositor gets a second, definitely-armed chance to
+  if (fsChanged)
+    self->appFullscreen_ = appFullscreen;
+  // Save the pre-transition size (before resize() below runs) so a
+  // configure that carries no size can restore to it — the same rule
+  // for unmaximize and for unfullscreen. Arm the settle commit on
+  // either transition (see maximizeSettlePending_ in wayland.h): on
+  // the next frame callback after this configure, commit once more
+  // so the compositor gets a second, definitely-armed chance to
   // reposition the window.
   if (flagChanged) {
-    if (maximized) {
+    if ((maxChanged && maximized) || (fsChanged && appFullscreen)) {
       self->savedWidth_ = self->width_;
       self->savedHeight_ = self->height_;
     }
@@ -611,9 +661,10 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
   // commit the new size.
   auto notifyState = [&]() {
     if (flagChanged && !self->suppressWindowState_) {
-      logLine("WAYLAND toplevel %s", maximized ? "maximized" : "restored");
+      logLine("WAYLAND toplevel %s%s", maximized ? "maximized" : "restored",
+              appFullscreen ? " fullscreen" : "");
       if (self->windowStateHandler_)
-        self->windowStateHandler_(maximized);
+        self->windowStateHandler_(maximized, appFullscreen, self->active_);
     }
   };
   // M9: honor the compositor's size. Zero means "no opinion" — the
@@ -622,17 +673,19 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
   // A resize drag ends with a configure carrying the new size; the
   // fullscreen shell gets one when the output mode changes. App
   // windows clamp to the minimum size.
-  // Exception: on unmaximize, a sizeless configure means "restore
-  // to your pre-maximize size" — the client keeps the maximized
-  // size otherwise, and the window stays fullscreen. (Weston sends
-  // 0,0 on unmaximize when it has no saved size; verified in CI:
-  // the restore configure carried no size and no resize ran.)
+  // Exception: on unmaximize/unfullscreen, a sizeless configure
+  // means "restore to your pre-transition size" — the client keeps
+  // the expanded size otherwise, and the window stays fullscreen.
+  // (Weston sends 0,0 on unmaximize when it has no saved size;
+  // verified in CI: the restore configure carried no size and no
+  // resize ran.) Only when NEITHER expanded state remains: a
+  // fullscreen window that unmaximizes stays fullscreen.
   // Defer the resize to onXdgSurfaceConfigure (restorePending_):
   // committing 800x500 before acking the configure makes Weston
   // raise xdg_wm_base error 4 and kill the connection.
   if (width <= 0 || height <= 0) {
-    if (flagChanged && !maximized && self->savedWidth_ > 0 &&
-        self->savedHeight_ > 0) {
+    if (flagChanged && !maximized && !appFullscreen &&
+        self->savedWidth_ > 0 && self->savedHeight_ > 0) {
       logLine("WAYLAND restore to saved size %dx%d deferred (sizeless configure)",
               self->savedWidth_, self->savedHeight_);
       self->restorePending_ = true;
@@ -649,12 +702,12 @@ void Wayland::onXdgToplevelConfigure(void* data, xdg_toplevel* toplevel,
       h = kMinHeight;
   }
   if (w == self->width_ && h == self->height_) {
-    // Same exception as above: on unmaximize the compositor may
-    // echo the maximized size instead of the restored one; restore
-    // to the saved pre-maximize size (deferred to after the ack,
-    // as above).
-    if (flagChanged && !maximized && self->savedWidth_ > 0 &&
-        self->savedHeight_ > 0 &&
+    // Same exception as above: on unmaximize/unfullscreen the
+    // compositor may echo the expanded size instead of the restored
+    // one; restore to the saved pre-transition size (deferred to
+    // after the ack, as above).
+    if (flagChanged && !maximized && !appFullscreen &&
+        self->savedWidth_ > 0 && self->savedHeight_ > 0 &&
         (self->savedWidth_ != w || self->savedHeight_ != h)) {
       logLine("WAYLAND restore to saved size %dx%d deferred (configure echoed maximized size)",
               self->savedWidth_, self->savedHeight_);
@@ -878,13 +931,12 @@ void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
                               uint32_t time, uint32_t button, uint32_t state) {
   Wayland* self = static_cast<Wayland*>(data);
   (void)pointer;
-  (void)time;
   // The serial is the clipboard's set_selection serial too (see
   // onKeyboardKey): a click is an input event, and a copy made
   // right after it carries this serial.
   self->lastInputSerial_ = serial;
   // M9 move + resize (app windows only — the shell is fullscreen).
-  // Left-button press in the title bar (44px, minus the close-X
+  // Left-button press in the title bar (40px, minus the close-X
   // zone) starts an interactive move; a press in the 8px right /
   // bottom edge strips (or the bottom-right corner) starts an
   // interactive resize. The compositor owns the drag from here: it
@@ -892,6 +944,11 @@ void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
   // through onXdgToplevelConfigure. The press is still forwarded to
   // JS below — the title bar holds no pressables, and the close X
   // is outside the move region, so nothing in JS fires for a drag.
+  // A second press in the move region within 500ms is a double-
+  // click: it toggles maximize instead of starting a move grab
+  // (the first press already started one, which ends on release).
+  // Never while fullscreen — a fullscreen window has nowhere to
+  // move to, and fullscreen exits through the middle button.
   if (state == WL_POINTER_BUTTON_STATE_PRESSED && button == 0x110 &&
       !self->fullscreen_ && self->xdgToplevel_ && self->seat_) {
     const double x = self->pointerX_;
@@ -908,7 +965,32 @@ void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
     if (edges != XDG_TOPLEVEL_RESIZE_EDGE_NONE) {
       xdg_toplevel_resize(self->xdgToplevel_, self->seat_, serial, edges);
     } else if (y < kTitleBarHeight && x < w - kCloseZoneWidth) {
-      xdg_toplevel_move(self->xdgToplevel_, self->seat_, serial);
+      bool doubleClick = !self->appFullscreen_ &&
+                         self->haveLastTitleBarPress_ &&
+                         (time - self->lastTitleBarPressMs_) < 500;
+      if (doubleClick) {
+        self->haveLastTitleBarPress_ = false;
+        if (self->maximized_)
+          self->unmaximize();
+        else
+          self->maximize();
+      } else {
+        // A maximized window cannot move (it is locked to the work
+        // area; the compositor does not unmaximize on move), so do
+        // not start a move grab for it. The grab is a no-op for
+        // movement, and its pointer capture interferes with the
+        // second press of a restore double-click: on the maximized
+        // window the second press is lost below the compositor (no
+        // POINTER BUTTON line) and the unmaximize never fires, while
+        // the identical maximize double-click on a windowed window
+        // works. Just record the press so the double-click can
+        // restore; the windowed case still starts the grab.
+        if (!self->appFullscreen_ && !self->maximized_) {
+          xdg_toplevel_move(self->xdgToplevel_, self->seat_, serial);
+        }
+        self->lastTitleBarPressMs_ = time;
+        self->haveLastTitleBarPress_ = true;
+      }
     }
   }
   if (self->pointerHandler_)
@@ -998,19 +1080,36 @@ void Wayland::onKeyboardKeymap(void* data, wl_keyboard* keyboard,
 void Wayland::onKeyboardEnter(void* data, wl_keyboard* keyboard,
                               uint32_t serial, wl_surface* surface,
                               wl_array* keys) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)keyboard;
   (void)serial;
   (void)surface;
   (void)keys;
+  // App windows only: the shell's keyboard focus never reaches JS.
+  // The compositor gives the window keyboard focus (a click on it,
+  // or the focus path on launch); the title bar renders active.
+  if (self->fullscreen_ || self->active_)
+    return;
+  self->active_ = true;
+  logLine("WAYLAND keyboard focus gained");
+  if (self->windowStateHandler_)
+    self->windowStateHandler_(self->maximized_, self->appFullscreen_, true);
 }
 
 void Wayland::onKeyboardLeave(void* data, wl_keyboard* keyboard,
                               uint32_t serial, wl_surface* surface) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)keyboard;
   (void)serial;
   (void)surface;
+  // App windows only (see onKeyboardEnter). Clicking the desktop
+  // gives the shell keyboard focus, so the window dims.
+  if (self->fullscreen_ || !self->active_)
+    return;
+  self->active_ = false;
+  logLine("WAYLAND keyboard focus lost");
+  if (self->windowStateHandler_)
+    self->windowStateHandler_(self->maximized_, self->appFullscreen_, false);
 }
 
 void Wayland::onKeyboardKey(void* data, wl_keyboard* keyboard, uint32_t serial,

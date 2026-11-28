@@ -1062,6 +1062,110 @@ check(
   },
 );
 
+// --- Window state store (polish surface (b)) -------------------------
+// The host reports the window-state triple (state + fullscreen +
+// active) via Sevyn.onWindowState; the store snapshot is
+// {maximized, fullscreen, active} and a subscribed title bar
+// re-renders from it.
+function WindowStateApp() {
+  const snap = React.useSyncExternalStore(
+    renderer.subscribeWindowState,
+    renderer.getWindowStateSnapshot,
+  );
+  return h(
+    "View",
+    { style: { flexDirection: "column", backgroundColor: "#0b0b0f" } },
+    h(
+      "Text",
+      { style: { fontSize: 16, color: "#ffffff" } },
+      `maximized=${snap.maximized} fullscreen=${snap.fullscreen} active=${snap.active}`,
+    ),
+  );
+}
+
+check("window state: initial snapshot is windowed, active", () => {
+  renderer.render(h(WindowStateApp), { width: 1024, height: 768 });
+  assert.deepEqual(renderer.getWindowStateSnapshot(), {
+    maximized: false,
+    fullscreen: false,
+    active: true,
+  });
+  assert.ok(
+    lastTexts().some((t) => t === "maximized=false fullscreen=false active=true"),
+    "title bar reads the initial snapshot",
+  );
+});
+
+check("window state: maximize event flips maximized and re-renders", () => {
+  Sevyn._handlers.windowState({
+    state: "maximized",
+    fullscreen: false,
+    active: true,
+  });
+  assert.deepEqual(renderer.getWindowStateSnapshot(), {
+    maximized: true,
+    fullscreen: false,
+    active: true,
+  });
+  assert.ok(
+    lastTexts().some((t) => t === "maximized=true fullscreen=false active=true"),
+    "title bar re-rendered maximized",
+  );
+});
+
+check("window state: fullscreen event flips fullscreen, maximize clears", () => {
+  Sevyn._handlers.windowState({
+    state: "normal",
+    fullscreen: true,
+    active: true,
+  });
+  assert.deepEqual(renderer.getWindowStateSnapshot(), {
+    maximized: false,
+    fullscreen: true,
+    active: true,
+  });
+  assert.ok(
+    lastTexts().some((t) => t === "maximized=false fullscreen=true active=true"),
+    "title bar re-rendered fullscreen",
+  );
+});
+
+check("window state: focus leave dims (active=false) and re-renders", () => {
+  Sevyn._handlers.windowState({
+    state: "normal",
+    fullscreen: false,
+    active: false,
+  });
+  assert.deepEqual(renderer.getWindowStateSnapshot(), {
+    maximized: false,
+    fullscreen: false,
+    active: false,
+  });
+  assert.ok(
+    lastTexts().some((t) => t === "maximized=false fullscreen=false active=false"),
+    "title bar re-rendered inactive",
+  );
+});
+
+check("window state: an event without active stays active (older host)", () => {
+  Sevyn._handlers.windowState({ state: "normal", fullscreen: false });
+  assert.deepEqual(renderer.getWindowStateSnapshot(), {
+    maximized: false,
+    fullscreen: false,
+    active: true,
+  });
+});
+
+check("window state: a duplicate event does not re-present", () => {
+  const presentsBefore = Sevyn._presents.length;
+  Sevyn._handlers.windowState({ state: "normal", fullscreen: false });
+  assert.equal(
+    Sevyn._presents.length,
+    presentsBefore,
+    "no re-render for an unchanged triple",
+  );
+});
+
 // Restore the shell tree for a clean end state.
 renderer.update(h(App));
 

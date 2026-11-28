@@ -1801,17 +1801,26 @@ function handleAppEvent(line) {
 }
 
 // Window state store for useSyncExternalStore. The snapshot is
-// {maximized: boolean} — an app's title bar shows ▢ or ❐ from it.
-// The host reports changes via Sevyn.onWindowState (maximize /
-// unmaximize / a title-bar drag restoring a maximized window);
-// Sevyn.windowState ("normal" | "maximized" | "minimized") is the
-// initial value. Minimized never reaches this store (a minimized
-// window is hidden; the dock restores it through the focus path).
+// {maximized, fullscreen, active} — an app's title bar shows ▢ or
+// ❐ from maximized/fullscreen (either expanded state shows ❐) and
+// dims the title + controls when !active. The host reports changes
+// via Sevyn.onWindowState (maximize/unmaximize, fullscreen/
+// unfullscreen, a title-bar drag restoring a maximized window, and
+// keyboard focus enter/leave); Sevyn.windowState ("normal" |
+// "maximized" | "minimized") is the initial value for maximized.
+// Minimized never reaches this store (a minimized window is hidden;
+// the dock restores it through the focus path). Active starts true:
+// a newly launched window is the foreground window, and a Leave
+// dims it; the host tracks the same initial value.
 let windowStateSnapshot = null;
 const windowStateListeners = new Set();
 function getWindowStateSnapshot() {
   if (!windowStateSnapshot) {
-    windowStateSnapshot = { maximized: Sevyn.windowState === "maximized" };
+    windowStateSnapshot = {
+      maximized: Sevyn.windowState === "maximized",
+      fullscreen: false,
+      active: true,
+    };
   }
   return windowStateSnapshot;
 }
@@ -1821,9 +1830,18 @@ function subscribeWindowState(fn) {
 }
 function handleWindowState(ev) {
   const maximized = !!(ev && ev.state === "maximized");
+  const fullscreen = !!(ev && ev.fullscreen);
+  // No active field (an older host, or a test mock) means active:
+  // only an explicit false dims the title bar.
+  const active = !ev || ev.active !== false;
   const prev = getWindowStateSnapshot();
-  if (prev.maximized === maximized) return;
-  windowStateSnapshot = { maximized };
+  if (
+    prev.maximized === maximized &&
+    prev.fullscreen === fullscreen &&
+    prev.active === active
+  )
+    return;
+  windowStateSnapshot = { maximized, fullscreen, active };
   for (const fn of Array.from(windowStateListeners)) {
     try {
       fn();

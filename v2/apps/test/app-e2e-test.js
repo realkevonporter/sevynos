@@ -37,6 +37,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { tokens } = require("../../rn/renderer/tokens");
 
 const Sevyn = require("../../rn/renderer/test/mock-sevyn");
 const renderer = require("../../rn/renderer/sevyn-renderer");
@@ -195,7 +196,8 @@ check("files (status.read): name, glyph, live status line", () => {
     "live wifi in status line",
   );
   const header = last.ops.find(
-    (o) => o.type === "rect" && o.color === "#3b82f6" && o.h === 44,
+    (o) =>
+      o.type === "rect" && o.color === "#3b82f6" && o.h === tokens.window.titleBarHeight,
   );
   assert.ok(header, "header uses the app colour");
 });
