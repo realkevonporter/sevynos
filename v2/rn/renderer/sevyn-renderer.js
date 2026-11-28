@@ -12,9 +12,17 @@
 //
 // Event flow (host -> JS):
 //   Sevyn.onPointer(ev)  ev = {type:'move'|'button'|'axis', x, y,
-//                               button, pressed, nodeId?}
+//                               button, pressed, nodeId?,
+//                               shift, ctrl, alt, super, meta}
 //     nodeId is set on button-press only: the yoga id of the topmost
 //     hit op (host hit-tests the last presented ops).
+//     shift/ctrl/alt/super/meta are the modifier states at the moment
+//     of the pointer event (the host attaches its live snapshot —
+//     gap unit 13, audit #22: Shift is swallowed as a key event and
+//     never reaches JS, so a click's modifiers can only arrive on
+//     the pointer event itself). onPress receives them as
+//     {nativeEvent:{shiftKey, ctrlKey, metaKey, altKey}} — the same
+//     shape onSubmitEditing already uses for shiftKey.
 //     Button codes are the Linux input codes (0x110 left, 0x111
 //     right, 0x112 middle); the headless driver and the mock tests
 //     send 1 for left, 2 for right. A right-button press dispatches
@@ -369,14 +377,15 @@ function emitInstance(inst, ox, oy, ops, clip) {
     ops.push({ type: "pushClip", x, y, w, h });
     if (st.backgroundColor) {
       // A ScrollView that declares onContextMenu (gap unit 10, audit
-      // #13: the Files list) is hit-testable: its background rect
-      // carries its yogaId, so a right-click on empty list space
-      // dispatches onContextMenu instead of hitting nothing (only
-      // Pressable / onPress views emit hit rects, and a ScrollView is
-      // neither). Without onContextMenu the rect stays nodeId -1, as
-      // before — no other ScrollView changes behaviour. Children are
-      // emitted after this rect, so a row still wins the hit-test
-      // where it overlaps the list surface.
+      // #13: the Files list) or onPress (gap unit 13: the Files list
+      // clears the selection on an empty-space click) is hit-testable:
+      // its background rect carries its yogaId, so a press on empty
+      // list space dispatches the handler instead of hitting nothing
+      // (only Pressable / onPress views emit hit rects, and a
+      // ScrollView is neither). Without either the rect stays nodeId
+      // -1, as before — no other ScrollView changes behaviour.
+      // Children are emitted after this rect, so a row still wins
+      // the hit-test where it overlaps the list surface.
       ops.push({
         type: "rect",
         x,
@@ -385,7 +394,10 @@ function emitInstance(inst, ox, oy, ops, clip) {
         h,
         color: st.backgroundColor,
         radius: st.borderRadius || 0,
-        nodeId: inst.props && inst.props.onContextMenu ? inst.yogaId : -1,
+        nodeId:
+          inst.props && (inst.props.onContextMenu || inst.props.onPress)
+            ? inst.yogaId
+            : -1,
       });
     }
     // Content size = max descendant extent (for scroll clamping).
@@ -1010,10 +1022,15 @@ function focusables() {
   const out = [];
   function walk(inst) {
     if (inst.hidden) return;
+    // A ScrollView with onPress (gap unit 13: the Files list clears
+    // the selection on an empty-space click) is a pointer affordance,
+    // not a keyboard control — Tab must skip it, or the Files focus
+    // order would gain a stop on the list surface before the rows.
     if (
-      inst.type === "Pressable" ||
-      inst.type === "TextInput" ||
-      (inst.props && inst.props.onPress)
+      inst.type !== "ScrollView" &&
+      (inst.type === "Pressable" ||
+        inst.type === "TextInput" ||
+        (inst.props && inst.props.onPress))
     ) {
       out.push(inst);
     }
@@ -1047,10 +1064,29 @@ function moveFocus(dir) {
   presentRoot();
 }
 
-function activateFocused() {
+function activateFocused(ev) {
   if (focusedInstance && focusedInstance.props && focusedInstance.props.onPress) {
-    focusedInstance.props.onPress();
+    // Keyboard activation carries the activating key's modifiers, so
+    // Ctrl+Enter / Shift+Enter reach onPress exactly like a modified
+    // click (gap unit 13: the Files rows select with the same
+    // modifiers through Tab+Enter as through a pointer press).
+    focusedInstance.props.onPress(pressEventFrom(ev));
   }
+}
+
+// The press event an onPress handler receives: the modifier keys held
+// at the moment of the press. `ev` is a pointer event (host snapshot)
+// or a key event (the activating key's own flags); either may omit
+// the flags, which then read as unheld.
+function pressEventFrom(ev) {
+  return {
+    nativeEvent: {
+      shiftKey: !!(ev && ev.shift),
+      ctrlKey: !!(ev && ev.ctrl),
+      metaKey: !!((ev && ev.meta) || (ev && ev.super)),
+      altKey: !!(ev && ev.alt),
+    },
+  };
 }
 
 // US keycode map (evdev codes -> [plain, shift]). Space is 57.
@@ -1399,7 +1435,7 @@ function handleKey(ev) {
   switch (ev.key) {
     case 28: // Enter
     case 57: // Space
-      activateFocused();
+      activateFocused(ev);
       break;
     case 15: // Tab
     case 106: // Right
@@ -1551,7 +1587,10 @@ function handlePointer(ev) {
       textDrag = null;
     }
     if (inst.props && inst.props.onPress) {
-      inst.props.onPress();
+      // A press carries the modifiers held at the moment of the
+      // click (gap unit 13) — Ctrl/Cmd-click and Shift-click in the
+      // Files list read them here.
+      inst.props.onPress(pressEventFrom(ev));
       // Pinpoint a stuck tap: if the loop wedges inside the navigation,
       // the "onPress returned" line never appears; if it wedges in the
       // flush (the go-live mount render), only that line appears.

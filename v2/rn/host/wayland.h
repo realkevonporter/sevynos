@@ -47,10 +47,14 @@ class Wayland {
  public:
   // Pointer event: type is "enter" | "leave" | "motion" | "button".
   // button is the Linux input button code (0x110 left, 0x111 right…);
-  // pressed is meaningful for button events.
-  using PointerHandler =
-      std::function<void(const std::string& type, double x, double y,
-                         uint32_t button, bool pressed)>;
+  // pressed is meaningful for button events. modifiers is the Ctrl /
+  // Alt / Super(= Meta) / Shift state at the moment of the event
+  // (gap unit 13, audit #22: the host's live snapshot — Shift keys
+  // are swallowed as key events and never reach JS, so a click's
+  // modifiers can only arrive on the pointer event itself).
+  using PointerHandler = std::function<void(const std::string& type, double x,
+                                            double y, uint32_t button, bool pressed,
+                                            const KeyModifiers& modifiers)>;
   // Scroll event (GF65 fix, 2026-11-10): a wheel click or a
   // trackpad two-finger scroll, accumulated per pointer frame.
   // (x, y) is the pointer position; (dx, dy) is the scroll amount

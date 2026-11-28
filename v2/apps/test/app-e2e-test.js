@@ -1141,6 +1141,135 @@ check("files: lists a real directory, navigates into it", () => {
   assert.ok(texts.includes("hello.txt"), "file inside shown");
 });
 
+// --- Files multi-select (gap unit 13, audit #22) ------------------------
+// Plain click selects one; Ctrl-click toggles; Shift-click ranges
+// from the anchor; clicking empty list space clears; the toolbar
+// Cut/Copy/Delete act on the whole selection (one `sevyn files`
+// command per file through the existing clipboard path).
+check("files: multi-select toggle, range, clear, multi-copy, multi-delete", () => {
+  const deleted = [];
+  const clipboardSets = [];
+  const handler = (cmd) => {
+    if (cmd === "sevyn files list /data")
+      return "0\nd alpha\nf beta.txt\nf gamma.txt\nf delta.txt\n";
+    if (cmd === "sevyn files volumes")
+      return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+    if (cmd === "sevyn files clipboard") return "0\nempty\n";
+    if (cmd.startsWith("sevyn files delete ")) {
+      deleted.push(cmd.slice("sevyn files delete ".length));
+      return "0\n";
+    }
+    if (cmd.startsWith("sevyn files clipboard set ")) {
+      clipboardSets.push(cmd);
+      return "0\nclipboard set\n";
+    }
+    return "1\nerror: no such directory\n";
+  };
+  loadAs(
+    {
+      id: "files",
+      name: "Files",
+      color: "#3b82f6",
+      glyph: "F",
+      permissions: ["cli.exec"],
+    },
+    filesBundle,
+    handler,
+  );
+  function lastOps() {
+    return Sevyn._presents[Sevyn._presents.length - 1].ops;
+  }
+  function statusText() {
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    const line = texts.find((t) => t.startsWith("Clipboard"));
+    assert.ok(line, "status line present");
+    return line;
+  }
+  // Listing rows are the 36px pressables, top to bottom: "..",
+  // alpha, beta.txt, gamma.txt, delta.txt.
+  function rowRects() {
+    const rows = lastOps()
+      .filter((o) => o.type === "rect" && o.h === 36 && o.nodeId >= 0)
+      .sort((a, b) => a.y - b.y);
+    assert.equal(rows.length, 5, "five listing rows");
+    return rows;
+  }
+  function selectedRowCount() {
+    return lastOps().filter(
+      (o) => o.type === "rect" && o.h === 36 && o.color === "#dbeafe",
+    ).length;
+  }
+  function pressRect(rect, mods) {
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: rect.x + 2,
+      y: rect.y + 2,
+      button: 1,
+      pressed: true,
+      nodeId: rect.nodeId,
+      ...(mods || {}),
+    });
+  }
+  // Toolbar buttons are the 28px pressables wider than the 28px
+  // title-bar buttons, left to right: Cut, Copy, Paste, Delete.
+  function toolbarButtons() {
+    return lastOps()
+      .filter((o) => o.type === "rect" && o.h === 28 && o.w > 28 && o.nodeId >= 0)
+      .sort((a, b) => a.x - b.x);
+  }
+
+  // Plain click on beta.txt selects exactly it.
+  pressRect(rowRects()[2]);
+  assert.ok(statusText().includes("Selected beta.txt"), "plain click selects one");
+  assert.equal(selectedRowCount(), 1, "one row highlighted");
+  // Ctrl-click on delta.txt toggles it in (anchor moves to it).
+  pressRect(rowRects()[4], { ctrl: true });
+  assert.ok(statusText().includes("Selected 2 items"), "Ctrl-click adds a second");
+  assert.equal(selectedRowCount(), 2, "two rows highlighted");
+  // Shift-click on gamma.txt ranges from the anchor (delta) — the
+  // range joins the existing selection.
+  pressRect(rowRects()[3], { shift: true });
+  assert.ok(statusText().includes("Selected 3 items"), "Shift-click ranges");
+  assert.equal(selectedRowCount(), 3, "three rows highlighted");
+  // Clicking empty list space (below the rows, inside the surface)
+  // clears the selection.
+  const surface = lastOps().find(
+    (o) => o.type === "rect" && o.color === "#f9fafb" && o.h > 200 && o.nodeId >= 0,
+  );
+  assert.ok(surface, "list surface hit rect exists");
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: surface.x + 2,
+    y: surface.y + surface.h - 10,
+    button: 1,
+    pressed: true,
+    nodeId: surface.nodeId,
+  });
+  assert.ok(statusText().includes("Selection cleared."), "empty-space click clears");
+  assert.equal(selectedRowCount(), 0, "no rows highlighted after clear");
+  // Multi-copy: select beta.txt + delta.txt, Copy stages one
+  // `clipboard set` per file through the existing protocol.
+  pressRect(rowRects()[2]);
+  pressRect(rowRects()[4], { ctrl: true });
+  const buttons = toolbarButtons();
+  assert.equal(buttons.length, 4, "four toolbar buttons");
+  pressRect(buttons[1]); // Copy
+  assert.deepEqual(clipboardSets, [
+    "sevyn files clipboard set copy /data/beta.txt beta.txt file",
+    "sevyn files clipboard set copy /data/delta.txt delta.txt file",
+  ]);
+  assert.ok(statusText().includes("Copied 2 items"), "multi-copy status");
+  assert.ok(
+    statusText().startsWith("Clipboard: copy 2 items"),
+    "clipboard label counts the items",
+  );
+  // Multi-delete: Delete removes every selected file.
+  pressRect(buttons[3]); // Delete
+  assert.deepEqual(deleted, ["/data/beta.txt", "/data/delta.txt"]);
+  assert.ok(statusText().includes("Deleted 2 items"), "multi-delete status");
+  assert.equal(selectedRowCount(), 0, "selection cleared after delete");
+});
+
 // The #122 port: selection + Cut/Copy/Paste/Delete through the toolbar
 // (no right-click in v2). The handler is a fake filesystem: the paste
 // lands on the collision-suffixed name and the listing grows.

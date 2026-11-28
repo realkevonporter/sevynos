@@ -15,8 +15,20 @@
 // file clipboard. Right-click on empty list space offers Paste
 // alone when the clipboard holds an item, and nothing when it
 // doesn't. A right-click never fires the row's onPress, so it never
-// selects-again-to-open a directory. No Open / Rename / Trash /
-// multi-select here — those are later gap units.
+// selects-again-to-open a directory. No Open / Rename / Trash —
+// those are later gap units.
+//
+// Multi-select (gap unit 13, audit #22): plain click selects one
+// item; Ctrl/Cmd-click toggles one item in/out (the anchor moves to
+// it); Shift-click adds the contiguous range from the anchor to the
+// clicked item. Clicking empty list space clears the selection.
+// The toolbar and the context menu act on the WHOLE selection.
+// Cut/copy/delete run one `sevyn files` command per selected file
+// through the existing single-entry file clipboard (see cutOrCopy /
+// paste): the clipboard file ends up holding the last entry, so a
+// paste after an app restart pastes that one file, exactly like a
+// single-file cut/copy; a multi-file paste pastes every entry while
+// the app is still running.
 // `sevyn files clipboard` so it survives an app restart. Paste
 // resolves collisions to `name (1)` and a cross-device move falls
 // back to copy + delete in the CLI. The Devices sidebar lists the
@@ -29,14 +41,20 @@ import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView } from "./host";
 import { WindowButtons } from "./window-buttons";
 import { ContextMenu } from "../../rn/renderer/context-menu";
-import type { ContextMenuEvent } from "../../rn/renderer/sevyn-renderer";
+import type { ContextMenuEvent, PressEvent } from "../../rn/renderer/sevyn-renderer";
 import { runCli } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
 import {
+  applyPressSelection,
+  clearSelection,
+  resolveMultiPasteTargets,
+  type SelectionState,
+} from "./selection";
+import {
   isCrossVolumeMove,
   isCutPasteNoop,
+  isPasteIntoSelfOrDescendant,
   joinPath,
-  resolvePasteTarget,
   type ClipboardEntry,
 } from "./clipboard";
 import {
@@ -97,7 +115,19 @@ export function Files(): React.ReactElement {
   const [clipboard, setClipboard] = React.useState<ClipboardEntry | null>(() =>
     loadClipboard(),
   );
-  const [selected, setSelected] = React.useState<string | null>(null);
+  // Multi-selection (gap unit 13): the selected entry names, in
+  // listing order, plus the anchor index a Shift-click ranges from.
+  const [selection, setSelection] = React.useState<SelectionState>({
+    selected: [],
+    anchor: null,
+  });
+  // The in-memory multi-file clipboard: every entry a multi cut/copy
+  // staged, in selection order. The file clipboard above holds only
+  // the last one (single-entry protocol — see cutOrCopy), so a paste
+  // after an app restart falls back to that one entry.
+  const [clipboardItems, setClipboardItems] = React.useState<ClipboardEntry[] | null>(
+    null,
+  );
   const [status, setStatus] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   // Open context menu: {x, y} is the pointer position it anchors on;
@@ -130,34 +160,78 @@ export function Files(): React.ReactElement {
     setError(null);
     setPath(next);
     setEntries(r.entries);
-    setSelected(null);
+    setSelection(clearSelection());
     Sevyn.log("FILES listed " + next + " (" + r.entries.length + ")");
     refreshVolumes(next);
   }
 
-  function selectedEntry(): Entry | null {
-    if (!selected) return null;
-    for (const e of entries) if (e.name === selected) return e;
-    return null;
+  function selectedEntries(): Entry[] {
+    const picked = new Set(selection.selected);
+    return entries.filter((e) => picked.has(e.name));
   }
 
-  function pressEntry(e: Entry): void {
-    if (selected === e.name && e.type === "d") {
+  function namesOf(es: Entry[]): string[] {
+    return es.map((e) => e.name);
+  }
+
+  // Plain click selects one item; Ctrl/Cmd-click toggles it (the
+  // anchor moves to it); Shift-click adds the range from the anchor.
+  // The select-again-to-open rule is unchanged for the single case:
+  // a plain click on the SOLE selected directory navigates into it.
+  // A plain click on a directory that is one of several selected
+  // only collapses the selection to it — otherwise a multi-selection
+  // could never be collapsed by clicking one of its members.
+  function pressEntry(e: Entry, ev?: PressEvent): void {
+    const index = entries.findIndex((entry) => entry.name === e.name);
+    if (index < 0) return;
+    const modifiers = ev
+      ? ev.nativeEvent
+      : { shiftKey: false, ctrlKey: false, metaKey: false };
+    if (
+      !modifiers.shiftKey &&
+      !modifiers.ctrlKey &&
+      !modifiers.metaKey &&
+      selection.selected.length === 1 &&
+      selection.selected[0] === e.name &&
+      e.type === "d"
+    ) {
       navigate(joinPath(path, e.name));
       return;
     }
-    setSelected(e.name);
-    setStatus("Selected " + e.name);
+    const next = applyPressSelection(namesOf(entries), selection, index, modifiers);
+    setSelection(next);
+    setStatus(
+      next.selected.length === 0
+        ? "Selection cleared."
+        : next.selected.length === 1
+          ? "Selected " + next.selected[0]
+          : "Selected " + next.selected.length + " items",
+    );
   }
 
-  // Right-click on a row: select the entry first (when it isn't
-  // already) so the menu actions — which operate on the selection,
-  // exactly like the toolbar — act on it. This never navigates: a
-  // right-click dispatches onContextMenu, not onPress, so the
-  // select-again-to-open rule in pressEntry cannot fire.
+  // Clicking empty list space clears the selection. The ScrollView's
+  // background is hit-testable (its onPress), and rows are emitted
+  // after it, so a row still wins the hit-test where it overlaps
+  // the surface — only a genuinely empty click reaches here.
+  function pressEmptySpace(): void {
+    if (selection.selected.length === 0) return;
+    setSelection(clearSelection());
+    setStatus("Selection cleared.");
+  }
+
+  // Right-click on a row: when the entry is already in the
+  // selection the whole selection stays (the menu actions operate on
+  // all of it); when it isn't, it becomes the sole selection. This
+  // never navigates: a right-click dispatches onContextMenu, not
+  // onPress, so the select-again-to-open rule in pressEntry cannot
+  // fire.
   function contextMenuForEntry(e: Entry, ev: ContextMenuEvent): void {
-    setSelected(e.name);
-    setStatus("Selected " + e.name);
+    const index = entries.findIndex((entry) => entry.name === e.name);
+    if (!selection.selected.includes(e.name)) {
+      const next = { selected: [e.name], anchor: index < 0 ? null : index };
+      setSelection(next);
+      setStatus("Selected " + e.name);
+    }
     setMenu({ x: ev.nativeEvent.x, y: ev.nativeEvent.y, target: e.name });
   }
 
@@ -165,80 +239,129 @@ export function Files(): React.ReactElement {
   // only when the file clipboard holds an item. With an empty
   // clipboard there is nothing to offer, so no menu opens at all.
   function contextMenuForEmptySpace(ev: ContextMenuEvent): void {
-    if (!clipboard) return;
+    if (pasteEntries().length === 0) return;
     setMenu({ x: ev.nativeEvent.x, y: ev.nativeEvent.y, target: null });
   }
 
   function cutOrCopy(kind: "cut" | "copy"): void {
-    const e = selectedEntry();
-    if (!e) {
+    const picked = selectedEntries();
+    if (picked.length === 0) {
       setStatus(kind === "cut" ? "Select an item to cut." : "Select an item to copy.");
       return;
     }
-    const srcKind = e.type === "d" ? "directory" : "file";
-    const srcPath = joinPath(path, e.name);
-    const { code, out } = runCli(
-      "sevyn files clipboard set " + kind + " " + srcPath + " " + e.name + " " + srcKind,
-    );
-    if (code !== 0) {
-      setError(out.trim() || "could not set the clipboard");
-      return;
+    // One `clipboard set` per file through the existing single-entry
+    // protocol: the file ends up holding the last entry, so a paste
+    // after an app restart pastes that one file, exactly like a
+    // single-file cut/copy. The full list lives in clipboardItems
+    // for a paste while the app is still running.
+    const items: ClipboardEntry[] = [];
+    for (const e of picked) {
+      const srcKind = e.type === "d" ? "directory" : "file";
+      const srcPath = joinPath(path, e.name);
+      const { code, out } = runCli(
+        "sevyn files clipboard set " +
+          kind +
+          " " +
+          srcPath +
+          " " +
+          e.name +
+          " " +
+          srcKind,
+      );
+      if (code !== 0) {
+        setError(out.trim() || "could not set the clipboard");
+        return;
+      }
+      items.push({ kind, sourcePath: srcPath, sourceName: e.name, sourceKind: srcKind });
     }
-    setClipboard({ kind, sourcePath: srcPath, sourceName: e.name, sourceKind: srcKind });
-    setStatus((kind === "cut" ? "Cut " : "Copied ") + e.name);
+    const last = items[items.length - 1];
+    setClipboard(last);
+    setClipboardItems(items);
+    setStatus(
+      (kind === "cut" ? "Cut " : "Copied ") +
+        (items.length === 1 ? items[0].sourceName : items.length + " items"),
+    );
+  }
+
+  // The entries a paste draws on: the in-memory multi list when the
+  // cut/copy happened in this run, else the single file-backed entry.
+  function pasteEntries(): ClipboardEntry[] {
+    if (clipboardItems !== null) return clipboardItems;
+    return clipboard !== null ? [clipboard] : [];
   }
 
   function paste(): void {
-    if (!clipboard) {
+    const items = pasteEntries();
+    if (items.length === 0) {
       setStatus("Clipboard is empty.");
       return;
     }
-    if (isCutPasteNoop(clipboard, path)) {
+    const kind = items[0].kind;
+    if (kind === "cut" && items.every((entry) => isCutPasteNoop(entry, path))) {
       setStatus("Already here.");
       return;
     }
     const existing = new Set(entries.map((e) => e.name));
-    const target = resolvePasteTarget(clipboard, path, existing);
-    if (!target) {
-      setStatus("Cannot paste " + clipboard.sourceName + " here.");
+    const targets = resolveMultiPasteTargets(items, path, existing);
+    if (!targets) {
+      const refused = items.find((entry) =>
+        isPasteIntoSelfOrDescendant(entry.sourcePath, path),
+      );
+      setStatus("Cannot paste " + (refused ? refused.sourceName : "here") + " here.");
       return;
     }
-    const verb = clipboard.kind === "cut" ? "move" : "copy";
-    const cross = isCrossVolumeMove(
-      clipboard.sourcePath,
-      path,
-      volumes.map((v) => ({ mountPoint: v.mountPoint })),
-    );
-    const { code, out } = runCli(
-      "sevyn files " + verb + " " + clipboard.sourcePath + " " + target.targetPath,
-    );
-    if (code !== 0) {
-      setError(out.trim() || "could not paste " + clipboard.sourceName);
-      return;
+    // Resolve every target BEFORE moving anything: a paste is
+    // all-or-nothing on resolution, so a refused entry aborts the
+    // whole paste instead of leaving half of it done.
+    const verb = kind === "cut" ? "move" : "copy";
+    const vols = volumes.map((v) => ({ mountPoint: v.mountPoint }));
+    const cross = items.some((entry) => isCrossVolumeMove(entry.sourcePath, path, vols));
+    let pasted = 0;
+    for (const target of targets) {
+      const { code, out } = runCli(
+        "sevyn files " + verb + " " + target.entry.sourcePath + " " + target.targetPath,
+      );
+      if (code !== 0) {
+        setError(out.trim() || "could not paste " + target.entry.sourceName);
+        if (pasted > 0)
+          setStatus("Pasted " + pasted + " of " + targets.length + " items");
+        return;
+      }
+      pasted += 1;
     }
-    if (clipboard.kind === "cut") {
+    if (kind === "cut") {
       runCli("sevyn files clipboard clear");
       setClipboard(null);
+      setClipboardItems(null);
     }
-    setStatus("Pasted " + target.targetName + (cross ? " (copied across devices)" : ""));
-    setSelected(null);
+    setStatus(
+      "Pasted " +
+        (targets.length === 1 ? targets[0].targetName : targets.length + " items") +
+        (cross ? " (copied across devices)" : ""),
+    );
     navigate(path);
   }
 
   function deleteSelected(): void {
-    const e = selectedEntry();
-    if (!e) {
+    const picked = selectedEntries();
+    if (picked.length === 0) {
       setStatus("Select an item to delete.");
       return;
     }
-    const target = joinPath(path, e.name);
-    const { code, out } = runCli("sevyn files delete " + target);
-    if (code !== 0) {
-      setError(out.trim() || "could not delete " + e.name);
-      return;
+    let deleted = 0;
+    for (const e of picked) {
+      const target = joinPath(path, e.name);
+      const { code, out } = runCli("sevyn files delete " + target);
+      if (code !== 0) {
+        setError(out.trim() || "could not delete " + e.name);
+        if (deleted > 0)
+          setStatus("Deleted " + deleted + " of " + picked.length + " items");
+        navigate(path);
+        return;
+      }
+      deleted += 1;
     }
-    setStatus("Deleted " + e.name);
-    setSelected(null);
+    setStatus("Deleted " + (deleted === 1 ? picked[0].name : deleted + " items"));
     navigate(path);
   }
 
@@ -252,27 +375,46 @@ export function Files(): React.ReactElement {
     refreshVolumes(path);
   }
 
-  const clipboardLabel = clipboard
-    ? "Clipboard: " + clipboard.kind + " " + clipboard.sourceName
-    : "Clipboard empty";
+  const hasClipboard = pasteEntries().length > 0;
+  const clipboardLabel =
+    clipboardItems !== null && clipboardItems.length > 1
+      ? "Clipboard: " + clipboardItems[0].kind + " " + clipboardItems.length + " items"
+      : clipboard
+        ? "Clipboard: " + clipboard.kind + " " + clipboard.sourceName
+        : "Clipboard empty";
 
-  // The open menu's items: the toolbar's actions on a row (Paste
-  // disabled with an empty file clipboard), Paste alone on empty
-  // space. No Open / Rename / Trash — those are later gap units.
+  // The open menu's items: the toolbar's actions on the selection
+  // (Paste disabled with an empty file clipboard), Paste alone on
+  // empty space. Labels count the selection when it holds more than
+  // one item. No Open / Rename / Trash — those are later gap units.
+  const selectionCount = selection.selected.length;
+  const countSuffix = selectionCount > 1 ? " (" + selectionCount + " items)" : "";
   const menuItems =
     menu === null
       ? []
       : menu.target !== null
         ? [
-            { id: "cut", label: "Cut", onSelect: () => cutOrCopy("cut") },
-            { id: "copy", label: "Copy", onSelect: () => cutOrCopy("copy") },
+            {
+              id: "cut",
+              label: "Cut" + countSuffix,
+              onSelect: () => cutOrCopy("cut"),
+            },
+            {
+              id: "copy",
+              label: "Copy" + countSuffix,
+              onSelect: () => cutOrCopy("copy"),
+            },
             {
               id: "paste",
               label: "Paste",
-              disabled: clipboard === null,
+              disabled: !hasClipboard,
               onSelect: paste,
             },
-            { id: "delete", label: "Delete", onSelect: deleteSelected },
+            {
+              id: "delete",
+              label: "Delete" + countSuffix,
+              onSelect: deleteSelected,
+            },
           ]
         : [{ id: "paste", label: "Paste", onSelect: paste }];
 
@@ -359,10 +501,10 @@ export function Files(): React.ReactElement {
           paddingRight: 12,
         }}
       >
-        {toolbarButton("Cut", () => cutOrCopy("cut"), selected !== null)}
-        {toolbarButton("Copy", () => cutOrCopy("copy"), selected !== null)}
-        {toolbarButton("Paste", paste, clipboard !== null)}
-        {toolbarButton("Delete", deleteSelected, selected !== null)}
+        {toolbarButton("Cut", () => cutOrCopy("cut"), selection.selected.length > 0)}
+        {toolbarButton("Copy", () => cutOrCopy("copy"), selection.selected.length > 0)}
+        {toolbarButton("Paste", paste, hasClipboard)}
+        {toolbarButton("Delete", deleteSelected, selection.selected.length > 0)}
       </View>
       <View style={{ flex: 1, flexDirection: "row" }}>
         <View
@@ -438,8 +580,11 @@ export function Files(): React.ReactElement {
             The list surface carries the background color so the
             renderer's hit-test sees it (a ScrollView with
             onContextMenu is hit-testable through its background rect)
-            — right-click on empty list space opens the Paste menu. */}
+            — right-click on empty list space opens the Paste menu,
+            and a left-click there clears the selection (gap unit 13:
+            the ScrollView's onPress is hit-testable the same way). */}
         <ScrollView
+          onPress={() => pressEmptySpace()}
           onContextMenu={(ev: ContextMenuEvent) => contextMenuForEmptySpace(ev)}
           style={{
             flex: 1,
@@ -465,11 +610,11 @@ export function Files(): React.ReactElement {
           ) : null}
           {entries.map((e) => {
             const tile = fileTileForEntry(e.name, e.type === "d" ? "directory" : "file");
-            const isSelected = selected === e.name;
+            const isSelected = selection.selected.includes(e.name);
             return (
               <Pressable
                 key={e.name}
-                onPress={() => pressEntry(e)}
+                onPress={(ev: PressEvent) => pressEntry(e, ev)}
                 onContextMenu={(ev: ContextMenuEvent) => contextMenuForEntry(e, ev)}
                 style={{
                   height: 36,
