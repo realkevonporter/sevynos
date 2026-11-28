@@ -1319,6 +1319,35 @@ async function main() {
     check("chat turn 3: daemon logged the turn (allowed=1)", !!chatOk, chatOk || "");
   }
   {
+    // Turn 3's launch put the Music window on top of the Terminal
+    // and covered its header — the Terminal is unfocusable by the
+    // header-anchored click §8 uses (findWindowHeader would read
+    // the body's dark band as the header and click off-screen),
+    // and typing would go to Music, not the Terminal. Close Music
+    // via appd, like §6 closes Files after its launch check, so
+    // the Terminal is the top window again.
+    const closed = await appdCmd(b, "CLOSE music", /APPD CLOSE OK music/);
+    check("chat turn 3: CLOSE music accepted", !!closed, closed || "");
+  }
+  {
+    // Re-focus the Terminal input now that it is on top again
+    // (same as §7: without this the typed command goes nowhere).
+    const shotTerm7 = await shot(b.qmp, join(OUT, "m4.5-shot-terminal-7.ppm"));
+    const termHeader7 = findWindowHeader(shotTerm7, 17, 24, 39);
+    check("chat: Terminal window still up after closing Music", !!termHeader7);
+    if (termHeader7) {
+      await moveTo(
+        termHeader7.left + 200,
+        termHeader7.top + 482,
+        shotTerm7.width,
+        shotTerm7.height,
+      );
+      await sleep(300);
+      await click();
+      await sleep(300);
+    }
+  }
+  {
     const { exec } = await termCmd("ai chat end chat-1");
     check("chat: `ai chat end chat-1` runs (EXEC 0)", !!exec, exec || "");
   }
