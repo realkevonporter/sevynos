@@ -1110,6 +1110,41 @@ void Wayland::setClipboardText(const std::string& text) {
   logLine("WAYLAND clipboard copy offered");
 }
 
+bool Wayland::startFileDrag(const std::vector<std::string>& paths) {
+  if (!dataDevice_ || !surface_ || paths.empty())
+    return false; // No manager (or headless): no compositor drag.
+  // Drop a previous drag source first (a drag that never finished):
+  // destroying it cancels the old drag server-side, and a
+  // `cancelled` already in flight for it is skipped by the pointer
+  // check in onDataSourceCancelled.
+  if (dragSource_) {
+    wl_data_source_destroy(dragSource_);
+    dragSource_ = nullptr;
+  }
+  static const wl_data_source_listener kDragSourceListener = {
+      &Wayland::onDataSourceTarget, &Wayland::onDataSourceSend,
+      &Wayland::onDataSourceCancelled,
+      &Wayland::onDataSourceDndDropPerformed,
+      &Wayland::onDataSourceDndFinished, &Wayland::onDataSourceAction};
+  dragSource_ = wl_data_device_manager_create_data_source(dataDeviceManager_);
+  wl_data_source_add_listener(dragSource_, &kDragSourceListener, this);
+  wl_data_source_offer(dragSource_, kFileDragMime);
+  wl_data_source_set_actions(
+      dragSource_, WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE |
+                       WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+  dragUris_ = buildUriList(paths);
+  dragDropPerformed_ = false;
+  // lastInputSerial_ is the button-press serial (set in
+  // onPointerButton): the compositor requires the serial of the
+  // press that started the drag, so a stale or zero serial makes
+  // the drag fail silently. No icon in v1 — the drag is shown by
+  // the target's hover highlight and the source's drag chip.
+  wl_data_device_start_drag(dataDevice_, dragSource_, surface_, nullptr,
+                            lastInputSerial_);
+  logLine("WAYLAND file drag started (%zu files)", paths.size());
+  return true;
+}
+
 void Wayland::onDataSourceTarget(void* data, wl_data_source* source,
                                  const char* mime_type) {
   (void)data;
@@ -1121,9 +1156,13 @@ void Wayland::onDataSourceTarget(void* data, wl_data_source* source,
 void Wayland::onDataSourceSend(void* data, wl_data_source* source,
                                const char* mime_type, int32_t fd) {
   Wayland* self = static_cast<Wayland*>(data);
-  (void)source;
-  if (mime_type && strcmp(mime_type, kClipboardTextMime) == 0)
+  if (mime_type && strcmp(mime_type, kFileDragMime) == 0 &&
+      source == self->dragSource_) {
+    // A file-drag target asked for our URI list.
+    writeTextToFd(fd, self->dragUris_);
+  } else if (mime_type && strcmp(mime_type, kClipboardTextMime) == 0) {
     writeTextToFd(fd, self->clipboard_.get());
+  }
   close(fd);
 }
 
@@ -1137,25 +1176,57 @@ void Wayland::onDataSourceCancelled(void* data, wl_data_source* source) {
   if (source == self->dataSource_) {
     wl_data_source_destroy(source);
     self->dataSource_ = nullptr;
+    return;
+  }
+  if (source == self->dragSource_) {
+    // Our drag was aborted (or the target refused it): the drag
+    // ended without a drop. Tell JS so it clears its drag state.
+    wl_data_source_destroy(source);
+    self->dragSource_ = nullptr;
+    if (self->dragHandler_) {
+      DragEvent ev;
+      ev.type = "dragend";
+      ev.dropped = false;
+      self->dragHandler_(ev);
+    }
   }
 }
 
 void Wayland::onDataSourceDndDropPerformed(void* data,
                                            wl_data_source* source) {
-  (void)data;
-  (void)source;
+  Wayland* self = static_cast<Wayland*>(data);
+  if (source == self->dragSource_)
+    self->dragDropPerformed_ = true;
 }
 
 void Wayland::onDataSourceDndFinished(void* data, wl_data_source* source) {
-  (void)data;
-  (void)source;
+  Wayland* self = static_cast<Wayland*>(data);
+  if (source != self->dragSource_)
+    return;
+  // The target finished (or the drag was cancelled): the drag is
+  // over, the source object is dead server-side, and JS gets the
+  // end report — dropped is true only when a target accepted the
+  // drop (see onDataSourceDndDropPerformed).
+  wl_data_source_destroy(source);
+  self->dragSource_ = nullptr;
+  if (self->dragHandler_) {
+    DragEvent ev;
+    ev.type = "dragend";
+    ev.dropped = self->dragDropPerformed_;
+    self->dragHandler_(ev);
+  }
 }
 
 void Wayland::onDataSourceAction(void* data, wl_data_source* source,
-                                 uint32_t dnd_action) {
+                                uint32_t dnd_action) {
   (void)data;
   (void)source;
   (void)dnd_action;
+  // The chosen action is the target's business (it performs the
+  // move); the source never deletes, so there is nothing to do
+  // here — the callback exists only because the listener table
+  // needs all six entries. The action is not logged: the drag
+  // itself is the event, and the paths must never land in a log.
 }
 
 void Wayland::onDataOfferOffer(void* data, wl_data_offer* offer,
@@ -1200,33 +1271,122 @@ void Wayland::onDataDeviceEnter(void* data, wl_data_device* device,
                                 uint32_t serial, wl_surface* surface,
                                 wl_fixed_t x, wl_fixed_t y,
                                 wl_data_offer* offer) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)device;
-  (void)serial;
   (void)surface;
-  (void)x;
-  (void)y;
-  (void)offer;
-  // Drag-and-drop enter: gap #18, not this unit.
+  // The offer's MIME events precede the enter (the compositor sends
+  // data_offer + offer(MIME) first); take the list from the pending
+  // offer when this is the offer we track. A drag from another
+  // client is the only way an offer enters this surface — the
+  // selection never arrives as an enter.
+  std::vector<std::string> mimes;
+  if (offer && offer == self->pendingOffer_)
+    mimes = self->pendingMimes_;
+  self->pendingOffer_ = nullptr;
+  self->pendingMimes_.clear();
+  self->dragOffer_ = offer;
+  self->dragOfferMimes_ = mimes;
+  self->dragX_ = wl_fixed_to_double(x);
+  self->dragY_ = wl_fixed_to_double(y);
+  if (!self->dragHandler_ || !offer)
+    return;
+  DragEvent ev;
+  ev.type = "enter";
+  ev.x = self->dragX_;
+  ev.y = self->dragY_;
+  ev.mimes = mimes;
+  // Accept only when JS wants the files AND the offer carries
+  // them: the accept + MOVE action is what makes the compositor
+  // deliver the drop (an unaccepted offer gets no drop — the
+  // source gets cancelled instead).
+  if (self->dragHandler_(ev) && !selectFileMime(mimes).empty()) {
+    wl_data_offer_accept(offer, serial, kFileDragMime);
+    wl_data_offer_set_actions(
+        offer, WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+  }
 }
 
 void Wayland::onDataDeviceLeave(void* data, wl_data_device* device) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)device;
+  // The offer object dies with the drag on the compositor side
+  // (Smithay drops its pending offers on leave) — clear the
+  // pointer without destroying it, so a stale pointer is never
+  // dereferenced.
+  self->dragOffer_ = nullptr;
+  self->dragOfferMimes_.clear();
+  if (!self->dragHandler_)
+    return;
+  DragEvent ev;
+  ev.type = "leave";
+  ev.x = self->dragX_;
+  ev.y = self->dragY_;
+  self->dragHandler_(ev);
 }
 
 void Wayland::onDataDeviceMotion(void* data, wl_data_device* device,
                                  uint32_t time, wl_fixed_t x, wl_fixed_t y) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)device;
   (void)time;
-  (void)x;
-  (void)y;
+  if (!self->dragHandler_ || !self->dragOffer_)
+    return;
+  self->dragX_ = wl_fixed_to_double(x);
+  self->dragY_ = wl_fixed_to_double(y);
+  DragEvent ev;
+  ev.type = "motion";
+  ev.x = self->dragX_;
+  ev.y = self->dragY_;
+  self->dragHandler_(ev);
 }
 
 void Wayland::onDataDeviceDrop(void* data, wl_data_device* device) {
-  (void)data;
+  Wayland* self = static_cast<Wayland*>(data);
   (void)device;
+  if (!self->dragOffer_) {
+    // No offer tracked (a drag we never entered) — nothing to
+    // receive, and finish would be a protocol error.
+    return;
+  }
+  const std::string mime = selectFileMime(self->dragOfferMimes_);
+  if (mime.empty()) {
+    // We never accepted this offer, so the compositor should not
+    // have delivered a drop — but if it did, do not finish it.
+    self->dragOffer_ = nullptr;
+    self->dragOfferMimes_.clear();
+    return;
+  }
+  // Bounded receive (200 ms, 1 MiB cap — the same window as the
+  // clipboard paste): a source that never answers cannot stall
+  // the dispatch loop.
+  int fds[2];
+  if (pipe(fds) != 0) {
+    self->dragOffer_ = nullptr;
+    self->dragOfferMimes_.clear();
+    return;
+  }
+  wl_data_offer_receive(self->dragOffer_, mime.c_str(), fds[1]);
+  close(fds[1]);
+  std::string text = readTextFromFd(fds[0], kFileDragMaxBytes, 200);
+  close(fds[0]);
+  std::vector<std::string> paths = parseUriList(text);
+  // Finish the offer FIRST, before JS runs: the source's drag
+  // ends when the transfer is done, and the move decision (JS)
+  // must not hold the protocol hostage. A refused move still
+  // finishes — the files just stay where they are.
+  wl_data_offer_finish(self->dragOffer_);
+  self->dragOffer_ = nullptr;
+  self->dragOfferMimes_.clear();
+  logLine("WAYLAND file drop received (%zu files)", paths.size());
+  if (self->dragHandler_) {
+    DragEvent ev;
+    ev.type = "drop";
+    ev.x = self->dragX_;
+    ev.y = self->dragY_;
+    ev.paths = paths;
+    self->dragHandler_(ev);
+  }
 }
 
 void Wayland::onDataDeviceSelection(void* data, wl_data_device* device,

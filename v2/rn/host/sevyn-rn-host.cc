@@ -383,6 +383,10 @@ class RnHost {
   void dispatchPointer(const std::string& type, double x, double y,
                        uint32_t button, bool pressed,
                        const KeyModifiers& modifiers);
+  // File drag (gap unit 15): forward a Wayland drag event to the
+  // renderer's onDragDrop handler; returns whether JS consumed it
+  // (the host uses it for the protocol replies).
+  bool dispatchDragDrop(const Wayland::DragEvent& ev);
   void dispatchScroll(double x, double y, double dx, double dy);
   void dispatchKey(uint32_t key, bool pressed,
                    const KeyModifiers& modifiers);
@@ -513,6 +517,7 @@ class RnHost {
   std::optional<jsi::Function> scrollHandler_;
   std::optional<jsi::Function> sizeHandler_;
   std::optional<jsi::Function> windowStateHandler_;
+  std::optional<jsi::Function> dragDropHandler_;
   bool hasPointerHandler_ = false;
   bool hasKeyHandler_ = false;
   bool hasStatusHandler_ = false;
@@ -520,6 +525,7 @@ class RnHost {
   bool hasScrollHandler_ = false;
   bool hasSizeHandler_ = false;
   bool hasWindowStateHandler_ = false;
+  bool hasDragDropHandler_ = false;
   // Window state ("normal" | "maximized" | "minimized"), tracked by
   // the host: maximized comes from the compositor's configure states
   // (Wayland state handler), minimized is set by minimizeApp() and
@@ -1202,6 +1208,40 @@ void RnHost::installSevyn(jsi::Runtime& rt) {
            headlessClipboard_ = text;
            return jsi::Value(true);
          });
+  // File drag (gap unit 15): start a Wayland DnD drag carrying the
+  // given absolute paths. Returns false when there is no compositor
+  // drag to start (headless mode, or no data device) — the caller
+  // then just ends its local drag session with no move. The paths
+  // themselves are never logged.
+  hostFn("startFileDrag", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count < 1 || !args[0].isObject())
+             return jsi::Value(false);
+           jsi::Array arr = args[0].asObject(rt).asArray(rt);
+           std::vector<std::string> paths;
+           for (size_t i = 0; i < arr.size(rt); ++i) {
+             jsi::Value v = arr.getValueAtIndex(rt, i);
+             if (v.isString())
+               paths.push_back(jsString(rt, v));
+           }
+           if (wayland_)
+             return jsi::Value(wayland_->startFileDrag(paths));
+           return jsi::Value(false);
+         });
+  // The renderer subscribes in render() (see sevyn-renderer.js
+  // handleDragDrop); the Wayland drag handler below forwards the
+  // events through it.
+  hostFn("onDragDrop", 1,
+         [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                size_t count) {
+           if (count >= 1 && args[0].isObject()) {
+             dragDropHandler_ =
+                 std::move(args[0].asObject(rt).asFunction(rt));
+             hasDragDropHandler_ = true;
+           }
+           return jsi::Value::undefined();
+         });
   hostFn("getStatus", 0,
          [this](jsi::Runtime& rt, const jsi::Value&, const jsi::Value*,
                 size_t) {
@@ -1634,6 +1674,45 @@ void RnHost::dispatchPointer(const std::string& type, double x, double y,
     rt.drainMicrotasks();
   } catch (const jsi::JSError& e) {
     logLine("JS pointer handler failed: %s", e.getMessage().c_str());
+  }
+}
+
+// File drag (gap unit 15): forward a Wayland drag event to the
+// renderer's onDragDrop handler and return whether JS consumed it —
+// the host uses the answer for the protocol replies (accept on
+// enter, finish on drop). The paths are passed through to JS
+// untouched and never logged.
+bool RnHost::dispatchDragDrop(const Wayland::DragEvent& ev) {
+  if (!hasDragDropHandler_ || !runtime_)
+    return false;
+  jsi::Runtime& rt = *runtime_;
+  try {
+    jsi::Object o(rt);
+    o.setProperty(rt, "type", ev.type.c_str());
+    o.setProperty(rt, "x", ev.x);
+    o.setProperty(rt, "y", ev.y);
+    if (ev.type == "enter") {
+      jsi::Array mimes(rt, ev.mimes.size());
+      for (size_t i = 0; i < ev.mimes.size(); ++i)
+        mimes.setValueAtIndex(rt, i,
+                              jsi::String::createFromUtf8(rt, ev.mimes[i]));
+      o.setProperty(rt, "mimes", mimes);
+    }
+    if (ev.type == "drop") {
+      jsi::Array paths(rt, ev.paths.size());
+      for (size_t i = 0; i < ev.paths.size(); ++i)
+        paths.setValueAtIndex(rt, i,
+                              jsi::String::createFromUtf8(rt, ev.paths[i]));
+      o.setProperty(rt, "paths", paths);
+    }
+    if (ev.type == "dragend")
+      o.setProperty(rt, "dropped", ev.dropped);
+    jsi::Value result = dragDropHandler_->call(rt, o);
+    rt.drainMicrotasks();
+    return result.isBool() && result.getBool();
+  } catch (const jsi::JSError& e) {
+    logLine("JS drag-drop handler failed: %s", e.getMessage().c_str());
+    return false;
   }
 }
 
@@ -2299,6 +2378,11 @@ int RnHost::run() {
       [this](uint32_t key, bool pressed, const KeyModifiers& modifiers) {
         dispatchKey(key, pressed, modifiers);
       });
+  // File drag (gap unit 15): forward Wayland data-device drag
+  // events to the renderer's onDragDrop handler; the return value
+  // decides the protocol replies (accept on enter, finish on drop).
+  wayland_->setDragHandler(
+      [this](const Wayland::DragEvent& ev) { return dispatchDragDrop(ev); });
   // M9: a configure with a new size (resize drag, output mode)
   // re-lays out JS at the new size.
   wayland_->setSizeHandler(

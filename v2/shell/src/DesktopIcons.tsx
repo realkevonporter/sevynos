@@ -35,6 +35,16 @@
 //     STOPPED events re-render the shell), so a change made from
 //     Files shows up the next time the shell re-renders — there is
 //     no 1s live re-list in this port.
+//   - the desktop is a drop target (gap unit 15, audit #18): a file
+//     drag from Files (or another app) hovering the desktop lights
+//     the whole surface with the violet hover tint, and a drop moves
+//     the files into /data/Desktop — one `sevyn files move` per
+//     file, logged as `DESKTOP drop moved <name> to /data/Desktop`.
+//     A file already on the desktop is a no-op; the Desktop folder
+//     itself dropped here is refused. The shell re-lists on every
+//     render, so the drop handler returns false on motion events
+//     that change nothing — a re-render per motion would re-list
+//     the desktop (a CLI call) dozens of times a second.
 //
 // NOT in this port: rename / delete / cut / copy / paste (no CLI
 // verbs for them, and no icon menu trigger to hang them on).
@@ -42,12 +52,21 @@
 import * as React from "react";
 import { View, Text, Pressable } from "./host";
 import { ContextMenu } from "../../rn/renderer/context-menu";
-import type { ContextMenuEvent } from "../../rn/renderer/sevyn-renderer";
+import type { ContextMenuEvent, DragDropEvent } from "../../rn/renderer/sevyn-renderer";
 import {
+  subscribeDragDrop,
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
 } from "../../rn/renderer/sevyn-renderer";
 import { EMPTY_SELECTION, type SelectionState } from "../../rn/renderer/selection";
+import { DRAG_HOVER_FILL, FILE_DRAG_MIME } from "../../rn/renderer/drag";
+import {
+  baseName,
+  isCutPasteNoop,
+  isPasteIntoSelfOrDescendant,
+  resolveMultiPasteTargets,
+  type ClipboardEntry,
+} from "../../rn/renderer/file-ops";
 import {
   indicesInRect,
   MARQUEE_FILL,
@@ -266,6 +285,71 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
     setRefresh((r) => r + 1);
   }
 
+  // Drop target (gap unit 15, audit #18): the whole desktop
+  // surface accepts a file drag. Hover lights the surface; a drop
+  // moves the files into /data/Desktop. The hover lives in a ref
+  // as well as state — the shell re-lists on every render (a CLI
+  // call), so the handler returns false on motion events that
+  // change nothing, and the move runs only on a real drop.
+  const [dropHover, setDropHover] = React.useState(false);
+  const dropHoverRef = React.useRef(false);
+  function setHover(next: boolean): boolean {
+    if (dropHoverRef.current === next) return false;
+    dropHoverRef.current = next;
+    setDropHover(next);
+    return true;
+  }
+  function moveDropped(paths: string[]): void {
+    const items: ClipboardEntry[] = paths.map((p) => ({
+      kind: "cut",
+      sourcePath: p,
+      sourceName: baseName(p),
+      sourceKind: "file",
+    }));
+    // A file already on the desktop is a no-op; the Desktop
+    // folder itself (or a descendant) is refused — the same
+    // rules as a paste into the folder.
+    if (items.every((entry) => isCutPasteNoop(entry, DESKTOP_DIR))) return;
+    if (items.some((entry) => isPasteIntoSelfOrDescendant(entry.sourcePath, DESKTOP_DIR)))
+      return;
+    const existing = new Set(listDesktopEntries().map((e) => e.name));
+    const targets = resolveMultiPasteTargets(items, DESKTOP_DIR, existing);
+    if (!targets) return;
+    let moved = 0;
+    for (const t of targets) {
+      const raw = Sevyn.exec(
+        "sevyn files move " + q(t.entry.sourcePath) + " " + q(t.targetPath),
+      );
+      const nl = raw.indexOf("\n");
+      if (nl < 0 || parseInt(raw.slice(0, nl), 10) !== 0) {
+        setRefresh((r) => r + 1);
+        return;
+      }
+      moved += 1;
+      // The m9-check assertion line: one per moved file.
+      Sevyn.log("DESKTOP drop moved " + t.entry.sourceName + " to " + DESKTOP_DIR);
+    }
+    if (moved > 0) setRefresh((r) => r + 1);
+  }
+  React.useEffect(() => {
+    return subscribeDragDrop((ev: DragDropEvent) => {
+      if (ev.type === "enter") {
+        if (!ev.mimes || !ev.mimes.includes(FILE_DRAG_MIME)) return false;
+        return setHover(true);
+      }
+      if (ev.type === "motion") return setHover(true);
+      if (ev.type === "leave") return setHover(false);
+      if (ev.type === "drop") {
+        setHover(false);
+        const paths = ev.paths ?? [];
+        if (paths.length === 0) return true;
+        moveDropped(paths);
+        return true;
+      }
+      return false;
+    });
+  }, []);
+
   return (
     <View
       // The desktop surface is a plain View: the renderer (gap unit
@@ -361,6 +445,22 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
             width: band.width,
             height: band.height,
             backgroundColor: MARQUEE_FILL,
+          }}
+        />
+      ) : null}
+      {/* The drop hover (gap unit 15): the whole desktop surface
+          lights while a file drag hovers it. Above the icons, below
+          the context menu; pointer-transparent in effect — a View
+          with no handlers never wins a hit-test. */}
+      {dropHover ? (
+        <View
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: DRAG_HOVER_FILL,
           }}
         />
       ) : null}

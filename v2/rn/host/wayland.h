@@ -26,6 +26,7 @@
 #include <wayland-cursor.h>
 
 #include "common.h"
+#include "file-drag.h"
 #include "genesis-presenter.h"
 #include "key-modifiers.h"
 #include "painter.h"
@@ -160,6 +161,36 @@ class Wayland {
   void setClipboardText(const std::string& text);
   std::string clipboardText() const { return clipboard_.get(); }
   bool clipboardAvailable() const { return dataDeviceManager_ != nullptr; }
+
+  // File drag-and-drop (gap unit 15, audit #18): a Wayland
+  // data-device drag carrying file paths as text/uri-list.
+  // DragEvent: the host forwards data-device drag events to JS
+  // through the drag handler — enter/motion/leave while another
+  // client's drag hovers this surface, drop with the file paths
+  // when it lands, dragend when a drag this client started
+  // finishes. The handler returns true when JS consumed the
+  // event: true on enter accepts the offer (and sets the move
+  // action), true on drop means JS moved the files. `mimes` is
+  // the offered MIME list (enter only); `paths` is the dropped
+  // file paths (drop only); `dropped` says whether the drag this
+  // client started landed on an accepting target (dragend only).
+  // Paths are never logged — only the MIME type and the count.
+  struct DragEvent {
+    std::string type; // "enter" | "motion" | "leave" | "drop" | "dragend"
+    double x = 0, y = 0;
+    std::vector<std::string> mimes;
+    std::vector<std::string> paths;
+    bool dropped = false;
+  };
+  using DragHandler = std::function<bool(const DragEvent&)>;
+  void setDragHandler(DragHandler h) { dragHandler_ = h; }
+  // Start a file drag carrying these absolute paths. False when
+  // there is no compositor drag to start (no data device, no
+  // surface, or an empty list) — the caller then just ends its
+  // local drag session with no move. The drag offers text/uri-list
+  // with MOVE|COPY actions and no icon (v1); the target performs
+  // the move, this client only serves the URI list.
+  bool startFileDrag(const std::vector<std::string>& paths);
 
   // Resize the surface to a new size (M9): destroy both wl_buffers
   // (doPresent recreates them at the new size), resize both
@@ -386,6 +417,29 @@ class Wayland {
   std::vector<std::string> offerMimes_;
   TextClipboard clipboard_;
   uint32_t lastInputSerial_ = 0;
+
+  // File drag (gap unit 15): dragSource_ is our in-flight drag
+  // offer (null when no drag of ours is active) and dragUris_ is
+  // the URI list it serves; dragOffer_ is the in-flight offer from
+  // another client's drag hovering this surface (null when no drag
+  // hovers us) and dragOfferMimes_ is its MIME list;
+  // dragDropPerformed_ records whether the source was told a drop
+  // happened (for the dragend report). The offer object dies with
+  // the drag on the compositor side — the host never destroys
+  // dragOffer_ itself, it only clears the pointer on leave/drop,
+  // so a stale pointer is never dereferenced.
+  DragHandler dragHandler_;
+  wl_data_source* dragSource_ = nullptr;
+  std::string dragUris_;
+  wl_data_offer* dragOffer_ = nullptr;
+  std::vector<std::string> dragOfferMimes_;
+  bool dragDropPerformed_ = false;
+  // Last drag position (from the enter/motion events): the drop
+  // event carries no coordinates, so the drop position is the last
+  // motion before it. The pointer position is NOT updated during a
+  // drag — the grab consumes the motion — so pointerX_/pointerY_
+  // would be stale.
+  double dragX_ = 0, dragY_ = 0;
   xdg_wm_base* xdgWmBase_ = nullptr;
   wl_surface* surface_ = nullptr;
   xdg_surface* xdgSurface_ = nullptr;

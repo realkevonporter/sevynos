@@ -1855,6 +1855,13 @@ async function main() {
   // Notes: seed one real note, then the headless run must list it.
   await termCmd(b, "files mkdir /data/notes");
   await termCmd(b, "files write /data/notes/hello.txt Hello M9");
+  // File drag (gap unit 15): the drag source file and the desktop
+  // drop target. /data/Desktop is not seeded in this image, so the
+  // test creates it; the file is the only top-level file in /data
+  // (everything else up there is a directory), so its document tile
+  // (#3B82F6) is unique in the Files list column below the header.
+  await termCmd(b, "files mkdir /data/Desktop");
+  await termCmd(b, "files write /data/drag-me.txt Drag M9");
   const notesOps = await appRun(
     "notes",
     "--name Notes --color #eab308 --glyph N --permissions cli.exec",
@@ -2339,6 +2346,115 @@ async function main() {
       `calc=${JSON.stringify(calcFront.box)} files=${JSON.stringify(filesFront.box)}`,
     );
     win.files = filesFront.box;
+    // File drag (gap unit 15, audit #18): drag drag-me.txt out of
+    // the Files window onto the desktop. The source row is found by
+    // its document tile (#3B82F6) in the list column below the
+    // header — the only such tile there, since drag-me.txt is the
+    // only top-level file in /data. The release point is the first
+    // free desktop candidate (same list as clickDesktop: below the
+    // top bar, clear of every window). The move is proven by the
+    // shell's DESKTOP drop log line; the icon it leaves on the
+    // desktop is proven after the windows close below.
+    if (filesFront.box) {
+      const filesShot = await shot(b.qmp, join(OUT, "m9-shot-drag-source.ppm"));
+      const tile = colorBox(filesShot, 59, 130, 246, 12, {
+        x0: filesFront.box.x + 168,
+        y0: filesFront.box.y + 112,
+        x1: filesFront.box.x + filesFront.box.w,
+        y1: filesShot.height - 96,
+      });
+      check(
+        "m9: file drag source row found (one document tile in the list)",
+        !!tile && tile.w >= 20 && tile.w <= 28 && tile.h >= 20 && tile.h <= 28,
+        JSON.stringify(tile),
+      );
+      if (tile) {
+        const covered = [calcFront.box, filesFront.box]
+          .filter(Boolean)
+          .map((r) => ({ x: r.x, y: r.y, w: r.w, h: 700 }));
+        const target = [
+          [960, 60],
+          [1820, 100],
+          [100, 900],
+          [1820, 900],
+        ].find(
+          ([x, y]) =>
+            !covered.some(
+              (r) =>
+                x >= r.x - 10 &&
+                x <= r.x + r.w + 10 &&
+                y >= r.y - 10 &&
+                y <= r.y + r.h + 10,
+            ),
+        );
+        check(
+          "m9: file drag has a free desktop release point",
+          !!target,
+          JSON.stringify(target),
+        );
+        if (target) {
+          const fromX = tile.x + Math.round(tile.w / 2);
+          const fromY = tile.y + Math.round(tile.h / 2);
+          await pointerDrag(
+            b.qmp,
+            filesShot.width,
+            filesShot.height,
+            fromX,
+            fromY,
+            target[0],
+            target[1],
+          );
+          await sleep(2000);
+          const dropLine = await waitForLog(
+            b.logPath,
+            /DESKTOP drop moved drag-me\.txt to \/data\/Desktop/,
+            30000,
+          );
+          check("m9: file drag to desktop moves the file (DESKTOP drop log)", !!dropLine);
+          // The source refreshes after the drop (the dragend
+          // refresh): re-screenshot the Files window and prove the
+          // document tile is gone from the list column — drag-me.txt
+          // was the only top-level file in /data.
+          const afterShot = await shot(b.qmp, join(OUT, "m9-shot-drag-after.ppm"));
+          const gone = colorBox(afterShot, 59, 130, 246, 12, {
+            x0: filesFront.box.x + 168,
+            y0: filesFront.box.y + 112,
+            x1: filesFront.box.x + filesFront.box.w,
+            y1: afterShot.height - 96,
+          });
+          check(
+            "m9: file drag source refreshes (document tile gone from the list)",
+            !gone,
+            JSON.stringify(gone),
+          );
+        } else {
+          check(
+            "m9: file drag to desktop moves the file (DESKTOP drop log)",
+            false,
+            "no free release point",
+          );
+        }
+      } else {
+        check("m9: file drag has a free desktop release point", false, "no source tile");
+        check(
+          "m9: file drag to desktop moves the file (DESKTOP drop log)",
+          false,
+          "no source tile",
+        );
+      }
+    } else {
+      check(
+        "m9: file drag source row found (one document tile in the list)",
+        false,
+        "no files window",
+      );
+      check("m9: file drag has a free desktop release point", false, "no files window");
+      check(
+        "m9: file drag to desktop moves the file (DESKTOP drop log)",
+        false,
+        "no files window",
+      );
+    }
   } else {
     check(
       "window: two different apps coexist (dock switches between them)",
@@ -2418,6 +2534,27 @@ async function main() {
   await appdCmd(b, "CLOSE files", /APPD CLOSE OK files/);
   await appdCmd(b, "CLOSE settings", /APPD CLOSE OK settings/);
   await sleep(2000);
+  // File drag (gap unit 15): the moved file now has a desktop icon
+  // — the shell re-renders on the app STOPPED event, so the icon
+  // appears without a manual refresh. It is the only icon on the
+  // desktop (the drag created /data/Desktop), a 48px document tile
+  // at the first grid slot (24,70)-(128,162).
+  const deskShot = await shot(b.qmp, join(OUT, "m9-shot-drag-desktop.ppm"));
+  const deskIcon = colorBox(deskShot, 59, 130, 246, 12, {
+    x0: 24,
+    y0: 70,
+    x1: 130,
+    y1: 165,
+  });
+  check(
+    "m9: dragged file leaves a desktop icon (48px document tile)",
+    !!deskIcon &&
+      deskIcon.w >= 40 &&
+      deskIcon.w <= 56 &&
+      deskIcon.h >= 40 &&
+      deskIcon.h <= 56,
+    JSON.stringify(deskIcon),
+  );
   // Focus settles back onto the Terminal a beat after the close —
   // typing at once lost the first keys. Wait for the refocus before
   // the dock click below.

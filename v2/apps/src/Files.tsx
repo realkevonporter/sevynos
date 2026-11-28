@@ -29,6 +29,19 @@
 // paste after an app restart pastes that one file, exactly like a
 // single-file cut/copy; a multi-file paste pastes every entry while
 // the app is still running.
+//
+// File drag (gap unit 15, audit #18): drag a row (or a selection)
+// onto a folder row, the ".." row, or a sidebar volume to move it
+// there. The drag stays in the renderer while the pointer is inside
+// this window (a chip follows the pointer; the target highlights);
+// leaving the window hands the drag to a Wayland DnD drag and the
+// target client performs the move. A press that never crosses the
+// threshold is a click, decided at release time, so dragging never
+// selects-again-to-open a directory. The target performs the move
+// in both paths — this app never deletes on drag end, it just
+// refreshes. A drop into the folder the files already live in says
+// "Already here."; a folder dropped into itself or a descendant
+// says "Cannot move here.".
 // `sevyn files clipboard` so it survives an app restart. Paste
 // resolves collisions to `name (1)` and a cross-device move falls
 // back to copy + delete in the CLI. The Devices sidebar lists the
@@ -59,14 +72,20 @@ import {
   useMarqueeSelection,
   type MarqueeRect,
 } from "../../rn/renderer/marquee";
-import { resolveMultiPasteTargets } from "./clipboard";
+import {
+  DRAG_HOVER_FILL,
+  useFileDrag,
+  type FileDragEntry,
+  type FileDragTarget,
+} from "../../rn/renderer/drag";
+import { resolveMultiPasteTargets } from "../../rn/renderer/file-ops";
 import {
   isCrossVolumeMove,
   isCutPasteNoop,
   isPasteIntoSelfOrDescendant,
   joinPath,
   type ClipboardEntry,
-} from "./clipboard";
+} from "../../rn/renderer/file-ops";
 import {
   detectUnpluggedBrowsePath,
   formatBytes,
@@ -130,6 +149,17 @@ const ROW_HEIGHT = 36;
 const LIST_PAD_TOP = 8;
 const LIST_PAD_X = 12;
 const STATUS_HEIGHT = 28;
+// Sidebar layout (gap unit 15): the same constants drive the
+// styles and the drop-target hit-test (targetAt), so the math and
+// the render cannot drift apart. The header is one 13px line
+// (~16px); a volume block is an 8px gap + a 32px tile + (when
+// removable) a 2px gap + a 24px Eject row.
+const SIDEBAR_PAD_TOP = 8;
+const SIDEBAR_HEADER_HEIGHT = 16;
+const VOLUME_BLOCK_GAP = 8;
+const VOLUME_TILE_HEIGHT = 32;
+const EJECT_GAP = 2;
+const EJECT_HEIGHT = 24;
 
 /** The status line for a selection, in pressEntry's wording. */
 function statusForSelection(next: SelectionState): string {
@@ -302,6 +332,140 @@ export function Files(): React.ReactElement {
     names: namesOf(entries),
     indicesForRect: (rect) => indicesInListRect(rect, entries, path, listRef.current),
     onClick: () => pressEmptySpace(),
+  });
+
+  // File drag (gap unit 15, audit #18): drag a row (or a
+  // selection) onto a folder row, the ".." row, or a sidebar volume
+  // to move it there. The payload is the selection when the pressed
+  // row is in it, else the pressed row alone. The target performs
+  // the move in both paths (local and Wayland handoff) — this side
+  // only resolves the target and runs the moves.
+  function payloadForPress(name: string): FileDragEntry[] | null {
+    const picked = selection.selected.includes(name)
+      ? selectedEntries()
+      : entries.filter((e) => e.name === name);
+    if (picked.length === 0) return null;
+    return picked.map((e) => ({
+      name: e.name,
+      kind: e.type === "d" ? "directory" : "file",
+      sourceDir: path,
+    }));
+  }
+
+  // Where a drop at window position (x, y) would land. Sidebar
+  // volumes first (x inside the sidebar column), then the list
+  // rows — content coords, the same mapping as indicesInListRect.
+  // Only folders are targets: a file row is never a drop target.
+  function targetAt(x: number, y: number): FileDragTarget | null {
+    if (x < SIDEBAR_WIDTH) {
+      const sy = y - LIST_TOP - SIDEBAR_PAD_TOP - SIDEBAR_HEADER_HEIGHT;
+      let cursor = 0;
+      for (const v of volumes) {
+        const tileTop = cursor + VOLUME_BLOCK_GAP;
+        if (sy >= tileTop && sy < tileTop + VOLUME_TILE_HEIGHT)
+          return { dir: v.mountPoint, label: v.label, kind: "volume" };
+        cursor =
+          tileTop + VOLUME_TILE_HEIGHT + (v.removable ? EJECT_GAP + EJECT_HEIGHT : 0);
+      }
+      return null;
+    }
+    const scrollY = listRef.current ? listRef.current.scrollY : 0;
+    const cy = y - LIST_TOP + scrollY;
+    if (path !== "/" && cy >= LIST_PAD_TOP && cy < LIST_PAD_TOP + ROW_HEIGHT)
+      return { dir: parentOf(path), label: parentOf(path), kind: "folder" };
+    const base = LIST_PAD_TOP + (path !== "/" ? ROW_HEIGHT : 0);
+    const j = Math.floor((cy - base) / ROW_HEIGHT);
+    if (j >= 0 && j < entries.length) {
+      const e = entries[j];
+      if (e.type === "d")
+        return { dir: joinPath(path, e.name), label: e.name, kind: "folder" };
+    }
+    return null;
+  }
+
+  // Commit a drop: move the entries into the target directory,
+  // one `sevyn files move` per entry. All-or-nothing on
+  // resolution (like paste): the targets are resolved before
+  // anything moves, a folder into itself or a descendant is
+  // refused, and a drop into the folder the files already live
+  // in says "Already here.". The target folder is listed live
+  // for the collision check — the app only knows the current
+  // directory's names, not the target's.
+  function commitDrop(dragEntries: FileDragEntry[], target: FileDragTarget): void {
+    const items: ClipboardEntry[] = dragEntries.map((e) => ({
+      kind: "cut",
+      sourcePath: joinPath(e.sourceDir, e.name),
+      sourceName: e.name,
+      sourceKind: e.kind,
+    }));
+    if (items.every((entry) => isCutPasteNoop(entry, target.dir))) {
+      setStatus("Already here.");
+      return;
+    }
+    if (
+      items.some((entry) => isPasteIntoSelfOrDescendant(entry.sourcePath, target.dir))
+    ) {
+      setStatus("Cannot move here.");
+      return;
+    }
+    const listed = listDir(target.dir);
+    if (listed.error) {
+      setStatus("Cannot move here.");
+      return;
+    }
+    const existing = new Set(listed.entries.map((e) => e.name));
+    const targets = resolveMultiPasteTargets(items, target.dir, existing);
+    if (!targets) {
+      setStatus("Cannot move here.");
+      return;
+    }
+    const vols = volumes.map((v) => ({ mountPoint: v.mountPoint }));
+    const cross = items.some((entry) =>
+      isCrossVolumeMove(entry.sourcePath, target.dir, vols),
+    );
+    let moved = 0;
+    for (const t of targets) {
+      const { code, out } = runCli(
+        "sevyn files move " + t.entry.sourcePath + " " + t.targetPath,
+      );
+      if (code !== 0) {
+        setError(out.trim() || "could not move " + t.entry.sourceName);
+        if (moved > 0) setStatus("Moved " + moved + " of " + targets.length + " items");
+        navigate(path);
+        return;
+      }
+      moved += 1;
+    }
+    setStatus(
+      "Moved " +
+        (targets.length === 1 ? targets[0].targetName : targets.length + " items") +
+        (cross ? " (copied across devices)" : ""),
+    );
+    navigate(path);
+  }
+
+  const fileDrag = useFileDrag({
+    payloadForPress,
+    targetAt,
+    onDrop: (dragEntries, target) => commitDrop(dragEntries, target),
+    // The row's click, at release time: the press never became a
+    // drag, so the click behaviour runs now (with the press's
+    // modifiers), exactly as pressEntry would have at press time.
+    onClick: (ev, name) => {
+      const e = entries.find((entry) => entry.name === name);
+      if (e) pressEntry(e, ev);
+    },
+    // A drag this window started ended on an accepting target:
+    // the target performed the move, this side just refreshes.
+    // The 150 ms delay is the race window — the dragend arrives
+    // when the target finishes the transfer, which is before its
+    // JS runs the moves, so a refresh at once can re-list before
+    // the files land.
+    onDragEnd: (dropped) => {
+      if (dropped) setTimeout(() => navigate(path), 150);
+    },
+    // No drag may start under a context menu.
+    canDrag: () => menu === null,
   });
 
   // Right-click on a row: when the entry is already in the
@@ -598,22 +762,32 @@ export function Files(): React.ReactElement {
             backgroundColor: "#f3f4f6",
             paddingLeft: 12,
             paddingRight: 8,
-            paddingTop: 8,
+            paddingTop: SIDEBAR_PAD_TOP,
           }}
         >
-          <Text style={{ fontSize: 13, fontWeight: "bold", color: "#374151" }}>
-            Devices
-          </Text>
+          <View style={{ height: SIDEBAR_HEADER_HEIGHT, justifyContent: "center" }}>
+            <Text style={{ fontSize: 13, fontWeight: "bold", color: "#374151" }}>
+              Devices
+            </Text>
+          </View>
           {volumes.map((v) => {
             const tile = driveTile();
             return (
-              <View key={v.mountPoint} style={{ marginTop: 8 }}>
+              <View key={v.mountPoint} style={{ marginTop: VOLUME_BLOCK_GAP }}>
                 <Pressable
                   onPress={() => navigate(v.mountPoint)}
                   style={{
+                    height: VOLUME_TILE_HEIGHT,
                     flexDirection: "row",
                     alignItems: "center",
-                    backgroundColor: path === v.mountPoint ? "#dbeafe" : "#f3f4f6",
+                    backgroundColor:
+                      fileDrag.hoverTarget !== null &&
+                      fileDrag.hoverTarget.kind === "volume" &&
+                      fileDrag.hoverTarget.dir === v.mountPoint
+                        ? DRAG_HOVER_FILL
+                        : path === v.mountPoint
+                          ? "#dbeafe"
+                          : "#f3f4f6",
                     borderRadius: 6,
                     paddingTop: 4,
                     paddingBottom: 4,
@@ -647,8 +821,8 @@ export function Files(): React.ReactElement {
                   <Pressable
                     onPress={() => eject(v.mountPoint, v.label)}
                     style={{
-                      height: 24,
-                      marginTop: 2,
+                      height: EJECT_HEIGHT,
+                      marginTop: EJECT_GAP,
                       marginLeft: 36,
                       justifyContent: "center",
                     }}
@@ -683,7 +857,15 @@ export function Files(): React.ReactElement {
           {path !== "/" ? (
             <Pressable
               onPress={() => navigate(parentOf(path))}
-              style={{ height: ROW_HEIGHT, justifyContent: "center" }}
+              style={{
+                height: ROW_HEIGHT,
+                justifyContent: "center",
+                backgroundColor:
+                  fileDrag.hoverTarget !== null &&
+                  fileDrag.hoverTarget.dir === parentOf(path)
+                    ? DRAG_HOVER_FILL
+                    : "#f9fafb",
+              }}
             >
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Image
@@ -700,12 +882,24 @@ export function Files(): React.ReactElement {
             return (
               <Pressable
                 key={e.name}
-                onPress={(ev: PressEvent) => pressEntry(e, ev)}
+                onPress={(ev: PressEvent) => {
+                  // A drag start swallows the press — the click
+                  // runs at release time through the hook's onClick
+                  // instead, so dragging never selects-again-to-open.
+                  if (!fileDrag.beginDrag(ev, e.name)) pressEntry(e, ev);
+                }}
                 onContextMenu={(ev: ContextMenuEvent) => contextMenuForEntry(e, ev)}
                 style={{
                   height: ROW_HEIGHT,
                   justifyContent: "center",
-                  backgroundColor: isSelected ? "#dbeafe" : "#f9fafb",
+                  backgroundColor:
+                    fileDrag.hoverTarget !== null &&
+                    fileDrag.hoverTarget.kind === "folder" &&
+                    fileDrag.hoverTarget.dir === joinPath(path, e.name)
+                      ? DRAG_HOVER_FILL
+                      : isSelected
+                        ? "#dbeafe"
+                        : "#f9fafb",
                   borderRadius: 6,
                   paddingLeft: 4,
                 }}
@@ -775,10 +969,39 @@ export function Files(): React.ReactElement {
         }}
       >
         <Text style={{ fontSize: 12, color: "#374151" }}>
-          {clipboardLabel}
-          {status ? " — " + status : ""}
+          {fileDrag.dragLabel
+            ? fileDrag.hoverTarget
+              ? "Drop to move " +
+                (fileDrag.hoverTarget.kind === "volume" ? "to " : "into ") +
+                fileDrag.hoverTarget.label
+              : "Dragging " + fileDrag.dragLabel
+            : clipboardLabel + (status ? " — " + status : "")}
         </Text>
       </View>
+      {/* The drag chip (gap unit 15): follows the pointer while a
+          local drag is active, at the root level so it draws above
+          the list and the sidebar. After the handoff to the
+          compositor there is no chip — the target's hover highlight
+          is the feedback. */}
+      {fileDrag.dragChip ? (
+        <View
+          style={{
+            position: "absolute",
+            left: fileDrag.dragChip.x + 12,
+            top: fileDrag.dragChip.y + 12,
+            backgroundColor: "#111827",
+            borderRadius: 6,
+            paddingLeft: 8,
+            paddingRight: 8,
+            paddingTop: 4,
+            paddingBottom: 4,
+          }}
+        >
+          <Text style={{ fontSize: 12, color: "#ffffff" }}>
+            {fileDrag.dragChip.label}
+          </Text>
+        </View>
+      ) : null}
       {/* Context menu (gap unit 10): last child so it draws and
           hit-tests above everything else. */}
       {menu ? (

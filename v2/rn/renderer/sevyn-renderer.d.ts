@@ -60,16 +60,42 @@ export function subscribePointerMove(
 // called on left-button release and on pointer-leave (a drag ending
 // off-surface), receives the release position, and returns true only
 // when it changed state — the renderer re-presents only then, the
-// same contract as the move listeners. A leave carries the far-off
-// position, so a listener that needs the last real position must
-// remember it from the moves.
+// same contract as the move listeners. `left` (gap unit 15, audit
+// #18) is true when the event is a leave, not a release, so a file
+// drag can hand off to the compositor instead of committing a drop.
+// A leave carries the last known position, so a listener that needs
+// the position must remember it from the moves.
 export interface PointerUpEvent {
   x: number;
   y: number;
+  left?: boolean;
 }
 export function subscribePointerUp(
   fn: (ev: PointerUpEvent) => boolean | void,
 ): () => void;
+// Drag-and-drop subscribers (gap unit 15, audit #18). The host
+// forwards Wayland data-device drag events: another client's drag
+// entering / moving over / leaving this surface, a drop landing
+// with the file paths, and the end of a drag this client started.
+// A listener returns true only when it changed state (the renderer
+// re-presents only then); the return value also decides the host's
+// protocol replies — true on enter accepts the offer, true on drop
+// finishes it. `mimes` is the offered MIME list (enter only);
+// `paths` is the dropped file paths (drop only); `dropped` says
+// whether the drag this client started landed somewhere (dragend only).
+export interface DragDropEvent {
+  type: "enter" | "motion" | "leave" | "drop" | "dragend";
+  x: number;
+  y: number;
+  mimes?: string[];
+  paths?: string[];
+  dropped?: boolean;
+}
+export function subscribeDragDrop(fn: (ev: DragDropEvent) => boolean | void): () => void;
+// Start a Wayland DnD drag carrying the given absolute paths (gap
+// unit 15, audit #18). Returns false when there is no compositor
+// drag to start (headless runs, or no data device).
+export function startFileDrag(paths: string[]): boolean;
 // Context-menu key handler (gap unit 9, audit #12). The open
 // ContextMenu (./context-menu.js) registers a handler that owns the
 // navigation keys while it is mounted; handleKey offers each pressed

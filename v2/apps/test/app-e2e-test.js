@@ -1199,6 +1199,9 @@ check("files: multi-select toggle, range, clear, multi-copy, multi-delete", () =
       (o) => o.type === "rect" && o.h === 36 && o.color === "#dbeafe",
     ).length;
   }
+  // A row click commits at release time now (gap unit 15: a press
+  // on a row may become a file drag, so the click only commits when
+  // the press is released without dragging) — press + release.
   function pressRect(rect, mods) {
     Sevyn._handlers.pointer({
       type: "button",
@@ -1208,6 +1211,14 @@ check("files: multi-select toggle, range, clear, multi-copy, multi-delete", () =
       pressed: true,
       nodeId: rect.nodeId,
       ...(mods || {}),
+    });
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: rect.x + 2,
+      y: rect.y + 2,
+      button: 1,
+      pressed: false,
+      nodeId: rect.nodeId,
     });
   }
   // Toolbar buttons are the 28px pressables wider than the 28px
@@ -1336,6 +1347,9 @@ check("files: marquee select drags a rectangle, Shift adds, click still clears",
     assert.ok(surface, "list surface hit rect exists");
     return surface;
   }
+  // A row click commits at release time now (gap unit 15: a press
+  // on a row may become a file drag, so the click only commits when
+  // the press is released without dragging) — press + release.
   function pressRect(rect, mods) {
     Sevyn._handlers.pointer({
       type: "button",
@@ -1345,6 +1359,14 @@ check("files: marquee select drags a rectangle, Shift adds, click still clears",
       pressed: true,
       nodeId: rect.nodeId,
       ...(mods || {}),
+    });
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: rect.x + 2,
+      y: rect.y + 2,
+      button: 1,
+      pressed: false,
+      nodeId: rect.nodeId,
     });
   }
   function bandPresent() {
@@ -1427,6 +1449,176 @@ check("files: marquee select drags a rectangle, Shift adds, click still clears",
 // The #122 port: selection + Cut/Copy/Paste/Delete through the toolbar
 // (no right-click in v2). The handler is a fake filesystem: the paste
 // lands on the collision-suffixed name and the listing grows.
+// --- Files file drag (gap unit 15, audit #18) ---------------------------
+// Drag a row onto a folder row to move it there (the renderer-local
+// path): the chip follows the pointer, the target highlights, and
+// release commits one `sevyn files move`. A press released without
+// dragging is a click (selects, at release time). Leaving the surface
+// mid-drag hands the drag to the compositor (Sevyn.startFileDrag).
+// An incoming drop from another client moves through the same commit;
+// a drop onto a file row (not a folder) cancels without moving.
+check(
+  "files: file drag moves onto a folder, click still selects, leave hands off",
+  () => {
+    const moved = [];
+    const handler = (cmd) => {
+      if (cmd === "sevyn files list /data")
+        return "0\nd alpha\nf beta.txt\nf gamma.txt\nf delta.txt\n";
+      if (cmd === "sevyn files list /data/alpha") return "0\n";
+      if (cmd === "sevyn files volumes")
+        return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+      if (cmd === "sevyn files clipboard") return "0\nempty\n";
+      if (cmd.startsWith("sevyn files move ")) {
+        moved.push(cmd);
+        return "0\nmoved\n";
+      }
+      return "1\nerror: no such directory\n";
+    };
+    loadAs(
+      {
+        id: "files",
+        name: "Files",
+        color: "#3b82f6",
+        glyph: "F",
+        permissions: ["cli.exec"],
+      },
+      filesBundle,
+      handler,
+    );
+    function lastOps() {
+      return Sevyn._presents[Sevyn._presents.length - 1].ops;
+    }
+    // The status line reads "Clipboard …" at rest, "Dragging …" /
+    // "Drop to move …" while a drag is active.
+    function statusText() {
+      const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+      const line = texts.find(
+        (t) =>
+          t.startsWith("Clipboard") ||
+          t.startsWith("Dragging") ||
+          t.startsWith("Drop to move"),
+      );
+      assert.ok(line, "status line present, texts=" + JSON.stringify(texts));
+      return line;
+    }
+    // Listing rows are the 36px pressables, top to bottom: "..",
+    // alpha, beta.txt, gamma.txt, delta.txt.
+    function rowRects() {
+      const rows = lastOps()
+        .filter((o) => o.type === "rect" && o.h === 36 && o.nodeId >= 0)
+        .sort((a, b) => a.y - b.y);
+      assert.equal(rows.length, 5, "five listing rows");
+      return rows;
+    }
+    function hoverRowCount() {
+      return lastOps().filter(
+        (o) => o.type === "rect" && o.h === 36 && o.color === "#5B5BD626",
+      ).length;
+    }
+    function chipPresent() {
+      return lastOps().some((o) => o.type === "rect" && o.color === "#111827");
+    }
+    function pressRect(rect) {
+      Sevyn._handlers.pointer({
+        type: "button",
+        x: rect.x + 2,
+        y: rect.y + 2,
+        button: 1,
+        pressed: true,
+        nodeId: rect.nodeId,
+      });
+    }
+    function moveTo(x, y) {
+      Sevyn._handlers.pointer({ type: "move", x, y });
+    }
+    function releaseAt(x, y) {
+      Sevyn._handlers.pointer({ type: "button", x, y, button: 1, pressed: false });
+    }
+    function centre(rect) {
+      return { x: rect.x + Math.round(rect.w / 2), y: rect.y + 18 };
+    }
+
+    const rows = rowRects();
+    const alpha = centre(rows[1]);
+    const beta = centre(rows[2]);
+    const gamma = centre(rows[3]);
+    const delta = centre(rows[4]);
+    // Drag beta.txt onto the alpha folder: the chip shows, alpha
+    // highlights, release moves it.
+    pressRect(rows[2]);
+    moveTo(beta.x, beta.y + 10);
+    assert.ok(chipPresent(), "drag chip shows past the threshold");
+    moveTo(alpha.x, alpha.y);
+    assert.equal(hoverRowCount(), 1, "alpha row highlights as the drop target");
+    assert.ok(
+      statusText().includes("Drop to move into alpha"),
+      "status names the target, got: " + statusText(),
+    );
+    releaseAt(alpha.x, alpha.y);
+    assert.ok(!chipPresent(), "chip clears on release");
+    assert.deepEqual(moved, ["sevyn files move /data/beta.txt /data/alpha/beta.txt"]);
+    assert.ok(
+      statusText().includes("Moved beta.txt"),
+      "move status, got: " + statusText(),
+    );
+    // A drop onto a file row is not a target: no move, no status.
+    const movedBefore = moved.length;
+    pressRect(rows[3]);
+    moveTo(gamma.x, gamma.y - 10);
+    assert.ok(chipPresent(), "chip shows for the second drag");
+    moveTo(gamma.x, gamma.y);
+    assert.equal(hoverRowCount(), 0, "a file row never highlights");
+    releaseAt(gamma.x, gamma.y);
+    assert.equal(moved.length, movedBefore, "no move onto a file row");
+    // A press released without dragging is a click: gamma.txt selects
+    // at release time, as before.
+    pressRect(rows[3]);
+    releaseAt(gamma.x, gamma.y);
+    assert.ok(
+      statusText().includes("Selected gamma.txt"),
+      "click selects at release, got: " + statusText(),
+    );
+    // An incoming drop from another client lands on alpha through the
+    // same commit: the paths arrive with the drop event.
+    const before = moved.length;
+    Sevyn._handlers.dragDrop({
+      type: "enter",
+      x: alpha.x,
+      y: alpha.y,
+      mimes: ["text/uri-list"],
+    });
+    assert.equal(hoverRowCount(), 1, "incoming drag highlights alpha");
+    Sevyn._handlers.dragDrop({
+      type: "drop",
+      x: alpha.x,
+      y: alpha.y,
+      paths: ["/data/other.txt"],
+    });
+    assert.equal(moved.length, before + 1, "incoming drop moves one file");
+    assert.equal(moved[before], "sevyn files move /data/other.txt /data/alpha/other.txt");
+    assert.ok(statusText().includes("Moved other.txt"), "incoming move status");
+    // An incoming drag offering no files is ignored entirely.
+    Sevyn._handlers.dragDrop({
+      type: "enter",
+      x: alpha.x,
+      y: alpha.y,
+      mimes: ["text/plain"],
+    });
+    assert.equal(hoverRowCount(), 0, "non-file offer highlights nothing");
+    // Leaving the surface mid-drag hands off to the compositor: the
+    // chip clears and startFileDrag carries the paths. (No dragend is
+    // fired here — the delayed refresh belongs to the live drag, and
+    // the m9 test proves it end to end.)
+    assert.deepEqual(Sevyn._startFileDragCalls, [], "no handoff yet");
+    pressRect(rows[4]);
+    moveTo(delta.x, delta.y + 20);
+    assert.ok(chipPresent(), "chip shows for the handoff drag");
+    Sevyn._handlers.pointer({ type: "leave", x: delta.x, y: delta.y + 40 });
+    assert.deepEqual(Sevyn._startFileDragCalls, [["/data/delta.txt"]]);
+    assert.ok(!chipPresent(), "chip clears on handoff");
+  },
+);
+
 check("files: select, copy, paste, delete via the toolbar", () => {
   let pasted = false;
   let clipboard = null;

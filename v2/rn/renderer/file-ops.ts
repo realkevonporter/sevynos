@@ -6,6 +6,11 @@
  * rules — paste into itself, name collisions, cross-volume moves —
  * are unit-testable without filesystem access. The component
  * performs the actual filesystem calls through `sevyn files`).
+ *
+ * Moved here from v2/apps/src/clipboard.ts by gap unit 15 (audit #18):
+ * the shell's desktop is a drop target too, and the shell imports only
+ * from the shared renderer layer — so the pure move rules live here
+ * and both the apps and the shell import them from this one place.
  */
 
 export type ClipboardKind = "cut" | "copy";
@@ -26,6 +31,28 @@ export interface VolumeLike {
 export function joinPath(directory: string, name: string): string {
   const base = directory === "/" ? "" : directory.replace(/\/+$/, "");
   return `${base}/${name}`;
+}
+
+/**
+ * The last component of a path (`photo.png` for
+ * `/data/Photos/photo.png`). Trailing slashes are ignored, so
+ * `/data/Photos/` is `Photos`; the root is `""`.
+ */
+export function baseName(path: string): string {
+  const clean = path.replace(/\/+$/, "");
+  const i = clean.lastIndexOf("/");
+  return i < 0 ? clean : clean.slice(i + 1);
+}
+
+/**
+ * The parent directory of a path (`/data/Photos` for
+ * `/data/Photos/photo.png`). Trailing slashes are ignored; the
+ * parent of a top-level name is `/`.
+ */
+export function dirName(path: string): string {
+  const clean = path.replace(/\/+$/, "");
+  const i = clean.lastIndexOf("/");
+  return i <= 0 ? "/" : clean.slice(0, i);
 }
 
 /**

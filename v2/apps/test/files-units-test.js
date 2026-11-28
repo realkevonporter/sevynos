@@ -1,6 +1,7 @@
 "use strict";
-// Unit tests for the Files port's pure modules (v2/apps/src/clipboard.ts,
-// volumes.ts, file-icons.ts) and the shared selection/marquee modules
+// Unit tests for the Files port's pure modules (v2/rn/renderer/file-ops.ts
+// — moved from v2/apps/src/clipboard.ts by gap unit 15 — volumes.ts,
+// file-icons.ts) and the shared selection/marquee modules
 // (v2/rn/renderer/selection.ts, marquee.ts — gap units 13/14) — the
 // #122 rules ported 1:1, plus the v2 additions (volumes/clipboard
 // output parsing, byte formatting, glyphs).
@@ -27,7 +28,7 @@ const bundle = path.join(os.tmpdir(), "sevyn-files-units-bundle.cjs");
 fs.writeFileSync(
   entry,
   "export * as clipboard from " +
-    JSON.stringify(path.join(__dirname, "..", "src", "clipboard.ts")) +
+    JSON.stringify(path.join(__dirname, "..", "..", "rn", "renderer", "file-ops.ts")) +
     ";\n" +
     "export * as volumes from " +
     JSON.stringify(path.join(__dirname, "..", "src", "volumes.ts")) +
@@ -40,6 +41,9 @@ fs.writeFileSync(
     ";\n" +
     "export * as marquee from " +
     JSON.stringify(path.join(__dirname, "..", "..", "rn", "renderer", "marquee.ts")) +
+    ";\n" +
+    "export * as drag from " +
+    JSON.stringify(path.join(__dirname, "..", "..", "rn", "renderer", "drag.ts")) +
     ";\n",
 );
 
@@ -51,7 +55,7 @@ esbuild.buildSync({
   outfile: bundle,
   logLevel: "silent",
 });
-const { clipboard, volumes, icons, selection, marquee } = require(bundle);
+const { clipboard, volumes, icons, selection, marquee, drag } = require(bundle);
 
 const cutDir = {
   kind: "cut",
@@ -566,6 +570,40 @@ check("marquee: out-of-range indices are ignored", () => {
     PLAIN,
   );
   assert.deepEqual(s, { selected: ["beta.txt"], anchor: 1 });
+});
+
+// --- File drag (gap unit 15, audit #18) ----------------------------------
+// The pure drag helpers: the MIME, the threshold, the hover fill, the
+// dropped-paths session, and the path helpers the session uses.
+check("drag: FILE_DRAG_MIME is the standard URI list", () => {
+  assert.equal(drag.FILE_DRAG_MIME, "text/uri-list");
+});
+
+check("drag: threshold is 4px, hover fill is the violet accent tint", () => {
+  assert.equal(drag.DRAG_THRESHOLD_PX, 4);
+  assert.equal(drag.DRAG_HOVER_FILL, "#5B5BD626");
+});
+
+check("clipboard: baseName takes the last path component", () => {
+  assert.equal(clipboard.baseName("/data/Photos/photo.png"), "photo.png");
+  assert.equal(clipboard.baseName("/data/Photos/"), "Photos");
+  assert.equal(clipboard.baseName("/"), "");
+  assert.equal(clipboard.baseName("photo.png"), "photo.png");
+});
+
+check("clipboard: dirName takes the parent directory", () => {
+  assert.equal(clipboard.dirName("/data/Photos/photo.png"), "/data/Photos");
+  assert.equal(clipboard.dirName("/data/Photos/"), "/data");
+  assert.equal(clipboard.dirName("/photo.png"), "/");
+  assert.equal(clipboard.dirName("/"), "/");
+});
+
+check("drag: entriesForDroppedPaths splits paths into entries", () => {
+  assert.deepEqual(drag.entriesForDroppedPaths(["/data/a.txt", "/data/Photos/b.png"]), [
+    { name: "a.txt", kind: "file", sourceDir: "/data" },
+    { name: "b.png", kind: "file", sourceDir: "/data/Photos" },
+  ]);
+  assert.deepEqual(drag.entriesForDroppedPaths([]), []);
 });
 
 console.log(`\nfiles units: ${passed} checks passed`);
