@@ -547,6 +547,12 @@ static int cmd_update(int argc, char **argv)
                 continue;
             if (strncmp(line, "OK applying ", 12) == 0) {
                 printf("applying %s\n", line + 12);
+                /* The Terminal captures the CLI through a pipe, so
+                 * glibc fully buffers stdout: without this flush the
+                 * prints sit in the buffer until the CLI exits — and
+                 * the reboot kills it first, so `update apply`
+                 * showed nothing at all before rebooting. */
+                fflush(stdout);
                 continue;
             }
             if (strncmp(line, "ERR ", 4) == 0) {
@@ -555,10 +561,17 @@ static int cmd_update(int argc, char **argv)
             }
             if (strncmp(line, "EVENT APPLY STARTED ", 20) == 0) {
                 printf("started %s\n", line + 20);
+                fflush(stdout);
+                continue;
+            }
+            if (strncmp(line, "EVENT APPLY PROGRESS ", 21) == 0) {
+                printf("still applying %s...\n", line + 21);
+                fflush(stdout);
                 continue;
             }
             if (strncmp(line, "EVENT APPLIED ", 14) == 0) {
                 printf("applied %s\n", line + 14);
+                fflush(stdout);
                 rc = 0;
                 break;
             }
@@ -568,6 +581,7 @@ static int cmd_update(int argc, char **argv)
                 break;
             }
             printf("%s\n", line);
+            fflush(stdout);
         }
         close(fd);
         return rc;

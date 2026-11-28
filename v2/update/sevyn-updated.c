@@ -111,6 +111,9 @@
  *   SUBSCRIBE         -> OK subscribed (then receives EVENT lines)
  * Events (subscribers only):
  *   EVENT APPLY STARTED <version>
+ *   EVENT APPLY PROGRESS <version> (heartbeat while an apply is in
+ *     flight, every SEVYN_UPDATE_PROGRESS_SECS, default 30 s — the
+ *     download otherwise sends nothing for minutes)
  *   EVENT APPLIED <version> <slot>
  *   EVENT APPLY FAILED <reason>
  *   EVENT SLOT GOOD <slot>
@@ -126,7 +129,13 @@
  * downloads are verified by sha256 + size before anything is written
  * to a slot.
  * The apply child writes to temp names and renames, fsyncs files and
- * the slot dir, flips the state atomically, syncs, then reboots.
+ * the slot dir, flips the state atomically, syncs, then exits 0; the
+ * parent's reaper broadcasts EVENT APPLIED to subscribers, flushes
+ * it, and forks a rebooter child that reboots. The child must NOT
+ * reboot itself: the reboot kills the daemon before its reaper can
+ * broadcast, so the CLI never sees EVENT APPLIED and `update apply`
+ * prints nothing (the harness reboot stub exits 0, which masked
+ * this on-device silence).
  *
  * Paths come from the environment for the host-side unit tests:
  *   SEVYN_UPDATE_SOCK (default /run/sevyn-update.sock),
@@ -139,6 +148,8 @@
  *   SEVYN_UPDATE_HEALTH_FILE (default /tmp/sevyn-host.log),
  *   SEVYN_UPDATE_CA_BUNDLE (default
  *     /etc/ssl/certs/ca-certificates.crt),
+ *   SEVYN_UPDATE_PROGRESS_SECS (default 30: seconds between
+ *     EVENT APPLY PROGRESS heartbeats while an apply is in flight),
  *   SEVYN_UPDATE_SLOT (host-test hook: the booted slot when the
  *     kernel cmdline carries no sevyn.slot=),
  *   SEVYN_UPDATE_ESP_DIR (host-test hook: use this directory as the
@@ -242,6 +253,10 @@ static char g_boot_slot = 0; /* 'A' / 'B' from sevyn.slot=, or 0 */
 static int g_applying = 0;
 static pid_t g_apply_pid = -1;
 static char g_available[128] = ""; /* "" = unknown; "none" = up to date */
+/* Seconds between EVENT APPLY PROGRESS heartbeats while an apply is
+ * in flight (SEVYN_UPDATE_PROGRESS_SECS, default 30). */
+static int g_progress_secs = 30;
+static int g_apply_progress_s = 0;
 static int g_marked_good = 0;
 
 static void on_signal(int sig)
@@ -2559,9 +2574,10 @@ static int esp_sync_restore(const char *slot_dir, char good,
 
 /* The apply child: fetch + verify the feed, download + verify both
  * artifacts, write them to the idle slot, flip the state, sync, and
- * reboot. On any failure it logs UPDATE APPLY FAIL and exits 1
- * without touching the slot state — the running system is untouched.
- * Never returns. */
+ * exit 0 — the parent's reaper broadcasts EVENT APPLIED and forks a
+ * rebooter child (see the reaper). On any failure it logs
+ * UPDATE APPLY FAIL and exits 1 without touching the slot state —
+ * the running system is untouched. Never returns. */
 static void apply_child(int listen_fd, int ctl_fd)
 {
     /* Drop the parent's fds (the child reboots or exits). */
@@ -2635,12 +2651,14 @@ static void apply_child(int listen_fd, int ctl_fd)
     }
     sync();
     log_line("UPDATE APPLIED %s slot=%c", feed.version, idle);
-    /* Reboot into the new slot. -f: no init dance, the kernel
-     * reboots now; QEMU -no-reboot turns this into a clean exit the
-     * harness treats as an expected reboot. */
-    execlp("reboot", "reboot", "-f", (char *)NULL);
-    log_line("UPDATE APPLY FAIL cannot reboot: %s", strerror(errno));
-    _exit(1);
+    /* Exit 0 instead of rebooting: the parent's reaper broadcasts
+     * EVENT APPLIED, flushes it to subscribers, then forks a
+     * rebooter child. If this child rebooted itself, the reboot
+     * would kill the daemon before the reaper ever runs, so the CLI
+     * would never see EVENT APPLIED — the on-device silence. The
+     * harness reboot stub exits 0, so the old shape passed the
+     * tests while the device stayed silent. */
+    _exit(0);
 }
 
 /* --- clients (socket) --- */
@@ -2911,6 +2929,7 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
             apply_child(g_listen_fd, g_ctl_fd);
         g_applying = 1;
         g_apply_pid = pid;
+        g_apply_progress_s = 0;
         snprintf(g_available, sizeof(g_available), "%s", feed.version);
         broadcast_event("EVENT APPLY STARTED %s\n", feed.version);
         if (from_ctl)
@@ -3145,6 +3164,14 @@ int main(int argc, char **argv)
     g_esp_dir = getenv("SEVYN_UPDATE_ESP_DIR");
     g_esp_size = getenv("SEVYN_UPDATE_ESP_SIZE_BYTES");
     g_proc_mounts = getenv("SEVYN_UPDATE_PROC_MOUNTS");
+    {
+        const char *ps = getenv("SEVYN_UPDATE_PROGRESS_SECS");
+        if (ps && *ps) {
+            long v = strtol(ps, NULL, 10);
+            if (v >= 1 && v <= 3600)
+                g_progress_secs = (int)v;
+        }
+    }
 
     g_console_fd = open("/dev/console", O_WRONLY | O_NONBLOCK);
     signal(SIGPIPE, SIG_IGN);
@@ -3320,20 +3347,72 @@ int main(int argc, char **argv)
             if (done == g_apply_pid) {
                 g_apply_pid = -1;
                 g_applying = 0;
+                g_apply_progress_s = 0;
                 if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
                     struct slot_state st;
                     if (read_slot_state(&st) == 0)
                         broadcast_event("EVENT APPLIED %s %c\n",
                                         st.version, st.active);
+                    /* Flush the event to subscribers NOW, then
+                     * reboot: the reboot kills the daemon, so the
+                     * event must already be in the subscribers'
+                     * socket buffers. The reboot runs in a forked
+                     * child so the daemon itself survives in the
+                     * harness (the reboot stub exits 0 without
+                     * rebooting); on the device the reboot takes
+                     * the machine down, daemon included. -f: no
+                     * init dance, the kernel reboots now; QEMU
+                     * -no-reboot turns this into a clean exit the
+                     * harness treats as an expected reboot. */
+                    flush_clients();
+                    log_line("UPDATE APPLY REBOOTING");
+                    pid_t rpid = fork();
+                    if (rpid == 0) {
+                        if (g_listen_fd >= 0)
+                            close(g_listen_fd);
+                        if (g_ctl_fd >= 0)
+                            close(g_ctl_fd);
+                        execlp("reboot", "reboot", "-f",
+                               (char *)NULL);
+                        log_line("UPDATE APPLY FAIL cannot reboot: %s",
+                                 strerror(errno));
+                        _exit(1);
+                    } else if (rpid < 0) {
+                        log_line("UPDATE APPLY FAIL cannot fork "
+                                 "reboot: %s", strerror(errno));
+                    }
                 } else {
                     broadcast_event("EVENT APPLY FAILED\n");
                 }
             }
         }
+        /* Reap stray children (e.g. the rebooter forked above):
+         * the harness reboot stub exits 0, so without this the
+         * rebooter would linger as a zombie until the daemon exits.
+         * Runs after the apply reaper above, so it can never steal
+         * the apply child's status. */
+        for (;;) {
+            int st2 = 0;
+            pid_t done = waitpid(-1, &st2, WNOHANG);
+            if (done <= 0)
+                break;
+        }
         /* Health watch (~once a second). */
         if (++health_tick >= 10) {
             health_tick = 0;
             check_health();
+            /* Apply heartbeat: while an apply is in flight the
+             * download otherwise sends nothing for minutes, so the
+             * CLI (and the user) sees no sign of life. Broadcast a
+             * progress event every g_progress_secs; the CLI prints
+             * "still applying ...". Best-effort only — a missed
+             * heartbeat changes nothing about the apply itself. */
+            if (g_applying && g_available[0] != '\0' &&
+                ++g_apply_progress_s >= g_progress_secs) {
+                g_apply_progress_s = 0;
+                broadcast_event("EVENT APPLY PROGRESS %s\n",
+                                g_available);
+            }
         }
     }
 
