@@ -138,6 +138,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const started = Date.now();
 
 const checks = [];
+// Set by finish(): the beforeExit guard below uses it to tell a
+// clean verdict from a silent exit.
+let finished = false;
 function check(name, ok, detail = "") {
   checks.push({ name, ok: !!ok, detail: String(detail).slice(0, 300) });
   console.log(`${ok ? "ok  " : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
@@ -236,11 +239,16 @@ function countColor(img, r, g, b, tol = 10, box = null) {
 }
 
 // --- QMP client ---
+// A QMP round-trip is a local-socket exchange QEMU answers in
+// milliseconds; 60 s is far past any legitimate TCG-load stall, and
+// bounds a write to a dead socket instead of hanging forever.
+const QMP_TIMEOUT_MS = 60000;
 class QMP {
   constructor(path) {
     this.path = path;
     this.buf = "";
     this.waiters = [];
+    this.closed = false;
     this.sock = net.connect(path);
     this.sock.on("data", (d) => {
       this.buf += d.toString();
@@ -266,6 +274,7 @@ class QMP {
     // probe) kills the socket mid-drag — without this, Node's event
     // loop empties and the check exits 0 without a verdict.
     const failWaiters = (err) => {
+      this.closed = true;
       for (const w of this.waiters.splice(0)) w({ error: err });
     };
     this.sock.on("close", () => failWaiters({ message: "qmp socket closed" }));
@@ -279,11 +288,35 @@ class QMP {
   }
   execute(cmd, args) {
     return new Promise((resolve, reject) => {
-      this.waiters.push((msg) => {
+      // The socket can already be dead when this runs: the close
+      // fired during a sleep (pointerDrag's settle), when no waiter
+      // was pending, so failWaiters had nothing to reject. A write
+      // to the destroyed socket never settles — without this check
+      // the event loop empties and the check exits 0 with no
+      // verdict (the bisect false green, run 46166095132).
+      if (this.closed || this.sock.destroyed) {
+        reject(new Error(`${cmd}: qmp socket closed`));
+        return;
+      }
+      const settle = (msg) => {
+        clearTimeout(timer);
         if (msg.error) reject(new Error(`${cmd}: ${JSON.stringify(msg.error)}`));
         else resolve(msg.return);
+      };
+      const timer = setTimeout(() => {
+        const i = this.waiters.indexOf(settle);
+        if (i >= 0) this.waiters.splice(i, 1);
+        reject(new Error(`${cmd}: qmp timed out after ${QMP_TIMEOUT_MS}ms`));
+      }, QMP_TIMEOUT_MS);
+      this.waiters.push(settle);
+      this.sock.write(JSON.stringify({ execute: cmd, arguments: args }) + "\n", (err) => {
+        if (err) {
+          clearTimeout(timer);
+          const i = this.waiters.indexOf(settle);
+          if (i >= 0) this.waiters.splice(i, 1);
+          reject(new Error(`${cmd}: qmp write failed: ${err.message}`));
+        }
       });
-      this.sock.write(JSON.stringify({ execute: cmd, arguments: args }) + "\n");
     });
   }
   async capabilities() {
@@ -2948,6 +2981,7 @@ async function main() {
 }
 
 function finish(ok, extra = {}) {
+  finished = true;
   const result = {
     pass: ok,
     duration_s: Number(((Date.now() - started) / 1000).toFixed(1)),
@@ -2981,6 +3015,37 @@ function finish(ok, extra = {}) {
   } catch {}
   process.exit(ok ? 0 : 1);
 }
+
+// A silent exit must never read as a pass: if the event loop
+// empties without finish() — a promise that never settled, e.g. a
+// QMP write to a socket that closed mid-drag — fail loudly instead
+// of exiting 0 with no verdict (the bisect false green, run
+// 46166095132: job `success` with no m9-check.json). finish() and
+// the main().catch handler both process.exit(), which never
+// triggers beforeExit, so this only fires on the silent path.
+process.on("beforeExit", () => {
+  if (finished) return;
+  console.error("M9 check exited without a verdict (finish() never ran)");
+  try {
+    if (currentBoot) closeBoot(currentBoot);
+  } catch {}
+  try {
+    writeFileSync(
+      join(OUT, "m9-check.json"),
+      JSON.stringify(
+        {
+          pass: false,
+          duration_s: Number(((Date.now() - started) / 1000).toFixed(1)),
+          checks,
+          error: "no verdict: harness exited without finish()",
+        },
+        null,
+        2,
+      ),
+    );
+  } catch {}
+  process.exit(1);
+});
 
 main().catch((e) => {
   console.error("M9 check crashed:", e);
