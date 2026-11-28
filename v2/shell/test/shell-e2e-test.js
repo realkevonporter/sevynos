@@ -215,7 +215,8 @@ const runningDots = (ops) =>
 
 // Desktop right-click (gap unit 11, audit #14): drive a right-button
 // press (0x111) at a presented rect, and read the menu back from the
-// presented ops. The menu panel is the 220-wide #1f2937 rect; its
+// presented ops. The menu panel is the 220-wide #1F2937 rect
+// (tokens.color.dark.surface, canonical case — polish surface (a)); its
 // item rows are the smallest hit rects under their labels (the
 // full-surface click-away overlay is larger, so "smallest" picks the
 // row, not the overlay).
@@ -248,7 +249,7 @@ const rightClickRect = (rect, x, y) => {
   });
 };
 const findMenuPanel = (ops) =>
-  ops.find((o) => o.type === "rect" && o.color === "#1f2937" && o.w === 220);
+  ops.find((o) => o.type === "rect" && o.color === "#1F2937" && o.w === 220);
 const menuTexts = (ops) => {
   const panel = findMenuPanel(ops);
   assert.ok(panel, "menu panel presented");

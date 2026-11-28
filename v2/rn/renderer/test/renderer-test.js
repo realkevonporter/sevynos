@@ -1192,8 +1192,11 @@ function pressButton(x, y, button, nodeId) {
   Sevyn._handlers.pointer({ type: "button", x, y, button, pressed: true, nodeId });
 }
 function panelRect() {
+  // The menu panel now emits the canonical token case (#1F2937,
+  // tokens.color.dark.surface); the test app's own #1f2937 rects
+  // (the 200-wide targets) are untouched.
   return lastPresent().ops.find(
-    (o) => o.type === "rect" && o.color === "#1f2937" && o.w === 220,
+    (o) => o.type === "rect" && o.color === "#1F2937" && o.w === 220,
   );
 }
 function highlightRect() {
@@ -1237,7 +1240,7 @@ check("context menu: right-click fires onContextMenu, not onPress", () => {
   );
   assert.ok(
     lastPresent().ops.some(
-      (o) => o.type === "rect" && o.color === "#4b5563" && o.h === 1,
+      (o) => o.type === "rect" && o.color === "#4B5563" && o.h === 1,
     ),
     "separator row presented",
   );

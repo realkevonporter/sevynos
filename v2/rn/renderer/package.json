@@ -7,7 +7,7 @@
   "name": "@sevynos/renderer",
   "private": true,
   "scripts": {
-    "test": "node test/renderer-test.js && node test/audio-test.js"
+    "test": "node test/renderer-test.js && node test/audio-test.js && node test/tokens-test.js"
   },
   "version": "0.2.0"
 }

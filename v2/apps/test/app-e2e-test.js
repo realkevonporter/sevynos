@@ -1376,7 +1376,8 @@ check("files: select, copy, paste, delete via the toolbar", () => {
 
 // Files right-click (gap unit 10, audit #13): drive a right-button
 // press (0x111) at a presented rect, and read the menu back from
-// the presented ops. The menu panel is the 220-wide #1f2937 rect;
+// the presented ops. The menu panel is the 220-wide #1F2937 rect
+// (tokens.color.dark.surface, canonical case — polish surface (a));
 // its item rows are the smallest hit rects under their labels (the
 // full-surface click-away overlay is larger, so "smallest" picks
 // the row, not the overlay).
@@ -1430,7 +1431,7 @@ function listSurfaceRect() {
 function findMenuPanel() {
   const present = Sevyn._presents[Sevyn._presents.length - 1];
   return present.ops.find(
-    (o) => o.type === "rect" && o.color === "#1f2937" && o.w === 220,
+    (o) => o.type === "rect" && o.color === "#1F2937" && o.w === 220,
   );
 }
 function menuPanelRect() {
