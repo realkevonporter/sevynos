@@ -83,6 +83,36 @@ export function resolvePasteTarget(
 }
 
 /**
+ * Resolve the paste targets for a multi-file paste, in entry order.
+ *
+ * Each target is resolved against the names already in the folder
+ * PLUS the names the earlier entries in this paste will take, so two
+ * same-named files pasted from different folders suffix apart
+ * (`photo.png`, `photo (1).png`) instead of colliding with each
+ * other. Returns undefined when ANY entry must be refused (a folder
+ * pasted into itself or a descendant) — the paste is all-or-nothing,
+ * so the caller aborts before moving anything. (Moved here from the
+ * selection module by gap unit 14: it resolves paste targets, so it
+ * belongs with the clipboard module, and the shared selection module
+ * must not import the apps' clipboard.)
+ */
+export function resolveMultiPasteTargets(
+  entries: readonly ClipboardEntry[],
+  destinationDir: string,
+  existingNames: ReadonlySet<string>,
+): { entry: ClipboardEntry; targetPath: string; targetName: string }[] | undefined {
+  const taken = new Set(existingNames);
+  const targets: { entry: ClipboardEntry; targetPath: string; targetName: string }[] = [];
+  for (const entry of entries) {
+    const target = resolvePasteTarget(entry, destinationDir, taken);
+    if (!target) return undefined;
+    taken.add(target.targetName);
+    targets.push({ entry, ...target });
+  }
+  return targets;
+}
+
+/**
  * True when `sourcePath` and `destinationDir` live on different volumes,
  * i.e. a rename (move) between them would fail with EXDEV and the caller
  * must copy + delete instead. `volumes` are the mounted volumes; any path

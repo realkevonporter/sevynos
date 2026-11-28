@@ -651,6 +651,83 @@ check("desktop right-click: click-away dismisses the menu", () => {
   );
 });
 
+// Desktop marquee select (gap unit 14, audit #23): drag a rectangle
+// over empty desktop space to multi-select the icons it touches.
+// Window coords: the icons sit at desktop y 22..114 (window 70..162)
+// — Photos x 24..128, Notes.txt x 146..250. The drag starts on empty
+// space below the icons and ends inside the icon band; the band draws
+// while dragging and clears on release. A press released without
+// dragging is a click on empty desktop, which does nothing today —
+// the selection it leaves behind stays put.
+check("desktop marquee: drag selects both icons, one icon, click changes nothing", () => {
+  function selectedIconCount() {
+    return desktopItems(lastPresent().ops).filter((o) => o.color === "#FFFFFF29").length;
+  }
+  function bandPresent() {
+    return lastPresent().ops.some((o) => o.type === "rect" && o.color === "#5B5BD626");
+  }
+  // Press on the surface, move in steps, release: a drag. The
+  // release carries the same nodeId as the press (the host reports
+  // the release against the surface it started on).
+  function drag(x0, y0, x1, y1, mods) {
+    const surface = desktopSurfaceRect(lastPresent().ops);
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: x0,
+      y: y0,
+      button: 1,
+      pressed: true,
+      nodeId: surface.nodeId,
+      ...(mods || {}),
+    });
+    Sevyn._handlers.pointer({ type: "move", x: (x0 + x1) / 2, y: (y0 + y1) / 2 });
+    Sevyn._handlers.pointer({ type: "move", x: x1, y: y1 });
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: x1,
+      y: y1,
+      button: 1,
+      pressed: false,
+      nodeId: surface.nodeId,
+    });
+  }
+
+  const items = desktopItems(lastPresent().ops);
+  assert.equal(items.length, 2, "2 desktop icons");
+  // From empty space below the icons, up over both: the band covers
+  // Photos + Notes.txt, and the selection live-previews mid-drag.
+  const surface = desktopSurfaceRect(lastPresent().ops);
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: 10,
+    y: 200,
+    button: 1,
+    pressed: true,
+    nodeId: surface.nodeId,
+  });
+  Sevyn._handlers.pointer({ type: "move", x: 155, y: 140 });
+  assert.ok(bandPresent(), "rubber band draws during the drag");
+  assert.equal(selectedIconCount(), 2, "both icons preview mid-drag");
+  Sevyn._handlers.pointer({ type: "move", x: 300, y: 80 });
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: 300,
+    y: 80,
+    button: 1,
+    pressed: false,
+    nodeId: surface.nodeId,
+  });
+  assert.equal(selectedIconCount(), 2, "both icons selected on release");
+  assert.ok(!bandPresent(), "rubber band clears on release");
+  // The same drag ending before Notes.txt selects Photos alone.
+  drag(10, 200, 140, 80);
+  assert.equal(selectedIconCount(), 1, "one icon selected");
+  // A press released without dragging is a click on empty desktop
+  // and changes nothing — the Photos selection stays.
+  drag(500, 300, 502, 302);
+  assert.equal(selectedIconCount(), 1, "click without drag changes nothing");
+});
+
 check(
   "dock right-click: a tile right-click opens the menu and launches nothing by itself",
   () => {

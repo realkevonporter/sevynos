@@ -41,15 +41,25 @@ import * as React from "react";
 import { View, Text, Image, Pressable, ScrollView } from "./host";
 import { WindowButtons } from "./window-buttons";
 import { ContextMenu } from "../../rn/renderer/context-menu";
-import type { ContextMenuEvent, PressEvent } from "../../rn/renderer/sevyn-renderer";
+import type {
+  ContextMenuEvent,
+  PressEvent,
+  ScrollViewInstance,
+} from "../../rn/renderer/sevyn-renderer";
 import { runCli } from "./cli";
 import { appIconTitlePath, symbolPath } from "./icons";
 import {
   applyPressSelection,
   clearSelection,
-  resolveMultiPasteTargets,
   type SelectionState,
-} from "./selection";
+} from "../../rn/renderer/selection";
+import {
+  indicesInRect,
+  MARQUEE_FILL,
+  useMarqueeSelection,
+  type MarqueeRect,
+} from "../../rn/renderer/marquee";
+import { resolveMultiPasteTargets } from "./clipboard";
 import {
   isCrossVolumeMove,
   isCutPasteNoop,
@@ -102,6 +112,66 @@ function parentOf(p: string): string {
   if (p === "/") return "/";
   const i = p.lastIndexOf("/");
   return i <= 0 ? "/" : p.slice(0, i);
+}
+
+/**
+ * The list layout, as the marquee math depends on it. The styles
+ * below use these same constants, so the math and the render cannot
+ * drift apart. The list sits under the title, the path bar and the
+ * toolbar, next to the sidebar; rows are 36px tall in a list padded
+ * 8px top, 12px sides; the status bar is 28px tall.
+ */
+const TITLE_HEIGHT = 44;
+const PATH_HEIGHT = 32;
+const TOOLBAR_HEIGHT = 36;
+const LIST_TOP = TITLE_HEIGHT + PATH_HEIGHT + TOOLBAR_HEIGHT;
+const SIDEBAR_WIDTH = 168;
+const ROW_HEIGHT = 36;
+const LIST_PAD_TOP = 8;
+const LIST_PAD_X = 12;
+const STATUS_HEIGHT = 28;
+
+/** The status line for a selection, in pressEntry's wording. */
+function statusForSelection(next: SelectionState): string {
+  return next.selected.length === 0
+    ? "Selection cleared."
+    : next.selected.length === 1
+      ? "Selected " + next.selected[0]
+      : "Selected " + next.selected.length + " items";
+}
+
+/**
+ * The entry indices a marquee rect touches. `rect` is in window
+ * (pointer) coords; the list's content starts LIST_TOP below the
+ * window top and SIDEBAR_WIDTH in from the left, and scrolls, so
+ * the scroll offset comes off the live ScrollView instance. Entry
+ * j's band is its row in content coords — rows span the full list
+ * width — and the ".." row (when the path is not the root) takes
+ * the first row slot and is navigation, never selected. A rect
+ * outside the content band intersects no row; rows scrolled below
+ * the fold are still touched when the rect reaches them (the
+ * marquee selects what it touches — it does not scroll).
+ */
+function indicesInListRect(
+  rect: MarqueeRect,
+  entries: Entry[],
+  path: string,
+  list: ScrollViewInstance | null,
+): number[] {
+  const scrollY = list ? list.scrollY : 0;
+  const contentRect: MarqueeRect = {
+    x: rect.x - SIDEBAR_WIDTH,
+    y: rect.y - LIST_TOP + scrollY,
+    width: rect.width,
+    height: rect.height,
+  };
+  const rows: MarqueeRect[] = entries.map((_, j) => ({
+    x: 0,
+    y: LIST_PAD_TOP + (path !== "/" ? ROW_HEIGHT : 0) + j * ROW_HEIGHT,
+    width: Number.POSITIVE_INFINITY,
+    height: ROW_HEIGHT,
+  }));
+  return indicesInRect(rows, contentRect);
 }
 
 export function Files(): React.ReactElement {
@@ -200,13 +270,7 @@ export function Files(): React.ReactElement {
     }
     const next = applyPressSelection(namesOf(entries), selection, index, modifiers);
     setSelection(next);
-    setStatus(
-      next.selected.length === 0
-        ? "Selection cleared."
-        : next.selected.length === 1
-          ? "Selected " + next.selected[0]
-          : "Selected " + next.selected.length + " items",
-    );
+    setStatus(statusForSelection(next));
   }
 
   // Clicking empty list space clears the selection. The ScrollView's
@@ -218,6 +282,27 @@ export function Files(): React.ReactElement {
     setSelection(clearSelection());
     setStatus("Selection cleared.");
   }
+
+  // Rubber-band / marquee select (gap unit 14, audit #23): drag a
+  // rectangle over empty list space to multi-select what it
+  // touches. The ScrollView's onPress starts the drag (it is
+  // hit-testable through its background rect, and rows win where
+  // they overlap); a press released without dragging is a click on
+  // empty space and clears the selection, as before — at release
+  // time now, not at press time. The band draws in content coords
+  // inside the ScrollView, so it scrolls with the list and is
+  // clipped to the list viewport.
+  const listRef = React.useRef<ScrollViewInstance>(null);
+  const marquee = useMarqueeSelection({
+    selection,
+    onSelection: (next) => {
+      setSelection(next);
+      setStatus(statusForSelection(next));
+    },
+    names: namesOf(entries),
+    indicesForRect: (rect) => indicesInListRect(rect, entries, path, listRef.current),
+    onClick: () => pressEmptySpace(),
+  });
 
   // Right-click on a row: when the entry is already in the
   // selection the whole selection stays (the menu actions operate on
@@ -451,7 +536,7 @@ export function Files(): React.ReactElement {
       <View
         style={{
           flexDirection: "row",
-          height: 44,
+          height: TITLE_HEIGHT,
           backgroundColor: color,
           alignItems: "center",
           paddingLeft: 16,
@@ -483,7 +568,7 @@ export function Files(): React.ReactElement {
       </View>
       <View
         style={{
-          height: 32,
+          height: PATH_HEIGHT,
           backgroundColor: "#e5e7eb",
           justifyContent: "center",
           paddingLeft: 12,
@@ -494,7 +579,7 @@ export function Files(): React.ReactElement {
       <View
         style={{
           flexDirection: "row",
-          height: 36,
+          height: TOOLBAR_HEIGHT,
           backgroundColor: "#f3f4f6",
           alignItems: "center",
           paddingLeft: 12,
@@ -509,7 +594,7 @@ export function Files(): React.ReactElement {
       <View style={{ flex: 1, flexDirection: "row" }}>
         <View
           style={{
-            width: 168,
+            width: SIDEBAR_WIDTH,
             backgroundColor: "#f3f4f6",
             paddingLeft: 12,
             paddingRight: 8,
@@ -584,20 +669,21 @@ export function Files(): React.ReactElement {
             and a left-click there clears the selection (gap unit 13:
             the ScrollView's onPress is hit-testable the same way). */}
         <ScrollView
-          onPress={() => pressEmptySpace()}
+          ref={listRef}
+          onPress={marquee.begin}
           onContextMenu={(ev: ContextMenuEvent) => contextMenuForEmptySpace(ev)}
           style={{
             flex: 1,
             backgroundColor: "#f9fafb",
-            paddingLeft: 12,
-            paddingRight: 12,
-            paddingTop: 8,
+            paddingLeft: LIST_PAD_X,
+            paddingRight: LIST_PAD_X,
+            paddingTop: LIST_PAD_TOP,
           }}
         >
           {path !== "/" ? (
             <Pressable
               onPress={() => navigate(parentOf(path))}
-              style={{ height: 36, justifyContent: "center" }}
+              style={{ height: ROW_HEIGHT, justifyContent: "center" }}
             >
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Image
@@ -617,7 +703,7 @@ export function Files(): React.ReactElement {
                 onPress={(ev: PressEvent) => pressEntry(e, ev)}
                 onContextMenu={(ev: ContextMenuEvent) => contextMenuForEntry(e, ev)}
                 style={{
-                  height: 36,
+                  height: ROW_HEIGHT,
                   justifyContent: "center",
                   backgroundColor: isSelected ? "#dbeafe" : "#f9fafb",
                   borderRadius: 6,
@@ -660,11 +746,28 @@ export function Files(): React.ReactElement {
           {error ? (
             <Text style={{ fontSize: 14, color: "#dc2626", marginTop: 8 }}>{error}</Text>
           ) : null}
+          {/* The rubber band (gap unit 14): the drag rect in content
+              coords — the ScrollView clips it to the list viewport
+              and scrolls it with the list. Last child so it draws
+              above the rows. */}
+          {marquee.dragRect ? (
+            <View
+              style={{
+                position: "absolute",
+                left:
+                  marquee.dragRect.x - SIDEBAR_WIDTH + (listRef.current?.scrollX ?? 0),
+                top: marquee.dragRect.y - LIST_TOP + (listRef.current?.scrollY ?? 0),
+                width: marquee.dragRect.width,
+                height: marquee.dragRect.height,
+                backgroundColor: MARQUEE_FILL,
+              }}
+            />
+          ) : null}
         </ScrollView>
       </View>
       <View
         style={{
-          height: 28,
+          height: STATUS_HEIGHT,
           backgroundColor: "#e5e7eb",
           justifyContent: "center",
           paddingLeft: 12,

@@ -1,7 +1,9 @@
 /**
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Multi-selection for the Files app (gap unit 13, audit #22).
+ * Multi-selection (gap unit 13, audit #22; shared with the desktop
+ * by gap unit 14, audit #23 — this module moved from v2/apps/src to
+ * the renderer dir so Files and the shell import the same model).
  *
  * Pure selection math, unit-testable without filesystem access: the
  * component owns the state, this module owns the transitions. A
@@ -18,10 +20,15 @@
  *
  * Shift-click never deselects: items picked with Ctrl-click outside
  * the range stay selected (Finder behaviour).
+ *
+ * A marquee (gap unit 14) applies the same modifiers to a set of
+ * indices instead of one click: plain replaces the selection with
+ * the touched items (anchor = first touched index, in listing
+ * order); Shift adds them, anchor unchanged; Ctrl/Cmd toggles each,
+ * anchor = first touched index. A marquee over nothing behaves like
+ * a click on empty space for plain (clears) and changes nothing for
+ * Shift/Ctrl.
  */
-
-import type { ClipboardEntry } from "./clipboard";
-import { resolvePasteTarget } from "./clipboard";
 
 export interface PressModifiers {
   readonly shiftKey: boolean;
@@ -77,28 +84,39 @@ export function clearSelection(): SelectionState {
 }
 
 /**
- * Resolve the paste targets for a multi-file paste, in entry order.
- *
- * Each target is resolved against the names already in the folder
- * PLUS the names the earlier entries in this paste will take, so two
- * same-named files pasted from different folders suffix apart
- * (`photo.png`, `photo (1).png`) instead of colliding with each
- * other. Returns undefined when ANY entry must be refused (a folder
- * pasted into itself or a descendant) — the paste is all-or-nothing,
- * so the caller aborts before moving anything.
+ * The selection after a marquee drag touches the entries at `indices`
+ * (in `names`, in listing order — the caller sorts them; the drag
+ * direction does not matter) with `modifiers` held. The rules mirror
+ * applyPressSelection for one item: plain replaces, Shift adds with
+ * the anchor unchanged, Ctrl/Cmd toggles each. A plain marquee over
+ * nothing clears, exactly like a click on empty space; a Shift/Ctrl
+ * marquee over nothing changes nothing.
  */
-export function resolveMultiPasteTargets(
-  entries: readonly ClipboardEntry[],
-  destinationDir: string,
-  existingNames: ReadonlySet<string>,
-): { entry: ClipboardEntry; targetPath: string; targetName: string }[] | undefined {
-  const taken = new Set(existingNames);
-  const targets: { entry: ClipboardEntry; targetPath: string; targetName: string }[] = [];
-  for (const entry of entries) {
-    const target = resolvePasteTarget(entry, destinationDir, taken);
-    if (!target) return undefined;
-    taken.add(target.targetName);
-    targets.push({ entry, ...target });
+export function applyMarqueeSelection(
+  names: readonly string[],
+  prev: SelectionState,
+  indices: readonly number[],
+  modifiers: PressModifiers,
+): SelectionState {
+  const touched = [...indices]
+    .filter((i) => i >= 0 && i < names.length)
+    .sort((a, b) => a - b);
+  if (modifiers.ctrlKey || modifiers.metaKey) {
+    if (touched.length === 0) return prev;
+    const picked = new Set(prev.selected);
+    for (const i of touched) {
+      const name = names[i];
+      if (picked.has(name)) picked.delete(name);
+      else picked.add(name);
+    }
+    return { selected: inListingOrder(names, picked), anchor: touched[0] };
   }
-  return targets;
+  if (modifiers.shiftKey) {
+    if (touched.length === 0) return prev;
+    const picked = new Set(prev.selected);
+    for (const i of touched) picked.add(names[i]);
+    return { selected: inListingOrder(names, picked), anchor: prev.anchor };
+  }
+  if (touched.length === 0) return EMPTY_SELECTION;
+  return { selected: touched.map((i) => names[i]), anchor: touched[0] };
 }
