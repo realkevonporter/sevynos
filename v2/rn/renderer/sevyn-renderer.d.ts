@@ -75,6 +75,23 @@ export interface ContextMenuKeyEvent {
 export function setContextMenuKeyHandler(
   fn: ((ev: ContextMenuKeyEvent) => boolean) | null,
 ): void;
+// A view's press handler (gap unit 13, audit #22). The renderer
+// calls onPress with the modifier keys held at the moment of the
+// press — a plain click, Ctrl/Cmd-click and Shift-click all arrive
+// here, so the Files list can tell them apart. Keyboard activation
+// (Tab+Enter / Space) passes the activating key's modifiers the
+// same way. Declared here so TSX consumers get the event shape;
+// the JSX intrinsics themselves are `any` (see apps/src/jsx.d.ts
+// and shell/src/jsx.d.ts).
+export interface PressEvent {
+  nativeEvent: {
+    shiftKey: boolean;
+    ctrlKey: boolean;
+    metaKey: boolean;
+    altKey: boolean;
+  };
+}
+export type PressHandler = (ev: PressEvent) => void;
 // A view's right-click handler (gap unit 9, audit #12). The renderer
 // calls it — instead of onPress — on a right-button press on the hit
 // view, with the pointer position the menu anchors on. Views without

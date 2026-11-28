@@ -1373,6 +1373,131 @@ check("context menu: right-click outside the panel dismisses", () => {
   assert.ok(!menuOpen, "menu closed after right-click-away");
 });
 
+// --- Press modifiers (gap unit 13, audit #22) --------------------------
+// onPress receives the modifiers held at the moment of the press, so
+// a Ctrl/Cmd-click and a Shift-click are distinguishable from a plain
+// click; keyboard activation (Tab+Enter) passes the activating key's
+// modifiers the same way. A ScrollView with onPress is hit-testable
+// through its background rect (the Files list clears the selection
+// on an empty-space click), and a child row still wins the hit-test
+// where it overlaps the surface.
+const pressModsEvents = [];
+function PressModsApp() {
+  return h(
+    "View",
+    { style: { width: 1024, height: 768, backgroundColor: "#0b0b0f" } },
+    h(
+      "ScrollView",
+      {
+        onPress: (ev) => pressModsEvents.push(["list", ev.nativeEvent]),
+        style: { width: 400, height: 200, backgroundColor: "#f9fafb" },
+      },
+      h(
+        "Pressable",
+        {
+          onPress: (ev) => pressModsEvents.push(["row-a", ev.nativeEvent]),
+          style: { width: 400, height: 36, backgroundColor: "#111111" },
+        },
+        h("Text", { style: { fontSize: 14, color: "#fff" } }, "a"),
+      ),
+      h(
+        "Pressable",
+        {
+          onPress: (ev) => pressModsEvents.push(["row-b", ev.nativeEvent]),
+          style: { width: 400, height: 36, backgroundColor: "#222222" },
+        },
+        h("Text", { style: { fontSize: 14, color: "#fff" } }, "b"),
+      ),
+    ),
+  );
+}
+function pressModsRect(color) {
+  const rect = lastPresent().ops.find(
+    (o) => o.type === "rect" && o.color === color && o.nodeId >= 0,
+  );
+  assert.ok(rect, "hit rect for " + color + " exists");
+  return rect;
+}
+function pressWithMods(rect, mods) {
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: rect.x + 2,
+    y: rect.y + 2,
+    button: 1,
+    pressed: true,
+    nodeId: rect.nodeId,
+    ...mods,
+  });
+}
+
+renderer.update(h(PressModsApp));
+
+check("press: pointer modifiers reach onPress as nativeEvent flags", () => {
+  pressModsEvents.length = 0;
+  pressWithMods(pressModsRect("#111111"), {});
+  assert.deepEqual(pressModsEvents, [
+    ["row-a", { shiftKey: false, ctrlKey: false, metaKey: false, altKey: false }],
+  ]);
+  pressModsEvents.length = 0;
+  pressWithMods(pressModsRect("#111111"), { shift: true });
+  assert.deepEqual(pressModsEvents[0][1].shiftKey, true);
+  assert.deepEqual(pressModsEvents[0][1].ctrlKey, false);
+  pressModsEvents.length = 0;
+  pressWithMods(pressModsRect("#222222"), { ctrl: true });
+  assert.deepEqual(pressModsEvents[0], [
+    "row-b",
+    { shiftKey: false, ctrlKey: true, metaKey: false, altKey: false },
+  ]);
+  pressModsEvents.length = 0;
+  pressWithMods(pressModsRect("#222222"), { meta: true });
+  assert.deepEqual(pressModsEvents[0][1].metaKey, true);
+  pressModsEvents.length = 0;
+  pressWithMods(pressModsRect("#222222"), { super: true, alt: true });
+  assert.deepEqual(pressModsEvents[0][1].metaKey, true);
+  assert.deepEqual(pressModsEvents[0][1].altKey, true);
+});
+
+check("press: keyboard activation carries the activating key's modifiers", () => {
+  pressModsEvents.length = 0;
+  Sevyn._handlers.key({ key: 15, pressed: true }); // Tab -> row-a
+  Sevyn._handlers.key({ key: 28, pressed: true, ctrl: true }); // Ctrl+Enter
+  assert.deepEqual(pressModsEvents, [
+    ["row-a", { shiftKey: false, ctrlKey: true, metaKey: false, altKey: false }],
+  ]);
+  pressModsEvents.length = 0;
+  Sevyn._handlers.key({ key: 28, pressed: true, shift: true }); // Shift+Enter
+  assert.deepEqual(pressModsEvents[0][1].shiftKey, true);
+});
+
+check("press: ScrollView with onPress is hit-testable, rows win the overlap", () => {
+  const surface = pressModsRect("#f9fafb");
+  assert.ok(surface.h >= 100, "list surface is tall, h=" + surface.h);
+  pressModsEvents.length = 0;
+  // Below the two 36px rows, inside the 200px surface: empty space.
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: surface.x + 2,
+    y: surface.y + 150,
+    button: 1,
+    pressed: true,
+    nodeId: surface.nodeId,
+  });
+  assert.deepEqual(
+    pressModsEvents.map(([who]) => who),
+    ["list"],
+    "empty-space press hit the list, not a row",
+  );
+  pressModsEvents.length = 0;
+  pressWithMods(pressModsRect("#111111"), {});
+  assert.deepEqual(
+    pressModsEvents.map(([who]) => who),
+    ["row-a"],
+    "row press did not leak to the list",
+  );
+});
+
+renderer.update(h(App));
+
 // --- View hit rect for onContextMenu (gap unit 11, audit #14) --------
 // A plain View has the same no-hit-rect shape as a ScrollView: only
 // Pressable / onPress views emit one. A View that declares

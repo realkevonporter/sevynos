@@ -381,7 +381,8 @@ class RnHost {
                  const jsi::Value& v, bool isMargin);
   std::vector<DrawOp> parseOps(jsi::Runtime& rt, const jsi::Value& opsValue);
   void dispatchPointer(const std::string& type, double x, double y,
-                       uint32_t button, bool pressed);
+                       uint32_t button, bool pressed,
+                       const KeyModifiers& modifiers);
   void dispatchScroll(double x, double y, double dx, double dy);
   void dispatchKey(uint32_t key, bool pressed,
                    const KeyModifiers& modifiers);
@@ -433,10 +434,14 @@ class RnHost {
   // One timed input event from the headless input file. Events are
   // separated by ';' (the file is written through the Terminal's
   // single-line input, so it is one line):
-  //   <ms> pointer <down|up|move> <x> <y>
-  //   <ms> tap <x> <y>            (down + up 120 ms apart)
+  //   <ms> pointer <down|up|move> <x> <y> [shift|ctrl|meta|alt ...]
+  //   <ms> tap <x> <y> [shift|ctrl|meta|alt ...]  (down + up 120 ms apart)
   //   <ms> key <evdev-code> <down|up> <shift 0|1>
   //   <ms> type <text>   (expands to key down/up pairs, 30 ms/char)
+  // The trailing modifier tokens on pointer/tap lines (gap unit 13)
+  // are optional and backward compatible: a bare `tap x y` is a
+  // plain click, `tap x y ctrl` a Ctrl-click, `tap x y shift` a
+  // Shift-click — the modifiers a check holds for the press.
   struct HeadlessEvent {
     long long atMs = 0;
     bool isPointer = true;
@@ -447,8 +452,16 @@ class RnHost {
     uint32_t code = 0;
     bool pressed = false;
     bool shift = false;
+    bool ctrl = false;
+    bool meta = false;
+    bool alt = false;
   };
   std::vector<HeadlessEvent> headlessEvents_;
+  // Trailing modifier tokens on a headless `pointer`/`tap` line
+  // (gap unit 13): `shift`, `ctrl`, `meta` (or `super`), `alt` —
+  // any combination, any order; unknown tokens are ignored so a
+  // typo never breaks the event. A bare line holds no modifiers.
+  static void parsePointerModifiers(std::istringstream& es, HeadlessEvent& hev);
   size_t headlessEventIdx_ = 0;
   long long headlessStartMs_ = 0;
   long long headlessPresents_ = 0;
@@ -1576,7 +1589,8 @@ void RnHost::fireDueTimers(jsi::Runtime& rt) {
 }
 
 void RnHost::dispatchPointer(const std::string& type, double x, double y,
-                             uint32_t button, bool pressed) {
+                             uint32_t button, bool pressed,
+                             const KeyModifiers& modifiers) {
   if (!hasPointerHandler_ || !runtime_)
     return;
   jsi::Runtime& rt = *runtime_;
@@ -1587,6 +1601,15 @@ void RnHost::dispatchPointer(const std::string& type, double x, double y,
     ev.setProperty(rt, "y", y);
     ev.setProperty(rt, "button", (double)button);
     ev.setProperty(rt, "pressed", pressed);
+    // Modifier snapshot at the moment of the pointer event (gap unit
+    // 13, audit #22): the renderer forwards these to onPress, so a
+    // Ctrl/Cmd-click or Shift-click is distinguishable from a plain
+    // click. Same field names as dispatchKey below.
+    ev.setProperty(rt, "shift", modifiers.shift());
+    ev.setProperty(rt, "ctrl", modifiers.ctrl());
+    ev.setProperty(rt, "alt", modifiers.alt());
+    ev.setProperty(rt, "super", modifiers.super());
+    ev.setProperty(rt, "meta", modifiers.meta());
     if (type == "button" && pressed) {
       // Hit-test the last presented tree, topmost first.
       int hit = -1;
@@ -2020,6 +2043,16 @@ static bool charToKey(char c, uint32_t& code, bool& shift) {
   }
 }
 
+void RnHost::parsePointerModifiers(std::istringstream& es, HeadlessEvent& hev) {
+  std::string token;
+  while (es >> token) {
+    if (token == "shift") hev.shift = true;
+    if (token == "ctrl") hev.ctrl = true;
+    if (token == "meta" || token == "super") hev.meta = true;
+    if (token == "alt") hev.alt = true;
+  }
+}
+
 void RnHost::loadHeadlessInput() {
   headlessEvents_.clear();
   headlessEventIdx_ = 0;
@@ -2063,6 +2096,7 @@ void RnHost::loadHeadlessInput() {
       // pressed=true for a tap; "move" for motion.
       hev.type = action == "move" ? "move" : "button";
       hev.pressed = action == "down";
+      parsePointerModifiers(es, hev);
       headlessEvents_.push_back(hev);
     } else if (kind == "tap") {
       // A tap is a down + an up 120 ms apart (one event, not two).
@@ -2082,6 +2116,12 @@ void RnHost::loadHeadlessInput() {
       up.x = x;
       up.y = y;
       up.pressed = false;
+      // The same modifiers hold for the down and the up.
+      parsePointerModifiers(es, down);
+      up.shift = down.shift;
+      up.ctrl = down.ctrl;
+      up.meta = down.meta;
+      up.alt = down.alt;
       headlessEvents_.push_back(down);
       headlessEvents_.push_back(up);
     } else if (kind == "scroll") {
@@ -2153,8 +2193,15 @@ void RnHost::fireDueHeadlessInput() {
     if (ev.isScroll) {
       dispatchScroll(ev.x, ev.y, ev.dx, ev.dy);
     } else if (ev.isPointer) {
-      // A tap is a down + an up; the file carries both lines.
-      dispatchPointer(ev.type, ev.x, ev.y, /*button=*/1, ev.pressed);
+      // A tap is a down + an up; the file carries both lines. The
+      // modifier snapshot comes from the line's trailing tokens
+      // (gap unit 13) — a bare line is a plain click.
+      KeyModifiers modifiers;
+      modifiers.setShift(ev.shift);
+      modifiers.onKey(29, ev.ctrl);   // KEY_LEFTCTRL
+      modifiers.onKey(56, ev.alt);    // KEY_LEFTALT
+      modifiers.onKey(125, ev.meta);  // KEY_LEFTMETA (Super / Cmd)
+      dispatchPointer(ev.type, ev.x, ev.y, /*button=*/1, ev.pressed, modifiers);
     } else {
       // Headless `key` lines carry shift only (no per-side
       // keycodes, no Ctrl/Alt/Super) — the snapshot is shift-only.
@@ -2238,7 +2285,9 @@ int RnHost::run() {
   if (!headless_) {
   wayland_->setPointerHandler(
       [this](const std::string& type, double x, double y, uint32_t button,
-             bool pressed) { dispatchPointer(type, x, y, button, pressed); });
+             bool pressed, const KeyModifiers& modifiers) {
+        dispatchPointer(type, x, y, button, pressed, modifiers);
+      });
   // GF65 scroll fix: wheel/trackpad axis events reach the
   // renderer's scrollAt through the existing dispatchScroll (the
   // same path the headless `scroll` input lines use).

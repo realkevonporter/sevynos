@@ -794,7 +794,8 @@ void Wayland::onPointerEnter(void* data, wl_pointer* pointer, uint32_t serial,
   // bug — nothing in the guest ever set one).
   self->setCursor(serial);
   if (self->pointerHandler_)
-    self->pointerHandler_("enter", self->pointerX_, self->pointerY_, 0, false);
+    self->pointerHandler_("enter", self->pointerX_, self->pointerY_, 0, false,
+                          self->modifiers_);
 }
 
 // Load the default arrow cursor and hand it to the compositor for
@@ -857,7 +858,8 @@ void Wayland::onPointerLeave(void* data, wl_pointer* pointer, uint32_t serial,
   (void)serial;
   (void)surface;
   if (self->pointerHandler_)
-    self->pointerHandler_("leave", self->pointerX_, self->pointerY_, 0, false);
+    self->pointerHandler_("leave", self->pointerX_, self->pointerY_, 0, false,
+                          self->modifiers_);
 }
 
 void Wayland::onPointerMotion(void* data, wl_pointer* pointer, uint32_t time,
@@ -869,7 +871,7 @@ void Wayland::onPointerMotion(void* data, wl_pointer* pointer, uint32_t time,
   self->pointerY_ = wl_fixed_to_double(sy);
   if (self->pointerHandler_)
     self->pointerHandler_("motion", self->pointerX_, self->pointerY_, 0,
-                          false);
+                          false, self->modifiers_);
 }
 
 void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
@@ -911,7 +913,8 @@ void Wayland::onPointerButton(void* data, wl_pointer* pointer, uint32_t serial,
   }
   if (self->pointerHandler_)
     self->pointerHandler_("button", self->pointerX_, self->pointerY_, button,
-                          state == WL_POINTER_BUTTON_STATE_PRESSED);
+                          state == WL_POINTER_BUTTON_STATE_PRESSED,
+                          self->modifiers_);
 }
 
 void Wayland::onPointerAxis(void* data, wl_pointer* pointer, uint32_t time,

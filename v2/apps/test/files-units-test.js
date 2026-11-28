@@ -32,6 +32,9 @@ fs.writeFileSync(
     ";\n" +
     "export * as icons from " +
     JSON.stringify(path.join(__dirname, "..", "src", "file-icons.ts")) +
+    ";\n" +
+    "export * as selection from " +
+    JSON.stringify(path.join(__dirname, "..", "src", "selection.ts")) +
     ";\n",
 );
 
@@ -43,7 +46,7 @@ esbuild.buildSync({
   outfile: bundle,
   logLevel: "silent",
 });
-const { clipboard, volumes, icons } = require(bundle);
+const { clipboard, volumes, icons, selection } = require(bundle);
 
 const cutDir = {
   kind: "cut",
@@ -339,5 +342,128 @@ check("file-icons: glyphForIcon gives every icon a glyph", () => {
     assert.ok(icons.glyphForIcon(icon).length > 0, icon + " has a glyph");
   }
 });
+
+// --- multi-selection (gap unit 13) --------------------------------------
+const PLAIN = { shiftKey: false, ctrlKey: false, metaKey: false };
+const CTRL = { shiftKey: false, ctrlKey: true, metaKey: false };
+const META = { shiftKey: false, ctrlKey: false, metaKey: true };
+const SHIFT = { shiftKey: true, ctrlKey: false, metaKey: false };
+const NAMES = ["alpha", "beta.txt", "gamma.txt", "delta.txt"];
+
+check("selection: plain click selects one item and moves the anchor", () => {
+  const next = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 1, PLAIN);
+  assert.deepEqual(next, { selected: ["beta.txt"], anchor: 1 });
+  const again = selection.applyPressSelection(NAMES, next, 3, PLAIN);
+  assert.deepEqual(again, { selected: ["delta.txt"], anchor: 3 });
+});
+
+check("selection: Ctrl-click toggles in and out, anchor moves to it", () => {
+  let s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 0, PLAIN);
+  s = selection.applyPressSelection(NAMES, s, 2, CTRL);
+  assert.deepEqual(s, { selected: ["alpha", "gamma.txt"], anchor: 2 });
+  s = selection.applyPressSelection(NAMES, s, 0, CTRL);
+  assert.deepEqual(s, { selected: ["gamma.txt"], anchor: 0 });
+  s = selection.applyPressSelection(NAMES, s, 2, META);
+  assert.deepEqual(s, { selected: [], anchor: 2 });
+});
+
+check("selection: Cmd-click (meta) toggles like Ctrl-click", () => {
+  const s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 1, META);
+  assert.deepEqual(s, { selected: ["beta.txt"], anchor: 1 });
+});
+
+check("selection: Shift-click adds the range from the anchor, anchor stays", () => {
+  let s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 0, PLAIN);
+  s = selection.applyPressSelection(NAMES, s, 2, SHIFT);
+  assert.deepEqual(s, { selected: ["alpha", "beta.txt", "gamma.txt"], anchor: 0 });
+  // A second Shift-click re-ranges from the same anchor.
+  s = selection.applyPressSelection(NAMES, s, 1, SHIFT);
+  assert.deepEqual(s, { selected: ["alpha", "beta.txt", "gamma.txt"], anchor: 0 });
+  // Upwards works too.
+  s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 3, PLAIN);
+  s = selection.applyPressSelection(NAMES, s, 1, SHIFT);
+  assert.deepEqual(s, { selected: ["beta.txt", "gamma.txt", "delta.txt"], anchor: 3 });
+});
+
+check("selection: Shift-click keeps Ctrl-picked items outside the range", () => {
+  let s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 0, PLAIN);
+  s = selection.applyPressSelection(NAMES, s, 3, CTRL);
+  s = selection.applyPressSelection(NAMES, s, 2, SHIFT);
+  assert.deepEqual(s, {
+    selected: ["alpha", "gamma.txt", "delta.txt"],
+    anchor: 3,
+  });
+});
+
+check("selection: Shift-click with no anchor behaves like a plain click", () => {
+  const s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 2, SHIFT);
+  assert.deepEqual(s, { selected: ["gamma.txt"], anchor: 2 });
+});
+
+check("selection: clearSelection empties the selection and the anchor", () => {
+  let s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 0, PLAIN);
+  s = selection.applyPressSelection(NAMES, s, 2, CTRL);
+  assert.deepEqual(selection.clearSelection(), selection.EMPTY_SELECTION);
+  assert.deepEqual(s.selected, ["alpha", "gamma.txt"]);
+});
+
+check("selection: press outside the listing leaves the selection alone", () => {
+  const s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 0, PLAIN);
+  assert.deepEqual(selection.applyPressSelection(NAMES, s, 9, PLAIN), s);
+  assert.deepEqual(selection.applyPressSelection(NAMES, s, -1, CTRL), s);
+});
+
+check("selection: resolveMultiPasteTargets suffixes same-named files apart", () => {
+  const entries = [
+    {
+      kind: "copy",
+      sourcePath: "/data/photo.png",
+      sourceName: "photo.png",
+      sourceKind: "file",
+    },
+    {
+      kind: "copy",
+      sourcePath: "/other/photo.png",
+      sourceName: "photo.png",
+      sourceKind: "file",
+    },
+  ];
+  assert.deepEqual(selection.resolveMultiPasteTargets(entries, "/Downloads", new Set()), [
+    {
+      entry: entries[0],
+      targetPath: "/Downloads/photo.png",
+      targetName: "photo.png",
+    },
+    {
+      entry: entries[1],
+      targetPath: "/Downloads/photo (1).png",
+      targetName: "photo (1).png",
+    },
+  ]);
+});
+
+check(
+  "selection: resolveMultiPasteTargets refuses the whole paste on a self-paste",
+  () => {
+    const entries = [
+      {
+        kind: "copy",
+        sourcePath: "/data/a.txt",
+        sourceName: "a.txt",
+        sourceKind: "file",
+      },
+      {
+        kind: "cut",
+        sourcePath: "/data/Photos",
+        sourceName: "Photos",
+        sourceKind: "directory",
+      },
+    ];
+    assert.equal(
+      selection.resolveMultiPasteTargets(entries, "/data/Photos/Trip", new Set()),
+      undefined,
+    );
+  },
+);
 
 console.log(`\nfiles units: ${passed} checks passed`);
