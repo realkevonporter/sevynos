@@ -189,6 +189,32 @@ jobs:
           sudo chown -R "$USER" v2/image/build
           node v2/image/m9-check.mjs
 
+      - name: Fail if the M9 check produced no verdict
+        # Backstop for a silent harness exit: the check must write
+        # v2/image/build/m9-check.json with pass=true. A run that
+        # exits 0 without a verdict file (the bisect false green,
+        # run 46166095132 — QMP socket closed mid-drag, node exited 0
+        # with no verdict) previously read as a green job.
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          path = "v2/image/build/m9-check.json"
+          try:
+              with open(path) as f:
+                  result = json.load(f)
+          except FileNotFoundError:
+              print("m9-check.json missing: the harness exited without a verdict")
+              sys.exit(1)
+          except json.JSONDecodeError as e:
+              print(f"m9-check.json unreadable: {e}")
+              sys.exit(1)
+          if result.get("pass") is not True:
+              print("m9-check.json pass=false: the M9 check failed")
+              sys.exit(1)
+          print("m9-check.json pass=true")
+          EOF
+
       - name: Upload M9 artifacts
         if: always()
         uses: actions/upload-artifact@v4
