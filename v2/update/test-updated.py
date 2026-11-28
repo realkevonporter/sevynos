@@ -321,6 +321,38 @@ def main():
             pass
 
         def do_GET(self):
+            # Slow-apply hook: /slow/<name> streams the file in
+            # 64 KiB chunks with a pause between them, so the
+            # download takes seconds and the CLI's live output +
+            # heartbeat can be observed mid-apply (the silence fix
+            # proves its prints arrive while the apply is still
+            # running, not only at exit).
+            if self.path.startswith("/slow/"):
+                name = self.path[len("/slow/"):]
+                if "/" in name or name.startswith("."):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                fpath = Path(self.directory) / name
+                if not fpath.exists():
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                size = fpath.stat().st_size
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "application/octet-stream")
+                self.send_header("Content-Length", str(size))
+                self.end_headers()
+                with open(fpath, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                        time.sleep(0.2)
+                return
             # Case 5 hook: fail the first feed fetch with HTTP 500.
             if getattr(server, "fail_feed_once", False) and \
                     self.path == "/updates.json":
@@ -497,10 +529,22 @@ def main():
                        capture_output=True, text=True, env=cli_env,
                        timeout=120)
     check("CLI apply exits 0", r.returncode == 0, r.stderr[:300])
+    check("CLI apply prints applying",
+          "applying m8-test-2" in r.stdout, r.stdout[:200])
     check("CLI apply prints applied",
           "applied m8-test-2 B" in r.stdout, r.stdout[:200])
-    check("reboot requested", reboot_marker.exists(),
-          "no reboot marker")
+    # The reboot is requested only after EVENT APPLIED is flushed to
+    # the CLI, so the marker lands a few ms after "applied" is
+    # printed — poll briefly instead of asserting it already exists
+    # (the old immediate check encoded the buggy marker-before-event
+    # ordering, which is exactly what kept the device silent).
+    ok_marker = False
+    for _ in range(50):
+        if reboot_marker.exists():
+            ok_marker = True
+            break
+        time.sleep(0.1)
+    check("reboot requested", ok_marker, "no reboot marker")
     check("slot B holds the verified v2 images",
           sha256_file(data / "slots" / "B" / "vmlinuz") ==
           sha256_file(kern_v2) and
@@ -1453,6 +1497,114 @@ def main():
         (tmp / "bin" / "wget").unlink()
     shutil.rmtree(gd6)
     shutil.rmtree(gesp6)
+
+    # --- slow apply: live CLI output + heartbeat + parent reboot ---
+    # The silence bug: `update apply` printed nothing on the GF65
+    # before rebooting. Two causes — (1) the CLI's apply-loop prints
+    # sat in glibc's fully-buffered stdout (the Terminal captures
+    # the CLI through a pipe) until the CLI exited, and the reboot
+    # killed it first; (2) the daemon's EVENT APPLIED only ever
+    # fired from the reaper, which the child's own execlp("reboot")
+    # could never reach on-device (the harness reboot stub exits 0,
+    # masking it). The fix: fflush after each CLI print, the child
+    # exits 0 and the parent broadcasts EVENT APPLIED, flushes, then
+    # reboots — plus a progress heartbeat while the download runs.
+    # This section proves all three against a trickling server: the
+    # CLI must print "applying ..." and a heartbeat line WHILE the
+    # download is still running (not only at exit), and the daemon
+    # log must show UPDATE APPLY REBOOTING after UPDATE APPLIED
+    # (the parent, not the child, performed the reboot).
+    kern_slow = big_image("vmlinuz-slow", 1024 * 1024, "VMLINUZ-SLOW\n")
+    init_slow = big_image("initramfs-slow.cpio.gz", 1024 * 1024,
+                          "INITRAMFS-SLOW\n")
+    dslow = tmp / "data-slow"
+    (dslow / "slots" / "A").mkdir(parents=True)
+    (dslow / "slots" / "B").mkdir(parents=True)
+    (dslow / "slot-state.json").write_text(json.dumps(
+        {"active": "A", "good": "A", "attempts": 0,
+         "version": "m8-slow-1"}, indent=2) + "\n")
+    (dslow / "update-config.json").write_text(json.dumps(
+        {"channel": "nightly", "url": feed_url}, indent=2) + "\n")
+    (tmp / "os-version-slow").write_text("m8-slow-1\n")
+    (tmp / "health-slow.log").write_text("")
+    master_slow, slave_slow = pty.openpty()
+    env_slow = {
+        "SEVYN_UPDATE_SOCK": str(tmp / "update-slow.sock"),
+        "SEVYN_UPDATE_DATA": str(dslow),
+        "SEVYN_UPDATE_TRUSTED_KEYS":
+            str(tmp / "trusted-update-keys.json"),
+        "SEVYN_UPDATE_VERSION_FILE": str(tmp / "os-version-slow"),
+        "SEVYN_UPDATE_TMP": str(tmp / "dl"),
+        "SEVYN_UPDATE_HEALTH_FILE": str(tmp / "health-slow.log"),
+        "SEVYN_UPDATE_SLOT": "A",
+        "SEVYN_UPDATE_CTL": os.ttyname(slave_slow),
+        "SEVYN_UPDATE_PROGRESS_SECS": "1",
+    }
+    d_slow = Daemon(tmp, env_slow)
+    check("slow: daemon starts", d_slow.start())
+    write_feed(server_dir, key_file, "m8-slow-2", "nightly",
+               artifacts_for(kern_slow, init_slow,
+                             base=f"http://127.0.0.1:{port}/slow"))
+    n_rb_slow = geo_reboots()
+    cli_env_slow = dict(os.environ)
+    cli_env_slow["SEVYN_UPDATE_SOCK"] = str(tmp / "update-slow.sock")
+    proc_slow = subprocess.Popen(
+        [str(cli_bin), "update", "apply"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=cli_env_slow)
+    # (line, arrival time): the "applying" line must arrive seconds
+    # before the process exits to prove live output — without the
+    # fflush fix the CLI's whole stdout arrives in one burst at
+    # exit, so an arrival-time margin (not proc.poll(), which races
+    # the reaper) is what discriminates the fix.
+    slow_lines = []
+
+    def _read_slow():
+        for raw in proc_slow.stdout:
+            slow_lines.append((raw.rstrip("\n"), time.time()))
+
+    slow_reader = threading.Thread(target=_read_slow, daemon=True)
+    slow_reader.start()
+    try:
+        rc_slow = proc_slow.wait(timeout=90)
+    except subprocess.TimeoutExpired:
+        proc_slow.kill()
+        rc_slow = "timeout"
+    t_exit_slow = time.time()
+    slow_reader.join(timeout=5)
+    slow_text = "\n".join(ln for ln, _ in slow_lines)
+    check("slow: CLI apply exits 0", rc_slow == 0, str(rc_slow))
+    check("slow: CLI prints applying while still running",
+          any("applying m8-slow-2" in ln and t_exit_slow - t >= 1.0
+              for ln, t in slow_lines), slow_text[:300])
+    applied_idx = next(
+        (i for i, (ln, _) in enumerate(slow_lines)
+         if "applied m8-slow-2 B" in ln), None)
+    check("slow: CLI prints applied",
+          applied_idx is not None, slow_text[:300])
+    n_heartbeat = sum(
+        1 for i, (ln, _) in enumerate(slow_lines)
+        if "still applying m8-slow-2" in ln and
+        (applied_idx is None or i < applied_idx))
+    check("slow: heartbeat printed before applied",
+          n_heartbeat >= 1, slow_text[:300])
+    check("slow: apply requested a reboot",
+          geo_wait_reboot(n_rb_slow))
+    slow_log = d_slow.watcher.text()
+    check("slow: parent rebooted after broadcasting APPLIED",
+          "UPDATE APPLIED m8-slow-2 slot=B" in slow_log and
+          "UPDATE APPLY REBOOTING" in slow_log and
+          slow_log.index("UPDATE APPLIED m8-slow-2 slot=B") <
+          slow_log.index("UPDATE APPLY REBOOTING"),
+          slow_log[-400:])
+    st_slow = json.loads((dslow / "slot-state.json").read_text())
+    check("slow: state flipped to B (good stays A)",
+          st_slow["active"] == "B" and st_slow["good"] == "A" and
+          st_slow["version"] == "m8-slow-2", str(st_slow))
+    d_slow.stop()
+    os.close(master_slow)
+    os.close(slave_slow)
+    shutil.rmtree(dslow)
 
     server.shutdown()
     os.close(master_fd)
