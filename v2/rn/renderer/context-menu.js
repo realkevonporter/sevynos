@@ -40,11 +40,19 @@
 const React = require("react");
 const { useState, useLayoutEffect, useSyncExternalStore } = React;
 const renderer = require("./sevyn-renderer");
+const { tokens } = require("./tokens");
 
-const MENU_WIDTH = 220;
-const ROW_HEIGHT = 32;
-const MENU_PADDING = 4;
-const SEPARATOR_HEIGHT = 9; // 1px rule + 4px margins either side
+// Geometry and dark colors come from ./tokens (the manifest's one
+// shared source, polish surface (a)). Literals that stay are the ones
+// whose manifest value differs from today's code — those change in
+// their own surface's PR, not here (see ROW_HEIGHT and the highlight
+// / label colors below).
+
+const MENU_WIDTH = tokens.menu.width;
+const ROW_HEIGHT = 32; // Manifest menu.rowHeight is 28 (surface (d)
+// changes it); 32 is today's measured value — do NOT migrate yet.
+const MENU_PADDING = tokens.menu.padding;
+const SEPARATOR_HEIGHT = tokens.menu.separatorHeight; // 1px rule + 4px margins either side
 
 function itemHeight(item) {
   return item.separator ? SEPARATOR_HEIGHT : ROW_HEIGHT;
@@ -136,9 +144,9 @@ function ContextMenu(props) {
         key: item.id,
         style: {
           height: 1,
-          backgroundColor: "#4b5563",
-          marginTop: 4,
-          marginBottom: 4,
+          backgroundColor: tokens.color.dark.border,
+          marginTop: tokens.menu.padding,
+          marginBottom: tokens.menu.padding,
         },
       });
     }
@@ -146,11 +154,16 @@ function ContextMenu(props) {
       flexDirection: "row",
       alignItems: "center",
       height: ROW_HEIGHT,
-      borderRadius: 6,
-      paddingLeft: 10,
-      paddingRight: 10,
+      borderRadius: tokens.menu.rowRadius,
+      paddingLeft: tokens.menu.labelPadX,
+      paddingRight: tokens.menu.labelPadX,
     };
+    // Highlight stays #3b82f6: the manifest retires the blue for the
+    // accent fill in surface (d); that PR changes this line.
     if (i === highlight) rowStyle.backgroundColor = "#3b82f6";
+    // Label stays #ffffff / disabled #6b7280: the manifest's dark
+    // textPrimary is #FAFAFA (a value change) and its dark muted is
+    // #9CA3AF — neither is today's value, so neither migrates here.
     const labelColor = item.disabled ? "#6b7280" : "#ffffff";
     return React.createElement(
       "Pressable",
@@ -169,14 +182,18 @@ function ContextMenu(props) {
         ? React.createElement(
             "Text",
             {
-              style: { fontSize: 14, color: labelColor, width: 20 },
+              style: {
+                fontSize: tokens.type.menuLabel.size,
+                color: labelColor,
+                width: tokens.menu.iconSlot,
+              },
             },
             item.icon,
           )
         : null,
       React.createElement(
         "Text",
-        { style: { fontSize: 14, color: labelColor } },
+        { style: { fontSize: tokens.type.menuLabel.size, color: labelColor } },
         item.label,
       ),
     );
@@ -221,8 +238,8 @@ function ContextMenu(props) {
           left,
           top,
           width: menuWidth,
-          backgroundColor: "#1f2937",
-          borderRadius: 8,
+          backgroundColor: tokens.color.dark.surface,
+          borderRadius: tokens.menu.radius,
           padding: MENU_PADDING,
         },
       },

@@ -109,6 +109,7 @@
 // the headless `scroll` input lines.
 
 const Reconciler = require("react-reconciler");
+const { tokens } = require("./tokens");
 
 // SyncLane in this reconciler build (lanes are shifted one bit from
 // the React 18 layout: Sync=2, InputContinuous=8, Default=32).
@@ -215,7 +216,7 @@ function fontOf(inst) {
     const st = flattenStyle(n.props && n.props.style);
     if (st.fontSize != null || st.fontWeight != null || st.color != null) {
       return {
-        size: st.fontSize != null ? Number(st.fontSize) : 14,
+        size: st.fontSize != null ? Number(st.fontSize) : tokens.type.body.size,
         bold:
           st.fontWeight != null &&
           (st.fontWeight === "bold" || Number(st.fontWeight) >= 600),
@@ -225,7 +226,10 @@ function fontOf(inst) {
     }
     n = n.parent;
   }
-  return { size: 14, bold: false, color: "#ffffff", align: "left" };
+  // No font anywhere up the tree: the manifest body size (14). The
+  // #ffffff default stays — the manifest's dark textPrimary is
+  // #FAFAFA, a value change for a later surface, not this PR.
+  return { size: tokens.type.body.size, bold: false, color: "#ffffff", align: "left" };
 }
 
 function applyStyleToNode(inst) {
