@@ -56,6 +56,20 @@ export interface PointerMoveEvent {
 export function subscribePointerMove(
   fn: (ev: PointerMoveEvent) => boolean | void,
 ): () => void;
+// Pointer-up subscribers (gap unit 14, audit #23). A listener is
+// called on left-button release and on pointer-leave (a drag ending
+// off-surface), receives the release position, and returns true only
+// when it changed state — the renderer re-presents only then, the
+// same contract as the move listeners. A leave carries the far-off
+// position, so a listener that needs the last real position must
+// remember it from the moves.
+export interface PointerUpEvent {
+  x: number;
+  y: number;
+}
+export function subscribePointerUp(
+  fn: (ev: PointerUpEvent) => boolean | void,
+): () => void;
 // Context-menu key handler (gap unit 9, audit #12). The open
 // ContextMenu (./context-menu.js) registers a handler that owns the
 // navigation keys while it is mounted; handleKey offers each pressed
@@ -89,6 +103,13 @@ export interface PressEvent {
     ctrlKey: boolean;
     metaKey: boolean;
     altKey: boolean;
+    // The pointer position at the moment of the press (gap unit 14,
+    // audit #23: the marquee starts from an onPress). Present on
+    // pointer presses only — keyboard activation (Tab+Enter / Space)
+    // has no position, so a handler can tell the two apart by
+    // whether these keys exist.
+    x?: number;
+    y?: number;
   };
 }
 export type PressHandler = (ev: PressEvent) => void;

@@ -1232,7 +1232,9 @@ check("files: multi-select toggle, range, clear, multi-copy, multi-delete", () =
   assert.ok(statusText().includes("Selected 3 items"), "Shift-click ranges");
   assert.equal(selectedRowCount(), 3, "three rows highlighted");
   // Clicking empty list space (below the rows, inside the surface)
-  // clears the selection.
+  // clears the selection — at release time, not press time (gap
+  // unit 14: a press on empty space may become a marquee, so the
+  // click only commits when the press is released without dragging).
   const surface = lastOps().find(
     (o) => o.type === "rect" && o.color === "#f9fafb" && o.h > 200 && o.nodeId >= 0,
   );
@@ -1243,6 +1245,14 @@ check("files: multi-select toggle, range, clear, multi-copy, multi-delete", () =
     y: surface.y + surface.h - 10,
     button: 1,
     pressed: true,
+    nodeId: surface.nodeId,
+  });
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: surface.x + 2,
+    y: surface.y + surface.h - 10,
+    button: 1,
+    pressed: false,
     nodeId: surface.nodeId,
   });
   assert.ok(statusText().includes("Selection cleared."), "empty-space click clears");
@@ -1268,6 +1278,150 @@ check("files: multi-select toggle, range, clear, multi-copy, multi-delete", () =
   assert.deepEqual(deleted, ["/data/beta.txt", "/data/delta.txt"]);
   assert.ok(statusText().includes("Deleted 2 items"), "multi-delete status");
   assert.equal(selectedRowCount(), 0, "selection cleared after delete");
+});
+
+// --- Files marquee select (gap unit 14, audit #23) -----------------------
+// Drag a rectangle over empty list space to multi-select the rows it
+// touches: the selection live-previews during the drag, the rubber
+// band draws while dragging and clears on release, Shift adds to the
+// selection, and a press released without dragging is a click that
+// clears — as before, at release time now.
+check("files: marquee select drags a rectangle, Shift adds, click still clears", () => {
+  const handler = (cmd) => {
+    if (cmd === "sevyn files list /data")
+      return "0\nd alpha\nf beta.txt\nf gamma.txt\nf delta.txt\n";
+    if (cmd === "sevyn files volumes")
+      return "0\n/\tInternal Drive\t0\t1000000\t500000\n";
+    if (cmd === "sevyn files clipboard") return "0\nempty\n";
+    return "1\nerror: no such directory\n";
+  };
+  loadAs(
+    {
+      id: "files",
+      name: "Files",
+      color: "#3b82f6",
+      glyph: "F",
+      permissions: ["cli.exec"],
+    },
+    filesBundle,
+    handler,
+  );
+  function lastOps() {
+    return Sevyn._presents[Sevyn._presents.length - 1].ops;
+  }
+  function statusText() {
+    const texts = textsOf(Sevyn._presents[Sevyn._presents.length - 1]);
+    const line = texts.find((t) => t.startsWith("Clipboard"));
+    assert.ok(line, "status line present");
+    return line;
+  }
+  // Listing rows are the 36px pressables, top to bottom: "..",
+  // alpha, beta.txt, gamma.txt, delta.txt.
+  function rowRects() {
+    const rows = lastOps()
+      .filter((o) => o.type === "rect" && o.h === 36 && o.nodeId >= 0)
+      .sort((a, b) => a.y - b.y);
+    assert.equal(rows.length, 5, "five listing rows");
+    return rows;
+  }
+  function selectedRowCount() {
+    return lastOps().filter(
+      (o) => o.type === "rect" && o.h === 36 && o.color === "#dbeafe",
+    ).length;
+  }
+  function surfaceRect() {
+    const surface = lastOps().find(
+      (o) => o.type === "rect" && o.color === "#f9fafb" && o.h > 200 && o.nodeId >= 0,
+    );
+    assert.ok(surface, "list surface hit rect exists");
+    return surface;
+  }
+  function pressRect(rect, mods) {
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: rect.x + 2,
+      y: rect.y + 2,
+      button: 1,
+      pressed: true,
+      nodeId: rect.nodeId,
+      ...(mods || {}),
+    });
+  }
+  function bandPresent() {
+    return lastOps().some((o) => o.type === "rect" && o.color === "#5B5BD626");
+  }
+  // Press on empty space, move in steps, release: a drag. The
+  // release carries the same nodeId as the press (the host reports
+  // the release against the surface it started on).
+  function drag(x0, y0, x1, y1, mods) {
+    const surface = surfaceRect();
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: x0,
+      y: y0,
+      button: 1,
+      pressed: true,
+      nodeId: surface.nodeId,
+      ...(mods || {}),
+    });
+    Sevyn._handlers.pointer({ type: "move", x: (x0 + x1) / 2, y: (y0 + y1) / 2 });
+    Sevyn._handlers.pointer({ type: "move", x: x1, y: y1 });
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: x1,
+      y: y1,
+      button: 1,
+      pressed: false,
+      nodeId: surface.nodeId,
+    });
+  }
+
+  const rows = rowRects();
+  const surface = surfaceRect();
+  // From empty space below delta, up into gamma: the band covers
+  // gamma + delta and nothing else (beta ends above the band top).
+  const x = surface.x + 50;
+  const yStart = rows[4].y + rows[4].h + 40;
+  const yEnd = rows[3].y + 10;
+  Sevyn._handlers.pointer({
+    type: "button",
+    x,
+    y: yStart,
+    button: 1,
+    pressed: true,
+    nodeId: surface.nodeId,
+  });
+  Sevyn._handlers.pointer({ type: "move", x, y: (yStart + yEnd) / 2 });
+  assert.ok(bandPresent(), "rubber band draws during the drag");
+  assert.ok(
+    statusText().includes("Selected delta.txt"),
+    "selection live-previews mid-drag",
+  );
+  Sevyn._handlers.pointer({ type: "move", x, y: yEnd });
+  assert.ok(statusText().includes("Selected 2 items"), "preview grows to gamma+delta");
+  Sevyn._handlers.pointer({
+    type: "button",
+    x,
+    y: yEnd,
+    button: 1,
+    pressed: false,
+    nodeId: surface.nodeId,
+  });
+  assert.ok(statusText().includes("Selected 2 items"), "marquee commits on release");
+  assert.equal(selectedRowCount(), 2, "gamma + delta highlighted");
+  assert.ok(!bandPresent(), "rubber band clears on release");
+  // Shift-marquee adds: plain-click alpha first, then drag the
+  // same band with Shift held — alpha stays selected.
+  pressRect(rows[1]);
+  assert.ok(statusText().includes("Selected alpha"), "plain click selects alpha");
+  drag(x, yStart, x, yEnd, { shift: true });
+  assert.ok(statusText().includes("Selected 3 items"), "Shift-marquee adds");
+  assert.equal(selectedRowCount(), 3, "alpha + gamma + delta highlighted");
+  // A press released without dragging is a click on empty space and
+  // clears the selection.
+  drag(x, yStart, x, yStart + 2);
+  assert.ok(statusText().includes("Selection cleared."), "click without drag clears");
+  assert.equal(selectedRowCount(), 0, "no rows highlighted after clear");
 });
 
 // The #122 port: selection + Cut/Copy/Paste/Delete through the toolbar

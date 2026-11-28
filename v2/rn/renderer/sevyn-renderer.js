@@ -1026,16 +1026,16 @@ function focusables() {
   const out = [];
   function walk(inst) {
     if (inst.hidden) return;
-    // A ScrollView with onPress (gap unit 13: the Files list clears
-    // the selection on an empty-space click) is a pointer affordance,
-    // not a keyboard control — Tab must skip it, or the Files focus
-    // order would gain a stop on the list surface before the rows.
-    if (
-      inst.type !== "ScrollView" &&
-      (inst.type === "Pressable" ||
-        inst.type === "TextInput" ||
-        (inst.props && inst.props.onPress))
-    ) {
+    // Only Pressable and TextInput are keyboard controls. A plain
+    // View with onPress (gap unit 13: the Files ScrollView, whose
+    // onPress clears the selection; gap unit 14: the desktop
+    // surface, whose onPress starts the marquee) is a pointer
+    // affordance, not a Tab stop — Tab must skip it, or the shell's
+    // first Tab would land on the desktop surface instead of the
+    // first dock tile and Enter would do nothing (M3 proved it:
+    // Tab + Enter must launch the first app). A View that wants
+    // keyboard activation must be a Pressable.
+    if (inst.type === "Pressable" || inst.type === "TextInput") {
       out.push(inst);
     }
     for (const c of inst.children) walk(c);
@@ -1083,14 +1083,20 @@ function activateFocused(ev) {
 // or a key event (the activating key's own flags); either may omit
 // the flags, which then read as unheld.
 function pressEventFrom(ev) {
-  return {
-    nativeEvent: {
-      shiftKey: !!(ev && ev.shift),
-      ctrlKey: !!(ev && ev.ctrl),
-      metaKey: !!((ev && ev.meta) || (ev && ev.super)),
-      altKey: !!(ev && ev.alt),
-    },
+  const nativeEvent = {
+    shiftKey: !!(ev && ev.shift),
+    ctrlKey: !!(ev && ev.ctrl),
+    metaKey: !!((ev && ev.meta) || (ev && ev.super)),
+    altKey: !!(ev && ev.alt),
   };
+  // A pointer press carries its position, so the handler can tell
+  // where the press started (gap unit 14, audit #23: the marquee
+  // starts from an onPress). Keyboard activation has no position —
+  // the keys are left off entirely, so a handler can tell the two
+  // apart by their presence.
+  if (ev && typeof ev.x === "number") nativeEvent.x = ev.x;
+  if (ev && typeof ev.y === "number") nativeEvent.y = ev.y;
+  return { nativeEvent };
 }
 
 // US keycode map (evdev codes -> [plain, shift]). Space is 57.
@@ -1492,6 +1498,28 @@ function handlePointer(ev) {
   // the drag here keeps it from dragging the selection to an edge.
   if (ev.type === "leave") textDrag = null;
   if (ev.type === "button" && !ev.pressed) textDrag = null;
+  // Pointer-up subscribers (gap unit 14, audit #23): a drag started
+  // from an onPress (the marquee) ends on release — or on the pointer
+  // leaving the surface — and the app must commit then. Button-up
+  // returns early below without presenting, so a listener that changed
+  // state returns true and the renderer flushes + presents here, the
+  // same contract as the move listeners.
+  if (ev.type === "leave" || (ev.type === "button" && !ev.pressed)) {
+    let upChanged = false;
+    for (const fn of Array.from(pointerUpListeners)) {
+      try {
+        if (fn({ x: ev.x, y: ev.y }) === true) upChanged = true;
+      } catch (e) {
+        Sevyn.log(
+          "pointer-up listener failed: " + (e && e.message ? e.message : String(e)),
+        );
+      }
+    }
+    if (upChanged) {
+      SevynReconciler.flushSyncWork();
+      presentRoot();
+    }
+  }
   // Motion arrives under three type strings, and pointer-move
   // listeners need all of them. The real Wayland host forwards
   // pointer motion as "motion" (wayland.cc onPointerMotion) and the
@@ -1817,6 +1845,17 @@ const pointerMoveListeners = new Set();
 function subscribePointerMove(fn) {
   pointerMoveListeners.add(fn);
   return () => pointerMoveListeners.delete(fn);
+}
+// Pointer-up subscribers. Release (and pointer-leave, which ends a
+// drag off-surface) notifies here; a listener returns true only when
+// it changed state — the renderer re-presents only then, the same
+// contract as the move listeners. The host forwards the release to
+// the single onPointer handler (see handlePointer); the shell must
+// not register its own.
+const pointerUpListeners = new Set();
+function subscribePointerUp(fn) {
+  pointerUpListeners.add(fn);
+  return () => pointerUpListeners.delete(fn);
 }
 
 // Surface-size store for useSyncExternalStore. The snapshot is cached
@@ -2297,6 +2336,7 @@ module.exports = {
   subscribeWindowState,
   getWindowStateSnapshot,
   subscribePointerMove,
+  subscribePointerUp,
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
   setContextMenuKeyHandler,

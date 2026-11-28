@@ -1,7 +1,9 @@
 "use strict";
 // Unit tests for the Files port's pure modules (v2/apps/src/clipboard.ts,
-// volumes.ts, file-icons.ts) — the #122 rules ported 1:1, plus the v2
-// additions (volumes/clipboard output parsing, byte formatting, glyphs).
+// volumes.ts, file-icons.ts) and the shared selection/marquee modules
+// (v2/rn/renderer/selection.ts, marquee.ts — gap units 13/14) — the
+// #122 rules ported 1:1, plus the v2 additions (volumes/clipboard
+// output parsing, byte formatting, glyphs).
 //
 // The modules are bundled with esbuild (zero new deps) into a temp
 // CommonJS file and driven with node:assert.
@@ -34,7 +36,10 @@ fs.writeFileSync(
     JSON.stringify(path.join(__dirname, "..", "src", "file-icons.ts")) +
     ";\n" +
     "export * as selection from " +
-    JSON.stringify(path.join(__dirname, "..", "src", "selection.ts")) +
+    JSON.stringify(path.join(__dirname, "..", "..", "rn", "renderer", "selection.ts")) +
+    ";\n" +
+    "export * as marquee from " +
+    JSON.stringify(path.join(__dirname, "..", "..", "rn", "renderer", "marquee.ts")) +
     ";\n",
 );
 
@@ -46,7 +51,7 @@ esbuild.buildSync({
   outfile: bundle,
   logLevel: "silent",
 });
-const { clipboard, volumes, icons, selection } = require(bundle);
+const { clipboard, volumes, icons, selection, marquee } = require(bundle);
 
 const cutDir = {
   kind: "cut",
@@ -413,7 +418,7 @@ check("selection: press outside the listing leaves the selection alone", () => {
   assert.deepEqual(selection.applyPressSelection(NAMES, s, -1, CTRL), s);
 });
 
-check("selection: resolveMultiPasteTargets suffixes same-named files apart", () => {
+check("clipboard: resolveMultiPasteTargets suffixes same-named files apart", () => {
   const entries = [
     {
       kind: "copy",
@@ -428,7 +433,7 @@ check("selection: resolveMultiPasteTargets suffixes same-named files apart", () 
       sourceKind: "file",
     },
   ];
-  assert.deepEqual(selection.resolveMultiPasteTargets(entries, "/Downloads", new Set()), [
+  assert.deepEqual(clipboard.resolveMultiPasteTargets(entries, "/Downloads", new Set()), [
     {
       entry: entries[0],
       targetPath: "/Downloads/photo.png",
@@ -443,7 +448,7 @@ check("selection: resolveMultiPasteTargets suffixes same-named files apart", () 
 });
 
 check(
-  "selection: resolveMultiPasteTargets refuses the whole paste on a self-paste",
+  "clipboard: resolveMultiPasteTargets refuses the whole paste on a self-paste",
   () => {
     const entries = [
       {
@@ -460,10 +465,107 @@ check(
       },
     ];
     assert.equal(
-      selection.resolveMultiPasteTargets(entries, "/data/Photos/Trip", new Set()),
+      clipboard.resolveMultiPasteTargets(entries, "/data/Photos/Trip", new Set()),
       undefined,
     );
   },
 );
+
+check("marquee: normalizeRect spans any drag direction", () => {
+  assert.deepEqual(marquee.normalizeRect(10, 20, 30, 40), {
+    x: 10,
+    y: 20,
+    width: 20,
+    height: 20,
+  });
+  assert.deepEqual(marquee.normalizeRect(30, 40, 10, 20), {
+    x: 10,
+    y: 20,
+    width: 20,
+    height: 20,
+  });
+  assert.deepEqual(marquee.normalizeRect(30, 20, 10, 40), {
+    x: 10,
+    y: 20,
+    width: 20,
+    height: 20,
+  });
+  assert.deepEqual(marquee.normalizeRect(10, 10, 10, 10), {
+    x: 10,
+    y: 10,
+    width: 0,
+    height: 0,
+  });
+});
+
+check("marquee: rectsIntersect needs real overlap, not an edge touch", () => {
+  const a = { x: 0, y: 0, width: 10, height: 10 };
+  assert.equal(marquee.rectsIntersect(a, { x: 5, y: 5, width: 10, height: 10 }), true);
+  assert.equal(marquee.rectsIntersect(a, { x: 10, y: 0, width: 10, height: 10 }), false);
+  assert.equal(marquee.rectsIntersect(a, { x: 0, y: 10, width: 10, height: 10 }), false);
+  assert.equal(marquee.rectsIntersect(a, { x: 20, y: 20, width: 10, height: 10 }), false);
+  assert.equal(marquee.rectsIntersect(a, { x: 2, y: 2, width: 2, height: 2 }), true);
+});
+
+check("marquee: indicesInRect returns touched indices in order", () => {
+  const rows = [
+    { x: 0, y: 8, width: 100, height: 36 },
+    { x: 0, y: 44, width: 100, height: 36 },
+    { x: 0, y: 80, width: 100, height: 36 },
+  ];
+  assert.deepEqual(
+    marquee.indicesInRect(rows, { x: 0, y: 0, width: 100, height: 60 }),
+    [0, 1],
+  );
+  assert.deepEqual(
+    marquee.indicesInRect(rows, { x: 0, y: 50, width: 100, height: 10 }),
+    [1],
+  );
+  assert.deepEqual(
+    marquee.indicesInRect(rows, { x: 200, y: 0, width: 10, height: 200 }),
+    [],
+  );
+});
+
+check("marquee: plain marquee replaces the selection, anchor is the first index", () => {
+  const prev = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 0, PLAIN);
+  const s = selection.applyMarqueeSelection(NAMES, prev, [3, 2], PLAIN);
+  assert.deepEqual(s, { selected: ["gamma.txt", "delta.txt"], anchor: 2 });
+});
+
+check("marquee: Shift marquee adds, anchor unchanged", () => {
+  let s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 0, PLAIN);
+  s = selection.applyMarqueeSelection(NAMES, s, [2, 3], SHIFT);
+  assert.deepEqual(s, { selected: ["alpha", "gamma.txt", "delta.txt"], anchor: 0 });
+});
+
+check("marquee: Ctrl marquee toggles each, anchor is the first index", () => {
+  let s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 1, PLAIN);
+  s = selection.applyMarqueeSelection(NAMES, s, [1, 2], CTRL);
+  assert.deepEqual(s, { selected: ["gamma.txt"], anchor: 1 });
+});
+
+check(
+  "marquee: a marquee over nothing clears on plain, changes nothing on Shift/Ctrl",
+  () => {
+    const s = selection.applyPressSelection(NAMES, selection.EMPTY_SELECTION, 1, PLAIN);
+    assert.deepEqual(
+      selection.applyMarqueeSelection(NAMES, s, [], PLAIN),
+      selection.EMPTY_SELECTION,
+    );
+    assert.deepEqual(selection.applyMarqueeSelection(NAMES, s, [], SHIFT), s);
+    assert.deepEqual(selection.applyMarqueeSelection(NAMES, s, [], CTRL), s);
+  },
+);
+
+check("marquee: out-of-range indices are ignored", () => {
+  const s = selection.applyMarqueeSelection(
+    NAMES,
+    selection.EMPTY_SELECTION,
+    [-1, 1, 9],
+    PLAIN,
+  );
+  assert.deepEqual(s, { selected: ["beta.txt"], anchor: 1 });
+});
 
 console.log(`\nfiles units: ${passed} checks passed`);

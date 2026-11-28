@@ -12,6 +12,14 @@
 //     deep-link channel that opens a folder directly is a
 //     follow-up, not this port); a file tap opens its parent in
 //     Files, which is /data for anything on the desktop.
+//   - drag a rectangle over empty desktop space to multi-select
+//     the icons it touches (gap unit 14, audit #23): the surface's
+//     onPress starts the marquee, a press released without dragging
+//     does nothing, and selected icons get a white 16% tint. Shift
+//     adds, Ctrl/Cmd toggles, plain replaces — the Files selection
+//     model (v2/rn/renderer/selection.ts), shared. No operations
+//     act on the selection yet; the marquee is the primitive the
+//     later desktop units consume.
 //   - right-click on empty desktop space opens a context menu
 //     (gap unit 11, audit #14) with "New folder" / "New text file"
 //     — those actions used to be always-visible buttons at the top
@@ -39,6 +47,13 @@ import {
   subscribeSurfaceSize,
   getSurfaceSizeSnapshot,
 } from "../../rn/renderer/sevyn-renderer";
+import { EMPTY_SELECTION, type SelectionState } from "../../rn/renderer/selection";
+import {
+  indicesInRect,
+  MARQUEE_FILL,
+  useMarqueeSelection,
+  type MarqueeRect,
+} from "../../rn/renderer/marquee";
 
 export const DESKTOP_DIR = "/data/Desktop";
 
@@ -50,6 +65,13 @@ const VERTICAL_GAP = 16;
 // buttons used to sit here (top 22, 34 tall); they moved into the
 // right-click menu (gap unit 11), so the grid takes their place.
 const ICON_TOP = 22;
+const ICON_LEFT = 24;
+// The desktop starts below the shell's 48px top bar (see Shell.tsx):
+// pointer coords are window coords, so the marquee math subtracts
+// this to reach desktop coords. The manifest (layout decisions,
+// 2026-11-28) will shrink the top bar to 32px — when it does, this
+// moves with it.
+const DESKTOP_TOP = 48;
 
 export type DesktopTileKind =
   "folder" | "image" | "video" | "audio" | "code" | "document" | "archive" | "file";
@@ -101,6 +123,39 @@ export interface DesktopEntry {
 /** Columns in the icon grid for a surface of width surfaceWidth. */
 export function desktopColumns(surfaceWidth: number): number {
   return Math.max(1, Math.floor((surfaceWidth - 48) / (ITEM_WIDTH + HORIZONTAL_GAP)));
+}
+
+/**
+ * The desktop entries a marquee rect touches. `rect` is in window
+ * (pointer) coords; the desktop starts DESKTOP_TOP below the window
+ * top, so the rect is translated into desktop coords first. The
+ * grid math is the render's math (same constants), so the band and
+ * the icons cannot drift apart. (When the manifest's resizable
+ * icon grid lands — S/M/L sizes, decided 2026-11-28 — this follows
+ * the same size setting the render uses.)
+ */
+function indicesInDesktopRect(
+  rect: MarqueeRect,
+  entries: DesktopEntry[],
+  columns: number,
+): number[] {
+  const desktopRect: MarqueeRect = {
+    x: rect.x,
+    y: rect.y - DESKTOP_TOP,
+    width: rect.width,
+    height: rect.height,
+  };
+  const icons: MarqueeRect[] = entries.map((_, index) => {
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+    return {
+      x: ICON_LEFT + column * (ITEM_WIDTH + HORIZONTAL_GAP),
+      y: ICON_TOP + row * (ITEM_HEIGHT + VERTICAL_GAP),
+      width: ITEM_WIDTH,
+      height: ITEM_HEIGHT,
+    };
+  });
+  return indicesInRect(icons, desktopRect);
 }
 
 // Parse one `sevyn files list` line ("d name" / "f name"); null for
@@ -164,6 +219,32 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
   const columns = desktopColumns(size.width);
   const iconTop = ICON_TOP;
 
+  // Multi-selection (gap unit 14, audit #23): the selected desktop
+  // entries, in listing order, plus the anchor a Shift-marquee
+  // ranges from. No operations act on it yet — the marquee is the
+  // primitive the later desktop units (icon drag, icon actions)
+  // consume. A plain click on empty desktop space still does
+  // nothing (no onClick), and a tap on an icon still opens Files.
+  const [selection, setSelection] = React.useState<SelectionState>(EMPTY_SELECTION);
+  const marquee = useMarqueeSelection({
+    selection,
+    onSelection: setSelection,
+    names: entries.map((e) => e.name),
+    indicesForRect: (rect) => indicesInDesktopRect(rect, entries, columns),
+  });
+  // The drag rect in desktop coords, for the band overlay. The top
+  // is clamped at the surface edge (display only — the selection
+  // rect is unclamped, and a drag into the top bar touches no icon)
+  // so a drag upward never paints over the top bar.
+  const band = marquee.dragRect
+    ? {
+        x: marquee.dragRect.x,
+        y: Math.max(0, marquee.dragRect.y - DESKTOP_TOP),
+        width: marquee.dragRect.width,
+        height: marquee.dragRect.height - Math.max(0, DESKTOP_TOP - marquee.dragRect.y),
+      }
+    : null;
+
   function openInFiles(entry: DesktopEntry): void {
     // Files always opens at /data root — the parent of any desktop
     // entry — so launching it is the open, for folders and files.
@@ -190,10 +271,14 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
       // The desktop surface is a plain View: the renderer (gap unit
       // 11) emits a hit rect for a View that declares onContextMenu,
       // so a right-click on empty desktop space reaches this
-      // handler. Icons are emitted after the surface rect, so they
+      // handler — and (gap unit 14) a View with onPress is pressable
+      // the same way, so a left-press on empty space starts the
+      // marquee. Icons are emitted after the surface rect, so they
       // still win the hit-test where they overlap it — a right-click
       // on an icon hits the icon (which has no onContextMenu) and
-      // does nothing, never launching Files.
+      // does nothing, never launching Files, and a left-press on an
+      // icon hits the icon's own onPress, never starting a marquee.
+      onPress={marquee.begin}
       onContextMenu={(ev: ContextMenuEvent) =>
         setMenu({ x: ev.nativeEvent.x, y: ev.nativeEvent.y })
       }
@@ -208,9 +293,10 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
       {entries.map((entry, index) => {
         const row = Math.floor(index / columns);
         const column = index % columns;
-        const x = 24 + column * (ITEM_WIDTH + HORIZONTAL_GAP);
+        const x = ICON_LEFT + column * (ITEM_WIDTH + HORIZONTAL_GAP);
         const y = iconTop + row * (ITEM_HEIGHT + VERTICAL_GAP);
         const tile = desktopTileForEntry(entry.name, entry.kind);
+        const isSelected = selection.selected.includes(entry.name);
         return (
           <Pressable
             key={entry.name}
@@ -224,6 +310,7 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
               borderRadius: 8,
               alignItems: "center",
               paddingTop: 8,
+              backgroundColor: isSelected ? "#FFFFFF29" : "#00000000",
             }}
           >
             <View
@@ -260,6 +347,23 @@ export function DesktopIcons(props: DesktopIconsProps): React.ReactElement {
           </Pressable>
         );
       })}
+      {/* The rubber band (gap unit 14): the drag rect in desktop
+          coords. It is present only mid-drag, when all pointer
+          handling is host-level (motion/release never hit-test), so
+          it cannot swallow a press. Drawn above the icons, below
+          the context menu. */}
+      {band ? (
+        <View
+          style={{
+            position: "absolute",
+            left: band.x,
+            top: band.y,
+            width: band.width,
+            height: band.height,
+            backgroundColor: MARQUEE_FILL,
+          }}
+        />
+      ) : null}
       {/* Context menu (gap unit 11): last child so it draws and
           hit-tests above everything else. The desktop offers only
           the two create actions today — nothing is invented here. */}

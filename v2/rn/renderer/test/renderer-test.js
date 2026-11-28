@@ -133,6 +133,38 @@ check("keyboard: Tab moves focus, Enter activates", () => {
   );
 });
 
+check("keyboard: a View with onPress is not a Tab stop", () => {
+  // Gap unit 14: the desktop surface is a plain View whose onPress
+  // starts the marquee — a pointer affordance, not a keyboard
+  // control. Tab must skip it, or the shell's first Tab would land
+  // on the surface instead of the first dock tile and Enter would
+  // do nothing (M3 proved it: Tab + Enter launches the first app).
+  const seen = [];
+  function FocusOrderApp() {
+    return h(
+      "View",
+      { style: { width: 1024, height: 768, backgroundColor: "#0b0b0f" } },
+      h("View", {
+        onPress: () => seen.push("surface"),
+        style: { width: 1024, height: 700, backgroundColor: "#111111" },
+      }),
+      h(
+        "Pressable",
+        {
+          onPress: () => seen.push("tile"),
+          style: { width: 56, height: 56, backgroundColor: "#1f2937" },
+        },
+        h("Text", { style: { fontSize: 12, color: "#fff" } }, "Files"),
+      ),
+    );
+  }
+  renderer.update(h(FocusOrderApp));
+  Sevyn._handlers.key({ key: 15, pressed: true }); // Tab
+  Sevyn._handlers.key({ key: 28, pressed: true }); // Enter
+  assert.deepEqual(seen, ["tile"], "Tab skipped the View, Enter hit the tile");
+  renderer.update(h(App));
+});
+
 check("text measure flows through Sevyn.measureText", () => {
   const m = Sevyn.measureText("hello", 14, false, 0);
   assert.ok(m.width > 0 && m.height > 0);
@@ -1437,19 +1469,40 @@ renderer.update(h(PressModsApp));
 
 check("press: pointer modifiers reach onPress as nativeEvent flags", () => {
   pressModsEvents.length = 0;
-  pressWithMods(pressModsRect("#111111"), {});
+  const rowA = pressModsRect("#111111");
+  pressWithMods(rowA, {});
   assert.deepEqual(pressModsEvents, [
-    ["row-a", { shiftKey: false, ctrlKey: false, metaKey: false, altKey: false }],
+    [
+      "row-a",
+      {
+        shiftKey: false,
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        // A pointer press carries its position (gap unit 14): the
+        // press was driven at the rect's corner + 2.
+        x: rowA.x + 2,
+        y: rowA.y + 2,
+      },
+    ],
   ]);
   pressModsEvents.length = 0;
   pressWithMods(pressModsRect("#111111"), { shift: true });
   assert.deepEqual(pressModsEvents[0][1].shiftKey, true);
   assert.deepEqual(pressModsEvents[0][1].ctrlKey, false);
   pressModsEvents.length = 0;
-  pressWithMods(pressModsRect("#222222"), { ctrl: true });
+  const rowB = pressModsRect("#222222");
+  pressWithMods(rowB, { ctrl: true });
   assert.deepEqual(pressModsEvents[0], [
     "row-b",
-    { shiftKey: false, ctrlKey: true, metaKey: false, altKey: false },
+    {
+      shiftKey: false,
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      x: rowB.x + 2,
+      y: rowB.y + 2,
+    },
   ]);
   pressModsEvents.length = 0;
   pressWithMods(pressModsRect("#222222"), { meta: true });
@@ -1470,6 +1523,80 @@ check("press: keyboard activation carries the activating key's modifiers", () =>
   pressModsEvents.length = 0;
   Sevyn._handlers.key({ key: 28, pressed: true, shift: true }); // Shift+Enter
   assert.deepEqual(pressModsEvents[0][1].shiftKey, true);
+});
+
+check(
+  "press: onPress receives the pointer position, keyboard activation has none",
+  () => {
+    // A pointer press carries where it started (gap unit 14: the
+    // marquee starts from an onPress); keyboard activation has no
+    // position at all, so the keys are absent, not zero.
+    pressModsEvents.length = 0;
+    const rowA = pressModsRect("#111111");
+    Sevyn._handlers.pointer({
+      type: "button",
+      x: rowA.x + 5,
+      y: rowA.y + 7,
+      button: 1,
+      pressed: true,
+      nodeId: rowA.nodeId,
+    });
+    assert.deepEqual(pressModsEvents[0][1].x, rowA.x + 5);
+    assert.deepEqual(pressModsEvents[0][1].y, rowA.y + 7);
+    pressModsEvents.length = 0;
+    Sevyn._handlers.key({ key: 15, pressed: true }); // Tab
+    Sevyn._handlers.key({ key: 28, pressed: true }); // Enter
+    assert.deepEqual("x" in pressModsEvents[0][1], false);
+    assert.deepEqual("y" in pressModsEvents[0][1], false);
+  },
+);
+
+check("pointer-up: subscribers fire on release and on leave", () => {
+  // Gap unit 14: a drag started from an onPress ends on release —
+  // or on the pointer leaving the surface — and the app must commit
+  // then. The renderer fires the up listeners on both, and
+  // re-presents only when a listener reports a change.
+  const seen = [];
+  const unsub = renderer.subscribePointerUp((ev) => {
+    seen.push([ev.x, ev.y]);
+    return true;
+  });
+  const surface = pressModsRect("#f9fafb");
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: surface.x + 2,
+    y: surface.y + 150,
+    button: 1,
+    pressed: true,
+    nodeId: surface.nodeId,
+  });
+  assert.deepEqual(seen, [], "no up event on press");
+  const presentsBefore = Sevyn._presents.length;
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: surface.x + 2,
+    y: surface.y + 150,
+    button: 1,
+    pressed: false,
+    nodeId: surface.nodeId,
+  });
+  assert.deepEqual(seen, [[surface.x + 2, surface.y + 150]]);
+  assert.ok(Sevyn._presents.length > presentsBefore, "a changed up listener re-presents");
+  Sevyn._handlers.pointer({ type: "leave", x: -100, y: -100 });
+  assert.deepEqual(seen, [
+    [surface.x + 2, surface.y + 150],
+    [-100, -100],
+  ]);
+  unsub();
+  Sevyn._handlers.pointer({
+    type: "button",
+    x: 30,
+    y: 40,
+    button: 1,
+    pressed: false,
+    nodeId: surface.nodeId,
+  });
+  assert.deepEqual(seen.length, 2, "unsubscribed listener stops firing");
 });
 
 check("press: ScrollView with onPress is hit-testable, rows win the overlap", () => {
