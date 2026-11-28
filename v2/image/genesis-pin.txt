@@ -4,4 +4,4 @@
 # vendored copy: the builder fetches the tarball below, verifies the
 # sha256, and builds the compositor + test client from the fetched tree.
 # Format: <commit sha> <tarball sha256> (one line; comment lines start #).
-295bcdd9b32ca5992413f70af5d43f81ccfd01b6 e88faca996535568b4e4d04e4e2b9826a4c579c75ea269a60b7434bdeb867d33
+fcdf9c5407ddd19031e56a228a18968bb53f9af4 d7a5da5d1becfb266bfe968808f318ac0e156c19f9e167841164caf9b660bf9c
