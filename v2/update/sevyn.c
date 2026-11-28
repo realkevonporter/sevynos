@@ -207,6 +207,9 @@ static void print_usage(FILE *f)
             "  sevyn ai ask <task...>      ask the AI to do something\n"
             "  sevyn ai session <task...>  ask the AI in a session "
             "(read -> fix -> re-check)\n"
+            "  sevyn ai chat new           open a new AI conversation\n"
+            "  sevyn ai chat <id> <msg...> send a message in a conversation\n"
+            "  sevyn ai chat end <id>      close a conversation\n"
             "  sevyn ai key [--file <path>|--clear]\n"
             "                              set/clear the Muse API key\n"
             "  sevyn ai reload             re-read the grant file\n"
@@ -3311,13 +3314,28 @@ static int cmd_ai(int argc, char **argv)
 
     if (strcmp(verb, "list") != 0 && strcmp(verb, "select") != 0 &&
         strcmp(verb, "status") != 0 && strcmp(verb, "ask") != 0 &&
-        strcmp(verb, "session") != 0 && strcmp(verb, "reload") != 0)
+        strcmp(verb, "session") != 0 && strcmp(verb, "chat") != 0 &&
+        strcmp(verb, "reload") != 0)
         return usage();
     if (strcmp(verb, "select") == 0 && argc != 4)
         return usage();
     if ((strcmp(verb, "ask") == 0 || strcmp(verb, "session") == 0) &&
         argc < 4)
         return usage();
+    /* `chat new` opens a conversation; `chat end <id>` closes one;
+     * `chat <id> <message...>` sends a turn. Anything else is
+     * usage — a bare `chat`, or a turn with no message. */
+    if (strcmp(verb, "chat") == 0) {
+        if (argc >= 4 && strcmp(argv[3], "new") == 0) {
+            if (argc != 4)
+                return usage();
+        } else if (argc >= 4 && strcmp(argv[3], "end") == 0) {
+            if (argc != 5)
+                return usage();
+        } else if (argc < 5) {
+            return usage();
+        }
+    }
     if ((strcmp(verb, "list") == 0 || strcmp(verb, "status") == 0 ||
          strcmp(verb, "reload") == 0) &&
         argc != 3)
@@ -3346,6 +3364,23 @@ static int cmd_ai(int argc, char **argv)
         for (int i = 3; i < argc && n < sizeof(cmd) - 1; i++)
             n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " %s",
                                   argv[i]);
+    } else if (strcmp(verb, "chat") == 0) {
+        /* The daemon's CHAT subcommands are uppercase (NEW / END);
+         * the CLI spells them lowercase, so they are mapped here. A
+         * turn joins the message words after the id, like
+         * ask/session. */
+        size_t n = 0;
+        n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, "CHAT");
+        if (strcmp(argv[3], "new") == 0) {
+            n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " NEW");
+        } else if (strcmp(argv[3], "end") == 0) {
+            n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " END %s",
+                                  argv[4]);
+        } else {
+            for (int i = 3; i < argc && n < sizeof(cmd) - 1; i++)
+                n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, " %s",
+                                      argv[i]);
+        }
     } else if (strcmp(verb, "list") == 0)
         snprintf(cmd, sizeof(cmd), "LIST");
     else if (strcmp(verb, "reload") == 0)
@@ -3357,7 +3392,10 @@ static int cmd_ai(int argc, char **argv)
         close(fd);
         return 1;
     }
-    char line[2048];
+    /* 16 KiB: the CHAT reply carries the TEXT (up to 8 KiB) plus the
+     * counts. ASK/SESSION replies stay short, but they share this
+     * buffer. */
+    char line[16384];
     int n = read_line(fd, line, sizeof(line));
     close(fd);
     if (n <= 0) {

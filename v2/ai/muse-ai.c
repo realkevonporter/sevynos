@@ -82,6 +82,18 @@
                                       * instead of hanging it. */
 #define ACTION_LINE_CAP 2048  /* daemon action-line cap (LINE_CAP) */
 #define RESP_CAP (512 * 1024) /* API response body cap */
+/* The final prose answer (phase 3, B1): the model answers in text
+ * when it calls no tools; that text is carried to the daemon as one
+ * escaped TEXT line, capped here so the daemon's reply (TASK_CAP)
+ * always fits it. The daemon stashes it in a TEXT_CAP+1 slot. */
+#define TEXT_CAP (8 * 1024)
+/* Conversation history (phase 3, B1): the daemon may send HISTORY
+ * lines before the task. The backend keeps at most this many turns
+ * and this many bytes total, oldest first — the daemon already
+ * drops oldest pairs to fit TASK_CAP, so these are a second,
+ * backend-side bound. */
+#define HISTORY_MAX_TURNS 32
+#define HISTORY_CAP (32 * 1024)
 #define KEY_MAX 512           /* API key, trimmed */
 #define SNAPSHOT_CAP (8 * 1024) /* device snapshot in the prompt */
 #define PRISTINE_PREFIX "/usr/share/sevyn/pristine/"
@@ -579,6 +591,64 @@ static char *escape_write_content(const char *content)
         }
     }
     out[w] = '\0';
+    return out;
+}
+
+/* Inverse of escape_write_content: \\ -> \, \n -> newline,
+ * \t -> tab. Any other backslash is kept as-is (the daemon only
+ * ever sends the three escapes above). Returns malloc'd text. */
+static char *unescape_write_content(const char *content)
+{
+    size_t n = strlen(content);
+    char *out = malloc(n + 1);
+    if (!out)
+        return NULL;
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (content[i] == '\\' && i + 1 < n) {
+            char e = content[i + 1];
+            if (e == 'n') {
+                out[w++] = '\n';
+                i++;
+            } else if (e == 't') {
+                out[w++] = '\t';
+                i++;
+            } else if (e == '\\') {
+                out[w++] = '\\';
+                i++;
+            } else {
+                out[w++] = content[i];
+            }
+        } else {
+            out[w++] = content[i];
+        }
+    }
+    out[w] = '\0';
+    return out;
+}
+
+/* Truncate an escaped TEXT to TEXT_CAP bytes, never splitting an
+ * escape pair, and mark the cut with "...". The input is already
+ * escaped; the output fits the daemon's stash whole. Returns
+ * malloc'd text. */
+static char *cap_text(const char *esc)
+{
+    size_t n = strlen(esc);
+    if (n <= TEXT_CAP)
+        return strdup(esc);
+    size_t cut = TEXT_CAP - 3; /* room for "..." */
+    /* A run of backslashes ending at cut-1: odd means the last one
+     * starts a pair whose partner is cut off — back off one. */
+    size_t bs = 0;
+    while (cut > bs && esc[cut - 1 - bs] == '\\')
+        bs++;
+    if (bs % 2 == 1)
+        cut--;
+    char *out = malloc(cut + 3 + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, esc, cut);
+    memcpy(out + cut, "...", 4);
     return out;
 }
 
@@ -1239,6 +1309,34 @@ static int parse_tool_calls(const char *body, struct tool_calls *tc)
     return 0;
 }
 
+/* Extract choices[0].message.content from an API response body.
+ * Returns a strdup'd string, or NULL when absent, null, or not a
+ * string. The caller frees it. A round with no tool calls is the
+ * model's final answer: this is the TEXT the daemon carries back
+ * (phase 3, B1) instead of freeing the body with it. */
+static char *parse_message_content(const char *body)
+{
+    char err[256];
+    jval_t *root = json_parse(body, err, sizeof(err));
+    if (!root)
+        return NULL;
+    const jval_t *choices = json_obj_get(root, "choices");
+    if (!choices || choices->type != J_ARR || json_arr_len(choices) < 1) {
+        json_free(root);
+        return NULL;
+    }
+    const jval_t *msg =
+        json_obj_get(json_arr_get(choices, 0), "message");
+    if (!msg || msg->type != J_OBJ) {
+        json_free(root);
+        return NULL;
+    }
+    const char *content = json_str(json_obj_get(msg, "content"));
+    char *out = content ? strdup(content) : NULL;
+    json_free(root);
+    return out;
+}
+
 /* Get one string field from a tool-call arguments JSON object.
  * Returns malloc'd value or NULL. */
 static char *args_field(const char *args_json, const char *key)
@@ -1291,17 +1389,39 @@ static char *tool_msg_json(const char *call_id, const char *content)
     return sb.data;
 }
 
+/* Build a plain history message for the conversation (phase 3, B1):
+ * a stored turn, user or assistant, with its prose. Unlike
+ * assistant_msg_json() (tool calls, content null), history turns
+ * carry their text — the model sees what was actually said. */
+static char *history_msg_json(const char *role, const char *content)
+{
+    struct strbuf sb;
+    if (sb_init(&sb) != 0)
+        return NULL;
+    sb_append(&sb, "{\"role\":\"");
+    sb_append_esc(&sb, role);
+    sb_append(&sb, "\",\"content\":\"");
+    sb_append_esc(&sb, content);
+    sb_append(&sb, "\"}");
+    return sb.data;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
-/* Emit the final action lines, then END. Always called — even on a
- * fail-closed path (with zero actions), so the daemon never waits
- * on a backend that has already decided. */
-static void emit_actions(struct action_list *al)
+/* Emit the action lines, then the final TEXT line (the model's prose
+ * answer, phase 3, B1) when there is one, then END. Always called —
+ * even on a fail-closed path (with zero actions), so the daemon
+ * never waits on a backend that has already decided. TEXT is not an
+ * action: it is never grant-checked and never counts against
+ * MAX_ACTIONS. The order is the same in ASK and session mode. */
+static void emit_actions(struct action_list *al, const char *final_text)
 {
     for (size_t i = 0; i < al->len; i++)
         printf("%s\n", al->items[i]);
+    if (final_text && final_text[0] != '\0')
+        printf("TEXT %s\n", final_text);
     printf("END\n");
     fflush(stdout);
 }
@@ -1322,25 +1442,100 @@ int main(void)
         return 0;
     }
     char *task = first;
+    /* Conversation history (phase 3, B1): after the SESSION marker
+     * the daemon may send HISTORY lines — one per stored turn —
+     * before the task line. The first line that is not a well-formed
+     * HISTORY line is the task. A daemon that sends no history
+     * (ASK, and sessions) behaves exactly as before. A HISTORY line
+     * is well-formed only when its role is exactly "user" or
+     * "assistant" and its text is non-empty — so a task that merely
+     * starts with the word HISTORY is still read as the task. */
+    struct msg_list history;
+    memset(&history, 0, sizeof(history));
+    size_t history_bytes = 0;
     if (strcmp(first, "SESSION") == 0) {
         session_mode = 1;
-        task = read_line_timeout(30);
         free(first);
+        task = NULL;
+        for (;;) {
+            char *line = read_line_timeout(30);
+            if (!line || line[0] == '\0') {
+                free(line);
+                break;
+            }
+            if (strncmp(line, "HISTORY ", 8) == 0) {
+                char *rest = line + 8;
+                char *sp = strchr(rest, ' ');
+                const char *role = NULL;
+                if (sp) {
+                    size_t role_len = (size_t)(sp - rest);
+                    if (role_len == 4 && strncmp(rest, "user", 4) == 0)
+                        role = "user";
+                    else if (role_len == 9 &&
+                             strncmp(rest, "assistant", 9) == 0)
+                        role = "assistant";
+                }
+                if (role && sp[1] != '\0') {
+                    char *text = unescape_write_content(sp + 1);
+                    if (text) {
+                        char *h = history_msg_json(role, text);
+                        free(text);
+                        if (h) {
+                            /* Caps: at most HISTORY_MAX_TURNS turns
+                             * and HISTORY_CAP bytes total, oldest
+                             * first. A single turn always fits
+                             * (the daemon's payload is TASK_CAP). */
+                            while ((history.len >= HISTORY_MAX_TURNS ||
+                                    history_bytes + strlen(h) >
+                                        HISTORY_CAP) &&
+                                   history.len > 0) {
+                                history_bytes -=
+                                    strlen(history.items[0]);
+                                free(history.items[0]);
+                                memmove(&history.items[0],
+                                        &history.items[1],
+                                        (history.len - 1) *
+                                            sizeof(char *));
+                                history.len--;
+                            }
+                            if (history.len < HISTORY_MAX_TURNS &&
+                                history_bytes + strlen(h) <=
+                                    HISTORY_CAP &&
+                                msg_push(&history, h) == 0) {
+                                history_bytes += strlen(h);
+                            } else {
+                                free(h);
+                            }
+                        }
+                    }
+                    free(line);
+                    continue;
+                }
+            }
+            /* Not a history line: this is the task. */
+            task = line;
+            break;
+        }
         if (!task || task[0] == '\0') {
             printf("ERR empty task\nEND\n");
             free(task);
+            msg_free_all(&history);
             return 0;
         }
     }
     struct action_list actions;
     memset(&actions, 0, sizeof(actions));
+    /* The model's final prose answer (phase 3, B1): set when a round
+     * makes no tool calls, emitted at done: after the actions. */
+    char *final_text = NULL;
 
     /* Auth first: no key, no API call, no actions. */
     char *key = read_key();
     if (!key) {
         printf("ERR no Muse API key configured\n");
-        emit_actions(&actions);
+        emit_actions(&actions, NULL);
         free(task);
+        msg_free_all(&history);
         return 0;
     }
 
@@ -1349,9 +1544,10 @@ int main(void)
     struct strbuf url;
     if (sb_init(&url) != 0) {
         printf("ERR out of memory\n");
-        emit_actions(&actions);
+        emit_actions(&actions, NULL);
         free(key);
         free(task);
+        msg_free_all(&history);
         return 0;
     }
     sb_append(&url, api_base);
@@ -1430,6 +1626,21 @@ int main(void)
         }
     }
 
+    /* Conversation history (phase 3, B1): the stored turns, oldest
+     * first, between the system messages and the new task — so the
+     * model sees what was already said. Ownership of each message
+     * moves to msgs; the list itself is freed below. */
+    for (size_t i = 0; i < history.len; i++) {
+        char *h = history.items[i];
+        history.items[i] = NULL;
+        if (msg_push(&msgs, h) != 0) {
+            free(h);
+            printf("ERR out of memory\n");
+            goto done;
+        }
+    }
+    msg_free_all(&history);
+
     struct strbuf user;
     if (sb_init(&user) != 0) {
         printf("ERR out of memory\n");
@@ -1481,9 +1692,35 @@ int main(void)
             free(resp.body);
             break;
         }
+        /* The model's prose answer (phase 3, B1): extracted before
+         * the body is freed. Only a no-tool round has one. */
+        char *content = NULL;
+        if (tc.len == 0)
+            content = parse_message_content(resp.body);
         free(resp.body);
         if (tc.len == 0) {
-            /* The model made no tool calls: done. */
+            /* The model made no tool calls: done. Its prose answer
+             * (if any) is the turn's TEXT, carried to the daemon
+             * instead of freed — a blank answer carries nothing. */
+            if (content && content[0] != '\0') {
+                int blank = 1;
+                for (const char *p = content; *p; p++) {
+                    if (*p != ' ' && *p != '\t' && *p != '\n' &&
+                        *p != '\r') {
+                        blank = 0;
+                        break;
+                    }
+                }
+                if (!blank) {
+                    char *esc = escape_write_content(content);
+                    if (esc) {
+                        free(final_text);
+                        final_text = cap_text(esc);
+                        free(esc);
+                    }
+                }
+            }
+            free(content);
             tool_calls_free(&tc);
             break;
         }
@@ -1777,13 +2014,15 @@ int main(void)
     }
 
 done:
-    emit_actions(&actions);
+    emit_actions(&actions, final_text);
     act_free_all(&actions);
     msg_free_all(&msgs);
+    msg_free_all(&history);
     sb_free(&url);
     free(grant);
     free(snapshot);
     free(key);
     free(task);
+    free(final_text);
     return 0;
 }

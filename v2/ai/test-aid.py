@@ -206,6 +206,14 @@ def resp_no_tools():
                      "finish_reason": "stop"}]}}
 
 
+def resp_text(content):
+    """A prose-only reply: the model answers in text and calls no
+    tools (phase 3, B1 — this is the turn's TEXT)."""
+    return {"status": 200, "body": {
+        "choices": [{"message": {"role": "assistant", "content": content},
+                     "finish_reason": "stop"}]}}
+
+
 def resp_tool_calls(calls):
     """calls: [(id, name, args_dict)] -> one Chat Completions reply."""
     return {"status": 200, "body": {
@@ -471,6 +479,27 @@ def main():
                   "print('END', flush=True)\n")
     (backends / "greedy-session-ai.limits").write_text(
         "timeout=5\nmax_actions=3\n")
+    # Chat: the CHAT backend for §15r–§15v. It reads the SESSION
+    # marker, the HISTORY lines, and the task, records the whole
+    # payload it was handed, runs one LIST, then answers in prose
+    # (a TEXT line, not a tool call).
+    chat_payload = tmp / "chat-payload.log"
+    write_backend("chat-ai",
+                  "#!/usr/bin/env python3\n"
+                  "import sys\n"
+                  f"PAYLOAD = {str(chat_payload)!r}\n"
+                  "lines = []\n"
+                  "lines.append(sys.stdin.readline().strip())\n"
+                  "while True:\n"
+                  "    line = sys.stdin.readline().rstrip('\\n')\n"
+                  "    lines.append(line)\n"
+                  "    if not line.startswith('HISTORY '):\n"
+                  "        break\n"
+                  "open(PAYLOAD, 'w').write('\\n'.join(lines) + '\\n')\n"
+                  "print('LIST', flush=True)\n"
+                  "sys.stdin.readline()\n"
+                  "print('TEXT got it - 15 apps listed.', flush=True)\n"
+                  "print('END', flush=True)\n")
 
     grant = tmp / "grant.json"
     shutil.copy(HERE / "grant.json", grant)
@@ -526,7 +555,7 @@ def main():
               "AID grant loaded (4 permissions)" in log_text())
         check("ready line names backends + selected",
               wait_for("ready line",
-                       lambda: "backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
+                       lambda: "backends=chat-ai,chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
                        "selected=echo-ai" in log_text()))
 
         c = SockClient(str(sock_path))
@@ -537,12 +566,12 @@ def main():
         c.send("LIST")
         check("LIST -> selected + backends",
               c.readline() ==
-              "OK selected=echo-ai backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai")
+              "OK selected=echo-ai backends=chat-ai,chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai")
         c.send("STATUS")
         check("STATUS -> grant csv",
               c.readline() ==
-              "OK selected=echo-ai backends=chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
-              "grant=app.launch,app.close,app.list,status.set god_mode=off relay=off")
+              "OK selected=echo-ai backends=chat-ai,chatty-ai,echo-ai,greedy-session-ai,muse-ai,one-action-ai,plan-ai,session-ai,slow-ai,slow-session-ai "
+              "grant=app.launch,app.close,app.list,status.set god_mode=off relay=off chats=0")
 
         # 3. SELECT: valid, unknown, usage.
         c.send("SELECT plan-ai")
@@ -1296,6 +1325,237 @@ def main():
         # persisted choice is echo-ai.
         c.send("SELECT echo-ai")
         check("SELECT echo-ai back (leave for restart)",
+              c.readline() == "OK selected echo-ai")
+
+        # 15r. CHAT (phase 3, B1): NEW / END and the error cases.
+        #      The ids are counter-generated (chat-N); the test
+        #      parses the id out of the NEW reply, like the sidebar
+        #      does, instead of hardcoding it.
+        c.send("CHAT NEW")
+        new_reply = c.readline()
+        check("CHAT NEW -> OK chat=<id>",
+              new_reply.startswith("OK chat=chat-"),
+              new_reply)
+        chat_id = new_reply.split("chat=")[1].strip()
+        c.send("STATUS")
+        check("STATUS chats=1 while a conversation is open",
+              "chats=1" in c.readline())
+        c.send(f"CHAT END {chat_id}")
+        check("CHAT END -> OK chat ended",
+              c.readline() == f"OK chat ended {chat_id}")
+        c.send("STATUS")
+        check("STATUS chats=0 after the conversation ends",
+              "chats=0" in c.readline())
+        c.send(f"CHAT END {chat_id}")
+        check("CHAT END twice -> unknown chat",
+              c.readline() == f"ERR unknown chat {chat_id}")
+        c.send(f"CHAT {chat_id} hello")
+        check("CHAT on an ended id -> unknown chat",
+              c.readline() == f"ERR unknown chat {chat_id}")
+        c.send("CHAT")
+        check("bare CHAT -> usage",
+              c.readline().startswith("ERR usage: CHAT"))
+        c.send("CHAT chat-999")
+        check("CHAT <id> with no message -> usage",
+              c.readline().startswith("ERR usage: CHAT"))
+        c.send("CHAT bogus-id hello")
+        check("CHAT on an unknown id -> unknown chat",
+              c.readline() == "ERR unknown chat bogus-id")
+
+        # 15s. CHAT slots: the daemon holds 16 conversations; the
+        #      17th NEW is refused, and END frees the slots again.
+        slot_ids = []
+        for _ in range(16):
+            c.send("CHAT NEW")
+            slot_ids.append(c.readline().split("chat=")[1].strip())
+        check("16 CHAT NEWs all succeed (distinct ids)",
+              len(slot_ids) == 16 and len(set(slot_ids)) == 16,
+              str(slot_ids))
+        c.send("CHAT NEW")
+        check("17th CHAT NEW -> no free chat slots",
+              c.readline() == "ERR no free chat slots")
+        c.send("STATUS")
+        check("STATUS chats=16 at the cap",
+              "chats=16" in c.readline())
+        for cid in slot_ids:
+            c.send(f"CHAT END {cid}")
+            c.readline()
+        c.send("STATUS")
+        check("STATUS chats=0 after ending all 16",
+              "chats=0" in c.readline())
+
+        # 15t. CHAT turns (chat-ai): the daemon passes the history
+        #      to the backend each turn, carries the backend's TEXT
+        #      into the reply, and tags the audit entry with the
+        #      conversation id.
+        c.send("SELECT chat-ai")
+        check("SELECT chat-ai ok",
+              c.readline() == "OK selected chat-ai")
+        c.send("CHAT NEW")
+        chat_id = c.readline().split("chat=")[1].strip()
+        c.send(f"CHAT {chat_id} HISTORY user not a history line")
+        check("message starting HISTORY user -> refused upfront",
+              c.readline() ==
+              "ERR message may not start with 'HISTORY user' "
+              "or 'HISTORY assistant'")
+        c.send(f"CHAT {chat_id} " + "x" * 9000)
+        check("message over 8192 bytes -> too long",
+              c.readline() == "ERR message too long (max 8192 bytes)")
+        c.send(f"CHAT {chat_id} list the installed apps")
+        reply = c.readline()
+        check("CHAT turn 1 -> allowed=1 + TEXT",
+              reply ==
+              "OK backend=chat-ai allowed=1 denied=0 failed=0 "
+              "text=got it - 15 apps listed.",
+              reply)
+        payload1 = (chat_payload.read_text()
+                    if chat_payload.exists() else "")
+        check("turn 1 payload: SESSION + task, no HISTORY",
+              payload1 == "SESSION\nlist the installed apps\n",
+              payload1)
+        check("audit log tags the turn with the conversation id",
+              wait_for("audit chat tag",
+                       lambda: f"chat={chat_id}" in audit_log.read_text()
+                       and "LIST OK" in audit_log.read_text()))
+        check("daemon logs AID CHAT TEXT for the turn",
+              wait_for("AID CHAT TEXT",
+                       lambda: "AID CHAT TEXT got it - 15 apps listed."
+                       in log_text()))
+        c.send(f"CHAT {chat_id} which ones can play music")
+        reply = c.readline()
+        check("CHAT turn 2 -> allowed=1 + TEXT",
+              reply ==
+              "OK backend=chat-ai allowed=1 denied=0 failed=0 "
+              "text=got it - 15 apps listed.",
+              reply)
+        payload2 = (chat_payload.read_text()
+                    if chat_payload.exists() else "")
+        check("turn 2 payload carries the history",
+              payload2 ==
+              "SESSION\n"
+              "HISTORY user list the installed apps\n"
+              "HISTORY assistant got it - 15 apps listed.\n"
+              "which ones can play music\n",
+              payload2)
+        c.send(f"CHAT END {chat_id}")
+        check("CHAT END ok (chat-ai)",
+              c.readline() == f"OK chat ended {chat_id}")
+
+        # 15u. muse-ai in a CHAT turn: a prose-only reply becomes
+        #      the turn's TEXT, and the next turn's request carries
+        #      the history — the first question plus the escaped
+        #      answer, unescaped back into the prompt (the escape
+        #      round-trip: the first answer has a real newline).
+        c.send("SELECT muse-ai")
+        check("SELECT muse-ai ok (chat)",
+              c.readline() == "OK selected muse-ai")
+        fake_api.set_scenario([
+            resp_text("first line\nsecond line"),
+            resp_text("Just Music."),
+        ])
+        c.send("CHAT NEW")
+        chat_id = c.readline().split("chat=")[1].strip()
+        c.send(f"CHAT {chat_id} list the installed apps")
+        reply = c.readline()
+        check("CHAT turn 1 (muse-ai) -> prose TEXT, no actions",
+              reply ==
+              "OK backend=muse-ai allowed=0 denied=0 failed=0 "
+              "text=first line\\nsecond line",
+              reply)
+        c.send(f"CHAT {chat_id} which ones can play music")
+        reply = c.readline()
+        check("CHAT turn 2 (muse-ai) -> memory-aware TEXT",
+              reply ==
+              "OK backend=muse-ai allowed=0 denied=0 failed=0 "
+              "text=Just Music.",
+              reply)
+        check("two API requests were made (one per turn)",
+              len(fake_api.requests) == 2,
+              str(len(fake_api.requests)))
+        msgs2 = fake_api.requests[1].get("messages", [])
+        check("turn 2 request carries the history",
+              [m.get("role") for m in msgs2] ==
+              ["system", "system", "user", "assistant", "user"],
+              json.dumps(msgs2))
+        check("history assistant text unescaped back to a newline",
+              any(m.get("role") == "assistant" and
+                  m.get("content") == "first line\nsecond line"
+                  for m in msgs2),
+              json.dumps(msgs2))
+        c.send(f"CHAT END {chat_id}")
+        check("CHAT END ok (muse-ai)",
+              c.readline() == f"OK chat ended {chat_id}")
+
+        # 15v. CLI + control serial: `sevyn ai chat ...` speaks the
+        #      same verbs, and CHAT NEW on the control serial logs
+        #      the console line the guest check greps.
+        c.send("SELECT chat-ai")
+        check("SELECT chat-ai ok (cli)",
+              c.readline() == "OK selected chat-ai")
+        cli_new = subprocess.run(
+            [str(sevyn_bin), "ai", "chat", "new"],
+            capture_output=True, text=True, env=cli_env, timeout=10)
+        check("sevyn ai chat new runs (exit 0, chat=<id>)",
+              cli_new.returncode == 0 and
+              "chat=chat-" in cli_new.stdout,
+              cli_new.stdout)
+        chat_id = cli_new.stdout.split("chat=")[1].split()[0]
+        cli_turn = subprocess.run(
+            [str(sevyn_bin), "ai", "chat", chat_id,
+             "list", "the", "installed", "apps"],
+            capture_output=True, text=True, env=cli_env, timeout=30)
+        check("sevyn ai chat <id> <msg> runs (allowed=1 + TEXT)",
+              cli_turn.returncode == 0 and
+              "backend=chat-ai allowed=1 denied=0 failed=0" in
+              cli_turn.stdout and
+              "text=got it - 15 apps listed." in cli_turn.stdout,
+              cli_turn.stdout)
+        cli_end = subprocess.run(
+            [str(sevyn_bin), "ai", "chat", "end", chat_id],
+            capture_output=True, text=True, env=cli_env, timeout=10)
+        check("sevyn ai chat end <id> runs (exit 0)",
+              cli_end.returncode == 0 and
+              f"chat ended {chat_id}" in cli_end.stdout,
+              cli_end.stdout)
+        cli_bare = subprocess.run(
+            [str(sevyn_bin), "ai", "chat"], capture_output=True,
+            text=True, env=cli_env, timeout=10)
+        check("sevyn ai chat (bare) -> usage (non-zero exit)",
+              cli_bare.returncode != 0)
+        cli_extra = subprocess.run(
+            [str(sevyn_bin), "ai", "chat", "new", "extra"],
+            capture_output=True, text=True, env=cli_env, timeout=10)
+        check("sevyn ai chat new extra -> usage (non-zero exit)",
+              cli_extra.returncode != 0)
+        # The control serial is a buffered Python file object: the
+        # write must be flushed or the daemon never sees it (the
+        # earlier ctl writes all flush for the same reason). The
+        # wait counts NEW lines — the bare substring pre-exists
+        # from the socket NEWs above, so it would return at once.
+        new_lines_before = log_text().count("AID CHAT NEW chat=")
+        ctl_w.write("CHAT NEW\n")
+        ctl_w.flush()
+        check("ctl CHAT NEW logs the console line",
+              wait_for("ctl CHAT NEW",
+                       lambda: log_text().count("AID CHAT NEW chat=") >
+                       new_lines_before))
+        # The control-serial NEW opened a conversation; end it from
+        # the socket so §16 starts with chats=0.
+        ctl_id = None
+        for log_line in log_text().splitlines():
+            if log_line.startswith("AID CHAT NEW chat="):
+                ctl_id = log_line.split("chat=")[1].strip()
+        check("ctl CHAT NEW id parsed from the log",
+              ctl_id is not None and ctl_id.startswith("chat-"),
+              str(ctl_id))
+        c.send(f"CHAT END {ctl_id}")
+        check("ctl-opened conversation ends from the socket",
+              c.readline() == f"OK chat ended {ctl_id}")
+        c.send("STATUS")
+        check("STATUS chats=0 at the end of the CHAT tests",
+              "chats=0" in c.readline())
+        c.send("SELECT echo-ai")
+        check("SELECT echo-ai back after the CHAT tests",
               c.readline() == "OK selected echo-ai")
 
         # 16. God mode (P2): the two-step confirm, the marker, the

@@ -61,9 +61,27 @@ Sevyn._execHandler = (cmd) => {
   if (cmd === "sevyn files list /data/Desktop") return "0\nd Photos\nf Notes.txt\n";
   if (cmd.startsWith("sevyn files mkdir ")) return "0\ncreated\n";
   if (cmd.startsWith("sevyn files write ")) return "0\nwrote\n";
-  // AI sidebar (phase 1): one-shot ask, canned counts reply.
-  if (cmd.startsWith("sevyn ai ask "))
-    return "0\nOK backend=muse-ai allowed=1 denied=0 failed=0\n";
+  // AI sidebar (phase 3): stateful CHAT. CHAT NEW opens chat-1; a
+  // turn on chat-1 returns the mock's TEXT + counts for that
+  // message; CHAT END closes it. The second turn's answer references
+  // the first (memory across turns) — the daemon would carry the
+  // history; here the mock routes on the message, like mock-muse.js
+  // does in the guest. The TEXT is the daemon's escaped form (no
+  // newlines in these answers, so nothing to unescape).
+  if (cmd === "sevyn ai chat new") return "0\nOK chat=chat-1\n";
+  if (cmd === "sevyn ai chat end chat-1") return "0\nOK chat ended chat-1\n";
+  if (cmd.startsWith("sevyn ai chat chat-1 ")) {
+    const msg = cmd.slice("sevyn ai chat chat-1 ".length);
+    if (msg === "which ones can play music")
+      return (
+        "0\nOK backend=muse-ai allowed=0 denied=0 failed=0 text=Just Music " +
+        "— it’s the only audio player installed.\n"
+      );
+    return (
+      "0\nOK backend=muse-ai allowed=1 denied=0 failed=0 text=You have 15 " +
+      "apps installed — Terminal, Files, Music, and 12 more.\n"
+    );
+  }
   return "0\n";
 };
 
@@ -107,7 +125,9 @@ const tiles = (ops) =>
     )
     .sort((a, b) => a.x - b.x);
 // The AI button rect (the only 56x56 square pressable) and the
-// sidebar panel rect (the only #111827 rect at its width).
+// sidebar panel rect (the only #1F2937 rect at its width — the dark
+// surface; the header shares the fill, so the first match may be the
+// header, which only exists while the sidebar is open).
 const aiButtonRect = (ops) =>
   ops.find(
     (o) =>
@@ -118,7 +138,7 @@ const aiButtonRect = (ops) =>
       o.h === AI_BUTTON_SIZE,
   );
 const sidebarRect = (ops, width) =>
-  ops.find((o) => o.type === "rect" && o.w === width && o.color === "#111827");
+  ops.find((o) => o.type === "rect" && o.w === width && o.color === "#1F2937");
 // A pressable rect containing the centre of a text op (the sidebar
 // header buttons are text pressables — the test finds the text, then
 // its pressable). Text ops carry x/y/w/h; the smallest containing
@@ -159,18 +179,25 @@ const flush = async (n = 3) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
 };
 // Key helpers (evdev codes; the renderer's US keymap) — the subset
-// for "list the installed apps", copied from app-e2e-test.js.
+// for "list the installed apps" plus the letters the second turn
+// ("which ones can play music") needs, copied from app-e2e-test.js.
 const KEY_FOR = {
   a: [30, false],
+  c: [46, false],
   d: [32, false],
   e: [18, false],
   h: [35, false],
   i: [23, false],
   l: [38, false],
+  m: [50, false],
   n: [49, false],
+  o: [24, false],
   p: [25, false],
   s: [31, false],
   t: [20, false],
+  u: [22, false],
+  w: [17, false],
+  y: [21, false],
   " ": [57, false],
 };
 function type(text) {
@@ -982,30 +1009,78 @@ check("status push re-renders the tray", () => {
     Sevyn._handlers.status({ key: "ai.god_mode", value: "off" });
   });
 
+  // AI sidebar (phase 3): the first send opens a conversation
+  // (CHAT NEW) and shows the model's prose + receipt; the second
+  // send reuses the same id and its prose references the first turn
+  // (memory across turns) with no receipt (no actions ran).
   await checkAsync(
-    "typing a question and submitting runs sevyn ai ask and shows the receipt",
+    "first send opens a conversation and shows prose + receipt",
     async () => {
       // The input is autoFocus, so key events go straight to it.
       type("list the installed apps");
       pressEnter();
       await flush();
       assert.ok(
-        Sevyn._logs.some((l) => l === "EXEC sevyn ai ask list the installed apps"),
-        "ai ask run, logs=" + JSON.stringify(Sevyn._logs),
+        Sevyn._logs.some((l) => l === "EXEC sevyn ai chat new"),
+        "chat new run, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      assert.ok(
+        Sevyn._logs.some(
+          (l) => l === "EXEC sevyn ai chat chat-1 list the installed apps",
+        ),
+        "chat turn run, logs=" + JSON.stringify(Sevyn._logs),
       );
       const after = lastPresent();
       const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
       assert.ok(
-        texts.some((t) => t.includes("You: list the installed apps")),
-        "user turn shown",
+        texts.some((t) => t.includes("list the installed apps")),
+        "user bubble shown",
       );
+      assert.ok(
+        texts.some((t) => t.includes("You have 15 apps installed")),
+        "prose shown, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(texts.includes("✓"), "receipt check shown");
       assert.ok(
         texts.some((t) => t.includes("1 allowed, 0 denied, 0 failed")),
         "receipt shown, texts=" + JSON.stringify(texts),
       );
       assert.ok(
-        Sevyn._logs.some((l) => l === "AI-SIDEBAR ask allowed=1 denied=0 failed=0"),
+        Sevyn._logs.some((l) => l === "AI-SIDEBAR chat allowed=1 denied=0 failed=0"),
         "sidebar marker logged",
+      );
+    },
+  );
+
+  await checkAsync(
+    "second send reuses the conversation and answers from memory",
+    async () => {
+      type("which ones can play music");
+      pressEnter();
+      await flush();
+      assert.ok(
+        Sevyn._logs.filter((l) => l === "EXEC sevyn ai chat new").length === 1,
+        "no second CHAT NEW, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      assert.ok(
+        Sevyn._logs.some(
+          (l) => l === "EXEC sevyn ai chat chat-1 which ones can play music",
+        ),
+        "second turn run, logs=" + JSON.stringify(Sevyn._logs),
+      );
+      const after = lastPresent();
+      const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
+      assert.ok(
+        texts.some((t) => t.includes("Just Music")),
+        "memory-aware prose shown, texts=" + JSON.stringify(texts),
+      );
+      assert.ok(
+        !texts.some((t) => t.includes("0 allowed, 0 denied, 0 failed")),
+        "no receipt when no actions ran",
+      );
+      assert.ok(
+        Sevyn._logs.some((l) => l === "AI-SIDEBAR chat allowed=0 denied=0 failed=0"),
+        "sidebar marker logged for the second turn",
       );
     },
   );
@@ -1020,9 +1095,16 @@ check("status push re-renders the tray", () => {
     assert.ok(!sidebarRect(after.ops, 360), "no 360px panel while full-screen");
   });
 
-  await checkAsync("close returns to button-only", () => {
+  await checkAsync("close ends the conversation and returns to button-only", async () => {
     const last = lastPresent();
     tap(pressableAtText(last.ops, "Close"));
+    // The CHAT END is fire-and-forget (the shell unmounts on close),
+    // so the EXEC lands on the next microtask, not the tap itself.
+    await flush();
+    assert.ok(
+      Sevyn._logs.some((l) => l === "EXEC sevyn ai chat end chat-1"),
+      "chat end run, logs=" + JSON.stringify(Sevyn._logs),
+    );
     const after = lastPresent();
     const texts = after.ops.filter((o) => o.type === "text").map((o) => o.text);
     assert.ok(

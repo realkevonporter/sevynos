@@ -175,6 +175,19 @@
  * is "Muse API unreachable: " plus a <=255-byte transport error).
  * The reply carries it as error=<text> so a 0/0/0 names its cause. */
 #define BACKEND_ERR_CAP 512
+/* The final prose answer (phase 3, B1): muse-ai emits its TEXT line
+ * capped at 8 KiB; the daemon stashes it in a TEXT_CAP+1 slot (the
+ * backend's TEXT can be exactly TEXT_CAP, and a TEXT_CAP stash would
+ * truncate its last char) and carries it in the CHAT reply. */
+#define TEXT_CAP (8 * 1024)
+/* Conversations (phase 3, B1): at most this many open at once, this
+ * many turns each. A stored turn must hold the largest TEXT the
+ * backend can emit (TEXT_CAP) plus its NUL — a shorter slot would
+ * drop the tail of a long answer from memory. The store is in-memory
+ * only: it dies with the daemon, like sessions. */
+#define MAX_CHATS 16
+#define MAX_CHAT_TURNS 32
+#define MAX_CHAT_MSG (TEXT_CAP + 1)
 /* The ASK task line (P0): a real agent task plus attached context
  * does not fit in 2,048 bytes. Backend action lines stay LINE_CAP
  * (actions are short by construction); only the task-carrying
@@ -259,6 +272,11 @@ static const char *g_relay = "off";
 /* 1 while the god grant is the live grant, 0 while the standard
  * grant governs. Set only by eval_god_mode(), never by a backend. */
 static int g_god_mode = 0;
+/* Phase 3 (B1): the conversation id of the CHAT turn currently
+ * running, or "" outside a turn. audit_append() tags the turn's
+ * actions with it. Single-threaded poll loop, so set/clear around
+ * run_session() is safe. */
+static char g_chat_id[32];
 
 /* Forward: defined after status_set() (it SETs the statusd key on
  * transitions); reload_grant() calls it, so it is declared here. */
@@ -476,9 +494,17 @@ static int audit_append(const char *actor, const char *action_line,
     char ts[32];
     audit_timestamp(ts, sizeof(ts));
     char line[2048];
-    int n = snprintf(line, sizeof(line), "%s %s god_mode=%s%s %s %s %s\n",
+    /* Phase 3 (B1): a CHAT turn's actions carry its conversation id
+     * after the via=relay slot, so the audit trail shows which
+     * conversation acted. Empty outside a turn. */
+    char chat_tag[40];
+    if (g_chat_id[0])
+        snprintf(chat_tag, sizeof(chat_tag), " chat=%s", g_chat_id);
+    else
+        chat_tag[0] = '\0';
+    int n = snprintf(line, sizeof(line), "%s %s god_mode=%s%s%s %s %s %s\n",
                      ts, actor, g_god_mode ? "on" : "off",
-                     via_relay ? " via=relay" : "", action_line,
+                     via_relay ? " via=relay" : "", chat_tag, action_line,
                      result, detail ? detail : "");
     if (n < 0)
         return -1;
@@ -1943,6 +1969,30 @@ static void stash_backend_err(char *backend_err, size_t backend_errcap,
     }
 }
 
+/* Stash the first backend TEXT line (muse-ai prints one, then END,
+ * when the model answers in prose: the turn's final text). Only the
+ * first is kept; the text is single-line by construction (the
+ * backend escapes newlines), so the reply stays one line. A no-op
+ * when the stash is already set or the caller passed none. */
+static void stash_backend_text(char *backend_text, size_t backend_textcap,
+                               const char *line)
+{
+    if (!backend_text || backend_textcap == 0 || backend_text[0] != '\0')
+        return;
+    /* Bounded copy, not snprintf: the TEXT line can be TEXT_CAP
+     * (the backend's cap), one longer than the stash holds with its
+     * NUL — truncate the tail, never overrun. */
+    size_t n = strlen(line + 5);
+    if (n >= backend_textcap)
+        n = backend_textcap - 1;
+    memcpy(backend_text, line + 5, n);
+    backend_text[n] = '\0';
+    for (char *p = backend_text; *p; p++) {
+        if (*p == '\n' || *p == '\r')
+            *p = ' ';
+    }
+}
+
 /* Run one backend on a task: write the task line to its stdin, read
  * action lines from its stdout until END / EOF / timeout. timeout_s
  * and max_actions are the backend's own limits (P0: read from its
@@ -2177,16 +2227,22 @@ static int write_all_quiet(int fd, const char *buf, size_t len)
  * progress is a 0 with the counts so far — the work already done
  * is real and the reply says so). via_relay (Phase 2) is threaded
  * to run_one_action so relay-driven actions are marked in the audit
- * log; it changes the marking only, never the grant decision. */
+ * log; it changes the marking only, never the grant decision. A
+ * backend TEXT line is stashed in backend_text (phase 3, B1; first
+ * one only, NULL when the caller does not want it) so the caller
+ * can carry the turn's prose answer. */
 static int run_session(const char *backend_path, const char *task,
                        int timeout_s, size_t max_actions, int *allowed,
                        int *denied, int *failed, char *err,
                        size_t errcap, int via_relay,
-                       char *backend_err, size_t backend_errcap)
+                       char *backend_err, size_t backend_errcap,
+                       char *backend_text, size_t backend_textcap)
 {
     *allowed = *denied = *failed = 0;
     if (backend_err && backend_errcap > 0)
         backend_err[0] = '\0';
+    if (backend_text && backend_textcap > 0)
+        backend_text[0] = '\0';
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
         snprintf(err, errcap, "cannot create pipes");
@@ -2232,7 +2288,11 @@ static int run_session(const char *backend_path, const char *task,
     }
 
     int rc = 0;
-    char line[LINE_CAP];
+    /* TEXT_CAP: the backend's TEXT line can be 8 KiB, and
+     * read_line_deadline() drops bytes past the buffer — a LINE_CAP
+     * buffer would cut the answer at 2047. Actions stay short; the
+     * bigger buffer weakens nothing (parse_action bounds them). */
+    char line[TEXT_CAP + 16];
     for (;;) {
         int done = *allowed + *denied + *failed;
         if (done >= (int)max_actions) {
@@ -2273,6 +2333,8 @@ static int run_session(const char *backend_path, const char *task,
         if (parse_action(line, &a) != 0) {
             if (strncmp(line, "ERR ", 4) == 0)
                 stash_backend_err(backend_err, backend_errcap, line);
+            else if (strncmp(line, "TEXT ", 5) == 0)
+                stash_backend_text(backend_text, backend_textcap, line);
             continue; /* chatter, not an action */
         }
         char detail[256];
@@ -2334,6 +2396,138 @@ static int run_session(const char *backend_path, const char *task,
         }
     }
     return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* conversations (phase 3, B1)                                         */
+/* ------------------------------------------------------------------ */
+
+/* A conversation's stored turns. The user message is stored raw;
+ * the assistant turn is stored exactly as the backend's TEXT line
+ * carried it (WRITE-escaped, one line) so it can be written back
+ * as a HISTORY line without re-escaping. History is in-memory
+ * only: it dies with the daemon, like sessions. */
+struct chat_turn {
+    char role; /* 'U' user, 'A' assistant */
+    char text[MAX_CHAT_MSG];
+};
+
+struct chat {
+    int in_use;
+    char id[32];
+    struct chat_turn turns[MAX_CHAT_TURNS];
+    size_t n_turns;
+};
+
+static struct chat g_chats[MAX_CHATS];
+static unsigned g_chat_next = 1;
+
+static struct chat *chat_find(const char *id)
+{
+    for (int i = 0; i < MAX_CHATS; i++)
+        if (g_chats[i].in_use && strcmp(g_chats[i].id, id) == 0)
+            return &g_chats[i];
+    return NULL;
+}
+
+static struct chat *chat_new(void)
+{
+    for (int i = 0; i < MAX_CHATS; i++) {
+        if (g_chats[i].in_use)
+            continue;
+        struct chat *c = &g_chats[i];
+        memset(c, 0, sizeof(*c));
+        c->in_use = 1;
+        snprintf(c->id, sizeof(c->id), "chat-%u", g_chat_next++);
+        return c;
+    }
+    return NULL;
+}
+
+/* Drop the oldest user+assistant pair (two turns). A lone user turn
+ * (no assistant reply yet) drops alone. */
+static void chat_drop_oldest_pair(struct chat *c)
+{
+    size_t drop = c->n_turns >= 2 ? 2 : c->n_turns;
+    if (drop == 0)
+        return;
+    memmove(&c->turns[0], &c->turns[drop],
+            (c->n_turns - drop) * sizeof(c->turns[0]));
+    c->n_turns -= drop;
+}
+
+/* Store one turn. The store holds at most MAX_CHAT_TURNS: the
+ * oldest pair goes so the newest turn always fits. A turn longer
+ * than the slot is refused (the caller reports it), never
+ * truncated — a cut turn would teach the model a message that was
+ * never sent. */
+static int chat_add_turn(struct chat *c, char role, const char *text)
+{
+    if (strlen(text) >= MAX_CHAT_MSG)
+        return -1;
+    if (c->n_turns >= MAX_CHAT_TURNS)
+        chat_drop_oldest_pair(c);
+    struct chat_turn *t = &c->turns[c->n_turns++];
+    t->role = role;
+    snprintf(t->text, sizeof(t->text), "%s", text);
+    return 0;
+}
+
+/* Append src to buf[pos..cap), escaping \ -> \\, newline -> \n,
+ * tab -> \t when escape is set. Returns 0, or -1 when it would
+ * overflow. */
+static int payload_append(char *buf, size_t *pos, size_t cap,
+                          const char *src, int escape)
+{
+    for (const char *p = src; *p; p++) {
+        char c = *p;
+        if (escape && (c == '\\' || c == '\n' || c == '\t')) {
+            if (*pos + 2 >= cap)
+                return -1;
+            buf[(*pos)++] = '\\';
+            buf[(*pos)++] =
+                c == '\\' ? '\\' : c == '\n' ? 'n' : 't';
+        } else {
+            if (*pos + 1 >= cap)
+                return -1;
+            buf[(*pos)++] = c;
+        }
+    }
+    return 0;
+}
+
+/* Compose the backend payload for a CHAT turn: the stored HISTORY
+ * lines (oldest first) followed by the new message as the task
+ * line. Returns the payload length, or -1 when it does not fit in
+ * cap bytes. The caller drops the oldest turn pair and retries;
+ * the newest message always fits on its own (it is bounded by
+ * MAX_CHAT_MSG, far below cap). */
+static int chat_payload(struct chat *c, const char *msg, char *buf,
+                        size_t cap)
+{
+    size_t pos = 0;
+    for (size_t i = 0; i < c->n_turns; i++) {
+        struct chat_turn *t = &c->turns[i];
+        if (payload_append(buf, &pos, cap, "HISTORY ", 0) != 0)
+            return -1;
+        if (payload_append(buf, &pos, cap,
+                           t->role == 'U' ? "user" : "assistant",
+                           0) != 0)
+            return -1;
+        if (payload_append(buf, &pos, cap, " ", 0) != 0)
+            return -1;
+        /* User turns are stored raw, so they are escaped here;
+         * assistant turns are stored already escaped. */
+        if (payload_append(buf, &pos, cap, t->text,
+                           t->role == 'U') != 0)
+            return -1;
+        if (payload_append(buf, &pos, cap, "\n", 0) != 0)
+            return -1;
+    }
+    if (payload_append(buf, &pos, cap, msg, 0) != 0)
+        return -1;
+    buf[pos] = '\0';
+    return (int)pos;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2427,18 +2621,23 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         backends_csv(backends, sizeof(backends));
         /* Phase 2 relay: STATUS gains relay=<on|off|idle> — the
          * daemon's own view of the relay state (what the tray reads
-         * via statusd). Additive, after god_mode. */
+         * via statusd). Additive, after god_mode. Phase 3 (B1):
+         * chats=<n> counts the open conversations, after relay. */
+        int n_chats = 0;
+        for (int i = 0; i < MAX_CHATS; i++)
+            if (g_chats[i].in_use)
+                n_chats++;
         if (from_ctl)
             log_line("AID STATUS selected=%s backends=%s grant=%s "
-                     "god_mode=%s relay=%s",
+                     "god_mode=%s relay=%s chats=%d",
                      g_selected, backends, grant,
-                     g_god_mode ? "on" : "off", g_relay);
+                     g_god_mode ? "on" : "off", g_relay, n_chats);
         else if (reply) {
             snprintf(out, sizeof(out),
                      "OK selected=%s backends=%s grant=%s god_mode=%s "
-                     "relay=%s\n",
+                     "relay=%s chats=%d\n",
                      g_selected, backends, grant,
-                     g_god_mode ? "on" : "off", g_relay);
+                     g_god_mode ? "on" : "off", g_relay, n_chats);
             reply(ctx, out);
         }
         return;
@@ -2590,7 +2789,10 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
         int ssrc = run_session(backend_path, arg, timeout_s, max_actions,
                                &allowed, &denied, &failed, err,
                                sizeof(err), via_relay,
-                               backend_err, sizeof(backend_err));
+                               backend_err, sizeof(backend_err),
+                               NULL, 0); /* SESSION takes no TEXT: the
+                                            prose answer is the CHAT
+                                            turn's, not a session's. */
         if (via_relay)
             relay_set_state("idle");
         if (ssrc != 0) {
@@ -2624,6 +2826,237 @@ static void run_verb(const char *verb_line, reply_fn reply, void *ctx,
                      g_selected, allowed, denied, failed,
                      backend_err[0] ? " error=" : "", backend_err);
             reply(ctx, out);
+        }
+        return;
+    }
+    /* CHAT (phase 3, B1): a daemon-held conversation. CHAT NEW opens
+     * one (the daemon returns its id); CHAT <id> <message> runs one
+     * turn (the daemon passes the stored history to the backend and
+     * stores the turn's TEXT as the assistant's reply); CHAT END
+     * <id> closes it. History is in-memory only and dies with the
+     * daemon, like sessions. Same per-backend limits as ASK/SESSION
+     * (D8: the timeout is a per-action budget), same grant checks at
+     * every step (run_one_action, via run_session). Works on the
+     * control serial too. */
+    if (strcmp(line, "CHAT") == 0) {
+        if (!arg) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL usage");
+            else if (reply)
+                reply(ctx,
+                      "ERR usage: CHAT NEW | CHAT <id> <message> | "
+                      "CHAT END <id>\n");
+            return;
+        }
+        if (strcmp(arg, "NEW") == 0) {
+            struct chat *c = chat_new();
+            if (!c) {
+                if (from_ctl)
+                    log_line("AID CHAT FAIL no free chat slots");
+                else if (reply)
+                    reply(ctx, "ERR no free chat slots\n");
+                return;
+            }
+            log_line("AID CHAT NEW chat=%s", c->id);
+            if (from_ctl)
+                log_line("AID CHAT NEW OK chat=%s", c->id);
+            else if (reply) {
+                snprintf(out, sizeof(out), "OK chat=%s\n", c->id);
+                reply(ctx, out);
+            }
+            return;
+        }
+        if (strncmp(arg, "END ", 4) == 0) {
+            const char *id = arg + 4;
+            struct chat *c = chat_find(id);
+            if (!c) {
+                if (from_ctl)
+                    log_line("AID CHAT FAIL unknown chat %s", id);
+                else if (reply) {
+                    snprintf(out, sizeof(out),
+                             "ERR unknown chat %s\n", id);
+                    reply(ctx, out);
+                }
+                return;
+            }
+            c->in_use = 0;
+            c->n_turns = 0;
+            log_line("AID CHAT END chat=%s", id);
+            if (from_ctl)
+                log_line("AID CHAT END OK chat=%s", id);
+            else if (reply) {
+                snprintf(out, sizeof(out), "OK chat ended %s\n", id);
+                reply(ctx, out);
+            }
+            return;
+        }
+        /* CHAT <id> <message> */
+        char *sp2 = strchr(arg, ' ');
+        if (!sp2) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL usage");
+            else if (reply)
+                reply(ctx,
+                      "ERR usage: CHAT NEW | CHAT <id> <message> | "
+                      "CHAT END <id>\n");
+            return;
+        }
+        *sp2 = '\0';
+        const char *id = arg;
+        const char *msg = sp2 + 1;
+        while (*msg == ' ')
+            msg++;
+        if (!*msg) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL usage");
+            else if (reply)
+                reply(ctx,
+                      "ERR usage: CHAT NEW | CHAT <id> <message> | "
+                      "CHAT END <id>\n");
+            return;
+        }
+        struct chat *c = chat_find(id);
+        if (!c) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL unknown chat %s", id);
+            else if (reply) {
+                snprintf(out, sizeof(out), "ERR unknown chat %s\n",
+                         id);
+                reply(ctx, out);
+            }
+            return;
+        }
+        /* A message that starts with a well-formed HISTORY prefix
+         * would read as a history line to the backend, not the task
+         * — refuse it up front rather than run a turn the model
+         * cannot see. */
+        if (strncmp(msg, "HISTORY user ", 13) == 0 ||
+            strncmp(msg, "HISTORY assistant ", 18) == 0) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL message starts with HISTORY");
+            else if (reply)
+                reply(ctx,
+                      "ERR message may not start with 'HISTORY user' "
+                      "or 'HISTORY assistant'\n");
+            return;
+        }
+        if (strlen(msg) >= MAX_CHAT_MSG) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL message too long");
+            else if (reply) {
+                snprintf(out, sizeof(out),
+                         "ERR message too long (max %d bytes)\n",
+                         MAX_CHAT_MSG - 1);
+                reply(ctx, out);
+            }
+            return;
+        }
+        scan_backends();
+        int bi = backend_index(g_selected);
+        if (bi < 0) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL no backend selected");
+            else if (reply)
+                reply(ctx, "ERR no backend selected\n");
+            return;
+        }
+        char backend_path[4096];
+        snprintf(backend_path, sizeof(backend_path), "%s/%s",
+                 g_backends_dir, g_backends[bi]);
+        int timeout_s = BACKEND_TIMEOUT_S;
+        size_t max_actions = MAX_ACTIONS;
+        read_backend_limits(g_selected, &timeout_s, &max_actions);
+        char backend_err[BACKEND_ERR_CAP];
+        char backend_text[TEXT_CAP + 1];
+        backend_text[0] = '\0';
+        /* Compose the backend payload: the stored HISTORY lines
+         * plus the new message. The payload must fit TASK_CAP with
+         * room for run_session's "SESSION\n" prefix: drop the
+         * oldest pair until it does. The newest message always
+         * fits on its own; if it somehow did not, fail closed
+         * rather than send a cut task. */
+        char payload[TASK_CAP];
+        for (;;) {
+            /* chat_payload returns the payload length, or -1 when
+             * it does not fit: any non-negative return is success
+             * (an empty payload would be length 0, never -1). */
+            if (chat_payload(c, msg, payload, sizeof(payload) - 16) >=
+                0)
+                break;
+            if (c->n_turns == 0) {
+                if (from_ctl)
+                    log_line("AID CHAT FAIL message too long");
+                else if (reply)
+                    reply(ctx, "ERR message too long\n");
+                return;
+            }
+            chat_drop_oldest_pair(c);
+        }
+        /* Store the user turn first: it is in the store before the
+         * turn runs, so a mid-turn failure still leaves the
+         * question asked. (It cannot overflow: the length was
+         * checked above.) */
+        chat_add_turn(c, 'U', msg);
+        /* Phase 2 relay: a CHAT turn from the relay agent is a live
+         * remote session, like SESSION — ai.relay goes "on" for the
+         * run and back to "idle" when it ends. */
+        if (via_relay)
+            relay_set_state("on");
+        snprintf(g_chat_id, sizeof(g_chat_id), "%s", c->id);
+        int allowed = 0, denied = 0, failed = 0;
+        char err[256];
+        int ssrc = run_session(backend_path, payload, timeout_s,
+                               max_actions, &allowed, &denied, &failed,
+                               err, sizeof(err), via_relay,
+                               backend_err, sizeof(backend_err),
+                               backend_text, sizeof(backend_text));
+        g_chat_id[0] = '\0';
+        if (via_relay)
+            relay_set_state("idle");
+        if (ssrc != 0) {
+            if (from_ctl)
+                log_line("AID CHAT FAIL backend %s: %s", g_selected,
+                         err);
+            else if (reply) {
+                snprintf(out, sizeof(out),
+                         "ERR backend %s failed: %s\n", g_selected,
+                         err);
+                reply(ctx, out);
+            }
+            return;
+        }
+        /* The turn's TEXT (if any) is the assistant's reply: store
+         * it so the next turn remembers what was said. No TEXT
+         * means the model acted without answering — nothing to
+         * store. (It cannot overflow the slot: the backend caps
+         * TEXT at TEXT_CAP.) */
+        if (backend_text[0] != '\0')
+            chat_add_turn(c, 'A', backend_text);
+        log_line("AID CHAT backend=%s%s chat=%s task=\"%s\" allowed=%d "
+                 "denied=%d failed=%d",
+                 g_selected, via_relay ? " via=relay" : "", c->id, msg,
+                 allowed, denied, failed);
+        /* The answer itself, on its own console line: the harness
+         * greps it (the Terminal has no ai-chat marker — that file
+         * is out of scope for this PR). Both paths log it. */
+        if (backend_text[0] != '\0')
+            log_line("AID CHAT TEXT %s", backend_text);
+        if (from_ctl) {
+            log_line("AID CHAT OK backend=%s chat=%s allowed=%d "
+                     "denied=%d failed=%d%s%s",
+                     g_selected, c->id, allowed, denied, failed,
+                     backend_err[0] ? " error=" : "", backend_err);
+        } else if (reply) {
+            /* TASK_CAP: the reply carries the TEXT (up to 8 KiB)
+             * plus the counts — the shared out[LINE_CAP] is too
+             * small. */
+            char chat_out[TASK_CAP];
+            snprintf(chat_out, sizeof(chat_out),
+                     "OK backend=%s allowed=%d denied=%d failed=%d%s%s%s%s\n",
+                     g_selected, allowed, denied, failed,
+                     backend_err[0] ? " error=" : "", backend_err,
+                     backend_text[0] ? " text=" : "", backend_text);
+            reply(ctx, chat_out);
         }
         return;
     }
